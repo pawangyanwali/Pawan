@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Snake and Ladder</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="game-container">
+    <h1>Snake &amp; Ladder</h1>
+
+    <div class="main">
+      <div class="board-wrapper">
+        <canvas id="board" width="500" height="500"></canvas>
+      </div>
+
+      <div class="sidebar">
+        <div class="players-section">
+          <h2>Players</h2>
+          <div id="player-list"></div>
+        </div>
+
+        <div class="dice-section">
+          <div id="dice" class="dice">
+            <div class="dice-face" id="dice-display">?</div>
+          </div>
+          <button id="roll-btn" class="roll-btn">Roll Dice</button>
+          <p id="turn-info" class="turn-info"></p>
+          <p id="move-info" class="move-info"></p>
+        </div>
+
+        <div class="legend">
+          <h3>Legend</h3>
+          <div class="legend-item"><span class="legend-snake"></span> Snake (go down)</div>
+          <div class="legend-item"><span class="legend-ladder"></span> Ladder (go up)</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="winner-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2 id="winner-text"></h2>
+        <button id="restart-btn" class="roll-btn">Play Again</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
