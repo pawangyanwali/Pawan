@@ -20,9 +20,10 @@ function freshState() {
       { name: 'CPU 1', isHuman: false, hand: [] },
       { name: 'CPU 2', isHuman: false, hand: [] },
       { name: 'CPU 3', isHuman: false, hand: [] },
+      { name: 'CPU 4', isHuman: false, hand: [] },
     ],
     currentPlayer: 0,
-    direction: 1,       // 1 = 0→1→2→3→0, -1 = 0→3→2→1→0
+    direction: 1,       // 1 = 0→1→2→3→4→0, -1 = 0→4→3→2→1→0
     currentColor: null,
     currentValue: null,
     phase: 'playing',   // 'playing' | 'color-pick' | 'game-over'
@@ -84,7 +85,7 @@ function initGame() {
   G.deck = buildDeck();
 
   // Deal 7 each
-  for (let p = 0; p < 4; p++) dealN(p, 7);
+  for (let p = 0; p < 5; p++) dealN(p, 7);
 
   // First discard must be a numbered card
   let first;
@@ -107,7 +108,7 @@ function initGame() {
     G.currentPlayer = 1;
   } else if (first.value === 'reverse') {
     G.direction = -1;
-    G.currentPlayer = 3;
+    G.currentPlayer = 4;
   } else if (first.value === 'draw2') {
     dealN(0, 2);
     G.currentPlayer = 1;
@@ -155,7 +156,7 @@ function skipNextPlayer() {
 }
 
 function advanceFrom(idx) {
-  return (idx + G.direction + 4) % 4;
+  return (idx + G.direction + 5) % 5;
 }
 
 // ─── Card validity ────────────────────────────────────────────────────────────
@@ -373,7 +374,7 @@ function endGame(winnerIdx) {
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
 function render() {
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 5; i++) {
     renderHand(i);
     const n = G.players[i].hand.length;
     el(`count-${i}`).textContent = `${n} card${n !== 1 ? 's' : ''}`;

@@ -13,10 +13,10 @@ body {
 .game-board {
   display: grid;
   grid-template-areas:
-    ".    top    ."
-    "left center right"
-    ".    bottom .";
-  grid-template-columns: 140px 1fr 140px;
+    ".    topl   topr   ."
+    "left center center right"
+    ".    bottom bottom .";
+  grid-template-columns: 140px 1fr 1fr 140px;
   grid-template-rows: 130px 1fr 175px;
   height: 100vh;
   gap: 6px;
@@ -25,7 +25,8 @@ body {
 
 /* ─── Player Zones ────────────────────────────────────────────────────────── */
 .player-zone { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.player-zone.top    { grid-area: top;    flex-direction: column; }
+.player-zone.topl   { grid-area: topl;   flex-direction: column; }
+.player-zone.topr   { grid-area: topr;   flex-direction: column; }
 .player-zone.left   { grid-area: left;   flex-direction: row; align-items: flex-start; }
 .player-zone.right  { grid-area: right;  flex-direction: row; align-items: flex-start; }
 .player-zone.bottom { grid-area: bottom; flex-direction: column; }
