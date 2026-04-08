@@ -17,10 +17,10 @@ function freshState() {
     discard: [],
     players: [
       { name: 'You',   isHuman: true,  hand: [] },
-      { name: 'CPU 1', isHuman: false, hand: [] },
-      { name: 'CPU 2', isHuman: false, hand: [] },
-      { name: 'CPU 3', isHuman: false, hand: [] },
-      { name: 'CPU 4', isHuman: false, hand: [] },
+      { name: 'Aarya', isHuman: false, hand: [] },
+      { name: 'Aayush', isHuman: false, hand: [] },
+      { name: 'Aarav', isHuman: false, hand: [] },
+      { name: 'Neena', isHuman: false, hand: [] },
     ],
     currentPlayer: 0,
     direction: 1,       // 1 = 0→1→2→3→4→0, -1 = 0→4→3→2→1→0
