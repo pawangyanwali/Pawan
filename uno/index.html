@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UNO</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="game-board">
+
+    <!-- CPU 2 — top -->
+    <div class="player-zone top" id="zone-2">
+      <div class="player-meta">
+        <span class="pname">CPU 2</span>
+        <span class="pcount" id="count-2">7 cards</span>
+        <span class="uno-badge" id="ubadge-2">UNO!</span>
+      </div>
+      <div class="hand horiz small" id="hand-2"></div>
+    </div>
+
+    <!-- CPU 1 — left -->
+    <div class="player-zone left" id="zone-1">
+      <div class="player-meta vert">
+        <span class="pname">CPU 1</span>
+        <span class="pcount" id="count-1">7 cards</span>
+        <span class="uno-badge" id="ubadge-1">UNO!</span>
+      </div>
+      <div class="hand vert small" id="hand-1"></div>
+    </div>
+
+    <!-- Center -->
+    <div class="center-area">
+      <div class="status-row">
+        <div id="dir-arrow" class="dir-arrow">&#8635;</div>
+        <div id="turn-msg" class="turn-msg">Your turn!</div>
+      </div>
+
+      <div class="piles-row">
+        <div class="pile-wrap">
+          <div class="card back pile-card" id="draw-pile-card">
+            <span class="pile-count" id="deck-count">104</span>
+          </div>
+          <span class="pile-label">Draw</span>
+        </div>
+
+        <div class="color-ring" id="color-ring"></div>
+
+        <div class="pile-wrap">
+          <div id="discard-top"></div>
+          <span class="pile-label">Discard</span>
+        </div>
+      </div>
+
+      <div class="action-row">
+        <button class="uno-shout-btn hidden" id="uno-shout">UNO!</button>
+        <button class="draw-btn" id="draw-btn">Draw Card</button>
+      </div>
+
+      <div id="msg-bar" class="msg-bar"></div>
+    </div>
+
+    <!-- CPU 3 — right -->
+    <div class="player-zone right" id="zone-3">
+      <div class="hand vert small" id="hand-3"></div>
+      <div class="player-meta vert">
+        <span class="pname">CPU 3</span>
+        <span class="pcount" id="count-3">7 cards</span>
+        <span class="uno-badge" id="ubadge-3">UNO!</span>
+      </div>
+    </div>
+
+    <!-- Human — bottom -->
+    <div class="player-zone bottom" id="zone-0">
+      <div class="player-meta">
+        <span class="pname">You</span>
+        <span class="pcount" id="count-0">7 cards</span>
+        <span class="uno-badge" id="ubadge-0">UNO!</span>
+      </div>
+      <div class="hand horiz" id="hand-0"></div>
+    </div>
+
+  </div><!-- .game-board -->
+
+  <!-- Color picker modal -->
+  <div class="overlay hidden" id="color-overlay">
+    <div class="modal color-modal">
+      <h3>Choose a color</h3>
+      <div class="color-choices">
+        <button class="color-btn" data-color="red"    style="background:#c0392b">Red</button>
+        <button class="color-btn" data-color="blue"   style="background:#2980b9">Blue</button>
+        <button class="color-btn" data-color="green"  style="background:#27ae60">Green</button>
+        <button class="color-btn" data-color="yellow" style="background:#d4ac0d">Yellow</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Game over modal -->
+  <div class="overlay hidden" id="over-overlay">
+    <div class="modal">
+      <div id="over-icon" class="over-icon"></div>
+      <h2 id="over-text"></h2>
+      <button id="restart-btn" class="restart-btn">Play Again</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
