@@ -10,13 +10,18 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE   = 10
 BATCH_DELAY  = 3.0
-TICKER_DELAY = 1.0
+TICKER_DELAY = 1.2
 
-# ── Browser-like session ──────────────────────────────────────────────────────
-# Yahoo Finance blocks bare urllib requests; passing a session with real browser
-# headers (and letting it collect cookies on first hit) fixes JSONDecodeError.
+# ── Yahoo Finance session with crumb auth ─────────────────────────────────────
+# Yahoo Finance requires a valid "crumb" + consent cookie since 2023.
+# We fetch it once on startup and reuse it for all requests.
 
-def _make_session() -> requests.Session:
+_SESSION: requests.Session | None = None
+_CRUMB:   str | None = None
+
+
+def _build_session() -> tuple[requests.Session, str | None]:
+    """Create a session with browser headers, accept consent, and extract crumb."""
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -27,31 +32,50 @@ def _make_session() -> requests.Session:
         "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
+        "Referer":         "https://finance.yahoo.com/",
     })
-    # Warm up: visit Yahoo Finance once to collect cookies
-    try:
-        s.get("https://finance.yahoo.com", timeout=10)
-    except Exception:
-        pass
-    return s
 
-_SESSION: requests.Session | None = None
+    crumb = None
+    try:
+        # Step 1: hit the main page to get initial cookies
+        resp = s.get("https://finance.yahoo.com", timeout=15)
+        logger.debug(f"Yahoo homepage status: {resp.status_code}")
+
+        # Step 2: accept GDPR/consent if redirected
+        if "consent.yahoo.com" in resp.url or resp.status_code in (302, 301):
+            consent_url = "https://consent.yahoo.com/v2/collectConsent"
+            s.post(consent_url, data={"agree": ["agree", "agree"], "lang": "en-US"}, timeout=10)
+            s.get("https://finance.yahoo.com", timeout=10)
+
+        # Step 3: fetch the crumb — needed for API calls since 2023
+        crumb_resp = s.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+        if crumb_resp.status_code == 200 and crumb_resp.text.strip():
+            crumb = crumb_resp.text.strip()
+            logger.info(f"Yahoo Finance crumb obtained: {crumb[:8]}…")
+        else:
+            logger.warning(f"Crumb fetch returned {crumb_resp.status_code}: '{crumb_resp.text[:80]}'")
+    except Exception as e:
+        logger.warning(f"Session build error (will continue without crumb): {e}")
+
+    return s, crumb
+
 
 def _get_session() -> requests.Session:
-    global _SESSION
+    global _SESSION, _CRUMB
     if _SESSION is None:
-        logger.info("Initialising Yahoo Finance session…")
-        _SESSION = _make_session()
+        logger.info("Initialising Yahoo Finance session with crumb…")
+        _SESSION, _CRUMB = _build_session()
     return _SESSION
 
+
 def _reset_session() -> requests.Session:
-    global _SESSION
+    global _SESSION, _CRUMB
     _SESSION = None
+    _CRUMB = None
     return _get_session()
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── DataFrame helpers ─────────────────────────────────────────────────────────
 
 def _flatten(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
@@ -59,39 +83,45 @@ def _flatten(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _ticker_history(ticker: str, period: str, interval: str, session: requests.Session) -> pd.DataFrame:
-    """Fetch via Ticker.history() using shared session."""
+def _normalise_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [str(c).title() for c in df.columns]
+    return df
+
+
+# ── Core download with retry ──────────────────────────────────────────────────
+
+def _ticker_history(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    session = _get_session()
     t = yf.Ticker(ticker, session=session)
     df = t.history(period=period, interval=interval, auto_adjust=True)
     if df is not None and not df.empty:
-        df = df.dropna()
-        df.columns = [c.title() for c in df.columns]
-        return df
+        return _normalise_cols(df.dropna())
     return pd.DataFrame()
 
 
 def _download_with_retry(ticker: str, period: str, interval: str, retries: int = 3) -> pd.DataFrame:
-    session = _get_session()
     for attempt in range(retries):
         try:
-            df = _ticker_history(ticker, period, interval, session)
+            df = _ticker_history(ticker, period, interval)
             if not df.empty:
                 return df
+            logger.debug(f"[{ticker}] empty response on attempt {attempt + 1}")
         except Exception as e:
-            logger.debug(f"[{ticker}] attempt {attempt+1} error: {e}")
+            logger.debug(f"[{ticker}] attempt {attempt + 1} error: {e}")
             if attempt == 1:
-                # Session may be stale — refresh it once
-                session = _reset_session()
+                _reset_session()   # refresh cookies once on repeated failure
         wait = 3.0 * (2 ** attempt) + random.uniform(0, 1.5)
         time.sleep(wait)
-    logger.warning(f"[{ticker}] all retries exhausted")
+    logger.warning(f"[{ticker}] all {retries} retries exhausted — skipping")
     return pd.DataFrame()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def fetch_historical(ticker: str) -> pd.DataFrame:
-    return _download_with_retry(ticker, period=f"{DATA_PERIOD_DAYS}d", interval=INTRADAY_INTERVAL)
+    return _download_with_retry(
+        ticker, period=f"{DATA_PERIOD_DAYS}d", interval=INTRADAY_INTERVAL
+    )
 
 
 def fetch_realtime(ticker: str) -> pd.DataFrame:
@@ -100,16 +130,17 @@ def fetch_realtime(ticker: str) -> pd.DataFrame:
 
 def fetch_batch_realtime(tickers: list) -> dict:
     """
-    Fetch 1-min intraday for all tickers.
-    Uses yf.download() in small batches; falls back to per-ticker Ticker.history().
+    Fetch 1-min bars for all tickers.
+    Tries yf.download() in small batches first; falls back to per-ticker
+    Ticker.history() for any that fail.
     """
     result: dict[str, pd.DataFrame] = {}
     failed: list[str] = []
     session = _get_session()
+    n_batches = -(-len(tickers) // BATCH_SIZE)
 
     for i in range(0, len(tickers), BATCH_SIZE):
         batch = tickers[i: i + BATCH_SIZE]
-        n_batches = -(-len(tickers) // BATCH_SIZE)
         logger.info(f"Fetching batch {i // BATCH_SIZE + 1}/{n_batches}: {batch}")
         try:
             raw = yf.download(
@@ -121,35 +152,36 @@ def fetch_batch_realtime(tickers: list) -> dict:
                 auto_adjust=True,
                 session=session,
             )
-
             if raw is None or raw.empty:
                 failed.extend(batch)
             elif len(batch) == 1:
                 df = _flatten(raw).dropna()
-                (result if not df.empty else {batch[0]: None})[batch[0]] = df if not df.empty else None
-                if df.empty:
+                if not df.empty:
+                    result[batch[0]] = df
+                else:
                     failed.append(batch[0])
             else:
                 for t in batch:
                     try:
-                        df = (raw[t] if isinstance(raw.columns, pd.MultiIndex) else raw).dropna()
+                        df = (
+                            raw[t] if isinstance(raw.columns, pd.MultiIndex) else raw
+                        ).dropna()
                         if not df.empty:
                             result[t] = _flatten(df)
                         else:
                             failed.append(t)
                     except Exception:
                         failed.append(t)
-
         except Exception as e:
-            logger.warning(f"Batch {i // BATCH_SIZE + 1} failed: {e} — will retry individually")
+            logger.warning(f"Batch {i // BATCH_SIZE + 1} failed ({e}) — queuing for individual retry")
             failed.extend(batch)
 
         if i + BATCH_SIZE < len(tickers):
             time.sleep(BATCH_DELAY)
 
-    # Retry failures individually
+    # Individual retry for anything that failed
     if failed:
-        logger.info(f"Retrying {len(failed)} failed tickers individually…")
+        logger.info(f"Retrying {len(failed)} tickers individually via Ticker.history()…")
         for t in failed:
             df = _download_with_retry(t, period="1d", interval=REALTIME_INTERVAL, retries=2)
             if not df.empty:
