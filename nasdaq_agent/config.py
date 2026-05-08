@@ -3,7 +3,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
+
+if not TWELVE_DATA_API_KEY:
+    raise RuntimeError(
+        "\n\n  ERROR: TWELVE_DATA_API_KEY not set.\n"
+        "  Create a file called .env in the nasdaq_agent folder with:\n"
+        "  TWELVE_DATA_API_KEY=your_key_here\n"
+    )
 
 SCAN_INTERVAL_SECONDS = 300       # 5 min — free tier: 800 credits/day, 100 tickers = 8 scans/day
 ML_RETRAIN_INTERVAL   = 86400     # Retrain ML once per day (saves API credits)
