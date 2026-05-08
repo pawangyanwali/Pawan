@@ -1,8 +1,15 @@
-SCAN_INTERVAL_SECONDS = 60        # How often to rescan all tickers
-ML_RETRAIN_INTERVAL = 3600        # Retrain ML model every hour
-DATA_PERIOD_DAYS = 59             # Days of historical data for ML training
-INTRADAY_INTERVAL = "5m"          # Candle resolution for ML features
-REALTIME_INTERVAL = "1m"          # Candle resolution for live signals
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+
+SCAN_INTERVAL_SECONDS = 300       # 5 min — free tier: 800 credits/day, 100 tickers = 8 scans/day
+ML_RETRAIN_INTERVAL   = 86400     # Retrain ML once per day (saves API credits)
+DATA_PERIOD_DAYS      = 30        # Days of 5-min history for ML (30d × 78 bars = 2340 bars)
+INTRADAY_INTERVAL     = "5m"      # Candle resolution for ML features
+REALTIME_INTERVAL     = "1m"      # Candle resolution for live signals
 
 # Signal weights (must sum to 1.0)
 WEIGHT_TECHNICAL = 0.35
@@ -10,7 +17,7 @@ WEIGHT_VOLUME    = 0.20
 WEIGHT_ML        = 0.35
 WEIGHT_SENTIMENT = 0.10
 
-# Thresholds for dashboard coloring
+# Thresholds for dashboard colouring
 STRONG_BUY_THRESHOLD  =  0.60
 BUY_THRESHOLD         =  0.30
 SELL_THRESHOLD        = -0.30
@@ -29,3 +36,29 @@ NASDAQ_TICKERS = [
     "NTAP", "HOLX", "WBA", "SIRI", "ZM", "DOCU", "PTON", "LCID", "RIVN", "CHKP",
     "INTC", "ARM", "SMCI", "MELI", "APP", "COIN", "HOOD", "RKLB", "SOFI", "PLTR",
 ]
+
+# Friendly names for the tickers (avoids extra API calls for company info)
+TICKER_NAMES = {
+    "AAPL":"Apple","MSFT":"Microsoft","NVDA":"NVIDIA","AMZN":"Amazon","META":"Meta",
+    "GOOGL":"Alphabet A","GOOG":"Alphabet C","TSLA":"Tesla","AVGO":"Broadcom","COST":"Costco",
+    "NFLX":"Netflix","AMD":"AMD","ADBE":"Adobe","QCOM":"Qualcomm","PEP":"PepsiCo",
+    "CSCO":"Cisco","INTU":"Intuit","CMCSA":"Comcast","AMAT":"Applied Materials","AMGN":"Amgen",
+    "HON":"Honeywell","MU":"Micron","ISRG":"Intuitive Surgical","LRCX":"Lam Research",
+    "KLAC":"KLA Corp","ADI":"Analog Devices","REGN":"Regeneron","SNPS":"Synopsys",
+    "CDNS":"Cadence","MDLZ":"Mondelez","PYPL":"PayPal","GILD":"Gilead","CTAS":"Cintas",
+    "MRVL":"Marvell","PANW":"Palo Alto Networks","ABNB":"Airbnb","CRWD":"CrowdStrike",
+    "ORLY":"O'Reilly Auto","ADSK":"Autodesk","DXCM":"Dexcom","ADP":"ADP","MNST":"Monster Bev",
+    "BKNG":"Booking Holdings","FTNT":"Fortinet","KDP":"Keurig Dr Pepper","BIIB":"Biogen",
+    "MCHP":"Microchip Tech","SBUX":"Starbucks","AEP":"AEP","NXPI":"NXP Semi",
+    "PCAR":"PACCAR","CPRT":"Copart","EXC":"Exelon","ROST":"Ross Stores","ODFL":"Old Dominion",
+    "PAYX":"Paychex","WDAY":"Workday","FAST":"Fastenal","IDXX":"IDEXX Labs","ZS":"Zscaler",
+    "ANSS":"ANSYS","TEAM":"Atlassian","DDOG":"Datadog","CEG":"Constellation Energy",
+    "TTD":"Trade Desk","EA":"Electronic Arts","MRNA":"Moderna","ALGN":"Align Tech",
+    "DLTR":"Dollar Tree","VRSK":"Verisk","GEHC":"GE HealthCare","ON":"ON Semi","ROP":"Roper",
+    "ILMN":"Illumina","TTWO":"Take-Two","OKTA":"Okta","EXPE":"Expedia","SWKS":"Skyworks",
+    "CTSH":"Cognizant","VRSN":"VeriSign","NTAP":"NetApp","HOLX":"Hologic","WBA":"Walgreens",
+    "SIRI":"Sirius XM","ZM":"Zoom","DOCU":"DocuSign","PTON":"Peloton","LCID":"Lucid",
+    "RIVN":"Rivian","CHKP":"Check Point","INTC":"Intel","ARM":"ARM Holdings","SMCI":"Super Micro",
+    "MELI":"MercadoLibre","APP":"AppLovin","COIN":"Coinbase","HOOD":"Robinhood",
+    "RKLB":"Rocket Lab","SOFI":"SoFi","PLTR":"Palantir",
+}
