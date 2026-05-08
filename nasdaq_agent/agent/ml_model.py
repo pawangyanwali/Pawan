@@ -7,6 +7,7 @@ most recent feature row fetched during each scan cycle.
 """
 
 import logging
+import time
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -107,15 +108,15 @@ class StockMLModel:
 _model_registry: dict[str, StockMLModel] = {}
 
 
-def get_or_train(ticker: str) -> StockMLModel:
+def get_or_create(ticker: str) -> StockMLModel:
+    """Return existing model (untrained is fine) — training happens lazily in retrain_all."""
     if ticker not in _model_registry:
-        m = StockMLModel(ticker)
-        m.train()
-        _model_registry[ticker] = m
+        _model_registry[ticker] = StockMLModel(ticker)
     return _model_registry[ticker]
 
 
-def retrain_all(tickers: list[str]) -> None:
+def retrain_all(tickers: list, delay: float = 1.2) -> None:
+    """Train/retrain models one ticker at a time with a delay to avoid rate limits."""
     for t in tickers:
         try:
             m = _model_registry.get(t, StockMLModel(t))
@@ -123,9 +124,10 @@ def retrain_all(tickers: list[str]) -> None:
             _model_registry[t] = m
         except Exception as e:
             logger.warning(f"[{t}] retrain failed: {e}")
+        time.sleep(delay)
 
 
 def predict(ticker: str, df: pd.DataFrame) -> float:
-    """Convenience wrapper: get/train model then return up-probability."""
-    m = get_or_train(ticker)
+    """Return up-probability; uses 0.5 (neutral) if model not yet trained."""
+    m = get_or_create(ticker)
     return m.predict_proba(df)

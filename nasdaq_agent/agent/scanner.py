@@ -162,11 +162,8 @@ class Scanner:
     def run_once(self) -> list[StockSignal]:
         logger.info(f"Starting scan of {len(NASDAQ_TICKERS)} tickers…")
 
-        if self._should_retrain():
-            logger.info("Retraining ML models…")
-            retrain_all(NASDAQ_TICKERS)
-            self._last_retrain = time.time()
-
+        # Fetch price data first so dashboard gets results quickly,
+        # then retrain ML models in the background afterwards.
         batch = fetch_batch_realtime(NASDAQ_TICKERS)
         results: list[StockSignal] = []
 
@@ -182,6 +179,14 @@ class Scanner:
         self.last_scan = datetime.utcnow().isoformat()
         self._notify(results)
         logger.info(f"Scan complete | {len(results)} stocks analysed")
+
+        # Retrain ML models after broadcasting results (non-blocking for dashboard)
+        if self._should_retrain():
+            logger.info("Starting ML retrain in background (1.2s delay between tickers)…")
+            retrain_all(NASDAQ_TICKERS)
+            self._last_retrain = time.time()
+            logger.info("ML retrain complete.")
+
         return results
 
     def _loop(self) -> None:
