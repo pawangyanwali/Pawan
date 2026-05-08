@@ -34,7 +34,7 @@ NASDAQ_TICKERS = [
     "ANSS", "TEAM", "DDOG", "CEG", "TTD", "EA", "MRNA", "ALGN", "DLTR", "VRSK",
     "GEHC", "ON", "ROP", "ILMN", "TTWO", "OKTA", "EXPE", "SWKS", "CTSH", "VRSN",
     "NTAP", "HOLX", "WBA", "SIRI", "ZM", "DOCU", "PTON", "LCID", "RIVN", "CHKP",
-    "INTC", "ARM", "SMCI", "MELI", "APP", "COIN", "HOOD", "RKLB", "SOFI", "PLTR",
+    "INTC", "ARM", "SMCI", "LULU", "NDAQ", "MPWR", "ENPH", "FSLR", "CELH", "AXON",
 ]
 
 # Friendly names for the tickers (avoids extra API calls for company info)
@@ -60,5 +60,6 @@ TICKER_NAMES = {
     "SIRI":"Sirius XM","ZM":"Zoom","DOCU":"DocuSign","PTON":"Peloton","LCID":"Lucid",
     "RIVN":"Rivian","CHKP":"Check Point","INTC":"Intel","ARM":"ARM Holdings","SMCI":"Super Micro",
     "MELI":"MercadoLibre","APP":"AppLovin","COIN":"Coinbase","HOOD":"Robinhood",
-    "RKLB":"Rocket Lab","SOFI":"SoFi","PLTR":"Palantir",
+    "LULU":"Lululemon","NDAQ":"Nasdaq Inc","MPWR":"Monolithic Power","ENPH":"Enphase Energy",
+    "FSLR":"First Solar","CELH":"Celsius Holdings","AXON":"Axon Enterprise",
 }
