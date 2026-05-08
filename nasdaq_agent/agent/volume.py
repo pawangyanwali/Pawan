@@ -76,7 +76,7 @@ def detect_unusual_volume(df: pd.DataFrame, threshold: float = 2.5) -> bool:
     avg_vol_20 = df["Volume"].iloc[-20:].mean()
     if avg_vol_20 == 0:
         return False
-    return (last_vol / avg_vol_20) >= threshold
+    return bool((last_vol / avg_vol_20) >= threshold)
 
 
 def relative_volume(df: pd.DataFrame) -> float:

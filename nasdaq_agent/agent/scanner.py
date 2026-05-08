@@ -54,7 +54,15 @@ class StockSignal:
     scanned_at:    str            = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        # Convert any numpy scalar types to native Python so json.dumps works
+        for k, v in d.items():
+            if hasattr(v, "item"):          # numpy scalar → Python scalar
+                d[k] = v.item()
+            elif isinstance(v, (bool,)):    # keep plain bool as-is
+                pass
+        d["unusual_vol"] = bool(d["unusual_vol"])
+        return d
 
 
 def _label_signal(score: float) -> str:
