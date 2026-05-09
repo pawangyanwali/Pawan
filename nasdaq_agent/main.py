@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import numpy as np
 from contextlib import asynccontextmanager
 from typing import Set
 
@@ -16,6 +17,24 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.scanner import scanner, StockSignal
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    """Converts numpy scalars to native Python types for JSON serialization."""
+    def default(self, obj):
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
+def _dumps(obj) -> str:
+    return json.dumps(obj, cls=_NumpyEncoder)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +71,7 @@ manager = ConnectionManager()
 
 def _on_signals(signals: list[StockSignal]) -> None:
     """Callback invoked by the scanner thread; schedule a broadcast."""
-    payload = json.dumps({
+    payload = _dumps({
         "type": "update",
         "signals": [s.to_dict() for s in signals],
     })
@@ -117,7 +136,7 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         # Send current state immediately on connect
         if scanner.signals:
-            payload = json.dumps({
+            payload = _dumps({
                 "type": "update",
                 "signals": [s.to_dict() for s in scanner.signals],
             })

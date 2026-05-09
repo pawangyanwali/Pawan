@@ -103,7 +103,7 @@ def _get_info(ticker: str) -> dict:
 
 def analyse_ticker(ticker: str, df) -> Optional[StockSignal]:
     try:
-        if df is None or df.empty or len(df) < 30:
+        if df is None or df.empty or len(df) < 5:
             return None
 
         df = compute_indicators(df.copy())
