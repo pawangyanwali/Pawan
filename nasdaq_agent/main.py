@@ -68,25 +68,27 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# Captured at startup so the scanner background thread can schedule broadcasts
+_event_loop: asyncio.AbstractEventLoop | None = None
+
 
 def _on_signals(signals: list[StockSignal]) -> None:
-    """Callback invoked by the scanner thread; schedule a broadcast."""
+    """Callback invoked by the scanner thread; schedule a broadcast on the main loop."""
+    if _event_loop is None:
+        return
     payload = _dumps({
         "type": "update",
         "signals": [s.to_dict() for s in signals],
     })
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.run_coroutine_threadsafe(manager.broadcast(payload), loop)
-    except Exception as e:
-        logger.warning(f"Broadcast error: {e}")
+    asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
 
 # ── App lifespan ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()   # capture before spawning thread
     scanner.register_callback(_on_signals)
     scanner.start_background()
     yield

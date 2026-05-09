@@ -12,7 +12,7 @@ if not TWELVE_DATA_API_KEY:
         "  TWELVE_DATA_API_KEY=your_key_here\n"
     )
 
-SCAN_INTERVAL_SECONDS = 300       # 5 min — free tier: 800 credits/day, 100 tickers = 8 scans/day
+SCAN_INTERVAL_SECONDS = 300       # 5 min — 30 tickers × 8.5s = ~4.25 min per scan
 ML_RETRAIN_INTERVAL   = 86400     # Retrain ML once per day (saves API credits)
 DATA_PERIOD_DAYS      = 30        # Days of 5-min history for ML (30d × 78 bars = 2340 bars)
 INTRADAY_INTERVAL     = "5m"      # Candle resolution for ML features
@@ -30,18 +30,15 @@ BUY_THRESHOLD         =  0.30
 SELL_THRESHOLD        = -0.30
 STRONG_SELL_THRESHOLD = -0.60
 
-# Top 100 liquid NASDAQ tickers (NASDAQ-100 + high-volume extras)
+# Top 30 most liquid NASDAQ tickers — ideal for scalping on free API tier
+# (30 tickers × 8.5s/request = ~4.25 min scan, fits inside 5-min interval)
 NASDAQ_TICKERS = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "COST",
-    "NFLX", "AMD", "ADBE", "QCOM", "PEP", "CSCO", "INTU", "CMCSA", "AMAT", "AMGN",
-    "HON", "MU", "ISRG", "LRCX", "KLAC", "ADI", "REGN", "SNPS", "CDNS", "MDLZ",
-    "PYPL", "GILD", "CTAS", "MRVL", "PANW", "ABNB", "CRWD", "ORLY", "ADSK", "DXCM",
-    "ADP", "MNST", "BKNG", "FTNT", "KDP", "BIIB", "MCHP", "SBUX", "AEP", "NXPI",
-    "PCAR", "CPRT", "EXC", "ROST", "ODFL", "PAYX", "WDAY", "FAST", "IDXX", "ZS",
-    "ANSS", "TEAM", "DDOG", "CEG", "TTD", "EA", "MRNA", "ALGN", "DLTR", "VRSK",
-    "GEHC", "ON", "ROP", "ILMN", "TTWO", "OKTA", "EXPE", "SWKS", "CTSH", "VRSN",
-    "NTAP", "HOLX", "WBA", "SIRI", "ZM", "DOCU", "PTON", "LCID", "RIVN", "CHKP",
-    "INTC", "ARM", "SMCI", "LULU", "NDAQ", "MPWR", "ENPH", "FSLR", "CELH", "AXON",
+    "AAPL", "MSFT", "NVDA", "AMZN", "META",
+    "GOOGL", "TSLA", "AVGO", "NFLX", "AMD",
+    "ADBE", "QCOM", "CSCO", "INTU", "AMAT",
+    "MU",   "PANW", "CRWD", "MRVL", "KLAC",
+    "LRCX", "ADI",  "SNPS", "CDNS", "ISRG",
+    "REGN", "BKNG", "ADP",  "SBUX", "INTC",
 ]
 
 # Friendly names for the tickers (avoids extra API calls for company info)

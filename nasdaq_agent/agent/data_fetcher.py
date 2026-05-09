@@ -19,8 +19,8 @@ from config import TWELVE_DATA_API_KEY, INTRADAY_INTERVAL, REALTIME_INTERVAL, DA
 logger = logging.getLogger(__name__)
 
 BASE_URL   = "https://api.twelvedata.com"
-BATCH_SIZE = 8      # symbols per request  (keeps URL short, stays within rate limit)
-CALL_GAP   = 8.5    # seconds between requests  (safe margin under 8 req/min)
+BATCH_SIZE = 1      # 1 symbol per request — free tier = 8 CREDITS/min, not 8 requests
+CALL_GAP   = 8.5    # seconds between requests  (60s / 8 credits = 7.5s, use 8.5s for safety)
 
 # Map our short codes → Twelve Data interval strings
 _IV = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "1d": "1day"}
@@ -36,14 +36,22 @@ def _throttle() -> None:
     _last_call = time.time()
 
 
-def _get(endpoint: str, params: dict) -> dict:
-    """GET request with throttling and basic error handling."""
+def _get(endpoint: str, params: dict, _retry: int = 3) -> dict:
+    """GET request with throttling, rate-limit retry, and basic error handling."""
     _throttle()
     params["apikey"] = TWELVE_DATA_API_KEY
     try:
         r = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=20)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        # Detect per-minute credit exhaustion and wait out the minute
+        if isinstance(data, dict) and data.get("code") == 429:
+            if _retry > 0:
+                logger.warning("Rate limit hit — waiting 62 seconds before retry…")
+                time.sleep(62)
+                return _get(endpoint, params, _retry=_retry - 1)
+            return {}
+        return data
     except Exception as e:
         logger.warning(f"Twelve Data request failed: {e}")
         return {}
@@ -137,13 +145,15 @@ def fetch_batch_realtime(tickers: list) -> dict:
             logger.warning(f"Batch {batch_num} returned empty response")
             continue
 
-        # Single ticker → response has "values" key directly
+        # With BATCH_SIZE=1, response always has "values" key directly
         if "values" in data:
-            df = _parse_values(data["values"])
-            if not df.empty:
-                result[batch[0]] = df
-
-        # Multiple tickers → response is keyed by symbol
+            if data.get("status") == "error":
+                logger.debug(f"[{batch[0]}] {data.get('message', 'error')}")
+            else:
+                df = _parse_values(data["values"])
+                if not df.empty:
+                    result[batch[0]] = df
+        # Multi-ticker fallback (if BATCH_SIZE > 1)
         else:
             for ticker in batch:
                 ticker_data = data.get(ticker, {})
