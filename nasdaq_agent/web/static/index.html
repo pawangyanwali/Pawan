@@ -134,6 +134,27 @@
     /* Patterns */
     .pattern-chips { display:flex; flex-wrap:wrap; gap:6px; }
     .pattern-chip { padding:3px 8px; border-radius:4px; font-size:10px; background:var(--surface2); border:1px solid var(--border); }
+    /* Multi-Timeframe */
+    .mtf-row { display:flex; align-items:center; gap:10px; padding:5px 0; border-bottom:1px solid var(--border); }
+    .mtf-row:last-child { border-bottom:none; }
+    .mtf-label { font-size:11px; color:var(--muted); min-width:36px; font-weight:600; }
+    .mtf-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+    .mtf-dot.up   { background:var(--green); box-shadow:0 0 6px rgba(34,197,94,.5); }
+    .mtf-dot.down { background:var(--red);   box-shadow:0 0 6px rgba(239,68,68,.5); }
+    .mtf-dot.side { background:var(--muted); }
+    .mtf-trend { font-size:10px; font-weight:700; min-width:80px; }
+    .mtf-trend.up   { color:var(--green); }
+    .mtf-trend.down { color:var(--red); }
+    .mtf-trend.side { color:var(--muted); }
+    .mtf-bar { flex:1; height:4px; background:var(--border); border-radius:2px; overflow:hidden; }
+    .mtf-bar-fill { height:100%; border-radius:2px; transition:width .3s; }
+    .mtf-score-val { font-size:10px; color:var(--muted); min-width:38px; text-align:right; }
+    .mtf-align-badge { display:inline-block; padding:3px 10px; border-radius:4px; font-size:11px; font-weight:700; }
+    .mtf-align-badge.sb { background:rgba(34,197,94,.15); color:var(--green); }
+    .mtf-align-badge.b  { background:rgba(134,239,172,.1); color:#86efac; }
+    .mtf-align-badge.mx { background:rgba(100,116,139,.12); color:var(--muted); }
+    .mtf-align-badge.br { background:rgba(248,113,113,.1); color:#f87171; }
+    .mtf-align-badge.sb2{ background:rgba(239,68,68,.15); color:var(--red); }
 
     /* Loading */
     .loading-overlay { position:fixed; inset:0; background:var(--bg); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; z-index:999; transition:opacity .5s; }
@@ -214,6 +235,7 @@
         <th>Prediction</th>
         <th>Confidence</th>
         <th>Trend</th>
+        <th title="Multi-Timeframe Alignment">MTF</th>
         <th>Score</th>
         <th>Target</th>
         <th>Stop</th>
@@ -286,6 +308,13 @@
   <div class="section" id="dp-patterns-section" style="display:none">
     <div class="section-title">Candlestick Patterns</div>
     <div class="pattern-chips" id="dp-patterns"></div>
+  </div>
+
+  <!-- Multi-Timeframe Analysis -->
+  <div class="section" id="dp-mtf-section">
+    <div class="section-title">Multi-Timeframe Analysis</div>
+    <div id="dp-mtf-alignment" style="margin-bottom:10px;font-size:12px;font-weight:700"></div>
+    <div id="dp-mtf-grid"></div>
   </div>
 
   <!-- S/R Levels -->
@@ -432,6 +461,14 @@ function renderTable() {
         <span class="trend-badge ${trC}">${s.trend}</span>
         <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${Math.round((s.trend_probability||0.5)*100)}% conf</span>
       </td>
+      <td style="font-size:10px;white-space:nowrap">
+        ${(() => {
+          const b = s.mtf_bull_count||0, br = s.mtf_bear_count||0;
+          const al = s.mtf_alignment||'MIXED';
+          const c = al==='STRONGLY BULLISH'?'var(--green)':al==='BULLISH'?'#86efac':al==='STRONGLY BEARISH'?'var(--red)':al==='BEARISH'?'#f87171':'var(--muted)';
+          return `<span style="color:${c};font-weight:700">${b}↑ ${br}↓</span>`;
+        })()}
+      </td>
       <td>
         <div class="score-bar-wrap">
           ${miniBar(s.score, 44)}
@@ -522,13 +559,43 @@ function openDetail(ticker) {
     ? `<div class="sr-item poc">$${fmt(s.poc)}</div>`
     : '<div style="color:var(--muted);font-size:11px">—</div>';
 
+  // Multi-timeframe analysis
+  const mtfTFs  = s.mtf_timeframes || {};
+  const mtfOrder = ['1D', '1H', '30M', '15M', '5M'];
+  const alignCls = {'STRONGLY BULLISH':'sb','BULLISH':'b','MIXED':'mx','BEARISH':'br','STRONGLY BEARISH':'sb2'};
+  const alignTxt = s.mtf_alignment || 'MIXED';
+  document.getElementById('dp-mtf-alignment').innerHTML =
+    `<span class="mtf-align-badge ${alignCls[alignTxt]||'mx'}">${alignTxt}</span>` +
+    `<span style="font-size:11px;color:var(--muted);margin-left:8px">${s.mtf_bull_count||0}↑ bullish · ${s.mtf_bear_count||0}↓ bearish across 5 timeframes</span>`;
+  document.getElementById('dp-mtf-grid').innerHTML = mtfOrder.map(tf => {
+    const r = mtfTFs[tf];
+    if (!r) return '';
+    const dotCls  = r.trend==='UPTREND'?'up':r.trend==='DOWNTREND'?'down':'side';
+    const trendCls = dotCls;
+    const pct     = Math.round((r.trend_prob||0.5)*100);
+    const sc      = r.score||0;
+    const barFill = Math.round(Math.abs(sc)*100);
+    const barColor = sc>=0?'var(--green)':'var(--red)';
+    return `<div class="mtf-row">
+      <span class="mtf-label">${tf}</span>
+      <span class="mtf-dot ${dotCls}"></span>
+      <span class="mtf-trend ${trendCls}">${r.trend} ${pct}%</span>
+      <div class="mtf-bar"><div class="mtf-bar-fill" style="width:${barFill}%;background:${barColor}"></div></div>
+      <span class="mtf-score-val">${sc>=0?'+':''}${fmt(sc,2)}</span>
+    </div>`;
+  }).join('');
+
   // Component scores
-  const mlVal  = s.ml_trained ? (s.ml_prob - 0.5) * 2 : null;
+  const mlVal      = s.ml_trained ? (s.ml_prob - 0.5) * 2 : null;
+  const mlDailyVal = s.ml_trained ? ((s.ml_daily_prob||0.5) - 0.5) * 2 : null;
+  const mtfVal     = s.mtf_score || 0;
   const comp = [
-    ['Technical',  s.technical, true],
-    ['Volume',     s.volume,    true],
-    ['ML Model',   mlVal,       s.ml_trained],
-    ['Sentiment',  s.sentiment, true],
+    ['MTF Score',   mtfVal,       true],
+    ['Technical',   s.technical,  true],
+    ['Volume',      s.volume,     true],
+    ['Scalp ML',    mlVal,        s.ml_trained],
+    ['Daily ML',    mlDailyVal,   s.ml_trained],
+    ['Sentiment',   s.sentiment,  true],
   ];
   document.getElementById('dp-components').innerHTML = comp.map(([label, v, trained]) => {
     if (!trained) {

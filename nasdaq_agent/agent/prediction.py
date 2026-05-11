@@ -172,6 +172,7 @@ def _compute_confidence(
     pa_score:     float,
     pattern_score: float,
     sent_score:   float,
+    mtf_score:    float = 0.0,
 ) -> float:
     """
     Confidence = weighted signal-agreement score (0–95 %).
@@ -199,11 +200,13 @@ def _compute_confidence(
     trend_signal = 1.0 if trend == "UPTREND" else (-1.0 if trend == "DOWNTREND" else 0.0)
     _agree(trend_signal * trend_prob, 30)
 
-    _agree(tech_score,    25)
-    _agree(vol_score,     12)
-    _agree(pa_score,      15)
-    _agree(pattern_score, 10)
-    _agree(sent_score,     5)
+    # MTF alignment is the strongest standalone signal after trend
+    _agree(float(mtf_score), 30)
+    _agree(tech_score,       20)
+    _agree(vol_score,        10)
+    _agree(pa_score,         10)
+    _agree(pattern_score,    8)
+    _agree(sent_score,       5)
 
     if ml_trained:
         # ml_prob in [0,1]; convert to [-1,+1]: (prob-0.5)*2
@@ -235,6 +238,7 @@ def generate_prediction(
     ml_prob:    float,
     sent_score: float,
     last_row:   pd.Series,
+    mtf_score:  float = 0.0,
 ) -> dict:
     """
     Generate a complete, actionable scalping prediction for ``ticker``.
@@ -291,23 +295,29 @@ def generate_prediction(
     ml_score   = float(np.clip((float(ml_prob) - 0.5) * 2, -1.0, 1.0)) if ml_trained else 0.0
 
     # ── 5. Composite score ────────────────────────────────────────────────────
-    # When ML is untrained its weight (0.20) redistributes to tech and PA
+    # MTF (multi-timeframe alignment) is the dominant signal — professional
+    # traders only enter when higher timeframes agree with the setup.
+    # When ML is untrained its weight redistributes to tech and MTF.
     if ml_trained:
-        w_tech, w_vol, w_ml, w_pa, w_pat, w_sent = 0.25, 0.15, 0.20, 0.18, 0.12, 0.05
+        # tech  vol   ml    pa    mtf   pat   sent
+        w_t, w_v, w_m, w_p, w_f, w_pat, w_s = 0.18, 0.10, 0.15, 0.08, 0.30, 0.12, 0.07
     else:
-        w_tech, w_vol, w_ml, w_pa, w_pat, w_sent = 0.30, 0.18,  0.0, 0.25, 0.17, 0.05
+        w_t, w_v, w_m, w_p, w_f, w_pat, w_s = 0.22, 0.12,  0.0, 0.12, 0.35, 0.12, 0.07
 
-    # Direct trend bias: UPTREND pushes composite bullish, DOWNTREND bearish
+    # Direct trend bias: intraday trend acts as an additional nudge
     trend_signal = 1.0 if trend == "UPTREND" else (-1.0 if trend == "DOWNTREND" else 0.0)
-    trend_bias   = 0.20 * trend_signal * trend_prob
+    trend_bias   = 0.12 * trend_signal * trend_prob
+
+    mtf_score_f = float(np.clip(float(mtf_score), -1.0, 1.0))
 
     composite = (
-        w_tech * float(tech_score)  +
-        w_vol  * float(vol_score)   +
-        w_ml   * ml_score           +
-        w_pa   * pa_score           +
-        w_pat  * pattern_score      +
-        w_sent * float(sent_score)  +
+        w_t   * float(tech_score)  +
+        w_v   * float(vol_score)   +
+        w_m   * ml_score           +
+        w_p   * pa_score           +
+        w_f   * mtf_score_f        +
+        w_pat * pattern_score      +
+        w_s   * float(sent_score)  +
         trend_bias
     )
     composite = round(float(np.clip(composite, -1.0, 1.0)), 4)
@@ -326,6 +336,7 @@ def generate_prediction(
         float(tech_score), float(vol_score),
         float(ml_prob), ml_trained,
         pa_score, pattern_score, float(sent_score),
+        mtf_score_f,
     )
 
     # ── 7. Targets and stop-loss ──────────────────────────────────────────────

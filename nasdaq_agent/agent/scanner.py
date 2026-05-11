@@ -18,16 +18,34 @@ from config import (
     NASDAQ_TICKERS,
     SCAN_INTERVAL_SECONDS,
     ML_RETRAIN_INTERVAL,
+    DAILY_CACHE_TTL,
 )
-from agent.data_fetcher import fetch_batch_realtime, fetch_ticker_info
+from agent.data_fetcher import (
+    fetch_batch_realtime,
+    fetch_batch_daily,
+    fetch_ticker_info,
+)
 from agent.technical import compute_indicators, score_technical
 from agent.volume import score_volume, relative_volume, detect_unusual_volume
-from agent.ml_model import predict, retrain_all
+from agent.ml_model import predict, predict_daily, retrain_all
 from agent.sentiment import score_sentiment
 from agent.prediction import generate_prediction
+from agent.mtf_analysis import multi_timeframe_analysis
 
 logger = logging.getLogger(__name__)
 
+
+# ── Module-level daily OHLCV cache (shared across all analyse_ticker calls) ───
+
+_daily_data: dict[str, pd.DataFrame] = {}
+_daily_fetched_at: float = 0.0
+
+
+def _get_daily(ticker: str) -> pd.DataFrame:
+    return _daily_data.get(ticker, pd.DataFrame())
+
+
+# ── StockSignal dataclass ─────────────────────────────────────────────────────
 
 @dataclass
 class StockSignal:
@@ -40,11 +58,12 @@ class StockSignal:
     # ── Component scores [-1, +1] ─────────────────────────────────────────────
     technical:    float
     volume:       float
-    ml_prob:      float
+    ml_prob:      float       # combined (40% daily ML + 60% intraday ML)
+    ml_daily_prob: float      # daily model probability separately
     sentiment:    float
     score:        float
 
-    # ── Legacy signal label (kept for table compatibility) ────────────────────
+    # ── Legacy signal label ────────────────────────────────────────────────────
     signal:       str
 
     # ── Volume flags ──────────────────────────────────────────────────────────
@@ -56,12 +75,19 @@ class StockSignal:
     confidence:        float  # 0–100
     trend:             str    # UPTREND / DOWNTREND / SIDEWAYS
     trend_probability: float  # fraction of trend sub-signals that agree (0–1)
-    ml_trained:        bool   # False until XGBoost has been trained for this ticker
+    ml_trained:        bool   # False until XGBoost intraday model has been trained
     target_price:      float
     stop_loss:         float
     rr_ratio:          float
     patterns:          list = field(default_factory=list)
     reasons:           list = field(default_factory=list)
+
+    # ── Multi-timeframe analysis ───────────────────────────────────────────────
+    mtf_score:      float = 0.0
+    mtf_alignment:  str   = "MIXED"   # STRONGLY BULLISH/BULLISH/MIXED/BEARISH/STRONGLY BEARISH
+    mtf_bull_count: int   = 0         # number of timeframes with UPTREND
+    mtf_bear_count: int   = 0         # number of timeframes with DOWNTREND
+    mtf_timeframes: dict  = field(default_factory=dict)  # per-TF breakdown
 
     # ── Support / Resistance ──────────────────────────────────────────────────
     supports:     list = field(default_factory=list)
@@ -99,11 +125,10 @@ def _get_info(ticker: str) -> dict:
 
 def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
     """Serialise the last N OHLCV bars for Lightweight Charts."""
-    tail = df.tail(n)
+    tail    = df.tail(n)
     candles = []
     for ts, row in tail.iterrows():
         try:
-            # Lightweight Charts needs Unix timestamp in seconds
             t = int(pd.Timestamp(ts).timestamp())
             candles.append({
                 "time":   t,
@@ -120,12 +145,14 @@ def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
 
 # ── Single ticker analysis ────────────────────────────────────────────────────
 
-def analyse_ticker(ticker: str, df) -> Optional[StockSignal]:
+def analyse_ticker(ticker: str, df_1m) -> Optional[StockSignal]:
     try:
-        if df is None or df.empty or len(df) < 5:
+        if df_1m is None or df_1m.empty or len(df_1m) < 5:
             return None
 
-        df_ind = compute_indicators(df.copy())
+        df_daily = _get_daily(ticker)
+
+        df_ind = compute_indicators(df_1m.copy())
         last   = df_ind.iloc[-1]
 
         price      = float(last["Close"])
@@ -134,33 +161,42 @@ def analyse_ticker(ticker: str, df) -> Optional[StockSignal]:
 
         tech             = score_technical(last)
         vol              = score_volume(df_ind)
-        ml               = predict(ticker, df_ind)
+        ml_scalp         = predict(ticker, df_ind)
+        ml_daily_p       = predict_daily(ticker, df_daily) if not df_daily.empty else 0.5
+        # Blend: 40% daily model (swing context) + 60% intraday model (scalp timing)
+        ml_combined      = round(0.4 * ml_daily_p + 0.6 * ml_scalp, 4)
         sent, headlines  = score_sentiment(ticker)
         rvol             = relative_volume(df_ind)
         uvol             = detect_unusual_volume(df_ind)
 
-        # Professional prediction (S/R + price action + patterns + confluence)
-        pred = generate_prediction(ticker, df_ind, tech, vol, ml, sent, last)
+        # Multi-timeframe analysis (resample 1M → 5M/15M/30M/1H + daily)
+        mtf = multi_timeframe_analysis(df_1m, df_daily)
 
-        # Use prediction's composite as the master score
-        score  = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
-        signal = pred["direction"]
-        candles = _build_candles(df)
+        # Professional prediction
+        pred = generate_prediction(
+            ticker, df_ind, tech, vol, ml_combined, sent, last,
+            mtf_score=mtf["mtf_score"],
+        )
+
+        score   = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
+        signal  = pred["direction"]
+        candles = _build_candles(df_1m)
         info    = _get_info(ticker)
 
         return StockSignal(
-            ticker       = ticker,
-            name         = info.get("name", ticker),
-            price        = round(price, 4),
-            change_pct   = change_pct,
-            technical    = round(tech, 4),
-            volume       = round(vol, 4),
-            ml_prob      = round(ml, 4),
-            sentiment    = round(sent, 4),
-            score        = score,
-            signal       = signal,
-            rel_volume   = rvol,
-            unusual_vol  = uvol,
+            ticker            = ticker,
+            name              = info.get("name", ticker),
+            price             = round(price, 4),
+            change_pct        = change_pct,
+            technical         = round(tech, 4),
+            volume            = round(vol, 4),
+            ml_prob           = ml_combined,
+            ml_daily_prob     = round(ml_daily_p, 4),
+            sentiment         = round(sent, 4),
+            score             = score,
+            signal            = signal,
+            rel_volume        = rvol,
+            unusual_vol       = uvol,
             prediction        = pred["direction"],
             confidence        = round(pred["confidence"], 1),
             trend             = pred["trend"],
@@ -175,6 +211,11 @@ def analyse_ticker(ticker: str, df) -> Optional[StockSignal]:
             resistances       = pred["resistances"],
             pivots            = pred["pivots"],
             poc               = pred["poc"],
+            mtf_score         = float(mtf["mtf_score"]),
+            mtf_alignment     = mtf["alignment"],
+            mtf_bull_count    = int(mtf["bull_count"]),
+            mtf_bear_count    = int(mtf["bear_count"]),
+            mtf_timeframes    = mtf["timeframes"],
             candles           = candles,
             headlines         = headlines[:5],
         )
@@ -204,12 +245,45 @@ class Scanner:
                 logger.warning(f"Callback error: {e}")
 
     def _should_retrain(self) -> bool:
-        # _last_retrain is 0.0 until the startup training thread completes.
-        # The scan loop should only re-trigger training once a full day has passed
-        # since the LAST completed training run.
         if self._last_retrain == 0.0:
             return False  # startup training already running in its own thread
         return (time.time() - self._last_retrain) > ML_RETRAIN_INTERVAL
+
+    # ── Daily data refresh ────────────────────────────────────────────────────
+
+    def _fetch_daily_data(self) -> None:
+        global _daily_data, _daily_fetched_at
+        logger.info("Fetching daily OHLCV for all tickers (6-month history)…")
+        result = fetch_batch_daily(NASDAQ_TICKERS)
+        _daily_data.update(result)
+        _daily_fetched_at = time.time()
+        logger.info(f"Daily data ready: {len(_daily_data)} tickers")
+
+    def _daily_refresh_loop(self) -> None:
+        """Fetch/refresh daily data at startup and every 24 hours."""
+        while True:
+            try:
+                self._fetch_daily_data()
+            except Exception as e:
+                logger.error(f"Daily data fetch error: {e}", exc_info=True)
+            time.sleep(DAILY_CACHE_TTL)
+
+    # ── ML training ───────────────────────────────────────────────────────────
+
+    def _train_ml_background(self) -> None:
+        """Wait for daily data, then train both intraday and daily ML models."""
+        # Give the daily data thread up to 15 min to fetch
+        for _ in range(180):
+            if _daily_fetched_at > 0:
+                break
+            time.sleep(5)
+
+        logger.info("ML initial training starting (intraday + daily models)…")
+        retrain_all(NASDAQ_TICKERS, daily_data=_daily_data)
+        self._last_retrain = time.time()
+        logger.info("ML initial training complete.")
+
+    # ── Scan loop ─────────────────────────────────────────────────────────────
 
     def run_once(self) -> list[StockSignal]:
         logger.info(f"Starting scan of {len(NASDAQ_TICKERS)} tickers…")
@@ -228,10 +302,10 @@ class Scanner:
         logger.info(f"Scan complete | {len(results)} stocks analysed")
 
         if self._should_retrain():
-            logger.info("ML retrain starting…")
-            retrain_all(NASDAQ_TICKERS)
+            logger.info("Daily ML retrain starting…")
+            retrain_all(NASDAQ_TICKERS, daily_data=_daily_data)
             self._last_retrain = time.time()
-            logger.info("ML retrain complete.")
+            logger.info("Daily ML retrain complete.")
 
         return results
 
@@ -244,21 +318,20 @@ class Scanner:
                 logger.error(f"Scanner loop error: {e}", exc_info=True)
             time.sleep(SCAN_INTERVAL_SECONDS)
 
-    def _train_ml_background(self) -> None:
-        """Train ML models in a separate thread so the first scan isn't blocked."""
-        logger.info("ML initial training starting in background…")
-        retrain_all(NASDAQ_TICKERS)
-        self._last_retrain = time.time()
-        logger.info("ML initial training complete.")
-
     def start_background(self) -> None:
-        # Kick off ML training immediately — don't wait for first scan
+        # Thread 1: Fetch and periodically refresh daily OHLCV data
+        daily_thread = threading.Thread(target=self._daily_refresh_loop, daemon=True)
+        daily_thread.start()
+
+        # Thread 2: Train ML models once daily data is ready
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
         ml_thread.start()
 
-        t = threading.Thread(target=self._loop, daemon=True)
-        t.start()
-        logger.info("Scanner background thread started.")
+        # Thread 3: Main scan loop
+        scan_thread = threading.Thread(target=self._loop, daemon=True)
+        scan_thread.start()
+
+        logger.info("Scanner started: daily-data, ML-training, and scan threads running.")
 
     def stop(self) -> None:
         self.is_running = False

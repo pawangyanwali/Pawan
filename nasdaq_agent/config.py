@@ -12,11 +12,13 @@ if not TWELVE_DATA_API_KEY:
         "  TWELVE_DATA_API_KEY=your_key_here\n"
     )
 
-SCAN_INTERVAL_SECONDS = 300       # 5 min — 30 tickers × 8.5s = ~4.25 min per scan
-ML_RETRAIN_INTERVAL   = 86400     # Retrain ML once per day (saves API credits)
-DATA_PERIOD_DAYS      = 30        # Days of 5-min history for ML (30d × 78 bars = 2340 bars)
-INTRADAY_INTERVAL     = "5m"      # Candle resolution for ML features
-REALTIME_INTERVAL     = "1m"      # Candle resolution for live signals
+SCAN_INTERVAL_SECONDS  = 300       # 5 min — 30 tickers × 8.5s = ~4.25 min per scan
+ML_RETRAIN_INTERVAL    = 86400     # Retrain ML once per day (saves API credits)
+DAILY_CACHE_TTL        = 86400     # Refresh daily OHLCV cache once per 24 hours
+DATA_PERIOD_DAYS       = 60        # Days of 5-min history for intraday ML (max ~64d at free tier)
+REALTIME_OUTPUTSIZE    = 500       # 1-min bars per scan — gives ~8h for 5M/15M/30M resampling
+INTRADAY_INTERVAL      = "5m"      # Candle resolution for intraday ML features
+REALTIME_INTERVAL      = "1m"      # Candle resolution for live signals
 
 # Signal weights (must sum to 1.0)
 WEIGHT_TECHNICAL = 0.35

@@ -174,9 +174,17 @@ def detect_patterns(df: pd.DataFrame) -> list[str]:
 
 # ── 2. Trend Analysis ─────────────────────────────────────────────────────────
 
-def analyze_trend_with_confidence(df: pd.DataFrame) -> tuple[str, float]:
+def analyze_trend_with_confidence(
+    df: pd.DataFrame, min_rows: int = _MIN_ROWS_TREND
+) -> tuple[str, float]:
     """
     Classify trend and return the fraction of signals (0–1) that agree.
+
+    Parameters
+    ----------
+    df       : OHLCV DataFrame.
+    min_rows : Minimum bars required; callers analysing sparse resampled data
+               can lower this (e.g. min_rows=6 for hourly bars).
 
     Returns
     -------
@@ -184,7 +192,7 @@ def analyze_trend_with_confidence(df: pd.DataFrame) -> tuple[str, float]:
         trend       – "UPTREND" | "DOWNTREND" | "SIDEWAYS"
         probability – 0.50–1.00 (proportion of the 4 sub-signals that agree)
     """
-    if df is None or len(df) < _MIN_ROWS_TREND:
+    if df is None or len(df) < min_rows:
         return "SIDEWAYS", 0.5
 
     try:
