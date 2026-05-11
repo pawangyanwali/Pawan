@@ -333,10 +333,13 @@
 <!-- Loading overlay -->
 <div class="loading-overlay" id="loading">
   <div class="spinner"></div>
-  <div class="loading-text">Connecting to NASDAQ agent…</div>
-  <div class="loading-text" id="loading-sub" style="font-size:11px;color:#475569">
-    First scan may take 60–120 seconds while ML models train.
+  <div class="loading-text" id="loading-main">Connecting to NASDAQ agent…</div>
+  <div class="loading-text" id="loading-sub" style="font-size:11px;color:#475569;margin-top:4px">
+    First scan fetches 30 tickers one-by-one (free API tier).<br>
+    Expect <strong style="color:#94a3b8">4–5 minutes</strong> before data appears.
   </div>
+  <div id="loading-timer" style="font-size:12px;color:#334155;margin-top:10px">Elapsed: 0s</div>
+  <div id="loading-health" style="font-size:11px;color:#334155;margin-top:6px"></div>
 </div>
 
 <!-- Header -->
@@ -501,7 +504,28 @@ function connectWS() {
   ws.onerror = () => ws.close();
 }
 
-// Fallback: poll REST API every 30s if WS fails
+// Elapsed timer shown on loading screen
+const _startTime = Date.now();
+setInterval(() => {
+  const el = document.getElementById('loading-timer');
+  if (el && document.getElementById('loading').style.display !== 'none') {
+    const s = Math.floor((Date.now() - _startTime) / 1000);
+    el.textContent = `Elapsed: ${s}s — scan runs in background, page will update automatically`;
+  }
+}, 1000);
+
+// Health check: show server status while loading
+async function checkHealth() {
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+    const el = document.getElementById('loading-health');
+    if (el) el.textContent = `Server: ${d.status} | Tickers tracked so far: ${d.tickers_tracked}`;
+  } catch {}
+}
+setInterval(checkHealth, 5000);
+
+// Fallback: poll REST API every 10s if WS hasn't pushed yet
 async function pollFallback() {
   try {
     const r = await fetch('/api/signals');
@@ -513,7 +537,7 @@ async function pollFallback() {
     }
   } catch {}
 }
-setInterval(pollFallback, 30000);
+setInterval(pollFallback, 10000);   // poll every 10s until WS delivers data
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function renderAll() {

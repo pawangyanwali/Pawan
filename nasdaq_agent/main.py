@@ -126,6 +126,7 @@ async def health():
         "is_running": scanner.is_running,
         "last_scan": scanner.last_scan,
         "tickers_tracked": len(scanner.signals),
+        "ws_clients": len(manager.active),
     }
 
 
