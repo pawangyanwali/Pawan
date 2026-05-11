@@ -471,13 +471,19 @@ let sortKey    = 'score_abs';
 let searchQ    = '';
 let selectedTicker = null;
 
+// ── Backend URL config ────────────────────────────────────────────────────────
+// FastAPI always runs on port 8000.
+// When served via IIS reverse proxy on the same host, keep hostname but use 8000.
+const BACKEND_HOST = `${location.hostname}:8000`;
+const BACKEND_HTTP = `${location.protocol}//${BACKEND_HOST}`;
+const BACKEND_WS   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${BACKEND_HOST}`;
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws;
 let reconnectDelay = 2000;
 
 function connectWS() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${BACKEND_WS}/ws`);
 
   ws.onopen = () => {
     document.getElementById('dot').classList.add('live');
@@ -517,7 +523,7 @@ setInterval(() => {
 // Health check: show server status while loading
 async function checkHealth() {
   try {
-    const r = await fetch('/api/health');
+    const r = await fetch(`${BACKEND_HTTP}/api/health`);
     const d = await r.json();
     const el = document.getElementById('loading-health');
     if (el) el.textContent = `Server: ${d.status} | Tickers tracked so far: ${d.tickers_tracked}`;
@@ -528,7 +534,7 @@ setInterval(checkHealth, 5000);
 // Fallback: poll REST API every 10s if WS hasn't pushed yet
 async function pollFallback() {
   try {
-    const r = await fetch('/api/signals');
+    const r = await fetch(`${BACKEND_HTTP}/api/signals`);
     const d = await r.json();
     if (d.signals && d.signals.length) {
       allSignals = d.signals;
@@ -760,7 +766,7 @@ connectWS();
 // Try fetching current data immediately via REST (faster than waiting for WS push)
 (async () => {
   try {
-    const r = await fetch('/api/signals');
+    const r = await fetch(`${BACKEND_HTTP}/api/signals`);
     const d = await r.json();
     if (d.signals && d.signals.length) {
       allSignals = d.signals;
