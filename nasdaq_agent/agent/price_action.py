@@ -174,30 +174,25 @@ def detect_patterns(df: pd.DataFrame) -> list[str]:
 
 # ── 2. Trend Analysis ─────────────────────────────────────────────────────────
 
-def analyze_trend(df: pd.DataFrame) -> str:
+def analyze_trend_with_confidence(df: pd.DataFrame) -> tuple[str, float]:
     """
-    Classify the current price trend.
-
-    Methodology
-    -----------
-    1. Compute EMA20 and EMA50.
-    2. Measure the slope of EMA20 over the last ``_EMA_SLOPE_BARS`` bars.
-    3. Look at Higher-High / Lower-Low structure over the last 10 bars.
-    4. Combine signals: 3 bullish → UPTREND, 3 bearish → DOWNTREND, else SIDEWAYS.
+    Classify trend and return the fraction of signals (0–1) that agree.
 
     Returns
     -------
-    "UPTREND" | "DOWNTREND" | "SIDEWAYS"
+    (trend, probability)
+        trend       – "UPTREND" | "DOWNTREND" | "SIDEWAYS"
+        probability – 0.50–1.00 (proportion of the 4 sub-signals that agree)
     """
     if df is None or len(df) < _MIN_ROWS_TREND:
-        return "SIDEWAYS"
+        return "SIDEWAYS", 0.5
 
     try:
         close = df["Close"].astype(float)
         high  = df["High"].astype(float)
         low   = df["Low"].astype(float)
     except (KeyError, TypeError, ValueError):
-        return "SIDEWAYS"
+        return "SIDEWAYS", 0.5
 
     ema20 = _ema(close, _EMA_SHORT)
     ema50 = _ema(close, _EMA_LONG) if len(df) >= _EMA_LONG else ema20
@@ -208,59 +203,45 @@ def analyze_trend(df: pd.DataFrame) -> str:
 
     signals: list[int] = []   # +1 bullish, -1 bearish, 0 neutral
 
-    # Signal 1: price vs EMA20
-    if price_now > e20_now:
-        signals.append(1)
-    elif price_now < e20_now:
-        signals.append(-1)
-    else:
-        signals.append(0)
+    signals.append(1 if price_now > e20_now else (-1 if price_now < e20_now else 0))
+    signals.append(1 if e20_now > e50_now   else (-1 if e20_now < e50_now   else 0))
 
-    # Signal 2: EMA20 vs EMA50
-    if e20_now > e50_now:
-        signals.append(1)
-    elif e20_now < e50_now:
-        signals.append(-1)
-    else:
-        signals.append(0)
-
-    # Signal 3: slope of EMA20 over last N bars
     if len(ema20) >= _EMA_SLOPE_BARS:
         slope = float(ema20.iloc[-1]) - float(ema20.iloc[-_EMA_SLOPE_BARS])
-        if slope > 0:
-            signals.append(1)
-        elif slope < 0:
-            signals.append(-1)
-        else:
-            signals.append(0)
+        signals.append(1 if slope > 0 else (-1 if slope < 0 else 0))
     else:
         signals.append(0)
 
-    # Signal 4: Higher Highs / Lower Lows structure (last 10 bars)
-    lookback = min(10, len(df))
+    lookback     = min(10, len(df))
     recent_highs = high.iloc[-lookback:].values
     recent_lows  = low.iloc[-lookback:].values
-
-    hh = int(recent_highs[-1] > recent_highs[0])   # recent high > earlier high
-    ll = int(recent_lows[-1]  < recent_lows[0])    # recent low  < earlier low
-    hl = int(recent_lows[-1]  > recent_lows[0])    # Higher Low  (bullish structure)
-    lh = int(recent_highs[-1] < recent_highs[0])   # Lower High  (bearish structure)
+    hh = recent_highs[-1] > recent_highs[0]
+    hl = recent_lows[-1]  > recent_lows[0]
+    ll = recent_lows[-1]  < recent_lows[0]
+    lh = recent_highs[-1] < recent_highs[0]
 
     if hh and hl:
-        signals.append(1)   # classic uptrend structure
+        signals.append(1)
     elif ll and lh:
-        signals.append(-1)  # classic downtrend structure
+        signals.append(-1)
     else:
         signals.append(0)
 
-    bull = sum(s for s in signals if s > 0)
-    bear = sum(-s for s in signals if s < 0)
+    n     = len(signals)          # always 4
+    bull  = sum(s for s in signals if s > 0)
+    bear  = sum(-s for s in signals if s < 0)
 
     if bull >= 3:
-        return "UPTREND"
+        return "UPTREND",   round(bull / n, 2)
     if bear >= 3:
-        return "DOWNTREND"
-    return "SIDEWAYS"
+        return "DOWNTREND", round(bear / n, 2)
+    return "SIDEWAYS", round(max(bull, bear) / n, 2)
+
+
+def analyze_trend(df: pd.DataFrame) -> str:
+    """Backward-compatible wrapper around analyze_trend_with_confidence."""
+    trend, _ = analyze_trend_with_confidence(df)
+    return trend
 
 
 # ── 3. Price-Action Score ─────────────────────────────────────────────────────

@@ -428,7 +428,10 @@ function renderTable() {
           <span style="font-size:11px;color:${confC}">${fmt(s.confidence,0)}%</span>
         </div>
       </td>
-      <td class="trend-cell"><span class="trend-badge ${trC}">${s.trend}</span></td>
+      <td class="trend-cell">
+        <span class="trend-badge ${trC}">${s.trend}</span>
+        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${Math.round((s.trend_probability||0.5)*100)}% conf</span>
+      </td>
       <td>
         <div class="score-bar-wrap">
           ${miniBar(s.score, 44)}
@@ -438,7 +441,9 @@ function renderTable() {
       <td style="color:var(--green);font-size:11px">$${fmt(s.target_price)}</td>
       <td style="color:var(--red);font-size:11px">$${fmt(s.stop_loss)}</td>
       <td style="color:${rrC};font-weight:600">${fmt(s.rr_ratio,1)}:1</td>
-      <td style="font-size:11px;color:${s.ml_prob>=.55?'var(--green)':s.ml_prob<=.45?'var(--red)':'var(--muted)'}">${fmt(s.ml_prob*100,0)}%</td>
+      <td style="font-size:11px;color:${s.ml_trained?(s.ml_prob>=.55?'var(--green)':s.ml_prob<=.45?'var(--red)':'var(--muted)'):'var(--muted)'}">
+        ${s.ml_trained ? fmt(s.ml_prob*100,0)+'%' : '<span title="ML model training in background…" style="font-size:10px">Training…</span>'}
+      </td>
       <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':'var(--muted)'}">${fmt(s.rel_volume,1)}x</td>
     </tr>`;
   }).join('');
@@ -471,7 +476,8 @@ function openDetail(ticker) {
   document.getElementById('dp-rr').textContent                = `${fmt(s.rr_ratio,1)} : 1`;
 
   const tb = document.getElementById('dp-trend-badge');
-  tb.textContent  = s.trend;
+  const trendPct = Math.round((s.trend_probability || 0.5) * 100);
+  tb.textContent  = `${s.trend}  ${trendPct}%`;
   tb.className    = `trend-badge trend-${s.trend}`;
   document.getElementById('dp-price-badge').textContent = `$${fmt(s.price,4)} | ${s.change_pct>=0?'+':''}${fmt(s.change_pct)}% today`;
 
@@ -517,19 +523,26 @@ function openDetail(ticker) {
     : '<div style="color:var(--muted);font-size:11px">—</div>';
 
   // Component scores
+  const mlVal  = s.ml_trained ? (s.ml_prob - 0.5) * 2 : null;
   const comp = [
-    ['Technical',  s.technical],
-    ['Volume',     s.volume],
-    ['ML Prob',    (s.ml_prob-0.5)*2],
-    ['Sentiment',  s.sentiment],
+    ['Technical',  s.technical, true],
+    ['Volume',     s.volume,    true],
+    ['ML Model',   mlVal,       s.ml_trained],
+    ['Sentiment',  s.sentiment, true],
   ];
-  document.getElementById('dp-components').innerHTML = comp.map(([label, v]) =>
-    `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+  document.getElementById('dp-components').innerHTML = comp.map(([label, v, trained]) => {
+    if (!trained) {
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:10px;color:var(--muted);min-width:70px">${label}</span>
+        <span style="font-size:10px;color:var(--muted);font-style:italic">Training in background…</span>
+      </div>`;
+    }
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
       <span style="font-size:10px;color:var(--muted);min-width:70px">${label}</span>
       ${miniBar(v, 80)}
       <span style="font-size:11px;color:${scoreColor(v)};min-width:38px">${v>=0?'+':''}${fmt(v,3)}</span>
-    </div>`
-  ).join('');
+    </div>`;
+  }).join('');
 
   // News
   if (s.headlines?.length) {

@@ -52,14 +52,16 @@ class StockSignal:
     unusual_vol:  bool
 
     # ── Professional prediction ───────────────────────────────────────────────
-    prediction:   str             # STRONG BUY / BUY / NEUTRAL / SELL / STRONG SELL
-    confidence:   float           # 0–100
-    trend:        str             # UPTREND / DOWNTREND / SIDEWAYS
-    target_price: float
-    stop_loss:    float
-    rr_ratio:     float
-    patterns:     list = field(default_factory=list)
-    reasons:      list = field(default_factory=list)
+    prediction:        str    # STRONG BUY / BUY / NEUTRAL / SELL / STRONG SELL
+    confidence:        float  # 0–100
+    trend:             str    # UPTREND / DOWNTREND / SIDEWAYS
+    trend_probability: float  # fraction of trend sub-signals that agree (0–1)
+    ml_trained:        bool   # False until XGBoost has been trained for this ticker
+    target_price:      float
+    stop_loss:         float
+    rr_ratio:          float
+    patterns:          list = field(default_factory=list)
+    reasons:           list = field(default_factory=list)
 
     # ── Support / Resistance ──────────────────────────────────────────────────
     supports:     list = field(default_factory=list)
@@ -80,6 +82,7 @@ class StockSignal:
             if hasattr(v, "item"):
                 d[k] = v.item()
         d["unusual_vol"] = bool(d["unusual_vol"])
+        d["ml_trained"]  = bool(d["ml_trained"])
         return d
 
 
@@ -158,20 +161,22 @@ def analyse_ticker(ticker: str, df) -> Optional[StockSignal]:
             signal       = signal,
             rel_volume   = rvol,
             unusual_vol  = uvol,
-            prediction   = pred["direction"],
-            confidence   = round(pred["confidence"], 1),
-            trend        = pred["trend"],
-            target_price = pred["target_price"],
-            stop_loss    = pred["stop_loss"],
-            rr_ratio     = pred["rr_ratio"],
-            patterns     = pred["patterns"],
-            reasons      = pred["reasons"],
-            supports     = pred["supports"],
-            resistances  = pred["resistances"],
-            pivots       = pred["pivots"],
-            poc          = pred["poc"],
-            candles      = candles,
-            headlines    = headlines[:5],
+            prediction        = pred["direction"],
+            confidence        = round(pred["confidence"], 1),
+            trend             = pred["trend"],
+            trend_probability = round(float(pred.get("trend_probability", 0.5)), 2),
+            ml_trained        = bool(pred.get("ml_trained", False)),
+            target_price      = pred["target_price"],
+            stop_loss         = pred["stop_loss"],
+            rr_ratio          = pred["rr_ratio"],
+            patterns          = pred["patterns"],
+            reasons           = pred["reasons"],
+            supports          = pred["supports"],
+            resistances       = pred["resistances"],
+            pivots            = pred["pivots"],
+            poc               = pred["poc"],
+            candles           = candles,
+            headlines         = headlines[:5],
         )
     except Exception as e:
         logger.warning(f"[{ticker}] analysis error: {e}", exc_info=True)
@@ -199,6 +204,11 @@ class Scanner:
                 logger.warning(f"Callback error: {e}")
 
     def _should_retrain(self) -> bool:
+        # _last_retrain is 0.0 until the startup training thread completes.
+        # The scan loop should only re-trigger training once a full day has passed
+        # since the LAST completed training run.
+        if self._last_retrain == 0.0:
+            return False  # startup training already running in its own thread
         return (time.time() - self._last_retrain) > ML_RETRAIN_INTERVAL
 
     def run_once(self) -> list[StockSignal]:
@@ -234,7 +244,18 @@ class Scanner:
                 logger.error(f"Scanner loop error: {e}", exc_info=True)
             time.sleep(SCAN_INTERVAL_SECONDS)
 
+    def _train_ml_background(self) -> None:
+        """Train ML models in a separate thread so the first scan isn't blocked."""
+        logger.info("ML initial training starting in background…")
+        retrain_all(NASDAQ_TICKERS)
+        self._last_retrain = time.time()
+        logger.info("ML initial training complete.")
+
     def start_background(self) -> None:
+        # Kick off ML training immediately — don't wait for first scan
+        ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
+        ml_thread.start()
+
         t = threading.Thread(target=self._loop, daemon=True)
         t.start()
         logger.info("Scanner background thread started.")

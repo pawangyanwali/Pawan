@@ -16,192 +16,138 @@ from agent.support_resistance import (
     nearest_support,
     nearest_resistance,
 )
-from agent.price_action import detect_patterns, analyze_trend, score_price_action
+from agent.price_action import (
+    detect_patterns,
+    analyze_trend_with_confidence,
+    score_price_action,
+)
 
 
-# ── Composite score weights ───────────────────────────────────────────────────
+# ── Direction thresholds ──────────────────────────────────────────────────────
 
-_W_TECH    = 0.25
-_W_VOLUME  = 0.15
-_W_ML      = 0.20
-_W_PA      = 0.20   # price-action (SR + trend)
-_W_PATTERN = 0.15
-_W_SENT    = 0.05
+_STRONG_BUY_THRESH  =  0.50
+_BUY_THRESH         =  0.15
+_SELL_THRESH        = -0.15
+_STRONG_SELL_THRESH = -0.50
 
-# Direction thresholds
-_STRONG_BUY_THRESH  =  0.60
-_BUY_THRESH         =  0.25
-_SELL_THRESH        = -0.25
-_STRONG_SELL_THRESH = -0.60
+# ── Pattern classification ────────────────────────────────────────────────────
 
-# Per-pattern score contribution
 _BULLISH_PATTERNS = {"Hammer", "Bullish Engulfing", "Bullish Pin Bar", "Morning Star"}
 _BEARISH_PATTERNS = {"Shooting Star", "Bearish Engulfing", "Bearish Pin Bar", "Evening Star"}
-_PATTERN_UNIT     = 0.5   # score per detected pattern
+_PATTERN_UNIT     = 0.5   # score per pattern, capped at ±1
 
 
 # ── Empty prediction sentinel ─────────────────────────────────────────────────
 
 def _empty_prediction() -> dict:
-    """
-    Return a neutral, zero-filled prediction dict for error / edge-case paths.
-
-    Callers can detect this by checking ``direction == "NEUTRAL"`` and
-    ``confidence == 0``.
-    """
     return {
-        "direction":       "NEUTRAL",
-        "confidence":      0.0,
-        "composite_score": 0.0,
-        "target_price":    0.0,
-        "stop_loss":       0.0,
-        "rr_ratio":        0.0,
-        "trend":           "SIDEWAYS",
-        "patterns":        [],
-        "reasons":         [],
-        "supports":        [],
-        "resistances":     [],
-        "pivots":          {},
-        "poc":             0.0,
+        "direction":        "NEUTRAL",
+        "confidence":       0.0,
+        "composite_score":  0.0,
+        "target_price":     0.0,
+        "stop_loss":        0.0,
+        "rr_ratio":         0.0,
+        "trend":            "SIDEWAYS",
+        "trend_probability": 0.5,
+        "ml_trained":       False,
+        "patterns":         [],
+        "reasons":          [],
+        "supports":         [],
+        "resistances":      [],
+        "pivots":           {},
+        "poc":              0.0,
     }
 
 
 # ── Pattern scoring ───────────────────────────────────────────────────────────
 
 def _score_patterns(patterns: list[str]) -> tuple[float, list[str]]:
-    """
-    Convert a list of detected candlestick patterns into a score and reasons.
-
-    Score is capped at ±1.
-
-    Returns
-    -------
-    (score, reason_strings)
-    """
     raw = 0.0
     reasons: list[str] = []
-
     for p in patterns:
         if p in _BULLISH_PATTERNS:
             raw += _PATTERN_UNIT
-            reasons.append(f"{p} pattern detected — bullish reversal signal")
+            reasons.append(f"{p} pattern — bullish reversal signal")
         elif p in _BEARISH_PATTERNS:
             raw -= _PATTERN_UNIT
-            reasons.append(f"{p} pattern detected — bearish reversal signal")
+            reasons.append(f"{p} pattern — bearish reversal signal")
         else:
-            # Doji / ambiguous patterns — note but do not bias score
-            reasons.append(f"{p} pattern detected — market indecision, wait for confirmation")
-
+            reasons.append(f"{p} — indecision, wait for confirmation")
     return float(np.clip(raw, -1.0, 1.0)), reasons
 
 
-# ── Indicator-based technical reasons ────────────────────────────────────────
+# ── Indicator-based reasons ───────────────────────────────────────────────────
+
+def _safe_float(row: pd.Series, key: str) -> float | None:
+    try:
+        val = row[key]
+        return None if pd.isna(val) else float(val)
+    except (KeyError, TypeError, ValueError):
+        return None
+
 
 def _build_tech_reasons(last_row: pd.Series) -> list[str]:
-    """
-    Derive human-readable reasons from the last bar's pre-computed indicator
-    columns (as produced by :func:`agent.technical.compute_indicators`).
-
-    Returns
-    -------
-    list[str] — may be empty when indicator columns are absent.
-    """
     reasons: list[str] = []
 
-    # RSI ─────────────────────────────────────────────────────────────────────
-    rsi = last_row.get("rsi_14") if hasattr(last_row, "get") else None
-    if rsi is None:
-        rsi = last_row["rsi_14"] if "rsi_14" in last_row.index else None
-    if rsi is not None and pd.notna(rsi):
-        rsi = float(rsi)
+    rsi = _safe_float(last_row, "rsi_14")
+    if rsi is not None:
         if rsi < 30:
-            reasons.append(f"RSI {rsi:.1f} — stock is deeply oversold, mean-reversion likely")
+            reasons.append(f"RSI {rsi:.1f} — deeply oversold, mean-reversion likely")
         elif rsi < 40:
-            reasons.append(f"RSI {rsi:.1f} — oversold conditions building potential snap-back")
+            reasons.append(f"RSI {rsi:.1f} — oversold, potential snap-back building")
         elif rsi > 70:
             reasons.append(f"RSI {rsi:.1f} — overbought, momentum may be exhausted")
         elif rsi > 60:
-            reasons.append(f"RSI {rsi:.1f} — approaching overbought territory, watch for reversal")
+            reasons.append(f"RSI {rsi:.1f} — approaching overbought, watch for reversal")
 
-    # MACD histogram ──────────────────────────────────────────────────────────
     macd_hist = _safe_float(last_row, "macd_hist")
     if macd_hist is not None:
         if macd_hist > 0:
-            reasons.append(
-                f"MACD histogram positive ({macd_hist:.4f}) — bullish momentum building"
-            )
+            reasons.append(f"MACD histogram +{macd_hist:.4f} — bullish momentum building")
         elif macd_hist < 0:
-            reasons.append(
-                f"MACD histogram negative ({macd_hist:.4f}) — bearish momentum in control"
-            )
+            reasons.append(f"MACD histogram {macd_hist:.4f} — bearish momentum in control")
 
-    # Bollinger Band position ─────────────────────────────────────────────────
     bb_pct = _safe_float(last_row, "bb_pct")
     if bb_pct is not None:
         if bb_pct < 0.10:
-            reasons.append(
-                "Price at lower Bollinger Band — classic bounce zone for scalp entries"
-            )
+            reasons.append("Price at lower Bollinger Band — classic bounce zone")
         elif bb_pct > 0.90:
-            reasons.append(
-                "Price at upper Bollinger Band — extended, fade opportunity on confirmation"
-            )
+            reasons.append("Price at upper Bollinger Band — extended, fade on confirmation")
 
-    # VWAP deviation ──────────────────────────────────────────────────────────
     vwap  = _safe_float(last_row, "vwap")
     close = _safe_float(last_row, "Close")
     if vwap and close and vwap > 0:
-        dev_pct = (close - vwap) / vwap
-        if dev_pct > 0.002:
-            reasons.append(
-                f"Price is {dev_pct * 100:.2f}% above VWAP — institutional buyers are active"
-            )
-        elif dev_pct < -0.002:
-            reasons.append(
-                f"Price is {abs(dev_pct) * 100:.2f}% below VWAP — sellers dominating intraday flow"
-            )
+        dev = (close - vwap) / vwap
+        if dev > 0.002:
+            reasons.append(f"Price {dev*100:.2f}% above VWAP — institutional buyers active")
+        elif dev < -0.002:
+            reasons.append(f"Price {abs(dev)*100:.2f}% below VWAP — sellers dominating intraday")
 
     return reasons
 
-
-# ── Volume reasons ────────────────────────────────────────────────────────────
 
 def _build_volume_reasons(last_row: pd.Series) -> list[str]:
-    """Generate volume-related reason strings from the last bar."""
-    reasons: list[str] = []
-
     rvol = _safe_float(last_row, "vol_ratio")
     if rvol is None:
-        return reasons
-
+        return []
     if rvol >= 2.5:
-        reasons.append(
-            f"Unusual volume spike ({rvol:.1f}x average) — significant interest from large players"
-        )
-    elif rvol >= 1.5:
-        reasons.append(
-            f"Elevated relative volume ({rvol:.1f}x average) — above-average participation"
-        )
-
-    return reasons
-
-
-# ── ML reasons ───────────────────────────────────────────────────────────────
-
-def _build_ml_reasons(ml_prob: float) -> list[str]:
-    """Convert the ML model's up-probability into a reason string."""
-    if ml_prob >= 0.65:
-        return [
-            f"ML model forecasts upside with {ml_prob * 100:.0f}% probability — algorithmic edge is bullish"
-        ]
-    if ml_prob <= 0.35:
-        return [
-            f"ML model flags downside risk ({(1 - ml_prob) * 100:.0f}% bearish probability)"
-        ]
+        return [f"Unusual volume spike ({rvol:.1f}× avg) — significant large-player interest"]
+    if rvol >= 1.5:
+        return [f"Elevated volume ({rvol:.1f}× avg) — above-average participation"]
     return []
 
 
-# ── Direction and targets ─────────────────────────────────────────────────────
+def _build_ml_reasons(ml_prob: float, ml_trained: bool) -> list[str]:
+    if not ml_trained:
+        return []
+    if ml_prob >= 0.65:
+        return [f"ML model: {ml_prob*100:.0f}% probability of upside — algorithmic edge bullish"]
+    if ml_prob <= 0.35:
+        return [f"ML model: {(1-ml_prob)*100:.0f}% probability of downside — algorithmic edge bearish"]
+    return []
+
+
+# ── Composite scoring ─────────────────────────────────────────────────────────
 
 def _label_direction(composite: float) -> str:
     if composite >= _STRONG_BUY_THRESH:
@@ -215,29 +161,68 @@ def _label_direction(composite: float) -> str:
     return "NEUTRAL"
 
 
+def _compute_confidence(
+    direction:    str,
+    trend:        str,
+    trend_prob:   float,
+    tech_score:   float,
+    vol_score:    float,
+    ml_prob:      float,
+    ml_trained:   bool,
+    pa_score:     float,
+    pattern_score: float,
+    sent_score:   float,
+) -> float:
+    """
+    Confidence = weighted signal-agreement score (0–95 %).
+
+    Each sub-signal contributes its weight × how strongly it agrees with
+    the stated direction.  Agreement is mapped from [-1,+1] to [0,1]:
+        agreement = (signal_in_direction + 1) / 2
+    so a neutral signal scores 0.50 (partial credit), a contrary signal 0.0.
+    """
+    if direction == "NEUTRAL":
+        return 50.0
+
+    d = 1 if direction in ("BUY", "STRONG BUY") else -1
+
+    votes = 0.0
+    total = 0.0
+
+    def _agree(signal: float, weight: float) -> None:
+        nonlocal votes, total
+        agreement = float(np.clip((signal * d + 1) / 2, 0.0, 1.0))
+        votes += weight * agreement
+        total += weight
+
+    # Trend  — strongest structural signal
+    trend_signal = 1.0 if trend == "UPTREND" else (-1.0 if trend == "DOWNTREND" else 0.0)
+    _agree(trend_signal * trend_prob, 30)
+
+    _agree(tech_score,    25)
+    _agree(vol_score,     12)
+    _agree(pa_score,      15)
+    _agree(pattern_score, 10)
+    _agree(sent_score,     5)
+
+    if ml_trained:
+        # ml_prob in [0,1]; convert to [-1,+1]: (prob-0.5)*2
+        ml_signal = float(np.clip((ml_prob - 0.5) * 2, -1.0, 1.0))
+        _agree(ml_signal, 20)
+    # If untrained: ML weight is simply not included (total stays at 97)
+
+    confidence = (votes / total * 100) if total > 0 else 50.0
+    # NEUTRAL cap + absolute bounds
+    return round(float(np.clip(confidence, 25.0, 95.0)), 1)
+
+
 def _compute_rr(price: float, target: float, stop: float) -> float:
-    """Risk-reward ratio, rounded to 2 decimals. Returns 0.0 on bad inputs."""
     try:
         reward = abs(target - price)
         risk   = abs(price - stop)
-        if risk == 0:
-            return 0.0
-        return round(reward / risk, 2)
+        return round(reward / risk, 2) if risk > 0 else 0.0
     except (TypeError, ZeroDivisionError):
         return 0.0
-
-
-# ── Utility helpers ───────────────────────────────────────────────────────────
-
-def _safe_float(row: pd.Series, key: str) -> float | None:
-    """Extract a float from a pandas Series row; return None if missing/NaN."""
-    try:
-        val = row[key]
-        if pd.isna(val):
-            return None
-        return float(val)
-    except (KeyError, TypeError, ValueError):
-        return None
 
 
 # ── Main prediction function ──────────────────────────────────────────────────
@@ -254,23 +239,13 @@ def generate_prediction(
     """
     Generate a complete, actionable scalping prediction for ``ticker``.
 
-    Parameters
-    ----------
-    ticker     : Ticker symbol (used in fallback label only).
-    df         : OHLCV DataFrame with pre-computed indicator columns.
-    tech_score : Technical indicator score in [-1, +1].
-    vol_score  : Volume score in [-1, +1].
-    ml_prob    : ML model's probability of price going up, in [0, 1].
-    sent_score : Sentiment score in [-1, +1].
-    last_row   : Last row of ``df`` (pd.Series) for fast indicator lookup.
-
     Returns
     -------
     dict with keys:
         direction, confidence, composite_score, target_price, stop_loss,
-        rr_ratio, trend, patterns, reasons, supports, resistances, pivots, poc
+        rr_ratio, trend, trend_probability, ml_trained,
+        patterns, reasons, supports, resistances, pivots, poc
     """
-    # ── Guard: must have usable data ─────────────────────────────────────────
     if df is None or df.empty or len(df) < 3:
         return _empty_prediction()
 
@@ -291,7 +266,7 @@ def generate_prediction(
     support    = nearest_support(price, sr)
     resistance = nearest_resistance(price, sr)
 
-    # ── 2. Price action score + patterns ─────────────────────────────────────
+    # ── 2. Price action ───────────────────────────────────────────────────────
     try:
         pa_score, pa_reasons = score_price_action(df, sr)
     except Exception:
@@ -304,37 +279,57 @@ def generate_prediction(
 
     pattern_score, pattern_reasons = _score_patterns(patterns)
 
-    # ── 3. Trend ──────────────────────────────────────────────────────────────
+    # ── 3. Trend + probability ────────────────────────────────────────────────
     try:
-        trend = analyze_trend(df)
+        trend, trend_prob = analyze_trend_with_confidence(df)
     except Exception:
-        trend = "SIDEWAYS"
+        trend, trend_prob = "SIDEWAYS", 0.5
 
-    # ── 4. Indicator-based reasons ────────────────────────────────────────────
-    tech_reasons = _build_tech_reasons(last_row)
-    vol_reasons  = _build_volume_reasons(last_row)
-    ml_reasons   = _build_ml_reasons(float(ml_prob))
+    # ── 4. ML state ───────────────────────────────────────────────────────────
+    # A model returning exactly 0.5 is untrained; exclude from composite
+    ml_trained = abs(float(ml_prob) - 0.5) > 0.02
+    ml_score   = float(np.clip((float(ml_prob) - 0.5) * 2, -1.0, 1.0)) if ml_trained else 0.0
 
     # ── 5. Composite score ────────────────────────────────────────────────────
-    ml_score = float(np.clip((float(ml_prob) - 0.5) * 2, -1.0, 1.0))
+    # When ML is untrained its weight (0.20) redistributes to tech and PA
+    if ml_trained:
+        w_tech, w_vol, w_ml, w_pa, w_pat, w_sent = 0.25, 0.15, 0.20, 0.18, 0.12, 0.05
+    else:
+        w_tech, w_vol, w_ml, w_pa, w_pat, w_sent = 0.30, 0.18,  0.0, 0.25, 0.17, 0.05
+
+    # Direct trend bias: UPTREND pushes composite bullish, DOWNTREND bearish
+    trend_signal = 1.0 if trend == "UPTREND" else (-1.0 if trend == "DOWNTREND" else 0.0)
+    trend_bias   = 0.20 * trend_signal * trend_prob
 
     composite = (
-        _W_TECH    * float(tech_score)   +
-        _W_VOLUME  * float(vol_score)    +
-        _W_ML      * ml_score            +
-        _W_PA      * pa_score            +
-        _W_PATTERN * pattern_score       +
-        _W_SENT    * float(sent_score)
+        w_tech * float(tech_score)  +
+        w_vol  * float(vol_score)   +
+        w_ml   * ml_score           +
+        w_pa   * pa_score           +
+        w_pat  * pattern_score      +
+        w_sent * float(sent_score)  +
+        trend_bias
     )
     composite = round(float(np.clip(composite, -1.0, 1.0)), 4)
 
+    # Enforce trend–direction consistency:
+    # Never label a clear UPTREND stock as SELL / STRONG SELL and vice-versa
+    if trend == "UPTREND"   and composite < 0.0:
+        composite = max(composite, 0.0)
+    if trend == "DOWNTREND" and composite > 0.0:
+        composite = min(composite, 0.0)
+
     # ── 6. Direction and confidence ───────────────────────────────────────────
     direction  = _label_direction(composite)
-    confidence = round(abs(composite) * 100, 1)
+    confidence = _compute_confidence(
+        direction, trend, trend_prob,
+        float(tech_score), float(vol_score),
+        float(ml_prob), ml_trained,
+        pa_score, pattern_score, float(sent_score),
+    )
 
     # ── 7. Targets and stop-loss ──────────────────────────────────────────────
     is_bullish = composite >= 0
-
     if is_bullish:
         target    = round(resistance, 4)
         stop_loss = round(support * 0.998, 4)
@@ -344,36 +339,48 @@ def generate_prediction(
 
     rr_ratio = _compute_rr(price, target, stop_loss)
 
-    # ── 8. Consolidate reasons (up to 8) ─────────────────────────────────────
-    all_reasons = (
-        pa_reasons
-        + pattern_reasons
-        + tech_reasons
-        + vol_reasons
-        + ml_reasons
-    )
-    # Deduplicate while preserving order, then cap at 8
+    # ── 8. Trend reason ───────────────────────────────────────────────────────
+    trend_reasons: list[str] = []
+    if trend == "UPTREND":
+        trend_reasons.append(
+            f"Trend is UPTREND ({trend_prob*100:.0f}% signal agreement) — higher highs & higher lows"
+        )
+    elif trend == "DOWNTREND":
+        trend_reasons.append(
+            f"Trend is DOWNTREND ({trend_prob*100:.0f}% signal agreement) — lower highs & lower lows"
+        )
+    else:
+        trend_reasons.append("Market is consolidating (SIDEWAYS) — no clear directional bias")
+
+    # ── 9. Build reason list ──────────────────────────────────────────────────
+    tech_reasons = _build_tech_reasons(last_row)
+    vol_reasons  = _build_volume_reasons(last_row)
+    ml_reasons   = _build_ml_reasons(float(ml_prob), ml_trained)
+
+    all_reasons = trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
+
     seen: set[str] = set()
     deduped: list[str] = []
     for r in all_reasons:
         if r not in seen:
             seen.add(r)
             deduped.append(r)
-    reasons = deduped[:8]
 
-    # ── 9. Return ─────────────────────────────────────────────────────────────
+    # ── 10. Return ────────────────────────────────────────────────────────────
     return {
-        "direction":       direction,
-        "confidence":      confidence,
-        "composite_score": composite,
-        "target_price":    target,
-        "stop_loss":       stop_loss,
-        "rr_ratio":        rr_ratio,
-        "trend":           trend,
-        "patterns":        patterns,
-        "reasons":         reasons,
-        "supports":        sr.get("supports", []),
-        "resistances":     sr.get("resistances", []),
-        "pivots":          sr.get("pivots", {}),
-        "poc":             sr.get("poc", 0.0),
+        "direction":         direction,
+        "confidence":        confidence,
+        "composite_score":   composite,
+        "target_price":      target,
+        "stop_loss":         stop_loss,
+        "rr_ratio":          rr_ratio,
+        "trend":             trend,
+        "trend_probability": round(float(trend_prob), 2),
+        "ml_trained":        ml_trained,
+        "patterns":          patterns,
+        "reasons":           deduped[:8],
+        "supports":          sr.get("supports", []),
+        "resistances":       sr.get("resistances", []),
+        "pivots":            sr.get("pivots", {}),
+        "poc":               sr.get("poc", 0.0),
     }
