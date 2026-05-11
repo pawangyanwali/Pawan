@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -96,6 +97,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NASDAQ Scalping Agent", lifespan=lifespan)
+
+# Allow IIS (port 80) and any other origin to call the FastAPI backend (port 8000)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 # Static files (dashboard)
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "web", "static")
