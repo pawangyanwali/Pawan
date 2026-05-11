@@ -4,7 +4,6 @@ Runs continuously in a background thread, emitting StockSignal objects
 that the FastAPI WebSocket layer broadcasts to all connected clients.
 """
 
-import asyncio
 import logging
 import time
 import threading
@@ -13,79 +12,75 @@ from datetime import datetime
 from typing import Optional, Callable
 
 import numpy as np
+import pandas as pd
 
 from config import (
     NASDAQ_TICKERS,
     SCAN_INTERVAL_SECONDS,
     ML_RETRAIN_INTERVAL,
-    WEIGHT_TECHNICAL,
-    WEIGHT_VOLUME,
-    WEIGHT_ML,
-    WEIGHT_SENTIMENT,
-    STRONG_BUY_THRESHOLD,
-    BUY_THRESHOLD,
-    SELL_THRESHOLD,
-    STRONG_SELL_THRESHOLD,
 )
 from agent.data_fetcher import fetch_batch_realtime, fetch_ticker_info
 from agent.technical import compute_indicators, score_technical
 from agent.volume import score_volume, relative_volume, detect_unusual_volume
 from agent.ml_model import predict, retrain_all
 from agent.sentiment import score_sentiment
+from agent.prediction import generate_prediction
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class StockSignal:
-    ticker:        str
-    name:          str
-    price:         float
-    change_pct:    float          # % change from prev close
-    technical:     float          # [-1, +1]
-    volume:        float          # [-1, +1]
-    ml_prob:       float          # [0, 1] probability of going up
-    sentiment:     float          # [-1, +1]
-    score:         float          # [-1, +1] composite
-    signal:        str            # "STRONG BUY" … "STRONG SELL"
-    rel_volume:    float          # x times average volume
-    unusual_vol:   bool
-    headlines:     list[str]      = field(default_factory=list)
-    scanned_at:    str            = field(default_factory=lambda: datetime.utcnow().isoformat())
+    # ── Core price data ───────────────────────────────────────────────────────
+    ticker:       str
+    name:         str
+    price:        float
+    change_pct:   float
+
+    # ── Component scores [-1, +1] ─────────────────────────────────────────────
+    technical:    float
+    volume:       float
+    ml_prob:      float
+    sentiment:    float
+    score:        float
+
+    # ── Legacy signal label (kept for table compatibility) ────────────────────
+    signal:       str
+
+    # ── Volume flags ──────────────────────────────────────────────────────────
+    rel_volume:   float
+    unusual_vol:  bool
+
+    # ── Professional prediction ───────────────────────────────────────────────
+    prediction:   str             # STRONG BUY / BUY / NEUTRAL / SELL / STRONG SELL
+    confidence:   float           # 0–100
+    trend:        str             # UPTREND / DOWNTREND / SIDEWAYS
+    target_price: float
+    stop_loss:    float
+    rr_ratio:     float
+    patterns:     list = field(default_factory=list)
+    reasons:      list = field(default_factory=list)
+
+    # ── Support / Resistance ──────────────────────────────────────────────────
+    supports:     list = field(default_factory=list)
+    resistances:  list = field(default_factory=list)
+    pivots:       dict = field(default_factory=dict)
+    poc:          float = 0.0
+
+    # ── Chart candles (last 80 × 1-min bars) ─────────────────────────────────
+    candles:      list = field(default_factory=list)
+
+    # ── News ──────────────────────────────────────────────────────────────────
+    headlines:    list = field(default_factory=list)
+    scanned_at:   str  = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        # Convert any numpy scalar types to native Python so json.dumps works
         for k, v in d.items():
-            if hasattr(v, "item"):          # numpy scalar → Python scalar
+            if hasattr(v, "item"):
                 d[k] = v.item()
-            elif isinstance(v, (bool,)):    # keep plain bool as-is
-                pass
         d["unusual_vol"] = bool(d["unusual_vol"])
         return d
-
-
-def _label_signal(score: float) -> str:
-    if score >= STRONG_BUY_THRESHOLD:
-        return "STRONG BUY"
-    elif score >= BUY_THRESHOLD:
-        return "BUY"
-    elif score <= STRONG_SELL_THRESHOLD:
-        return "STRONG SELL"
-    elif score <= SELL_THRESHOLD:
-        return "SELL"
-    return "NEUTRAL"
-
-
-def _composite_score(tech: float, vol: float, ml_prob: float, sent: float) -> float:
-    ml_score = (ml_prob - 0.5) * 2   # convert [0,1] → [-1,+1]
-    score = (
-        WEIGHT_TECHNICAL * tech +
-        WEIGHT_VOLUME    * vol  +
-        WEIGHT_ML        * ml_score +
-        WEIGHT_SENTIMENT * sent
-    )
-    return round(float(np.clip(score, -1, 1)), 4)
 
 
 # ── Ticker metadata cache ─────────────────────────────────────────────────────
@@ -99,6 +94,27 @@ def _get_info(ticker: str) -> dict:
     return _info_cache[ticker]
 
 
+def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
+    """Serialise the last N OHLCV bars for Lightweight Charts."""
+    tail = df.tail(n)
+    candles = []
+    for ts, row in tail.iterrows():
+        try:
+            # Lightweight Charts needs Unix timestamp in seconds
+            t = int(pd.Timestamp(ts).timestamp())
+            candles.append({
+                "time":   t,
+                "open":   round(float(row["Open"]),   4),
+                "high":   round(float(row["High"]),   4),
+                "low":    round(float(row["Low"]),    4),
+                "close":  round(float(row["Close"]),  4),
+                "volume": int(row["Volume"]),
+            })
+        except Exception:
+            pass
+    return candles
+
+
 # ── Single ticker analysis ────────────────────────────────────────────────────
 
 def analyse_ticker(ticker: str, df) -> Optional[StockSignal]:
@@ -106,38 +122,56 @@ def analyse_ticker(ticker: str, df) -> Optional[StockSignal]:
         if df is None or df.empty or len(df) < 5:
             return None
 
-        df = compute_indicators(df.copy())
-        last = df.iloc[-1]
+        df_ind = compute_indicators(df.copy())
+        last   = df_ind.iloc[-1]
 
         price      = float(last["Close"])
-        open_price = float(df.iloc[0]["Open"]) if len(df) > 0 else price
+        open_price = float(df_ind.iloc[0]["Open"])
         change_pct = round((price - open_price) / open_price * 100, 3) if open_price else 0.0
 
-        tech   = score_technical(last)
-        vol    = score_volume(df)
-        ml     = predict(ticker, df)
-        sent, headlines = score_sentiment(ticker)
+        tech             = score_technical(last)
+        vol              = score_volume(df_ind)
+        ml               = predict(ticker, df_ind)
+        sent, headlines  = score_sentiment(ticker)
+        rvol             = relative_volume(df_ind)
+        uvol             = detect_unusual_volume(df_ind)
 
-        score  = _composite_score(tech, vol, ml, sent)
-        signal = _label_signal(score)
-        info   = _get_info(ticker)
-        rvol   = relative_volume(df)
-        uvol   = detect_unusual_volume(df)
+        # Professional prediction (S/R + price action + patterns + confluence)
+        pred = generate_prediction(ticker, df_ind, tech, vol, ml, sent, last)
+
+        # Use prediction's composite as the master score
+        score  = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
+        signal = pred["direction"]
+        candles = _build_candles(df)
+        info    = _get_info(ticker)
 
         return StockSignal(
-            ticker=ticker,
-            name=info.get("name", ticker),
-            price=round(price, 4),
-            change_pct=change_pct,
-            technical=round(tech, 4),
-            volume=round(vol, 4),
-            ml_prob=round(ml, 4),
-            sentiment=round(sent, 4),
-            score=score,
-            signal=signal,
-            rel_volume=rvol,
-            unusual_vol=uvol,
-            headlines=headlines[:5],
+            ticker       = ticker,
+            name         = info.get("name", ticker),
+            price        = round(price, 4),
+            change_pct   = change_pct,
+            technical    = round(tech, 4),
+            volume       = round(vol, 4),
+            ml_prob      = round(ml, 4),
+            sentiment    = round(sent, 4),
+            score        = score,
+            signal       = signal,
+            rel_volume   = rvol,
+            unusual_vol  = uvol,
+            prediction   = pred["direction"],
+            confidence   = round(pred["confidence"], 1),
+            trend        = pred["trend"],
+            target_price = pred["target_price"],
+            stop_loss    = pred["stop_loss"],
+            rr_ratio     = pred["rr_ratio"],
+            patterns     = pred["patterns"],
+            reasons      = pred["reasons"],
+            supports     = pred["supports"],
+            resistances  = pred["resistances"],
+            pivots       = pred["pivots"],
+            poc          = pred["poc"],
+            candles      = candles,
+            headlines    = headlines[:5],
         )
     except Exception as e:
         logger.warning(f"[{ticker}] analysis error: {e}", exc_info=True)
@@ -169,28 +203,22 @@ class Scanner:
 
     def run_once(self) -> list[StockSignal]:
         logger.info(f"Starting scan of {len(NASDAQ_TICKERS)} tickers…")
-
-        # Fetch price data first so dashboard gets results quickly,
-        # then retrain ML models in the background afterwards.
-        batch = fetch_batch_realtime(NASDAQ_TICKERS)
-        results: list[StockSignal] = []
+        batch   = fetch_batch_realtime(NASDAQ_TICKERS)
+        results = []
 
         for ticker in NASDAQ_TICKERS:
-            df = batch.get(ticker)
-            sig = analyse_ticker(ticker, df)
+            sig = analyse_ticker(ticker, batch.get(ticker))
             if sig:
                 results.append(sig)
 
-        # Sort by absolute score descending (strongest signals first)
         results.sort(key=lambda s: abs(s.score), reverse=True)
         self.signals   = results
         self.last_scan = datetime.utcnow().isoformat()
         self._notify(results)
         logger.info(f"Scan complete | {len(results)} stocks analysed")
 
-        # Retrain ML models after broadcasting results (non-blocking for dashboard)
         if self._should_retrain():
-            logger.info("Starting ML retrain in background (1.2s delay between tickers)…")
+            logger.info("ML retrain starting…")
             retrain_all(NASDAQ_TICKERS)
             self._last_retrain = time.time()
             logger.info("ML retrain complete.")
@@ -215,5 +243,4 @@ class Scanner:
         self.is_running = False
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
 scanner = Scanner()
