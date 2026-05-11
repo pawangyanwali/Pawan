@@ -89,6 +89,13 @@ class StockSignal:
     pivots:       dict  = field(default_factory=dict)
     poc:          float = 0.0
 
+    # ── Exhaustion / retest entry ─────────────────────────────────────────────
+    entry_type:       str   = "IMMEDIATE"
+    retest_level:     float = 0.0
+    entry_zone_low:   float = 0.0
+    entry_zone_high:  float = 0.0
+    exhaustion_flags: list  = field(default_factory=list)
+
     # ── Chart candles (last 80 × 1-min bars) ─────────────────────────────────
     candles:    list = field(default_factory=list)
 
@@ -212,6 +219,11 @@ def analyse_ticker(
             mtf_bull_count    = int(mtf["bull_count"]),
             mtf_bear_count    = int(mtf["bear_count"]),
             mtf_timeframes    = mtf["timeframes"],
+            entry_type        = pred.get("entry_type",       "IMMEDIATE"),
+            retest_level      = pred.get("retest_level",     0.0),
+            entry_zone_low    = pred.get("entry_zone_low",   0.0),
+            entry_zone_high   = pred.get("entry_zone_high",  0.0),
+            exhaustion_flags  = pred.get("exhaustion_flags", []),
             candles           = candles,
             headlines         = headlines[:5],
         )

@@ -30,6 +30,12 @@ _BUY_THRESH         =  0.15
 _SELL_THRESH        = -0.15
 _STRONG_SELL_THRESH = -0.50
 
+# ── Exhaustion / retest thresholds ────────────────────────────────────────────
+_EXTENDED_PCT    = 0.015   # >1.5% from nearest S/R = extended move
+_VOL_CLIMAX_MULT = 2.5     # last bar vol > 2.5× 20-bar avg = climax
+_RSI_OB          = 70      # RSI overbought (bull exhaustion)
+_RSI_OS          = 30      # RSI oversold   (bear exhaustion)
+
 # ── Pattern classification ────────────────────────────────────────────────────
 
 _BULLISH_PATTERNS = {"Hammer", "Bullish Engulfing", "Bullish Pin Bar", "Morning Star"}
@@ -56,6 +62,11 @@ def _empty_prediction() -> dict:
         "resistances":      [],
         "pivots":           {},
         "poc":              0.0,
+        "entry_type":       "IMMEDIATE",
+        "retest_level":     0.0,
+        "entry_zone_low":   0.0,
+        "entry_zone_high":  0.0,
+        "exhaustion_flags": [],
     }
 
 
@@ -219,6 +230,133 @@ def _compute_confidence(
     return round(float(np.clip(confidence, 25.0, 95.0)), 1)
 
 
+def _detect_exhaustion(
+    price:     float,
+    support:   float,
+    resist:    float,
+    df:        pd.DataFrame,
+    last_row:  pd.Series,
+    direction: str,
+) -> dict:
+    """
+    Detect post-breakout exhaustion and determine optimal entry approach.
+
+    Returns entry_type = "IMMEDIATE" when price is at a good entry zone,
+    or "WAIT_RETEST" when the move is overextended and a pullback to key
+    support/resistance is the higher-probability entry.
+
+    A "WAIT_RETEST" call requires at least 2 of:
+      - Price >1.5% from nearest S/R (extended)
+      - Volume climax (last bar > 2.5× 20-bar average)
+      - RSI overbought/oversold
+      - Price at upper/lower Bollinger Band
+    """
+    base = {
+        "entry_type":       "IMMEDIATE",
+        "retest_level":     0.0,
+        "entry_zone_low":   price,
+        "entry_zone_high":  price,
+        "exhaustion_flags": [],
+        "adjusted_stop":    0.0,
+        "adjusted_target":  0.0,
+        "adjusted_rr":      0.0,
+    }
+
+    if df is None or df.empty or price <= 0:
+        return base
+
+    is_bull = direction in ("BUY", "STRONG BUY")
+    is_bear = direction in ("SELL", "STRONG SELL")
+
+    if not (is_bull or is_bear):
+        return base
+
+    flags: list[str] = []
+
+    # ── 1. Distance from nearest S/R ──────────────────────────────────────────
+    if is_bull and support > 0:
+        pct = (price - support) / support
+        if pct > _EXTENDED_PCT:
+            flags.append(
+                f"Price {pct*100:.1f}% above key support {support:.2f} — move extended"
+            )
+    if is_bear and resist > 0:
+        pct = (resist - price) / resist
+        if pct > _EXTENDED_PCT:
+            flags.append(
+                f"Price {pct*100:.1f}% below key resistance {resist:.2f} — move extended"
+            )
+
+    # ── 2. Volume climax ──────────────────────────────────────────────────────
+    try:
+        last_vol = float(df["Volume"].iloc[-1])
+        avg_vol  = float(df["Volume"].iloc[-20:-1].mean())
+        if avg_vol > 0 and last_vol > avg_vol * _VOL_CLIMAX_MULT:
+            flags.append(
+                f"Volume climax ({last_vol/avg_vol:.1f}× avg) — institutional selling into strength"
+                if is_bull else
+                f"Volume climax ({last_vol/avg_vol:.1f}× avg) — panic selling exhausted"
+            )
+    except Exception:
+        pass
+
+    # ── 3. RSI extreme ────────────────────────────────────────────────────────
+    rsi = _safe_float(last_row, "rsi_14")
+    if rsi is not None:
+        if is_bull and rsi > _RSI_OB:
+            flags.append(f"RSI {rsi:.1f} — overbought, pullback to support likely")
+        elif is_bear and rsi < _RSI_OS:
+            flags.append(f"RSI {rsi:.1f} — oversold, bounce to resistance likely")
+
+    # ── 4. Bollinger Band extreme ─────────────────────────────────────────────
+    bb_pct = _safe_float(last_row, "bb_pct")
+    if bb_pct is not None:
+        if is_bull and bb_pct > 0.92:
+            flags.append("Price at upper Bollinger Band — statistically stretched")
+        elif is_bear and bb_pct < 0.08:
+            flags.append("Price at lower Bollinger Band — statistically stretched")
+
+    # ── Decision: need ≥2 signals to call WAIT_RETEST ─────────────────────────
+    if len(flags) < 2:
+        return base
+
+    if is_bull and support > 0:
+        retest     = support
+        entry_high = round(retest * 1.002, 4)   # slightly above support
+        entry_low  = round(retest * 0.997, 4)   # allow wick through
+        adj_stop   = round(retest * 0.995, 4)   # tight stop below support
+        adj_rr     = _compute_rr(entry_high, resist, adj_stop)
+        return {
+            "entry_type":       "WAIT_RETEST",
+            "retest_level":     round(retest, 4),
+            "entry_zone_low":   entry_low,
+            "entry_zone_high":  entry_high,
+            "exhaustion_flags": flags,
+            "adjusted_stop":    adj_stop,
+            "adjusted_target":  round(resist, 4),
+            "adjusted_rr":      adj_rr,
+        }
+
+    if is_bear and resist > 0:
+        retest     = resist
+        entry_low  = round(retest * 0.998, 4)
+        entry_high = round(retest * 1.003, 4)
+        adj_stop   = round(retest * 1.005, 4)
+        adj_rr     = _compute_rr(entry_low, support, adj_stop)
+        return {
+            "entry_type":       "WAIT_RETEST",
+            "retest_level":     round(retest, 4),
+            "entry_zone_low":   entry_low,
+            "entry_zone_high":  entry_high,
+            "exhaustion_flags": flags,
+            "adjusted_stop":    adj_stop,
+            "adjusted_target":  round(support, 4),
+            "adjusted_rr":      adj_rr,
+        }
+
+    return base
+
+
 def _compute_rr(price: float, target: float, stop: float) -> float:
     try:
         reward = abs(target - price)
@@ -350,6 +488,19 @@ def generate_prediction(
 
     rr_ratio = _compute_rr(price, target, stop_loss)
 
+    # ── 7b. Exhaustion / retest check ─────────────────────────────────────────
+    exhaustion = _detect_exhaustion(
+        price, support, resistance, df, last_row, direction
+    )
+    # When waiting for retest, use retest-based R:R (better entry = better R:R)
+    if exhaustion["entry_type"] == "WAIT_RETEST":
+        if exhaustion["adjusted_rr"] > 0:
+            rr_ratio  = exhaustion["adjusted_rr"]
+        if exhaustion["adjusted_stop"] > 0:
+            stop_loss = exhaustion["adjusted_stop"]
+        if exhaustion["adjusted_target"] > 0:
+            target = exhaustion["adjusted_target"]
+
     # ── 8. Trend reason ───────────────────────────────────────────────────────
     trend_reasons: list[str] = []
     if trend == "UPTREND":
@@ -368,7 +519,10 @@ def generate_prediction(
     vol_reasons  = _build_volume_reasons(last_row)
     ml_reasons   = _build_ml_reasons(float(ml_prob), ml_trained)
 
-    all_reasons = trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
+    all_reasons = (
+        exhaustion["exhaustion_flags"] +   # exhaustion warnings shown first
+        trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
+    )
 
     seen: set[str] = set()
     deduped: list[str] = []
@@ -389,9 +543,14 @@ def generate_prediction(
         "trend_probability": round(float(trend_prob), 2),
         "ml_trained":        ml_trained,
         "patterns":          patterns,
-        "reasons":           deduped[:8],
+        "reasons":           deduped[:10],
         "supports":          sr.get("supports", []),
         "resistances":       sr.get("resistances", []),
         "pivots":            sr.get("pivots", {}),
         "poc":               sr.get("poc", 0.0),
+        "entry_type":        exhaustion["entry_type"],
+        "retest_level":      exhaustion["retest_level"],
+        "entry_zone_low":    exhaustion["entry_zone_low"],
+        "entry_zone_high":   exhaustion["entry_zone_high"],
+        "exhaustion_flags":  exhaustion["exhaustion_flags"],
     }
