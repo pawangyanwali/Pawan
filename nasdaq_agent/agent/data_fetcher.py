@@ -1,11 +1,16 @@
 """
 Data fetcher using the Twelve Data REST API.
 
-Free tier limits:
-  - 8 API credits / minute
-  - 800 API credits / day  (1 credit = 1 symbol in any request)
+Grow-377 plan:
+  - 377 API credits / minute
+  - Unlimited daily credits
+  - 1 credit = 1 symbol in any /time_series request
+  - Batch up to 20 symbols per request → massive throughput improvement
 
-Daily OHLCV data is cached in-process for 24 hours to avoid wasting credits.
+Core function: fetch_batch_interval(tickers, interval, outputsize, ttl)
+  - Serves from in-process cache when data is fresh
+  - Groups cache misses into batches of BATCH_SIZE
+  - Respects CALL_GAP between API calls
 """
 
 import time
@@ -14,21 +19,24 @@ import pandas as pd
 import logging
 from config import (
     TWELVE_DATA_API_KEY,
-    INTRADAY_INTERVAL,
-    REALTIME_INTERVAL,
+    CALL_GAP,
+    BATCH_SIZE,
     REALTIME_OUTPUTSIZE,
-    DATA_PERIOD_DAYS,
     DAILY_CACHE_TTL,
     TICKER_NAMES,
 )
 
 logger = logging.getLogger(__name__)
 
-BASE_URL   = "https://api.twelvedata.com"
-BATCH_SIZE = 1      # 1 symbol per request — free tier = 8 CREDITS/min, not 8 requests
-CALL_GAP   = 8.5    # seconds between requests  (60s / 8 credits = 7.5s, use 8.5s for safety)
+BASE_URL = "https://api.twelvedata.com"
 
-_IV = {"1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min", "1h": "1h", "1d": "1day"}
+# Twelve Data interval string aliases
+_IV = {
+    "1m": "1min", "5m": "5min", "15m": "15min",
+    "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1day",
+}
+
+# ── Rate limiter ──────────────────────────────────────────────────────────────
 
 _last_call: float = 0.0
 
@@ -42,16 +50,16 @@ def _throttle() -> None:
 
 
 def _get(endpoint: str, params: dict, _retry: int = 3) -> dict:
-    """GET request with throttling, rate-limit retry, and basic error handling."""
+    """Throttled GET with rate-limit retry."""
     _throttle()
     params["apikey"] = TWELVE_DATA_API_KEY
     try:
-        r = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=20)
+        r = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=30)
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict) and data.get("code") == 429:
             if _retry > 0:
-                logger.warning("Rate limit hit — waiting 62 seconds before retry…")
+                logger.warning("Rate limit hit — waiting 62s before retry…")
                 time.sleep(62)
                 return _get(endpoint, params, _retry=_retry - 1)
             return {}
@@ -61,7 +69,7 @@ def _get(endpoint: str, params: dict, _retry: int = 3) -> dict:
         return {}
 
 
-# ── Parsing helpers ───────────────────────────────────────────────────────────
+# ── OHLCV parsing ─────────────────────────────────────────────────────────────
 
 def _parse_values(values: list) -> pd.DataFrame:
     """Convert a Twelve Data 'values' list → OHLCV DataFrame (oldest first)."""
@@ -75,147 +83,142 @@ def _parse_values(values: list) -> pd.DataFrame:
             "Close":  [float(v["close"])         for v in values],
             "Volume": [float(v.get("volume", 0)) for v in values],
         }, index=pd.to_datetime([v["datetime"] for v in values]))
-        return df.sort_index()      # ascending — oldest bar first
+        return df.sort_index()
     except Exception as e:
         logger.debug(f"_parse_values error: {e}")
         return pd.DataFrame()
 
 
-def _bars_needed(days: int, interval: str) -> int:
-    bars_per_day = {"1min": 390, "5min": 78, "15min": 26, "30min": 13, "1h": 6, "1day": 1}
-    td_iv = _IV.get(interval, "1min")
-    return min(days * bars_per_day.get(td_iv, 390), 5000)
-
-
-# ── Intraday ML training data ─────────────────────────────────────────────────
-
-def fetch_historical(ticker: str) -> pd.DataFrame:
-    """Fetch multi-day intraday OHLCV for intraday ML training."""
-    td_iv = _IV.get(INTRADAY_INTERVAL, "5min")
-    outputsize = _bars_needed(DATA_PERIOD_DAYS, INTRADAY_INTERVAL)
-    data = _get("/time_series", {
-        "symbol":     ticker,
-        "interval":   td_iv,
-        "outputsize": outputsize,
-        "order":      "ASC",
-    })
-    if data.get("status") == "error":
-        logger.warning(f"[{ticker}] Twelve Data error: {data.get('message')}")
-        return pd.DataFrame()
-    return _parse_values(data.get("values", []))
-
-
-# ── Daily OHLCV (for macro trend + daily ML model) ────────────────────────────
-
-# Cache: ticker → (DataFrame, fetch_timestamp)
-_daily_cache: dict[str, tuple[pd.DataFrame, float]] = {}
-
-
-def fetch_historical_daily(ticker: str, outputsize: int = 500) -> pd.DataFrame:
-    """
-    Fetch ~2 years of daily OHLCV (500 bars) for daily ML training and macro trend.
-    Results are cached for DAILY_CACHE_TTL seconds.
-    """
-    now = time.time()
-    if ticker in _daily_cache:
-        df, ts = _daily_cache[ticker]
-        if now - ts < DAILY_CACHE_TTL:
-            return df
-
-    data = _get("/time_series", {
-        "symbol":     ticker,
-        "interval":   "1day",
-        "outputsize": outputsize,
-        "order":      "ASC",
-    })
-    if data.get("status") == "error":
-        logger.warning(f"[{ticker}] daily fetch error: {data.get('message')}")
-        df = pd.DataFrame()
-    else:
-        df = _parse_values(data.get("values", []))
-
-    _daily_cache[ticker] = (df, now)
-    return df
-
-
-def fetch_batch_daily(tickers: list) -> dict[str, pd.DataFrame]:
-    """
-    Fetch daily OHLCV for all tickers one by one (throttled).
-    Returns dict ticker → DataFrame.  Called once at startup and retried after 24h.
-    """
+def _parse_batch_response(data: dict, batch: list) -> dict[str, pd.DataFrame]:
+    """Parse a multi-ticker Twelve Data response into per-ticker DataFrames."""
     result: dict[str, pd.DataFrame] = {}
-    n = len(tickers)
-    for i, ticker in enumerate(tickers):
-        logger.info(f"Daily data [{i+1}/{n}]: {ticker}")
-        df = fetch_historical_daily(ticker)
+
+    # Single-ticker path: response has "values" directly
+    if "values" in data:
+        if data.get("status") != "error" and len(batch) == 1:
+            df = _parse_values(data["values"])
+            if not df.empty:
+                result[batch[0]] = df
+        return result
+
+    # Multi-ticker path: response keyed by symbol
+    for ticker in batch:
+        td = data.get(ticker, {})
+        if not isinstance(td, dict) or td.get("status") == "error":
+            logger.debug(f"[{ticker}] {td.get('message', 'not in response')}")
+            continue
+        df = _parse_values(td.get("values", []))
         if not df.empty:
             result[ticker] = df
-    logger.info(f"Daily batch complete: {len(result)}/{n} tickers")
+
     return result
 
 
-# ── Realtime scan data (1-min bars) ──────────────────────────────────────────
+# ── Per-interval in-process cache ─────────────────────────────────────────────
+# Structure: {ticker: {interval_str: (DataFrame, fetch_timestamp)}}
 
-def fetch_realtime(ticker: str) -> pd.DataFrame:
-    """Fetch latest REALTIME_OUTPUTSIZE 1-min bars for a single ticker."""
-    td_iv = _IV.get(REALTIME_INTERVAL, "1min")
-    data = _get("/time_series", {
-        "symbol":     ticker,
-        "interval":   td_iv,
-        "outputsize": REALTIME_OUTPUTSIZE,
-        "order":      "ASC",
-    })
-    if data.get("status") == "error":
-        logger.warning(f"[{ticker}] Twelve Data error: {data.get('message')}")
-        return pd.DataFrame()
-    return _parse_values(data.get("values", []))
+_interval_cache: dict[str, dict[str, tuple[pd.DataFrame, float]]] = {}
 
 
-def fetch_batch_realtime(tickers: list) -> dict[str, pd.DataFrame]:
+def _cache_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
+    entry = _interval_cache.get(ticker, {}).get(interval)
+    if entry and ttl > 0 and (time.time() - entry[1]) < ttl:
+        return entry[0]
+    return None
+
+
+def _cache_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
+    _interval_cache.setdefault(ticker, {})[interval] = (df, time.time())
+
+
+# ── Core batch fetcher ────────────────────────────────────────────────────────
+
+def fetch_batch_interval(
+    tickers:    list,
+    interval:   str,
+    outputsize: int,
+    ttl:        float = 0.0,
+) -> dict[str, pd.DataFrame]:
     """
-    Fetch 1-min intraday for all tickers using Twelve Data batch requests.
-    Each request fetches up to BATCH_SIZE symbols; each symbol costs 1 credit.
+    Fetch OHLCV data for multiple tickers at a given interval.
+
+    Parameters
+    ----------
+    tickers    : List of ticker symbols.
+    interval   : Twelve Data interval string ('1min', '5min', '1h', '1day', …).
+    outputsize : Number of bars to return per symbol.
+    ttl        : Cache TTL in seconds. 0 = always fetch fresh.
+
+    Returns
+    -------
+    Dict mapping ticker → DataFrame (oldest bar first).
+    Only successfully-fetched tickers are present.
     """
     result: dict[str, pd.DataFrame] = {}
-    td_iv     = _IV.get(REALTIME_INTERVAL, "1min")
-    n_batches = -(-len(tickers) // BATCH_SIZE)
+    to_fetch: list[str] = []
 
-    for i in range(0, len(tickers), BATCH_SIZE):
-        batch    = tickers[i: i + BATCH_SIZE]
-        symbols  = ",".join(batch)
+    # Serve cached tickers
+    for ticker in tickers:
+        cached = _cache_get(ticker, interval, ttl)
+        if cached is not None:
+            result[ticker] = cached
+        else:
+            to_fetch.append(ticker)
+
+    if not to_fetch:
+        return result  # all served from cache — zero API calls
+
+    n_batches = -(-len(to_fetch) // BATCH_SIZE)
+    for i in range(0, len(to_fetch), BATCH_SIZE):
+        batch     = to_fetch[i: i + BATCH_SIZE]
         batch_num = i // BATCH_SIZE + 1
-        logger.info(f"Fetching batch {batch_num}/{n_batches}: {batch}")
+        logger.debug(f"[{interval}] batch {batch_num}/{n_batches}: {len(batch)} symbols")
 
         data = _get("/time_series", {
-            "symbol":     symbols,
-            "interval":   td_iv,
-            "outputsize": REALTIME_OUTPUTSIZE,
+            "symbol":     ",".join(batch),
+            "interval":   interval,
+            "outputsize": outputsize,
             "order":      "ASC",
         })
 
         if not data:
-            logger.warning(f"Batch {batch_num} returned empty response")
+            logger.warning(f"[{interval}] batch {batch_num} returned empty response")
             continue
 
-        if "values" in data:
-            if data.get("status") == "error":
-                logger.debug(f"[{batch[0]}] {data.get('message', 'error')}")
-            else:
-                df = _parse_values(data["values"])
-                if not df.empty:
-                    result[batch[0]] = df
-        else:
-            for ticker in batch:
-                ticker_data = data.get(ticker, {})
-                if ticker_data.get("status") == "error":
-                    logger.debug(f"[{ticker}] {ticker_data.get('message', 'error')}")
-                    continue
-                df = _parse_values(ticker_data.get("values", []))
-                if not df.empty:
-                    result[ticker] = df
+        parsed = _parse_batch_response(data, batch)
+        for ticker, df in parsed.items():
+            result[ticker] = df
+            if ttl > 0:
+                _cache_set(ticker, interval, df)
 
-    logger.info(f"Batch fetch complete: {len(result)}/{len(tickers)} tickers OK")
+    fetched = len([t for t in to_fetch if t in result])
+    logger.info(f"[{interval}] fetched {fetched}/{len(to_fetch)} new + {len(tickers)-len(to_fetch)} cached")
     return result
+
+
+# ── Convenience wrappers ──────────────────────────────────────────────────────
+
+def fetch_batch_realtime(tickers: list) -> dict[str, pd.DataFrame]:
+    """Fetch fresh 1-min bars for all tickers (no caching — always live)."""
+    return fetch_batch_interval(tickers, "1min", REALTIME_OUTPUTSIZE, ttl=0)
+
+
+def fetch_historical(ticker: str) -> pd.DataFrame:
+    """Fetch ~6 months of 5-min OHLCV for intraday ML training (single ticker)."""
+    # 180 days × 78 bars/day = 14040 bars; API caps at 5000 → ~64 days at 5min
+    result = fetch_batch_interval([ticker], "5min", 5000, ttl=0)
+    return result.get(ticker, pd.DataFrame())
+
+
+def fetch_historical_daily(ticker: str, outputsize: int = 500) -> pd.DataFrame:
+    """Fetch ~2 years of daily OHLCV for daily ML model (cached 24h)."""
+    result = fetch_batch_interval([ticker], "1day", outputsize, ttl=DAILY_CACHE_TTL)
+    return result.get(ticker, pd.DataFrame())
+
+
+def fetch_batch_daily(tickers: list) -> dict[str, pd.DataFrame]:
+    """Batch-fetch daily OHLCV for all tickers (cached 24h)."""
+    return fetch_batch_interval(tickers, "1day", 500, ttl=DAILY_CACHE_TTL)
 
 
 # ── OHLCV resampling (free — no API calls) ────────────────────────────────────
@@ -223,15 +226,7 @@ def fetch_batch_realtime(tickers: list) -> dict[str, pd.DataFrame]:
 def resample_ohlcv(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     """
     Resample a higher-frequency OHLCV DataFrame to a lower frequency.
-
-    Parameters
-    ----------
-    df   : OHLCV DataFrame with a DatetimeIndex (e.g. 1-min bars).
-    freq : pandas offset alias — '5min', '15min', '30min', '60min', '1h', etc.
-
-    Returns
-    -------
-    Resampled DataFrame, oldest bar first, NaN rows dropped.
+    freq: pandas offset alias — '5min', '15min', '30min', '60min', etc.
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -252,7 +247,7 @@ def resample_ohlcv(df: pd.DataFrame, freq: str) -> pd.DataFrame:
 # ── News & info ───────────────────────────────────────────────────────────────
 
 def fetch_news(ticker: str) -> list:
-    """Twelve Data news endpoint requires a paid plan — returns empty on free tier."""
+    """Twelve Data news endpoint requires a paid plan — returns empty on current plan."""
     return []
 
 

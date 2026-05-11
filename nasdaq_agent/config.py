@@ -12,38 +12,55 @@ if not TWELVE_DATA_API_KEY:
         "  TWELVE_DATA_API_KEY=your_key_here\n"
     )
 
-SCAN_INTERVAL_SECONDS  = 300       # 5 min — 30 tickers × 8.5s = ~4.25 min per scan
-ML_RETRAIN_INTERVAL    = 86400     # Retrain ML once per day (saves API credits)
-DAILY_CACHE_TTL        = 86400     # Refresh daily OHLCV cache once per 24 hours
-DATA_PERIOD_DAYS       = 60        # Days of 5-min history for intraday ML (max ~64d at free tier)
-REALTIME_OUTPUTSIZE    = 500       # 1-min bars per scan — gives ~8h for 5M/15M/30M resampling
-INTRADAY_INTERVAL      = "5m"      # Candle resolution for intraday ML features
-REALTIME_INTERVAL      = "1m"      # Candle resolution for live signals
+# ── Grow-377 plan limits ───────────────────────────────────────────────────────
+# 377 credits/minute, unlimited daily credits
+# 1 credit = 1 symbol in any /time_series request
+# Batch up to 20 symbols per request → 20 credits per call
 
-# Signal weights (must sum to 1.0)
-WEIGHT_TECHNICAL = 0.35
-WEIGHT_VOLUME    = 0.20
-WEIGHT_ML        = 0.35
-WEIGHT_SENTIMENT = 0.10
+CALL_GAP    = 0.20   # seconds between API calls  (60 / 377 ≈ 0.16s, use 0.20s for safety)
+BATCH_SIZE  = 20     # symbols per request (each symbol = 1 credit; Twelve Data supports up to 55)
 
-# Thresholds for dashboard colouring
+# ── Scan / retrain cadence ────────────────────────────────────────────────────
+SCAN_INTERVAL_SECONDS  = 60       # 1 min — 50 tickers / 20 per batch = 3 calls ≈ 0.6s scan
+ML_RETRAIN_INTERVAL    = 21600    # Retrain ML every 6 hours (was 24h on free tier)
+
+# ── Historical data windows ───────────────────────────────────────────────────
+DATA_PERIOD_DAYS    = 180    # 6 months of 5-min data for intraday ML (~14,040 bars; cap 5000)
+REALTIME_OUTPUTSIZE = 500   # 1-min bars per scan (≈8h, gives 5M/15M/30M/1H resampling coverage)
+
+# ── Per-interval cache TTLs (seconds) ────────────────────────────────────────
+CACHE_TTL_5M  =   300   # 5 minutes
+CACHE_TTL_1H  =  3600   # 1 hour
+CACHE_TTL_1D  = 86400   # 24 hours  (also used as DAILY_CACHE_TTL for compatibility)
+DAILY_CACHE_TTL = CACHE_TTL_1D
+
+# ── Prediction thresholds (dashboard colouring) ───────────────────────────────
 STRONG_BUY_THRESHOLD  =  0.60
 BUY_THRESHOLD         =  0.30
 SELL_THRESHOLD        = -0.30
 STRONG_SELL_THRESHOLD = -0.60
 
-# Top 30 most liquid NASDAQ tickers — ideal for scalping on free API tier
-# (30 tickers × 8.5s/request = ~4.25 min scan, fits inside 5-min interval)
+# ── Ticker universe — top 50 liquid NASDAQ stocks ────────────────────────────
+# With 377 credits/min we can afford 50 tickers:
+#   50 tickers / 20 per batch = 3 calls × 0.20s = 0.60s per scan
 NASDAQ_TICKERS = [
+    # Mega-cap tech (unchanged core)
     "AAPL", "MSFT", "NVDA", "AMZN", "META",
     "GOOGL", "TSLA", "AVGO", "NFLX", "AMD",
+    # Large-cap tech + semi
     "ADBE", "QCOM", "CSCO", "INTU", "AMAT",
     "MU",   "PANW", "CRWD", "MRVL", "KLAC",
+    # Semi / EDA / biotech
     "LRCX", "ADI",  "SNPS", "CDNS", "ISRG",
     "REGN", "BKNG", "ADP",  "SBUX", "INTC",
+    # NEW — available on Grow plan
+    "COST", "AMGN", "ABNB", "DDOG", "ZS",
+    "WDAY", "MELI", "ARM",  "APP",  "COIN",
+    "TTD",  "HOOD", "SMCI", "TEAM", "OKTA",
+    "FTNT", "PYPL", "CEG",  "AXON", "SNOW",
 ]
 
-# Friendly names for the tickers (avoids extra API calls for company info)
+# ── Company name map (avoids API calls) ──────────────────────────────────────
 TICKER_NAMES = {
     "AAPL":"Apple","MSFT":"Microsoft","NVDA":"NVIDIA","AMZN":"Amazon","META":"Meta",
     "GOOGL":"Alphabet A","GOOG":"Alphabet C","TSLA":"Tesla","AVGO":"Broadcom","COST":"Costco",
@@ -68,4 +85,9 @@ TICKER_NAMES = {
     "MELI":"MercadoLibre","APP":"AppLovin","COIN":"Coinbase","HOOD":"Robinhood",
     "LULU":"Lululemon","NDAQ":"Nasdaq Inc","MPWR":"Monolithic Power","ENPH":"Enphase Energy",
     "FSLR":"First Solar","CELH":"Celsius Holdings","AXON":"Axon Enterprise",
+    "SNOW":"Snowflake","MSTR":"MicroStrategy",
 }
+
+# Legacy aliases (kept for any code that still references them)
+INTRADAY_INTERVAL = "5m"
+REALTIME_INTERVAL = "1m"

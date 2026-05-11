@@ -1,7 +1,9 @@
 """
-Main scanning engine.
-Runs continuously in a background thread, emitting StockSignal objects
-that the FastAPI WebSocket layer broadcasts to all connected clients.
+Main scanning engine — optimised for Twelve Data Grow-377 plan.
+
+3 calls per scan (50 tickers / 20 per batch = 3 batches × 0.20s ≈ 0.60s).
+5M and 1H data served from in-process cache (TTL 5 min / 1 h respectively),
+so additional timeframe data costs zero API calls on most scan cycles.
 """
 
 import logging
@@ -18,11 +20,13 @@ from config import (
     NASDAQ_TICKERS,
     SCAN_INTERVAL_SECONDS,
     ML_RETRAIN_INTERVAL,
-    DAILY_CACHE_TTL,
+    CACHE_TTL_5M,
+    CACHE_TTL_1H,
+    CACHE_TTL_1D,
 )
 from agent.data_fetcher import (
     fetch_batch_realtime,
-    fetch_batch_daily,
+    fetch_batch_interval,
     fetch_ticker_info,
 )
 from agent.technical import compute_indicators, score_technical
@@ -33,16 +37,6 @@ from agent.prediction import generate_prediction
 from agent.mtf_analysis import multi_timeframe_analysis
 
 logger = logging.getLogger(__name__)
-
-
-# ── Module-level daily OHLCV cache (shared across all analyse_ticker calls) ───
-
-_daily_data: dict[str, pd.DataFrame] = {}
-_daily_fetched_at: float = 0.0
-
-
-def _get_daily(ticker: str) -> pd.DataFrame:
-    return _daily_data.get(ticker, pd.DataFrame())
 
 
 # ── StockSignal dataclass ─────────────────────────────────────────────────────
@@ -56,26 +50,26 @@ class StockSignal:
     change_pct:   float
 
     # ── Component scores [-1, +1] ─────────────────────────────────────────────
-    technical:    float
-    volume:       float
-    ml_prob:      float       # combined (40% daily ML + 60% intraday ML)
-    ml_daily_prob: float      # daily model probability separately
-    sentiment:    float
-    score:        float
+    technical:     float
+    volume:        float
+    ml_prob:       float      # 40% daily ML + 60% intraday ML
+    ml_daily_prob: float      # daily model probability (separately)
+    sentiment:     float
+    score:         float
 
     # ── Legacy signal label ────────────────────────────────────────────────────
-    signal:       str
+    signal:        str
 
     # ── Volume flags ──────────────────────────────────────────────────────────
     rel_volume:   float
     unusual_vol:  bool
 
     # ── Professional prediction ───────────────────────────────────────────────
-    prediction:        str    # STRONG BUY / BUY / NEUTRAL / SELL / STRONG SELL
-    confidence:        float  # 0–100
-    trend:             str    # UPTREND / DOWNTREND / SIDEWAYS
-    trend_probability: float  # fraction of trend sub-signals that agree (0–1)
-    ml_trained:        bool   # False until XGBoost intraday model has been trained
+    prediction:        str
+    confidence:        float
+    trend:             str
+    trend_probability: float
+    ml_trained:        bool
     target_price:      float
     stop_loss:         float
     rr_ratio:          float
@@ -84,23 +78,23 @@ class StockSignal:
 
     # ── Multi-timeframe analysis ───────────────────────────────────────────────
     mtf_score:      float = 0.0
-    mtf_alignment:  str   = "MIXED"   # STRONGLY BULLISH/BULLISH/MIXED/BEARISH/STRONGLY BEARISH
-    mtf_bull_count: int   = 0         # number of timeframes with UPTREND
-    mtf_bear_count: int   = 0         # number of timeframes with DOWNTREND
-    mtf_timeframes: dict  = field(default_factory=dict)  # per-TF breakdown
+    mtf_alignment:  str   = "MIXED"
+    mtf_bull_count: int   = 0
+    mtf_bear_count: int   = 0
+    mtf_timeframes: dict  = field(default_factory=dict)
 
     # ── Support / Resistance ──────────────────────────────────────────────────
-    supports:     list = field(default_factory=list)
-    resistances:  list = field(default_factory=list)
-    pivots:       dict = field(default_factory=dict)
+    supports:     list  = field(default_factory=list)
+    resistances:  list  = field(default_factory=list)
+    pivots:       dict  = field(default_factory=dict)
     poc:          float = 0.0
 
     # ── Chart candles (last 80 × 1-min bars) ─────────────────────────────────
-    candles:      list = field(default_factory=list)
+    candles:    list = field(default_factory=list)
 
     # ── News ──────────────────────────────────────────────────────────────────
-    headlines:    list = field(default_factory=list)
-    scanned_at:   str  = field(default_factory=lambda: datetime.utcnow().isoformat())
+    headlines:  list = field(default_factory=list)
+    scanned_at: str  = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -124,18 +118,17 @@ def _get_info(ticker: str) -> dict:
 
 
 def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
-    """Serialise the last N OHLCV bars for Lightweight Charts."""
+    """Serialise the last N OHLCV bars for TradingView Lightweight Charts."""
     tail    = df.tail(n)
     candles = []
     for ts, row in tail.iterrows():
         try:
-            t = int(pd.Timestamp(ts).timestamp())
             candles.append({
-                "time":   t,
-                "open":   round(float(row["Open"]),   4),
-                "high":   round(float(row["High"]),   4),
-                "low":    round(float(row["Low"]),    4),
-                "close":  round(float(row["Close"]),  4),
+                "time":   int(pd.Timestamp(ts).timestamp()),
+                "open":   round(float(row["Open"]),  4),
+                "high":   round(float(row["High"]),  4),
+                "low":    round(float(row["Low"]),   4),
+                "close":  round(float(row["Close"]), 4),
                 "volume": int(row["Volume"]),
             })
         except Exception:
@@ -145,12 +138,16 @@ def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
 
 # ── Single ticker analysis ────────────────────────────────────────────────────
 
-def analyse_ticker(ticker: str, df_1m) -> Optional[StockSignal]:
+def analyse_ticker(
+    ticker: str,
+    df_1m:  Optional[pd.DataFrame],
+    df_5m:  pd.DataFrame,
+    df_1h:  pd.DataFrame,
+    df_1d:  pd.DataFrame,
+) -> Optional[StockSignal]:
     try:
         if df_1m is None or df_1m.empty or len(df_1m) < 5:
             return None
-
-        df_daily = _get_daily(ticker)
 
         df_ind = compute_indicators(df_1m.copy())
         last   = df_ind.iloc[-1]
@@ -159,18 +156,18 @@ def analyse_ticker(ticker: str, df_1m) -> Optional[StockSignal]:
         open_price = float(df_ind.iloc[0]["Open"])
         change_pct = round((price - open_price) / open_price * 100, 3) if open_price else 0.0
 
-        tech             = score_technical(last)
-        vol              = score_volume(df_ind)
-        ml_scalp         = predict(ticker, df_ind)
-        ml_daily_p       = predict_daily(ticker, df_daily) if not df_daily.empty else 0.5
-        # Blend: 40% daily model (swing context) + 60% intraday model (scalp timing)
-        ml_combined      = round(0.4 * ml_daily_p + 0.6 * ml_scalp, 4)
-        sent, headlines  = score_sentiment(ticker)
-        rvol             = relative_volume(df_ind)
-        uvol             = detect_unusual_volume(df_ind)
+        tech            = score_technical(last)
+        vol             = score_volume(df_ind)
+        ml_scalp        = predict(ticker, df_ind)
+        ml_daily_p      = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
+        # Blend: 40% daily (swing context) + 60% intraday (scalp timing)
+        ml_combined     = round(0.4 * ml_daily_p + 0.6 * ml_scalp, 4)
+        sent, headlines = score_sentiment(ticker)
+        rvol            = relative_volume(df_ind)
+        uvol            = detect_unusual_volume(df_ind)
 
-        # Multi-timeframe analysis (resample 1M → 5M/15M/30M/1H + daily)
-        mtf = multi_timeframe_analysis(df_1m, df_daily)
+        # Multi-timeframe analysis (6 TFs: 5M, 15M, 30M, 1H, 4H, 1D)
+        mtf = multi_timeframe_analysis(df_1m, df_5m, df_1h, df_1d)
 
         # Professional prediction
         pred = generate_prediction(
@@ -179,7 +176,6 @@ def analyse_ticker(ticker: str, df_1m) -> Optional[StockSignal]:
         )
 
         score   = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
-        signal  = pred["direction"]
         candles = _build_candles(df_1m)
         info    = _get_info(ticker)
 
@@ -194,7 +190,7 @@ def analyse_ticker(ticker: str, df_1m) -> Optional[StockSignal]:
             ml_daily_prob     = round(ml_daily_p, 4),
             sentiment         = round(sent, 4),
             score             = score,
-            signal            = signal,
+            signal            = pred["direction"],
             rel_volume        = rvol,
             unusual_vol       = uvol,
             prediction        = pred["direction"],
@@ -224,7 +220,7 @@ def analyse_ticker(ticker: str, df_1m) -> Optional[StockSignal]:
         return None
 
 
-# ── Scanner loop ──────────────────────────────────────────────────────────────
+# ── Scanner ───────────────────────────────────────────────────────────────────
 
 class Scanner:
     def __init__(self):
@@ -246,52 +242,49 @@ class Scanner:
 
     def _should_retrain(self) -> bool:
         if self._last_retrain == 0.0:
-            return False  # startup training already running in its own thread
+            return False  # startup training running in background
         return (time.time() - self._last_retrain) > ML_RETRAIN_INTERVAL
-
-    # ── Daily data refresh ────────────────────────────────────────────────────
-
-    def _fetch_daily_data(self) -> None:
-        global _daily_data, _daily_fetched_at
-        logger.info("Fetching daily OHLCV for all tickers (6-month history)…")
-        result = fetch_batch_daily(NASDAQ_TICKERS)
-        _daily_data.update(result)
-        _daily_fetched_at = time.time()
-        logger.info(f"Daily data ready: {len(_daily_data)} tickers")
-
-    def _daily_refresh_loop(self) -> None:
-        """Fetch/refresh daily data at startup and every 24 hours."""
-        while True:
-            try:
-                self._fetch_daily_data()
-            except Exception as e:
-                logger.error(f"Daily data fetch error: {e}", exc_info=True)
-            time.sleep(DAILY_CACHE_TTL)
 
     # ── ML training ───────────────────────────────────────────────────────────
 
     def _train_ml_background(self) -> None:
-        """Wait for daily data, then train both intraday and daily ML models."""
-        # Give the daily data thread up to 15 min to fetch
-        for _ in range(180):
-            if _daily_fetched_at > 0:
-                break
-            time.sleep(5)
+        """
+        Train both intraday (5M) and daily ML models at startup.
+        Daily data served from fetch_batch_interval cache (fetched during first scan).
+        We wait briefly to allow the first scan's data fetches to warm the cache.
+        """
+        logger.info("ML training: waiting for first scan to warm data cache…")
+        time.sleep(30)   # let the first scan + cache-fill complete first
 
-        logger.info("ML initial training starting (intraday + daily models)…")
-        retrain_all(NASDAQ_TICKERS, daily_data=_daily_data)
+        logger.info("ML training starting (intraday + daily models)…")
+        daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
+        retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
         self._last_retrain = time.time()
-        logger.info("ML initial training complete.")
+        logger.info("ML training complete.")
 
     # ── Scan loop ─────────────────────────────────────────────────────────────
 
     def run_once(self) -> list[StockSignal]:
-        logger.info(f"Starting scan of {len(NASDAQ_TICKERS)} tickers…")
-        batch   = fetch_batch_realtime(NASDAQ_TICKERS)
-        results = []
+        t0 = time.time()
+        logger.info(f"Scan starting — {len(NASDAQ_TICKERS)} tickers…")
 
+        # Always-fresh 1M data (live signal)
+        batch_1m = fetch_batch_realtime(NASDAQ_TICKERS)
+
+        # Cached higher-TF data (only refetched when TTL expires)
+        batch_5m = fetch_batch_interval(NASDAQ_TICKERS, "5min", 500,  ttl=CACHE_TTL_5M)
+        batch_1h = fetch_batch_interval(NASDAQ_TICKERS, "1h",   500,  ttl=CACHE_TTL_1H)
+        batch_1d = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500,  ttl=CACHE_TTL_1D)
+
+        results = []
         for ticker in NASDAQ_TICKERS:
-            sig = analyse_ticker(ticker, batch.get(ticker))
+            sig = analyse_ticker(
+                ticker,
+                df_1m = batch_1m.get(ticker),
+                df_5m = batch_5m.get(ticker, pd.DataFrame()),
+                df_1h = batch_1h.get(ticker, pd.DataFrame()),
+                df_1d = batch_1d.get(ticker, pd.DataFrame()),
+            )
             if sig:
                 results.append(sig)
 
@@ -299,13 +292,15 @@ class Scanner:
         self.signals   = results
         self.last_scan = datetime.utcnow().isoformat()
         self._notify(results)
-        logger.info(f"Scan complete | {len(results)} stocks analysed")
+        elapsed = round(time.time() - t0, 1)
+        logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(NASDAQ_TICKERS)} tickers analysed")
 
         if self._should_retrain():
-            logger.info("Daily ML retrain starting…")
-            retrain_all(NASDAQ_TICKERS, daily_data=_daily_data)
+            logger.info("Scheduled ML retrain starting…")
+            daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
+            retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
             self._last_retrain = time.time()
-            logger.info("Daily ML retrain complete.")
+            logger.info("Scheduled ML retrain complete.")
 
         return results
 
@@ -319,19 +314,15 @@ class Scanner:
             time.sleep(SCAN_INTERVAL_SECONDS)
 
     def start_background(self) -> None:
-        # Thread 1: Fetch and periodically refresh daily OHLCV data
-        daily_thread = threading.Thread(target=self._daily_refresh_loop, daemon=True)
-        daily_thread.start()
-
-        # Thread 2: Train ML models once daily data is ready
+        # Thread 1: ML training (waits 30s for first scan to warm cache)
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
         ml_thread.start()
 
-        # Thread 3: Main scan loop
+        # Thread 2: Main scan loop (starts immediately)
         scan_thread = threading.Thread(target=self._loop, daemon=True)
         scan_thread.start()
 
-        logger.info("Scanner started: daily-data, ML-training, and scan threads running.")
+        logger.info("Scanner started. Grow-377: 50 tickers, 1-min scan interval.")
 
     def stop(self) -> None:
         self.is_running = False

@@ -1,8 +1,17 @@
 """
 Multi-timeframe analysis module.
 
-Resamples 1-minute OHLCV data to 5M, 15M, 30M, 1H and combines with daily
-bars to produce a composite directional score and alignment label.
+With the Grow-377 plan we can afford to fetch 5M and 1H data directly from the API
+(cached with TTL) rather than resampling from 1M bars.  This gives far better quality
+analysis at each timeframe.
+
+Timeframe hierarchy (top-down, professional trader approach):
+  1D  → macro trend, market regime              (weight 0.32)
+  4H  → intermediate trend, swing structure     (weight 0.22)
+  1H  → intraday trend, setup quality           (weight 0.20)
+  30M → near-term momentum, entry timing        (weight 0.13)
+  15M → entry precision, pattern confirmation   (weight 0.08)
+  5M  → scalp entry trigger                     (weight 0.05)
 """
 
 from __future__ import annotations
@@ -17,13 +26,24 @@ from agent.price_action import analyze_trend_with_confidence
 
 logger = logging.getLogger(__name__)
 
-# (label, pandas_rule_or_None_for_daily, min_bars_needed, weight_in_composite)
+
+# ── Timeframe config ──────────────────────────────────────────────────────────
+# (label, source_key, resample_rule_if_derived, min_bars, weight)
+#
+# source_key values:
+#   "1d"  → df_daily  (directly fetched, cached 24h)
+#   "1h"  → df_1h     (directly fetched, cached 1h)
+#   "5m"  → df_5m     (directly fetched, cached 5min)
+#   "1m"  → resample df_1m using resample_rule
+#
 TIMEFRAME_CONFIG = [
-    ("1D",  None,    10, 0.35),
-    ("1H",  "60min",  6, 0.25),
-    ("30M", "30min",  8, 0.20),
-    ("15M", "15min", 12, 0.12),
-    ("5M",  "5min",  20, 0.08),
+    # label   source  resample_rule  min_bars  weight
+    ("1D",   "1d",   None,          10,        0.32),
+    ("4H",   "1h",   "4h",          6,         0.22),   # resample 1H → 4H
+    ("1H",   "1h",   None,          8,         0.20),
+    ("30M",  "5m",   "30min",       8,         0.13),   # resample 5M → 30M
+    ("15M",  "5m",   "15min",       10,        0.08),   # resample 5M → 15M
+    ("5M",   "5m",   None,          20,        0.05),
 ]
 
 _NEUTRAL_RESULT = {
@@ -44,127 +64,123 @@ _OHLCV_AGG = {
 
 
 def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample an OHLCV DataFrame using the given pandas offset alias."""
-    resampled = df.resample(rule).agg(_OHLCV_AGG).dropna()
-    return resampled
+    if df is None or df.empty:
+        return pd.DataFrame()
+    try:
+        return df.resample(rule).agg(_OHLCV_AGG).dropna(subset=["Open", "Close"])
+    except Exception as e:
+        logger.debug(f"resample({rule}) error: {e}")
+        return pd.DataFrame()
 
 
-def _analyze_timeframe(
-    df: pd.DataFrame,
-    label: str,
-    min_bars: int,
-    weight: float,
-) -> dict:
-    """Run trend + technical analysis on a single timeframe DataFrame."""
-    n = len(df)
+def _analyze_timeframe(df: pd.DataFrame, label: str, min_bars: int, weight: float) -> dict:
+    """Compute trend + technical score for a single timeframe DataFrame."""
+    n = len(df) if df is not None else 0
 
+    tech_score = 0.0
     if n >= 30:
         try:
-            df_ind = compute_indicators(df.copy())
+            df_ind   = compute_indicators(df.copy())
             last_row = df_ind.iloc[-1]
-            tech_score = score_technical(last_row)
+            tech_score = float(score_technical(last_row))
         except Exception:
-            tech_score = 0.0
-    else:
-        tech_score = 0.0
+            pass
 
+    trend, trend_prob = "SIDEWAYS", 0.5
     if n >= min_bars:
         try:
-            trend, trend_prob = analyze_trend_with_confidence(df)
+            trend, trend_prob = analyze_trend_with_confidence(df, min_rows=min_bars)
         except Exception:
-            trend, trend_prob = "SIDEWAYS", 0.5
-    else:
-        trend, trend_prob = "SIDEWAYS", 0.5
+            pass
 
-    if trend == "UPTREND":
-        trend_dir = 1
-    elif trend == "DOWNTREND":
-        trend_dir = -1
-    else:
-        trend_dir = 0
-
-    tf_contribution = trend_dir * trend_prob * 0.7 + tech_score * 0.3
+    trend_dir = 1 if trend == "UPTREND" else (-1 if trend == "DOWNTREND" else 0)
+    contribution = trend_dir * trend_prob * 0.70 + tech_score * 0.30
 
     return {
-        "label":          label,
-        "trend":          trend,
-        "trend_prob":     trend_prob,
-        "score":          round(weight * tf_contribution, 4),
-        "_contribution":  tf_contribution,
+        "label":         label,
+        "trend":         trend,
+        "trend_prob":    round(float(trend_prob), 2),
+        "score":         round(float(tech_score), 4),
+        "_contribution": float(contribution),
+        "_weight":       weight,
     }
 
 
-def _alignment_label(bull_count: int, bear_count: int) -> str:
-    if bull_count >= 4:
+def _alignment_label(bull: int, bear: int, total: int) -> str:
+    if total == 0:
+        return "MIXED"
+    if bull >= 5:
         return "STRONGLY BULLISH"
-    if bull_count == 3:
+    if bull >= 4:
         return "BULLISH"
-    if bear_count >= 4:
+    if bear >= 5:
         return "STRONGLY BEARISH"
-    if bear_count == 3:
+    if bear >= 4:
+        return "BEARISH"
+    if bull >= 3:
+        return "BULLISH"
+    if bear >= 3:
         return "BEARISH"
     return "MIXED"
 
 
 def multi_timeframe_analysis(
-    df_1m: pd.DataFrame,
+    df_1m:    pd.DataFrame,
+    df_5m:    pd.DataFrame,
+    df_1h:    pd.DataFrame,
     df_daily: pd.DataFrame,
 ) -> dict:
     """
-    Perform multi-timeframe analysis across 5M, 15M, 30M, 1H, and 1D.
+    Perform multi-timeframe analysis across 6 timeframes.
 
     Parameters
     ----------
-    df_1m   : 1-minute OHLCV DataFrame (DatetimeIndex required).
-    df_daily: Daily OHLCV DataFrame (DatetimeIndex required, already cached).
+    df_1m    : 1-minute OHLCV (from live scan).
+    df_5m    : 5-minute OHLCV (directly fetched, cached 5 min).
+    df_1h    : 1-hour OHLCV   (directly fetched, cached 1 h).
+    df_daily : Daily OHLCV    (directly fetched, cached 24 h).
 
     Returns
     -------
     dict with keys:
-        mtf_score : float in [-1, +1]
-        alignment : str  (STRONGLY BULLISH / BULLISH / MIXED / BEARISH / STRONGLY BEARISH)
-        bull_count: int
-        bear_count: int
-        timeframes: dict[str, dict] — per-TF results keyed by label
+        mtf_score  : float in [-1, +1]
+        alignment  : str  (STRONGLY BULLISH / BULLISH / MIXED / BEARISH / STRONGLY BEARISH)
+        bull_count : int
+        bear_count : int
+        timeframes : dict[label → dict]  per-TF results
     """
-    df_1m_valid = (
-        df_1m is not None
-        and isinstance(df_1m, pd.DataFrame)
-        and not df_1m.empty
-    )
-    df_daily_valid = (
-        df_daily is not None
-        and isinstance(df_daily, pd.DataFrame)
-        and not df_daily.empty
-    )
+    def _valid(df):
+        return df is not None and isinstance(df, pd.DataFrame) and not df.empty
 
-    if not df_1m_valid and not df_daily_valid:
+    sources = {
+        "1d": df_daily if _valid(df_daily) else None,
+        "1h": df_1h    if _valid(df_1h)    else None,
+        "5m": df_5m    if _valid(df_5m)    else None,
+        "1m": df_1m    if _valid(df_1m)    else None,
+    }
+
+    if not any(v is not None for v in sources.values()):
         return _NEUTRAL_RESULT.copy()
 
-    mtf_score = 0.0
+    mtf_score  = 0.0
     bull_count = 0
     bear_count = 0
     timeframes: dict[str, dict] = {}
 
-    for label, rule, min_bars, weight in TIMEFRAME_CONFIG:
+    for label, src_key, resample_rule, min_bars, weight in TIMEFRAME_CONFIG:
         try:
-            if rule is None:
-                if not df_daily_valid:
-                    logger.debug("[MTF] %s: daily data unavailable, skipping", label)
-                    continue
-                df_tf = df_daily.copy()
-            else:
-                if not df_1m_valid:
-                    logger.debug("[MTF] %s: 1m data unavailable, skipping", label)
-                    continue
-                df_tf = _resample(df_1m, rule)
-
-            if df_tf.empty:
-                logger.debug("[MTF] %s: empty after resample, skipping", label)
+            base_df = sources.get(src_key)
+            if base_df is None:
                 continue
 
-            result = _analyze_timeframe(df_tf, label, min_bars, weight)
-            mtf_score += result["score"]
+            df_tf = _resample(base_df, resample_rule) if resample_rule else base_df.copy()
+
+            if df_tf is None or df_tf.empty:
+                continue
+
+            result     = _analyze_timeframe(df_tf, label, min_bars, weight)
+            weighted   = result["_contribution"] * weight
+            mtf_score += weighted
 
             if result["trend"] == "UPTREND":
                 bull_count += 1
@@ -179,13 +195,13 @@ def multi_timeframe_analysis(
             }
 
         except Exception as exc:
-            logger.warning("[MTF] %s: analysis error — %s", label, exc)
+            logger.warning(f"[MTF] {label}: {exc}")
 
-    mtf_score = float(np.clip(mtf_score, -1.0, 1.0))
-    alignment = _alignment_label(bull_count, bear_count)
+    mtf_score = round(float(np.clip(mtf_score, -1.0, 1.0)), 4)
+    alignment = _alignment_label(bull_count, bear_count, len(timeframes))
 
     return {
-        "mtf_score":  round(mtf_score, 4),
+        "mtf_score":  mtf_score,
         "alignment":  alignment,
         "bull_count": bull_count,
         "bear_count": bear_count,
