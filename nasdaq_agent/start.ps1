@@ -79,13 +79,12 @@ if ($cmd -eq "start") {
     $python    = Find-Python
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content $LogFile "[$timestamp] === Agent starting ==="
+    # cmd /c merges stderr into stdout (2>&1) so both go to the same log file
     $proc = Start-Process `
-        -FilePath $python `
-        -ArgumentList "-m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log" `
+        -FilePath "cmd.exe" `
+        -ArgumentList "/c `"$python`" -m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log >> `"$LogFile`" 2>&1" `
         -WorkingDirectory $ScriptDir `
         -WindowStyle Hidden `
-        -RedirectStandardOutput $LogFile `
-        -RedirectStandardError  $LogFile `
         -PassThru
     $proc.Id | Set-Content $PidFile
     Write-Host "Started  PID $($proc.Id)" -ForegroundColor Green
