@@ -94,7 +94,7 @@
     .conf-fill { height:100%; border-radius:2px; background:var(--blue); }
 
     /* ── Detail Panel ── */
-    .detail-panel { display:none; position:fixed; right:0; top:0; bottom:0; width:480px; background:var(--surface); border-left:1px solid var(--border); overflow-y:auto; z-index:200; }
+    .detail-panel { display:none; position:fixed; right:0; top:0; bottom:0; width:680px; background:var(--surface); border-left:1px solid var(--border); overflow-y:auto; z-index:200; }
     .detail-panel.open { display:block; }
     .detail-header { padding:16px 20px; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--surface); z-index:10; }
     .detail-close { cursor:pointer; color:var(--muted); font-size:18px; float:right; margin-top:-2px; }
@@ -138,7 +138,7 @@
 
     /* Chart */
     .chart-container { margin:0 20px 16px; border-radius:8px; overflow:hidden; border:1px solid var(--border); }
-    #detail-chart { width:100%; height:220px; }
+    #detail-chart { width:100%; height:340px; }
 
     /* Patterns */
     .pattern-chips { display:flex; flex-wrap:wrap; gap:6px; }
@@ -319,7 +319,8 @@
     ::-webkit-scrollbar-track { background:var(--bg); }
     ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
 
-    @media(max-width:900px){ .detail-panel{width:100%;} .name-cell,.trend-cell{display:none;} }
+    @media(max-width:1100px){ .detail-panel{width:100%;} }
+    @media(max-width:900px){ .name-cell,.trend-cell{display:none;} }
   </style>
 </head>
 <body>
@@ -1252,8 +1253,8 @@ function renderChart(s) {
   }
 
   const chart = LightweightCharts.createChart(container, {
-    width:  container.clientWidth || 440,
-    height: 220,
+    width:  container.clientWidth || 640,
+    height: 340,
     layout: { background:{color:'#151820'}, textColor:'#94a3b8' },
     grid:   { vertLines:{color:'#252a35'}, horzLines:{color:'#252a35'} },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
