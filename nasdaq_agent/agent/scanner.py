@@ -368,9 +368,14 @@ def analyse_ticker(
                 mtf_alignment = mtf["alignment"],
             )
             maybe_open_trade(
-                ticker=ticker, direction=pred["direction"], price=price,
-                target=pred["target_price"], stop=pred["stop_loss"],
-                confidence=pred["confidence"], rr_qualifies=bool(pred.get("rr_qualifies", False)),
+                ticker       = ticker,
+                direction    = pred["direction"],
+                price        = price,
+                target       = pred["target_price"],
+                stop         = pred["stop_loss"],
+                confidence   = pred["confidence"],
+                rr_qualifies = bool(pred.get("rr_qualifies", False)),
+                rr_ratio     = float(pred.get("rr_ratio", 0.0)),
             )
 
         # Update open paper trades + live backtest tracking

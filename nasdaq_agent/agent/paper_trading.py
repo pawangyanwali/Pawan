@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
-_MIN_CONFIDENCE = 65.0   # minimum confidence to auto-enter
+_MIN_CONFIDENCE = 0.0   # track all signals — paper trading measures accuracy, not filters it
 
 
 def _conn() -> sqlite3.Connection:
@@ -42,39 +42,47 @@ def init_db() -> None:
     with _conn() as c:
         c.execute("""
             CREATE TABLE IF NOT EXISTS paper_trades (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                opened_at   TEXT    NOT NULL,
-                closed_at   TEXT,
-                ticker      TEXT    NOT NULL,
-                direction   TEXT    NOT NULL,
-                entry_price REAL    NOT NULL,
-                target      REAL    NOT NULL,
-                stop        REAL    NOT NULL,
-                confidence  REAL    NOT NULL,
-                bars_held   INTEGER DEFAULT 0,
-                status      TEXT    DEFAULT 'OPEN',   -- OPEN | CLOSED
-                exit_price  REAL,
-                exit_reason TEXT,
-                pnl_pct     REAL,
-                pnl_dollar  REAL
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_at    TEXT    NOT NULL,
+                closed_at    TEXT,
+                ticker       TEXT    NOT NULL,
+                direction    TEXT    NOT NULL,
+                entry_price  REAL    NOT NULL,
+                target       REAL    NOT NULL,
+                stop         REAL    NOT NULL,
+                confidence   REAL    NOT NULL,
+                rr_ratio     REAL    DEFAULT 0,
+                rr_qualifies INTEGER DEFAULT 0,
+                bars_held    INTEGER DEFAULT 0,
+                status       TEXT    DEFAULT 'OPEN',   -- OPEN | CLOSED
+                exit_price   REAL,
+                exit_reason  TEXT,
+                pnl_pct      REAL,
+                pnl_dollar   REAL
             )
         """)
+        # Add columns to existing DBs (safe — ALTER TABLE IF NOT EXISTS column)
+        for col, definition in [("rr_ratio", "REAL DEFAULT 0"),
+                                 ("rr_qualifies", "INTEGER DEFAULT 0")]:
+            try:
+                c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
+            except Exception:
+                pass
         c.commit()
 
 
 def maybe_open_trade(
-    ticker:     str,
-    direction:  str,
-    price:      float,
-    target:     float,
-    stop:       float,
-    confidence: float,
-    rr_qualifies: bool,
+    ticker:       str,
+    direction:    str,
+    price:        float,
+    target:       float,
+    stop:         float,
+    confidence:   float,
+    rr_qualifies: bool  = False,
+    rr_ratio:     float = 0.0,
 ) -> Optional[int]:
-    """Open a paper trade if conditions met. Returns trade id or None."""
+    """Open a paper trade for every BUY/SELL signal. Returns trade id or None."""
     if direction not in ("BUY", "SELL"):
-        return None
-    if confidence < _MIN_CONFIDENCE or not rr_qualifies:
         return None
 
     # Don't open if one already open for this ticker
@@ -88,15 +96,21 @@ def maybe_open_trade(
 
             cur = c.execute("""
                 INSERT INTO paper_trades
-                  (opened_at, ticker, direction, entry_price, target, stop, confidence)
-                VALUES (?,?,?,?,?,?,?)
+                  (opened_at, ticker, direction, entry_price, target, stop,
+                   confidence, rr_ratio, rr_qualifies)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
-                round(price, 4), round(target, 4), round(stop, 4), round(confidence, 2)
+                round(price, 4), round(target, 4), round(stop, 4),
+                round(confidence, 2), round(rr_ratio, 2), int(rr_qualifies),
             ))
             c.commit()
-            logger.info(f"[PAPER] Opened {direction} {ticker} @ ${price:.2f}  T:${target:.2f}  S:${stop:.2f}")
+            rr_flag = "✓ R:R" if rr_qualifies else "✗ R:R"
+            logger.info(
+                f"[PAPER] Opened {direction} {ticker} @ ${price:.2f} "
+                f"T:${target:.2f}  S:${stop:.2f}  conf:{confidence:.0f}%  {rr_flag}"
+            )
             return cur.lastrowid
 
 

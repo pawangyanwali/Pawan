@@ -15,13 +15,15 @@ def test_open_trade_high_confidence():
     open_trades = get_open_trades()
     assert any(t["ticker"] == "AAPL" for t in open_trades)
 
-def test_no_trade_low_confidence():
-    tid = maybe_open_trade("MSFT", "BUY", 300.0, 310.0, 295.0, confidence=50.0, rr_qualifies=True)
-    assert tid is None, "confidence < 65 should block trade"
+def test_low_confidence_trade_still_opens():
+    """All BUY/SELL signals are paper traded regardless of confidence."""
+    tid = maybe_open_trade("MSFT", "BUY", 300.0, 310.0, 295.0, confidence=30.0, rr_qualifies=False)
+    assert tid is not None, "low confidence should still open a paper trade"
 
-def test_no_trade_rr_fails():
+def test_rr_not_qualifying_still_opens():
+    """rr_qualifies=False no longer blocks — it is stored as metadata only."""
     tid = maybe_open_trade("NVDA", "BUY", 500.0, 502.0, 495.0, confidence=80.0, rr_qualifies=False)
-    assert tid is None, "rr_qualifies=False should block trade"
+    assert tid is not None, "rr_qualifies=False should no longer block paper trade"
 
 def test_no_duplicate_open_trade():
     maybe_open_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True)
