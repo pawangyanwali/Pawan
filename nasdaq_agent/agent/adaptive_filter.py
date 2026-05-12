@@ -165,7 +165,8 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
 
     _save()
 
-    logger.info(
+    # Routine stats go to DEBUG — only surface to console if threshold shifted significantly
+    logger.debug(
         f"[AdaptiveFilter:{source}] Updated — win_rate={current_wr*100:.1f}%  "
         f"threshold={new_threshold:.1f}%  "
         f"blocked={len(new_blocked)}  boosted={len(new_boosted)}  "
@@ -173,7 +174,7 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
     )
     if new_blocked:
         for k, v in new_blocked.items():
-            logger.info(f"  [SUPPRESS] {v['reason']}")
+            logger.debug(f"  [SUPPRESS] {v['reason']}")
 
 
 def _compute_threshold(by_confidence: dict, current_wr: float) -> float:

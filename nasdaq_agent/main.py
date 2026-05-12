@@ -28,6 +28,7 @@ from agent.live_backtest import get_performance_stats, get_tracking_signals, get
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from agent.adaptive_filter import get_status as af_get_status
 from agent.after_hours_monitor import get_all_biases as ah_get_all
+from agent.learning_engine import learning_engine, get_learning_log
 from config import (
     DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT,
     load_watchlist, save_watchlist, NASDAQ_TICKERS,
@@ -168,8 +169,10 @@ async def lifespan(app: FastAPI):
     _event_loop = asyncio.get_running_loop()   # capture before spawning thread
     scanner.register_callback(_on_signals)
     scanner.start_background()
+    learning_engine.start()   # continuous 24/7 learning — independent of scan loop
     yield
     scanner.stop()
+    learning_engine.stop()
 
 
 app = FastAPI(title="NASDAQ Scalping Agent", lifespan=lifespan)
@@ -337,7 +340,19 @@ async def backtest_path(signal_id: str):
 @app.get("/api/learning-status")
 async def learning_status():
     """Adaptive filter state — blocked contexts, dynamic threshold, win rate progress."""
-    return af_get_status()
+    return {
+        **af_get_status(),
+        "engine": learning_engine.get_status(),
+    }
+
+
+@app.get("/api/learning-log")
+async def learning_log_endpoint(limit: int = 100):
+    """Last N learning engine log entries for the dashboard live feed."""
+    return {
+        "log":    get_learning_log(limit=limit),
+        "engine": learning_engine.get_status(),
+    }
 
 
 @app.get("/api/after-hours")

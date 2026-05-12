@@ -95,7 +95,7 @@ def maybe_trigger_feedback_retrain(tickers: list) -> None:
             return
         _last_feedback_count = current_count
 
-    logger.info(
+    logger.debug(
         f"[BT Feedback] {new_outcomes} new outcomes → triggering ML feedback retrain"
     )
     thread = threading.Thread(

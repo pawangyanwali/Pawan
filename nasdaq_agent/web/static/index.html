@@ -800,10 +800,24 @@
     </div>
 
     <!-- Boosted contexts -->
-    <div>
+    <div style="margin-bottom:20px">
       <div class="bt-section-title" style="color:var(--green)">✅ Boosted Contexts (<span id="learn-boosted-count">0</span>)</div>
       <div class="learn-context-grid" id="learn-boosted-grid">
         <div style="color:var(--muted);font-size:11px;padding:8px">No boosted contexts yet — need more resolved trades.</div>
+      </div>
+    </div>
+
+    <!-- Live learning log -->
+    <div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="bt-section-title" style="margin:0">📡 Live Learning Log</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="learn-engine-status" style="font-size:10px;color:var(--muted)">—</span>
+          <button onclick="loadLearningLog()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;cursor:pointer;font-family:inherit;font-size:10px">Refresh</button>
+        </div>
+      </div>
+      <div id="learn-log-box" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:220px;overflow-y:auto;font-size:10px;font-family:'SF Mono','Fira Code',monospace;line-height:1.7">
+        <div style="color:var(--muted)">Loading…</div>
       </div>
     </div>
   </div>
@@ -2034,9 +2048,36 @@ function renderAfterHours(snaps) {
 
 async function openLearning() {
   document.getElementById('learn-modal').classList.add('open');
-  await loadLearningStatus();
+  await Promise.all([loadLearningStatus(), loadLearningLog()]);
 }
 function closeLearning() { document.getElementById('learn-modal').classList.remove('open'); }
+
+async function loadLearningLog() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/learning-log?limit=100`)).json();
+    const eng = d.engine || {};
+    const engEl = document.getElementById('learn-engine-status');
+    if (engEl) {
+      const col = eng.running ? 'var(--green-s)' : 'var(--red)';
+      engEl.innerHTML = `<span style="color:${col}">● ${eng.running ? 'RUNNING' : 'STOPPED'}</span>  Cycle #${eng.cycle_count||0}  Every ${eng.interval_secs||90}s`;
+    }
+    const logEl = document.getElementById('learn-log-box');
+    if (!logEl) return;
+    const entries = (d.log || []).slice().reverse(); // newest first
+    if (!entries.length) {
+      logEl.innerHTML = `<div style="color:var(--muted)">No log entries yet — engine starts on first scan.</div>`;
+      return;
+    }
+    logEl.innerHTML = entries.map(e => {
+      const col = e.level==='ERROR' ? 'var(--red)' : e.level==='WARN' ? 'var(--yellow)' : e.level==='DEBUG' ? 'var(--muted)' : 'var(--text)';
+      const ts = e.ts ? new Date(e.ts).toLocaleTimeString() : '';
+      return `<div style="color:${col};margin-bottom:1px"><span style="color:#475569;margin-right:6px">${ts}</span>${e.message}</div>`;
+    }).join('');
+  } catch(e) {
+    const logEl = document.getElementById('learn-log-box');
+    if (logEl) logEl.innerHTML = `<div style="color:var(--muted)">No learning data yet.</div>`;
+  }
+}
 
 async function loadLearningStatus() {
   try {
@@ -2068,6 +2109,7 @@ function renderLearningStatus(d) {
     : `<span style="color:var(--muted)">● Needs ${8 - total} more trades</span>`;
 
   // KPI cards
+  const eng = d.engine || {};
   const kpis = [
     { label:'Confidence Gate', value: thresh.toFixed(1) + '%', color:'var(--blue)' },
     { label:'Win Rate', value: wr.toFixed(1) + '%', color: col },
@@ -2075,6 +2117,8 @@ function renderLearningStatus(d) {
     { label:'Signals Suppressed', value: suppressed, color:'var(--yellow)' },
     { label:'Blocked Contexts', value: Object.keys(d.blocked_contexts||{}).length, color:'var(--red)' },
     { label:'Boosted Contexts', value: Object.keys(d.boosted_contexts||{}).length, color:'var(--green)' },
+    { label:'Engine Cycle', value: eng.cycle_count != null ? `#${eng.cycle_count}` : '—', color: eng.running ? 'var(--green-s)' : 'var(--muted)' },
+    { label:'Learn Interval', value: eng.interval_secs ? `${eng.interval_secs}s` : '—', color:'var(--muted)' },
     { label:'Last Updated', value: d.last_updated ? new Date(d.last_updated).toLocaleTimeString() : '—', color:'var(--muted)' },
   ];
   document.getElementById('learn-kpis').innerHTML = kpis.map(k =>

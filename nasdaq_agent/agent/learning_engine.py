@@ -1,0 +1,297 @@
+"""
+Continuous background learning engine.
+
+Runs as a single daemon thread 24/7 — completely independent of the scan loop.
+Every LEARN_INTERVAL_SECS it:
+
+  1. Reads latest resolved outcomes from live_backtest and closed paper trades
+  2. Builds combined context-breakdown stats (session, regime, vwap_event …)
+  3. Pushes fresh stats into the adaptive filter
+  4. Optionally triggers ML model feedback retrain when enough new outcomes exist
+
+Works during all sessions including AFTER_HOURS and PRE_MARKET — the learning
+never stops just because the market is closed.
+
+Log strategy
+------------
+Routine per-cycle messages go to a rotating in-memory ring buffer (last 200 lines)
+exposed via get_learning_log() for the /api/learning-log endpoint.
+Only significant events (new blocked context, threshold shift ≥ 3 pts, retrain
+triggered) emit a single INFO line to the root logger so the console stays clean.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from collections import deque
+from datetime import datetime, timezone
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# ── Tunable parameters ────────────────────────────────────────────────────────
+LEARN_INTERVAL_SECS   = 90      # how often to run a learning cycle (1.5 min)
+RETRAIN_MIN_NEW       = 15      # new outcomes needed to trigger ML retrain
+RETRAIN_COOLDOWN_SECS = 600     # don't retrain more often than every 10 min
+
+# ── In-memory ring buffer for dashboard log ───────────────────────────────────
+_LOG_BUFFER: deque[dict] = deque(maxlen=200)
+_buf_lock   = threading.Lock()
+
+
+def _log(msg: str, level: str = "INFO", significant: bool = False) -> None:
+    """Append to ring buffer; only emit to console if significant."""
+    entry = {
+        "ts":      datetime.now(timezone.utc).isoformat(),
+        "level":   level,
+        "message": msg,
+    }
+    with _buf_lock:
+        _LOG_BUFFER.append(entry)
+    if significant:
+        logger.info(f"[Learning] {msg}")
+
+
+def get_learning_log(limit: int = 100) -> list[dict]:
+    """Return the last `limit` log entries for the dashboard API."""
+    with _buf_lock:
+        entries = list(_LOG_BUFFER)
+    return entries[-limit:]
+
+
+# ── Learning engine ───────────────────────────────────────────────────────────
+
+class LearningEngine:
+    """
+    Singleton background learning thread.
+
+    Usage:
+        engine = LearningEngine()
+        engine.start()          # call once at app startup
+        engine.stop()           # call on shutdown
+        engine.get_status()     # returns current state for API
+    """
+
+    def __init__(self):
+        self._thread:         Optional[threading.Thread] = None
+        self._running:        bool  = False
+        self._cycle_count:    int   = 0
+        self._last_retrain_t: float = 0.0
+        self._last_bt_count:  int   = 0
+        self._last_pt_count:  int   = 0
+        self._last_cycle_ts:  Optional[str] = None
+        self._last_win_rate:  float = 0.0
+        self._last_threshold: float = 65.0
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread  = threading.Thread(
+            target=self._loop, name="LearningEngine", daemon=True
+        )
+        self._thread.start()
+        _log("Learning engine started — running every "
+             f"{LEARN_INTERVAL_SECS}s, 24/7 including after-hours", significant=True)
+
+    def stop(self) -> None:
+        self._running = False
+
+    def get_status(self) -> dict:
+        return {
+            "running":        self._running,
+            "cycle_count":    self._cycle_count,
+            "last_cycle":     self._last_cycle_ts,
+            "last_win_rate":  round(self._last_win_rate, 1),
+            "last_threshold": round(self._last_threshold, 1),
+            "interval_secs":  LEARN_INTERVAL_SECS,
+        }
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
+
+    def _loop(self) -> None:
+        while self._running:
+            try:
+                self._run_cycle()
+            except Exception as e:
+                _log(f"Cycle error: {e}", level="ERROR")
+            time.sleep(LEARN_INTERVAL_SECS)
+
+    def _run_cycle(self) -> None:
+        self._cycle_count += 1
+        ts = datetime.now(timezone.utc).isoformat()
+        _log(f"Cycle #{self._cycle_count} starting…", level="DEBUG")
+
+        # ── 1. Fetch latest resolved stats from live backtest ─────────────────
+        bt_stats, bt_count = self._get_bt_stats()
+
+        # ── 2. Fetch latest paper trade stats ────────────────────────────────
+        pt_stats, pt_count = self._get_pt_stats()
+
+        # ── 3. Merge both stat sources ────────────────────────────────────────
+        merged = self._merge_stats(bt_stats, pt_stats)
+        if merged["overall"]["total"] < 3:
+            _log(f"Cycle #{self._cycle_count}: only {merged['overall']['total']} "
+                 "resolved — waiting for more data", level="DEBUG")
+            self._last_cycle_ts = ts
+            return
+
+        # ── 4. Push merged stats into adaptive filter ─────────────────────────
+        from agent.adaptive_filter import update_filter, get_status as af_status
+        prev_threshold = self._last_threshold
+        update_filter(merged)
+
+        status = af_status()
+        new_wr        = float(status.get("current_win_rate", 0.0))
+        new_threshold = float(status.get("dynamic_threshold", 65.0))
+        blocked_n     = len(status.get("blocked_contexts", {}))
+        boosted_n     = len(status.get("boosted_contexts", {}))
+
+        # Log summary to ring buffer (always)
+        _log(
+            f"Cycle #{self._cycle_count} — WR:{new_wr:.1f}%  "
+            f"gate:{new_threshold:.1f}%  blocked:{blocked_n}  boosted:{boosted_n}  "
+            f"bt:{bt_count} pt:{pt_count} total:{merged['overall']['total']}"
+        )
+
+        # Only surface significant changes to console
+        if abs(new_threshold - prev_threshold) >= 3.0:
+            _log(
+                f"Threshold shifted {prev_threshold:.1f}% → {new_threshold:.1f}%  "
+                f"(WR {new_wr:.1f}%)", significant=True
+            )
+        if blocked_n > len(status.get("blocked_contexts", {})):
+            _log(f"New context blocked — {blocked_n} total suppressed contexts",
+                 significant=True)
+
+        self._last_win_rate  = new_wr
+        self._last_threshold = new_threshold
+        self._last_cycle_ts  = ts
+
+        # ── 5. Maybe trigger ML model retrain (heavier operation) ────────────
+        new_bt_outcomes = bt_count - self._last_bt_count
+        new_pt_outcomes = pt_count - self._last_pt_count
+        total_new       = new_bt_outcomes + new_pt_outcomes
+        cooldown_ok     = (time.time() - self._last_retrain_t) > RETRAIN_COOLDOWN_SECS
+
+        if total_new >= RETRAIN_MIN_NEW and cooldown_ok:
+            self._last_bt_count   = bt_count
+            self._last_pt_count   = pt_count
+            self._last_retrain_t  = time.time()
+            self._trigger_retrain(merged)
+        else:
+            # Update counts even when not retraining (avoid stale baseline)
+            self._last_bt_count = max(self._last_bt_count, bt_count)
+            self._last_pt_count = max(self._last_pt_count, pt_count)
+
+    # ── Data fetchers ─────────────────────────────────────────────────────────
+
+    def _get_bt_stats(self) -> tuple[dict, int]:
+        """Fetch live backtest resolved stats (last 30 days)."""
+        try:
+            from agent.live_backtest import get_performance_stats
+            stats = get_performance_stats(lookback_days=30)
+            count = stats.get("overall", {}).get("total", 0)
+            return stats, count
+        except Exception as e:
+            _log(f"bt_stats error: {e}", level="WARN")
+            return {}, 0
+
+    def _get_pt_stats(self) -> tuple[dict, int]:
+        """Fetch paper trading closed-trade stats."""
+        try:
+            from agent.paper_trading import _build_paper_stats
+            stats = _build_paper_stats()
+            count = stats.get("overall", {}).get("total", 0)
+            return stats, count
+        except Exception as e:
+            _log(f"pt_stats error: {e}", level="WARN")
+            return {}, 0
+
+    # ── Stat merger ───────────────────────────────────────────────────────────
+
+    def _merge_stats(self, bt: dict, pt: dict) -> dict:
+        """
+        Merge backtest and paper trading stats into a single stats dict.
+        For each breakdown dimension, combines win/total counts before computing
+        the merged win rate — giving us more data points for each context bucket.
+        """
+        if not bt and not pt:
+            return {"overall": {"total": 0, "wins": 0, "win_rate": 0.0}}
+        if not bt:
+            return pt
+        if not pt:
+            return bt
+
+        def _merge_breakdowns(bd_bt: dict, bd_pt: dict) -> dict:
+            merged: dict = {}
+            keys = set(bd_bt) | set(bd_pt)
+            for k in keys:
+                a = bd_bt.get(k, {"total": 0, "wins": 0, "win_rate": 0.0})
+                b = bd_pt.get(k, {"total": 0, "wins": 0, "win_rate": 0.0})
+                total = (a.get("total", 0) or 0) + (b.get("total", 0) or 0)
+                wins  = (a.get("wins",  0) or 0) + (b.get("wins",  0) or 0)
+                merged[k] = {
+                    "total":    total,
+                    "wins":     wins,
+                    "win_rate": round(wins / total, 4) if total else 0.0,
+                }
+            return merged
+
+        # Merge overall
+        bt_o   = bt.get("overall", {})
+        pt_o   = pt.get("overall", {})
+        tot    = (bt_o.get("total", 0) or 0) + (pt_o.get("total", 0) or 0)
+        wins   = (bt_o.get("wins",  0) or 0) + (pt_o.get("wins",  0) or 0)
+        overall = {
+            "total":    tot,
+            "wins":     wins,
+            "win_rate": round(wins / tot, 4) if tot else 0.0,
+        }
+
+        dims = [
+            "by_vwap_event", "by_session", "by_regime", "by_rsi_zone",
+            "by_entry_type", "by_direction", "by_sector_trend",
+            "by_confidence", "by_ah_bias",
+        ]
+        result = {"overall": overall}
+        for dim in dims:
+            result[dim] = _merge_breakdowns(bt.get(dim, {}), pt.get(dim, {}))
+        return result
+
+    # ── ML retrain ───────────────────────────────────────────────────────────
+
+    def _trigger_retrain(self, stats: dict) -> None:
+        """
+        Background ML model retrain — runs in its own thread so the learning
+        loop isn't blocked. Uses outcome-weighted samples from both backtest
+        and paper trading.
+        """
+        _log(f"ML feedback retrain triggered — "
+             f"{stats['overall']['total']} total outcomes", significant=True)
+
+        def _do_retrain():
+            try:
+                from agent.backtest_reporter import (
+                    _log_attribution, _update_confidence_calibration,
+                )
+                from agent.live_backtest import get_outcomes_for_ml
+                from agent.ml_model import retrain_all
+                from config import NASDAQ_TICKERS
+
+                outcomes_df = get_outcomes_for_ml(min_count=5)
+                if outcomes_df is not None and not outcomes_df.empty:
+                    _log_attribution(outcomes_df)
+                    _update_confidence_calibration(outcomes_df)
+
+                retrain_all(NASDAQ_TICKERS)
+                _log("ML retrain complete", significant=True)
+            except Exception as e:
+                _log(f"ML retrain failed: {e}", level="ERROR", significant=True)
+
+        threading.Thread(target=_do_retrain, name="LearningRetrain", daemon=True).start()
+
+
+# ── Module-level singleton ────────────────────────────────────────────────────
+learning_engine = LearningEngine()
