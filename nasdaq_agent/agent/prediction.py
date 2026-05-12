@@ -52,6 +52,7 @@ _VOL_DRY_FACTOR   = 0.65   # last bar < 65% of avg = sellers drying up
 
 # ── R:R gate ─────────────────────────────────────────────────────────────────
 _MIN_RR           = 2.0    # minimum acceptable reward-to-risk ratio
+_MIN_TARGET_PCT   = 0.003  # target must be at least 0.3% from entry (avoids degenerate targets)
 
 # ── Pattern classification ────────────────────────────────────────────────────
 
@@ -464,23 +465,29 @@ def _evaluate_rr(
     """
     is_bull = direction in ("BUY", "STRONG BUY", "NEUTRAL")
 
+    min_move = price * _MIN_TARGET_PCT   # absolute minimum target distance
+
     if is_bull and resist > 0 and support > 0:
         target = resist
+        # Enforce minimum target distance — if resist is too close, project forward
+        if target - price < min_move:
+            target = price + min_move
         reward = target - price
         if reward <= 0:
             raw_stop = support * 0.995
             rr = _compute_rr(price, target, raw_stop)
         else:
-            # Stop needed for exactly 2:1
             ideal_stop = price - (reward / _MIN_RR)
-            # Don't place stop above support — that exposes us to support breaks
             tight_stop = support * 0.995
-            stop = min(ideal_stop, tight_stop)   # take the tighter (lower) stop
+            stop = min(ideal_stop, tight_stop)
             rr   = _compute_rr(price, target, stop)
         stop = stop if reward > 0 else raw_stop
 
     elif not is_bull and support > 0 and resist > 0:
         target = support
+        # Enforce minimum target distance — if support is too close, project downward
+        if price - target < min_move:
+            target = price - min_move
         reward = price - target
         if reward <= 0:
             raw_stop = resist * 1.005
@@ -495,7 +502,11 @@ def _evaluate_rr(
         # Fallback
         stop   = (support * 0.995) if is_bull else (resist * 1.005)
         target = resist if is_bull else support
-        rr     = _compute_rr(price, target, stop)
+        if is_bull and target - price < min_move:
+            target = price + min_move
+        elif not is_bull and price - target < min_move:
+            target = price - min_move
+        rr = _compute_rr(price, target, stop)
 
     # Quality classification
     if rr >= 4.0:
