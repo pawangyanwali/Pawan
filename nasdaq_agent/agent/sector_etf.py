@@ -116,7 +116,9 @@ def analyse_sector_context(
 
     etf_sym   = SECTOR_MAP.get(ticker, _DEFAULT_SECTOR_ETF)
     ctx.etf   = etf_sym
-    df_etf    = etf_frames.get(etf_sym) or etf_frames.get(_DEFAULT_SECTOR_ETF)
+    df_etf = etf_frames.get(etf_sym)
+    if df_etf is None:
+        df_etf = etf_frames.get(_DEFAULT_SECTOR_ETF)
 
     stock_ret = _intraday_return(df_stock)
     sector_ret = _intraday_return(df_etf)
