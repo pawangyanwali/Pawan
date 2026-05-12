@@ -98,7 +98,7 @@ class StockMLModel:
         if df.empty:
             return 0.5
 
-        row   = df[FEATURE_COLS].iloc[[-1]]
+        row   = df[FEATURE_COLS].iloc[[-1]].values
         row_s = self.scaler.transform(row)
         prob  = float(self.model.predict_proba(row_s)[0][1])
         return round(prob, 4)
@@ -236,7 +236,7 @@ class DailyMLModel:
         if df.empty:
             return 0.5
 
-        row   = df[FEATURE_COLS].iloc[[-1]]
+        row   = df[FEATURE_COLS].iloc[[-1]].values
         row_s = self.scaler.transform(row)
         prob  = float(self.model.predict_proba(row_s)[0][1])
         return round(prob, 4)
@@ -346,7 +346,7 @@ class ReversalMLModel:
             df_feat = df_feat.dropna(subset=REVERSAL_FEATURE_COLS)
             if df_feat.empty:
                 return 0.5
-            row   = df_feat[REVERSAL_FEATURE_COLS].iloc[[-1]]
+            row   = df_feat[REVERSAL_FEATURE_COLS].iloc[[-1]].values
             row_s = self.scaler.transform(row)
             return round(float(self.model.predict_proba(row_s)[0][1]), 4)
         except Exception as e:
