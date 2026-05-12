@@ -196,10 +196,14 @@ class StockSignal:
     scanned_at: str  = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict:
+        import math
         d = asdict(self)
         for k, v in d.items():
             if hasattr(v, "item"):
-                d[k] = v.item()
+                v = v.item()
+                d[k] = v
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                d[k] = None
         d["unusual_vol"] = bool(d["unusual_vol"])
         d["ml_trained"]  = bool(d["ml_trained"])
         return d

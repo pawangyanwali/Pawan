@@ -32,6 +32,29 @@ from config import (
 )
 
 
+import math
+
+
+def _sanitize(obj):
+    """Recursively replace NaN/Inf floats with None so json.dumps never crashes."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if isinstance(obj, np.floating):
+        v = float(obj)
+        return None if (math.isnan(v) or math.isinf(v)) else v
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return [_sanitize(x) for x in obj.tolist()]
+    return obj
+
+
 class _NumpyEncoder(json.JSONEncoder):
     """Converts numpy scalars to native Python types for JSON serialization."""
     def default(self, obj):
@@ -47,7 +70,7 @@ class _NumpyEncoder(json.JSONEncoder):
 
 
 def _dumps(obj) -> str:
-    return json.dumps(obj, cls=_NumpyEncoder)
+    return json.dumps(_sanitize(obj), cls=_NumpyEncoder)
 
 logging.basicConfig(
     level=logging.INFO,
