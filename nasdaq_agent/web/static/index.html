@@ -72,7 +72,8 @@
     .badge-NEUTRAL     { background:rgba(100,116,139,.12);color:var(--neutral); border:1px solid var(--border); }
     .badge-SELL        { background:rgba(239,68,68,.12);  color:var(--red);     border:1px solid var(--red); }
     .badge-STRONG-SELL { background:rgba(255,51,102,.18); color:var(--red-s);   border:1px solid var(--red-s); }
-    .badge-WAIT-RETEST { background:rgba(234,179,8,.15);  color:#facc15;        border:1px solid #ca8a04; }
+    .badge-WAIT-RETEST  { background:rgba(234,179,8,.15);  color:#facc15;        border:1px solid #ca8a04; }
+    .badge-BOUNCE-SETUP { background:rgba(34,197,94,.20);  color:#4ade80;        border:1px solid #16a34a; }
 
     .trend-badge { display:inline-block; padding:2px 6px; border-radius:3px; font-size:9px; font-weight:700; }
     .trend-UPTREND   { background:rgba(34,197,94,.15);  color:var(--green); }
@@ -166,6 +167,19 @@
     .entry-zone-val { font-size:12px; font-weight:700; }
     .exhaust-flag { font-size:10px; color:#fbbf24; padding:3px 0; border-bottom:1px solid rgba(234,179,8,.15); }
     .exhaust-flag:last-child { border-bottom:none; }
+
+    /* Bounce setup panel */
+    .bounce-box { background:rgba(34,197,94,.07); border:1px solid rgba(22,163,74,.4); border-radius:6px; padding:10px 12px; margin-bottom:12px; }
+    .bounce-title { font-size:11px; font-weight:700; color:#4ade80; letter-spacing:.5px; margin-bottom:8px; }
+    .bounce-signal { font-size:10px; color:#86efac; padding:3px 0; border-bottom:1px solid rgba(34,197,94,.15); }
+    .bounce-signal:last-child { border-bottom:none; }
+
+    /* R:R quality badge */
+    .rr-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; font-weight:700; }
+    .rr-EXCELLENT { background:rgba(0,255,136,.2); color:var(--green-s); }
+    .rr-GOOD      { background:rgba(34,197,94,.15); color:var(--green); }
+    .rr-OK        { background:rgba(234,179,8,.15); color:#facc15; }
+    .rr-LOW       { background:rgba(239,68,68,.15); color:var(--red); }
 
     /* Loading */
     .loading-overlay { position:fixed; inset:0; background:var(--bg); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; z-index:999; transition:opacity .5s; }
@@ -466,7 +480,11 @@ function renderTable() {
       <td class="chg-cell ${chgC}">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%</td>
       <td>
         <span class="signal-badge ${sigC}">${s.prediction}</span>
-        ${s.entry_type==='WAIT_RETEST'?`<span class="signal-badge badge-WAIT-RETEST" style="margin-left:3px;font-size:9px" title="Wait for retest of $${fmt(s.retest_level)}">WAIT $${fmt(s.retest_level)}</span>`:''}
+        ${s.entry_type==='WAIT_RETEST'
+          ? `<span class="signal-badge badge-WAIT-RETEST" style="margin-left:3px;font-size:9px" title="Wait for retest of $${fmt(s.retest_level)}">WAIT $${fmt(s.retest_level)}</span>`
+          : s.entry_type==='BOUNCE_SETUP'
+            ? `<span class="signal-badge badge-BOUNCE-SETUP" style="margin-left:3px;font-size:9px">BOUNCE</span>`
+            : ''}
       </td>
       <td>
         <div style="display:flex;align-items:center;gap:5px">
@@ -494,7 +512,10 @@ function renderTable() {
       </td>
       <td style="color:var(--green);font-size:11px">$${fmt(s.target_price)}</td>
       <td style="color:var(--red);font-size:11px">$${fmt(s.stop_loss)}</td>
-      <td style="color:${rrC};font-weight:600">${fmt(s.rr_ratio,1)}:1</td>
+      <td>
+        <span style="color:${rrC};font-weight:600">${fmt(s.rr_ratio,1)}:1</span>
+        <span class="rr-badge rr-${s.rr_quality||'LOW'}" style="display:block;margin-top:1px">${s.rr_quality||'LOW'}</span>
+      </td>
       <td style="font-size:11px;color:${s.ml_trained?(s.ml_prob>=.55?'var(--green)':s.ml_prob<=.45?'var(--red)':'var(--muted)'):'var(--muted)'}">
         ${s.ml_trained ? fmt(s.ml_prob*100,0)+'%' : '<span title="ML model training in background…" style="font-size:10px">Training…</span>'}
       </td>
@@ -527,7 +548,8 @@ function openDetail(ticker) {
   document.getElementById('dp-conf-bar').style.background     = confColor;
   document.getElementById('dp-target').textContent            = `$${fmt(s.target_price)}`;
   document.getElementById('dp-stop').textContent              = `$${fmt(s.stop_loss)}`;
-  document.getElementById('dp-rr').textContent                = `${fmt(s.rr_ratio,1)} : 1`;
+  const rrQual = s.rr_quality || 'LOW';
+  document.getElementById('dp-rr').innerHTML = `${fmt(s.rr_ratio,1)} : 1 <span class="rr-badge rr-${rrQual}">${rrQual}</span>`;
 
   const tb = document.getElementById('dp-trend-badge');
   const trendPct = Math.round((s.trend_probability || 0.5) * 100);
@@ -535,14 +557,17 @@ function openDetail(ticker) {
   tb.className    = `trend-badge trend-${s.trend}`;
   document.getElementById('dp-price-badge').textContent = `$${fmt(s.price,4)} | ${s.change_pct>=0?'+':''}${fmt(s.change_pct)}% today`;
 
-  // Entry zone / exhaustion panel
+  // Entry zone / exhaustion / bounce panel
   const ezEl = document.getElementById('dp-entry-zone');
+  const rrCol = s.rr_ratio >= 3 ? 'var(--green-s)' : s.rr_ratio >= 2 ? 'var(--green)' : s.rr_ratio >= 1 ? 'var(--yellow)' : 'var(--red)';
+  const rrQuality = s.rr_quality || 'LOW';
+
+  let ezHtml = '';
+
   if (s.entry_type === 'WAIT_RETEST' && s.retest_level > 0) {
-    const rrCol = s.rr_ratio >= 2 ? 'var(--green)' : s.rr_ratio >= 1 ? 'var(--yellow)' : 'var(--red)';
-    ezEl.style.display = '';
-    ezEl.innerHTML = `
+    ezHtml += `
       <div class="entry-zone-box">
-        <div class="entry-zone-title">⚠ WAIT FOR RETEST — Do not chase</div>
+        <div class="entry-zone-title">⚠ WAIT FOR RETEST — Do not chase this move</div>
         <div class="entry-zone-grid">
           <div class="entry-zone-item">
             <span class="entry-zone-label">Retest Level</span>
@@ -553,21 +578,63 @@ function openDetail(ticker) {
             <span class="entry-zone-val" style="color:#facc15">$${fmt(s.entry_zone_low)} – $${fmt(s.entry_zone_high)}</span>
           </div>
           <div class="entry-zone-item">
-            <span class="entry-zone-label">Stop (at retest)</span>
+            <span class="entry-zone-label">Stop at Retest</span>
             <span class="entry-zone-val" style="color:var(--red)">$${fmt(s.stop_loss)}</span>
           </div>
           <div class="entry-zone-item">
             <span class="entry-zone-label">R:R at Retest</span>
-            <span class="entry-zone-val" style="color:${rrCol}">${fmt(s.rr_ratio,1)} : 1</span>
+            <span class="entry-zone-val" style="color:${rrCol}">${fmt(s.rr_ratio,1)}:1
+              <span class="rr-badge rr-${rrQuality}">${rrQuality}</span>
+            </span>
           </div>
         </div>
         <div style="margin-top:8px;border-top:1px solid rgba(234,179,8,.2);padding-top:7px">
           ${(s.exhaustion_flags||[]).map(f=>`<div class="exhaust-flag">⚡ ${f}</div>`).join('')}
         </div>
       </div>`;
-  } else {
-    ezEl.style.display = 'none';
   }
+
+  if (s.entry_type === 'BOUNCE_SETUP' && (s.bounce_signals||[]).length > 0) {
+    ezHtml += `
+      <div class="bounce-box">
+        <div class="bounce-title">🟢 BOUNCE SETUP — Oversold at support, high-probability entry</div>
+        <div class="entry-zone-grid" style="margin-bottom:8px">
+          <div class="entry-zone-item">
+            <span class="entry-zone-label">Entry Now</span>
+            <span class="entry-zone-val" style="color:#4ade80">$${fmt(s.price)}</span>
+          </div>
+          <div class="entry-zone-item">
+            <span class="entry-zone-label">Target</span>
+            <span class="entry-zone-val" style="color:var(--green)">$${fmt(s.target_price)}</span>
+          </div>
+          <div class="entry-zone-item">
+            <span class="entry-zone-label">Stop Loss</span>
+            <span class="entry-zone-val" style="color:var(--red)">$${fmt(s.stop_loss)}</span>
+          </div>
+          <div class="entry-zone-item">
+            <span class="entry-zone-label">R:R Ratio</span>
+            <span class="entry-zone-val" style="color:${rrCol}">${fmt(s.rr_ratio,1)}:1
+              <span class="rr-badge rr-${rrQuality}">${rrQuality}</span>
+            </span>
+          </div>
+        </div>
+        <div style="border-top:1px solid rgba(34,197,94,.2);padding-top:7px">
+          ${(s.bounce_signals||[]).map(f=>`<div class="bounce-signal">✓ ${f}</div>`).join('')}
+        </div>
+        ${!s.rr_qualifies ? `<div style="margin-top:6px;font-size:10px;color:var(--red)">⚠ R:R ${fmt(s.rr_ratio,1)}:1 is below 2:1 minimum — consider skipping or tightening stop</div>` : ''}
+      </div>`;
+  }
+
+  // Always show R:R quality even for IMMEDIATE signals
+  if (!ezHtml) {
+    const rrTxt = s.rr_qualifies
+      ? `<span style="color:var(--green);font-size:11px">✓ R:R ${fmt(s.rr_ratio,1)}:1 qualifies <span class="rr-badge rr-${rrQuality}">${rrQuality}</span></span>`
+      : `<span style="color:var(--red);font-size:11px">✗ R:R ${fmt(s.rr_ratio,1)}:1 below 2:1 minimum — skip or wait <span class="rr-badge rr-${rrQuality}">${rrQuality}</span></span>`;
+    ezHtml = `<div style="padding:6px 0">${rrTxt}</div>`;
+  }
+
+  ezEl.style.display = '';
+  ezEl.innerHTML = ezHtml;
 
   // Reasons
   const rEl = document.getElementById('dp-reasons');
@@ -752,6 +819,11 @@ function renderChart(s) {
     candleSeries.createPriceLine({ price:s.retest_level,    color:'rgba(250,204,21,0.9)', lineWidth:2, lineStyle:LightweightCharts.LineStyle.Solid,  axisLabelVisible:true, title:'RETEST' });
     candleSeries.createPriceLine({ price:s.entry_zone_high, color:'rgba(250,204,21,0.5)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dashed, axisLabelVisible:true, title:'ENTRY HI' });
     candleSeries.createPriceLine({ price:s.entry_zone_low,  color:'rgba(250,204,21,0.5)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dashed, axisLabelVisible:true, title:'ENTRY LO' });
+  }
+
+  // Bounce entry line (shown when BOUNCE_SETUP)
+  if (s.entry_type === 'BOUNCE_SETUP') {
+    candleSeries.createPriceLine({ price:s.price, color:'rgba(74,222,128,0.9)', lineWidth:2, lineStyle:LightweightCharts.LineStyle.Solid, axisLabelVisible:true, title:'BOUNCE ENTRY' });
   }
 
   // Target & Stop lines

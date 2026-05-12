@@ -36,6 +36,16 @@ _VOL_CLIMAX_MULT = 2.5     # last bar vol > 2.5× 20-bar avg = climax
 _RSI_OB          = 70      # RSI overbought (bull exhaustion)
 _RSI_OS          = 30      # RSI oversold   (bear exhaustion)
 
+# ── Bounce / oversold entry thresholds ───────────────────────────────────────
+_BOUNCE_RSI_DEEP  = 30     # deeply oversold → very high probability bounce
+_BOUNCE_RSI_ZONE  = 42     # oversold zone   → watch for bounce
+_BOUNCE_BB_LOW    = 0.15   # near lower Bollinger Band
+_BOUNCE_SUP_PCT   = 0.006  # within 0.6% of key support = "at support"
+_VOL_DRY_FACTOR   = 0.65   # last bar < 65% of avg = sellers drying up
+
+# ── R:R gate ─────────────────────────────────────────────────────────────────
+_MIN_RR           = 2.0    # minimum acceptable reward-to-risk ratio
+
 # ── Pattern classification ────────────────────────────────────────────────────
 
 _BULLISH_PATTERNS = {"Hammer", "Bullish Engulfing", "Bullish Pin Bar", "Morning Star"}
@@ -67,6 +77,9 @@ def _empty_prediction() -> dict:
         "entry_zone_low":   0.0,
         "entry_zone_high":  0.0,
         "exhaustion_flags": [],
+        "bounce_signals":   [],
+        "rr_quality":       "LOW",   # LOW | OK | GOOD | EXCELLENT
+        "rr_qualifies":     False,
     }
 
 
@@ -228,6 +241,146 @@ def _compute_confidence(
     confidence = (votes / total * 100) if total > 0 else 50.0
     # NEUTRAL cap + absolute bounds
     return round(float(np.clip(confidence, 25.0, 95.0)), 1)
+
+
+def _detect_bounce_setup(
+    price:    float,
+    support:  float,
+    resist:   float,
+    df:       pd.DataFrame,
+    last_row: pd.Series,
+) -> dict:
+    """
+    Identify high-probability oversold bounce setups at key support.
+
+    A bounce setup (the IDEAL entry) fires when the stock has been beaten
+    down, sellers are exhausted, and price is sitting on structural support.
+    Requires ≥ 2 of the 5 signals below.
+
+    Returns a dict with 'detected' bool and 'bounce_signals' list.
+    """
+    signals: list[str] = []
+
+    # ── 1. RSI oversold ───────────────────────────────────────────────────────
+    rsi = _safe_float(last_row, "rsi_14")
+    if rsi is not None:
+        if rsi <= _BOUNCE_RSI_DEEP:
+            signals.append(f"RSI {rsi:.1f} — deeply oversold, mean-reversion edge very high")
+        elif rsi <= _BOUNCE_RSI_ZONE:
+            signals.append(f"RSI {rsi:.1f} — oversold zone, snap-back probability elevated")
+
+    # ── 2. Lower Bollinger Band ────────────────────────────────────────────────
+    bb_pct = _safe_float(last_row, "bb_pct")
+    if bb_pct is not None and bb_pct <= _BOUNCE_BB_LOW:
+        signals.append(
+            f"Price at lower Bollinger Band ({bb_pct*100:.0f}%) — statistically stretched to downside"
+        )
+
+    # ── 3. Price at key support ────────────────────────────────────────────────
+    if support > 0:
+        pct_from_support = (price - support) / support
+        if 0 <= pct_from_support <= _BOUNCE_SUP_PCT:
+            signals.append(
+                f"Price ${price:.2f} sitting on key support ${support:.2f} "
+                f"({pct_from_support*100:.2f}% away) — structural bounce zone"
+            )
+
+    # ── 4. Volume dry-up (sellers exhausted) ──────────────────────────────────
+    try:
+        last_vol = float(df["Volume"].iloc[-1])
+        avg_vol  = float(df["Volume"].iloc[-20:-1].mean())
+        if avg_vol > 0 and last_vol < avg_vol * _VOL_DRY_FACTOR:
+            signals.append(
+                f"Volume dry-up ({last_vol/avg_vol:.2f}× avg) — selling pressure exhausted, "
+                "buyers stepping in quietly"
+            )
+    except Exception:
+        pass
+
+    # ── 5. MACD histogram improving (bearish momentum fading) ─────────────────
+    try:
+        hist_col = "macd_hist"
+        if hist_col in df.columns and len(df) >= 3:
+            h_now  = float(df[hist_col].iloc[-1])
+            h_prev = float(df[hist_col].iloc[-2])
+            if h_now < 0 and h_now > h_prev:   # still negative but improving
+                signals.append(
+                    f"MACD histogram turning ({h_prev:.4f} → {h_now:.4f}) — "
+                    "bearish momentum fading, reversal building"
+                )
+    except Exception:
+        pass
+
+    return {
+        "detected":       len(signals) >= 2,
+        "bounce_signals": signals,
+    }
+
+
+def _evaluate_rr(
+    price:     float,
+    support:   float,
+    resist:    float,
+    direction: str,
+) -> tuple[float, float, float, str, bool]:
+    """
+    Calculate and optimise stop/target to aim for ≥ 2:1 R:R.
+
+    Strategy:
+      1. Fix the target at nearest S/R on the reward side.
+      2. Calculate what stop is needed for exactly 2:1.
+      3. If that optimal stop is outside the key S/R level (would be too
+         loose), tighten to just-below support (0.5 % buffer).
+      4. Re-evaluate actual R:R and classify quality.
+
+    Returns (stop_loss, target, rr_ratio, rr_quality, rr_qualifies)
+    """
+    is_bull = direction in ("BUY", "STRONG BUY", "NEUTRAL")
+
+    if is_bull and resist > 0 and support > 0:
+        target = resist
+        reward = target - price
+        if reward <= 0:
+            raw_stop = support * 0.995
+            rr = _compute_rr(price, target, raw_stop)
+        else:
+            # Stop needed for exactly 2:1
+            ideal_stop = price - (reward / _MIN_RR)
+            # Don't place stop above support — that exposes us to support breaks
+            tight_stop = support * 0.995
+            stop = min(ideal_stop, tight_stop)   # take the tighter (lower) stop
+            rr   = _compute_rr(price, target, stop)
+        stop = stop if reward > 0 else raw_stop
+
+    elif not is_bull and support > 0 and resist > 0:
+        target = support
+        reward = price - target
+        if reward <= 0:
+            raw_stop = resist * 1.005
+            rr = _compute_rr(price, target, raw_stop)
+            stop = raw_stop
+        else:
+            ideal_stop = price + (reward / _MIN_RR)
+            tight_stop = resist * 1.005
+            stop = max(ideal_stop, tight_stop)
+            rr   = _compute_rr(price, target, stop)
+    else:
+        # Fallback
+        stop   = (support * 0.995) if is_bull else (resist * 1.005)
+        target = resist if is_bull else support
+        rr     = _compute_rr(price, target, stop)
+
+    # Quality classification
+    if rr >= 4.0:
+        quality = "EXCELLENT"
+    elif rr >= 3.0:
+        quality = "GOOD"
+    elif rr >= _MIN_RR:
+        quality = "OK"
+    else:
+        quality = "LOW"
+
+    return round(stop, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR
 
 
 def _detect_exhaustion(
@@ -477,29 +630,35 @@ def generate_prediction(
         mtf_score_f,
     )
 
-    # ── 7. Targets and stop-loss ──────────────────────────────────────────────
-    is_bullish = composite >= 0
-    if is_bullish:
-        target    = round(resistance, 4)
-        stop_loss = round(support * 0.998, 4)
-    else:
-        target    = round(support, 4)
-        stop_loss = round(resistance * 1.002, 4)
-
-    rr_ratio = _compute_rr(price, target, stop_loss)
+    # ── 7. Optimised stops, targets and R:R ──────────────────────────────────
+    stop_loss, target, rr_ratio, rr_quality, rr_qualifies = _evaluate_rr(
+        price, support, resistance, direction
+    )
 
     # ── 7b. Exhaustion / retest check ─────────────────────────────────────────
     exhaustion = _detect_exhaustion(
         price, support, resistance, df, last_row, direction
     )
-    # When waiting for retest, use retest-based R:R (better entry = better R:R)
     if exhaustion["entry_type"] == "WAIT_RETEST":
-        if exhaustion["adjusted_rr"] > 0:
-            rr_ratio  = exhaustion["adjusted_rr"]
-        if exhaustion["adjusted_stop"] > 0:
-            stop_loss = exhaustion["adjusted_stop"]
-        if exhaustion["adjusted_target"] > 0:
-            target = exhaustion["adjusted_target"]
+        # Recalculate R:R from the retest entry level (always better)
+        retest_entry = exhaustion["entry_zone_high"]
+        if retest_entry > 0:
+            adj_stop, adj_target, adj_rr, rr_quality, rr_qualifies = _evaluate_rr(
+                retest_entry, support, resistance, direction
+            )
+            if adj_rr > 0:
+                rr_ratio  = adj_rr
+                stop_loss = exhaustion["adjusted_stop"] or adj_stop
+                target    = exhaustion["adjusted_target"] or adj_target
+
+    # ── 7c. Bounce setup check ────────────────────────────────────────────────
+    bounce = _detect_bounce_setup(price, support, resistance, df, last_row)
+
+    # Promote entry_type to BOUNCE_SETUP when at support and oversold,
+    # but only if R:R qualifies — a bounce at support with bad R:R is still a bad trade
+    entry_type = exhaustion["entry_type"]   # default: IMMEDIATE or WAIT_RETEST
+    if bounce["detected"] and entry_type == "IMMEDIATE":
+        entry_type = "BOUNCE_SETUP"
 
     # ── 8. Trend reason ───────────────────────────────────────────────────────
     trend_reasons: list[str] = []
@@ -519,8 +678,20 @@ def generate_prediction(
     vol_reasons  = _build_volume_reasons(last_row)
     ml_reasons   = _build_ml_reasons(float(ml_prob), ml_trained)
 
+    # R:R quality reason — always shown so trader knows if setup is worth taking
+    if rr_qualifies:
+        rr_reason = f"R:R {rr_ratio:.1f}:1 ({rr_quality}) — risk/reward qualifies ≥ 2:1 threshold"
+    else:
+        rr_reason = (
+            f"R:R {rr_ratio:.1f}:1 — below 2:1 minimum. "
+            f"Target ${target:.2f} too close or stop ${stop_loss:.2f} too wide. "
+            "Consider skipping or waiting for better entry."
+        )
+
     all_reasons = (
-        exhaustion["exhaustion_flags"] +   # exhaustion warnings shown first
+        exhaustion["exhaustion_flags"] +   # exhaustion / overextension first
+        bounce["bounce_signals"]       +   # then bounce signals
+        [rr_reason]                    +   # R:R quality always visible
         trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
     )
 
@@ -548,9 +719,12 @@ def generate_prediction(
         "resistances":       sr.get("resistances", []),
         "pivots":            sr.get("pivots", {}),
         "poc":               sr.get("poc", 0.0),
-        "entry_type":        exhaustion["entry_type"],
+        "entry_type":        entry_type,
         "retest_level":      exhaustion["retest_level"],
         "entry_zone_low":    exhaustion["entry_zone_low"],
         "entry_zone_high":   exhaustion["entry_zone_high"],
         "exhaustion_flags":  exhaustion["exhaustion_flags"],
+        "bounce_signals":    bounce["bounce_signals"],
+        "rr_quality":        rr_quality,
+        "rr_qualifies":      rr_qualifies,
     }
