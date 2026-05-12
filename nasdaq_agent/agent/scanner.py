@@ -56,6 +56,9 @@ from agent.live_backtest import (
     update_tracking as bt_update,
 )
 from agent.backtest_reporter import maybe_trigger_feedback_retrain, adjust_confidence
+from agent.adaptive_filter import (
+    should_suppress, get_confidence_boost, increment_suppressed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +345,37 @@ def analyse_ticker(
             entry_type  = pred.get("entry_type", ""),
             direction   = pred["direction"],
         )
+
+        # Apply adaptive boost for high-win-rate contexts
+        boost = get_confidence_boost(
+            vwap_event = vwap_sig["event"],
+            session    = sess_info.get("session", ""),
+            regime     = regime.regime,
+            rsi_zone   = pred.get("rsi_zone", ""),
+            entry_type = pred.get("entry_type", ""),
+            direction  = pred["direction"],
+        )
+        if boost:
+            pred["confidence"] = round(
+                float(min(max(pred["confidence"] + boost, 25.0), 95.0)), 1
+            )
+
+        # Adaptive filter — suppress signals matching learned losing patterns
+        if pred["direction"] in ("BUY", "SELL"):
+            suppress, suppress_reason = should_suppress(
+                vwap_event   = vwap_sig["event"],
+                session      = sess_info.get("session", ""),
+                regime       = regime.regime,
+                rsi_zone     = pred.get("rsi_zone", ""),
+                entry_type   = pred.get("entry_type", ""),
+                direction    = pred["direction"],
+                sector_trend = sector_ctx.sector_trend,
+                confidence   = pred["confidence"],
+            )
+            if suppress:
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"]   = [f"⚡ {suppress_reason}"] + pred.get("reasons", [])
+                increment_suppressed()
 
         # Record signal in tracker + open paper trade (BUY/SELL only)
         if pred["direction"] in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:

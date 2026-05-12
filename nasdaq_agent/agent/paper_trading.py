@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
-_MIN_CONFIDENCE = 0.0   # track all signals — paper trading measures accuracy, not filters it
+_FALLBACK_MIN_CONFIDENCE = 65.0   # used before adaptive filter has enough data
 
 
 def _conn() -> sqlite3.Connection:
@@ -71,6 +71,15 @@ def init_db() -> None:
         c.commit()
 
 
+def _get_min_confidence() -> float:
+    """Return the dynamic confidence gate from the adaptive filter."""
+    try:
+        from agent.adaptive_filter import get_status as _af_status
+        return float(_af_status().get("dynamic_threshold", _FALLBACK_MIN_CONFIDENCE))
+    except Exception:
+        return _FALLBACK_MIN_CONFIDENCE
+
+
 def maybe_open_trade(
     ticker:       str,
     direction:    str,
@@ -81,8 +90,18 @@ def maybe_open_trade(
     rr_qualifies: bool  = False,
     rr_ratio:     float = 0.0,
 ) -> Optional[int]:
-    """Open a paper trade for every BUY/SELL signal. Returns trade id or None."""
+    """
+    Open a paper trade when signal passes the adaptive confidence gate AND R:R qualifies.
+    The gate starts at 65% and tightens automatically until 90% win rate is reached.
+    Returns trade id or None.
+    """
     if direction not in ("BUY", "SELL"):
+        return None
+
+    min_conf = _get_min_confidence()
+    if confidence < min_conf:
+        return None
+    if not rr_qualifies:
         return None
 
     # Don't open if one already open for this ticker

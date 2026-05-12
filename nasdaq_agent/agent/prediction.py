@@ -837,6 +837,16 @@ def generate_prediction(
                 direction  = _label_direction(composite)
 
     # ── 8. Trend reason ───────────────────────────────────────────────────────
+    # Apply R:R quality adjustment to confidence — aligns confidence with trade geometry
+    _rr_adj = {
+        "EXCELLENT": +8.0,   # ≥4:1 R:R — rare, high reward
+        "GOOD":      +4.0,   # ≥3:1 R:R — solid setup
+        "OK":         0.0,   # ≥2:1 R:R — minimum acceptable, no change
+        "LOW":       -15.0,  # <2:1 R:R — mathematically penalised
+    }.get(rr_quality, 0.0)
+    if _rr_adj != 0.0:
+        confidence = round(float(np.clip(confidence + _rr_adj, 25.0, 95.0)), 1)
+
     trend_reasons: list[str] = []
     if trend == "UPTREND":
         trend_reasons.append(

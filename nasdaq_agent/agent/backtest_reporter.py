@@ -120,14 +120,20 @@ def _run_feedback_retrain(outcomes_df: pd.DataFrame, tickers: list) -> None:
     """
     try:
         from agent.ml_model import retrain_all
+        from agent.adaptive_filter import update_filter as _af_update
+        from agent.live_backtest import get_performance_stats
 
         logger.info("[BT Feedback] Starting feedback-weighted retrain…")
         _log_attribution(outcomes_df)
 
-        # Retrain — the ML models use historical OHLCV labels internally.
-        # The feedback loop here adjusts confidence calibration thresholds.
+        # 1. Update confidence calibration table (±15% per context)
         _update_confidence_calibration(outcomes_df)
 
+        # 2. Update adaptive filter — suppresses losing patterns, raises threshold
+        stats = get_performance_stats(lookback_days=30)
+        _af_update(stats)
+
+        # 3. Retrain ML models with outcome-weighted samples
         retrain_all(tickers)
         logger.info("[BT Feedback] Feedback retrain complete.")
 

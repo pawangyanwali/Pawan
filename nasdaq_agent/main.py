@@ -26,6 +26,7 @@ from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_
 from agent.macro_calendar import check_macro_event, get_upcoming_events
 from agent.live_backtest import get_performance_stats, get_tracking_signals, get_recent_resolved, get_price_path
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
+from agent.adaptive_filter import get_status as af_get_status
 from config import (
     DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT,
     load_watchlist, save_watchlist, NASDAQ_TICKERS,
@@ -316,6 +317,12 @@ async def backtest_recent(limit: int = 50):
 async def backtest_path(signal_id: str):
     """Price path bars for a specific signal (for replay/chart)."""
     return {"signal_id": signal_id, "path": get_price_path(signal_id)}
+
+
+@app.get("/api/learning-status")
+async def learning_status():
+    """Adaptive filter state — blocked contexts, dynamic threshold, win rate progress."""
+    return af_get_status()
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
