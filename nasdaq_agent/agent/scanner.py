@@ -414,6 +414,11 @@ def analyse_ticker(
                 confidence   = pred["confidence"],
                 rr_qualifies = bool(pred.get("rr_qualifies", False)),
                 rr_ratio     = float(pred.get("rr_ratio", 0.0)),
+                session      = sess_info.get("session", ""),
+                regime       = regime.regime,
+                vwap_event   = vwap_sig["event"],
+                rsi_zone     = pred.get("rsi_zone", ""),
+                entry_type   = pred.get("entry_type", "IMMEDIATE"),
             )
 
         # Update open paper trades + live backtest tracking

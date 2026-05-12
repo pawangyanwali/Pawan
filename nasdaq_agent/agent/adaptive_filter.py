@@ -95,6 +95,21 @@ def update_filter(stats: dict) -> None:
     Called after each backtest feedback retrain with fresh performance stats.
     Updates blocked/boosted context lists and the dynamic confidence threshold.
     """
+    _apply_stats(stats, source="backtest")
+
+
+def update_from_paper_trades(stats: dict) -> None:
+    """
+    Called immediately after each paper trade closes.
+    Merges paper trading outcomes into the filter — complementing backtest data
+    with real simulated P&L so the system learns continuously, not just every
+    20 backtest resolutions.
+    """
+    _apply_stats(stats, source="paper")
+
+
+def _apply_stats(stats: dict, source: str = "backtest") -> None:
+    """Shared logic for update_filter and update_from_paper_trades."""
     overall = stats.get("overall", {})
     total   = overall.get("total", 0)
     if total < MIN_SAMPLE:
@@ -150,7 +165,7 @@ def update_filter(stats: dict) -> None:
     _save()
 
     logger.info(
-        f"[AdaptiveFilter] Updated — win_rate={current_wr*100:.1f}%  "
+        f"[AdaptiveFilter:{source}] Updated — win_rate={current_wr*100:.1f}%  "
         f"threshold={new_threshold:.1f}%  "
         f"blocked={len(new_blocked)}  boosted={len(new_boosted)}  "
         f"total={total}"

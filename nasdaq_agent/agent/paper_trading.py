@@ -4,14 +4,13 @@ live signal data, stored in SQLite.
 
 How it works
 ------------
-1. When a BUY/SELL signal fires with confidence ≥ threshold AND R:R qualifies,
-   a paper trade is opened at the current price.
+1. When a BUY/SELL signal fires with confidence ≥ adaptive threshold AND R:R qualifies,
+   a paper trade is opened with full context (session, regime, vwap_event, etc.).
 2. Each scan cycle, open paper trades are updated: exit signals are checked,
    P&L is computed, and trades are closed when conditions are met.
-3. A summary of all paper trades is available via get_summary().
-
-Paper trades are separate from signal_tracker.py (which only tracks signal
-accuracy, not simulated trades with dynamic exits).
+3. When a trade closes, its outcome is immediately fed back to the adaptive filter
+   so the system learns in real-time — not just from backtest outcomes.
+4. A summary of all paper trades is available via get_summary().
 """
 from __future__ import annotations
 import logging
@@ -54,16 +53,28 @@ def init_db() -> None:
                 rr_ratio     REAL    DEFAULT 0,
                 rr_qualifies INTEGER DEFAULT 0,
                 bars_held    INTEGER DEFAULT 0,
-                status       TEXT    DEFAULT 'OPEN',   -- OPEN | CLOSED
+                status       TEXT    DEFAULT 'OPEN',
                 exit_price   REAL,
                 exit_reason  TEXT,
                 pnl_pct      REAL,
-                pnl_dollar   REAL
+                pnl_dollar   REAL,
+                session      TEXT    DEFAULT '',
+                regime       TEXT    DEFAULT '',
+                vwap_event   TEXT    DEFAULT '',
+                rsi_zone     TEXT    DEFAULT '',
+                entry_type   TEXT    DEFAULT ''
             )
         """)
-        # Add columns to existing DBs (safe — ALTER TABLE IF NOT EXISTS column)
-        for col, definition in [("rr_ratio", "REAL DEFAULT 0"),
-                                 ("rr_qualifies", "INTEGER DEFAULT 0")]:
+        # Safe migration: add any missing columns to existing DBs
+        for col, definition in [
+            ("rr_ratio",    "REAL DEFAULT 0"),
+            ("rr_qualifies","INTEGER DEFAULT 0"),
+            ("session",     "TEXT DEFAULT ''"),
+            ("regime",      "TEXT DEFAULT ''"),
+            ("vwap_event",  "TEXT DEFAULT ''"),
+            ("rsi_zone",    "TEXT DEFAULT ''"),
+            ("entry_type",  "TEXT DEFAULT ''"),
+        ]:
             try:
                 c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
             except Exception:
@@ -89,10 +100,15 @@ def maybe_open_trade(
     confidence:   float,
     rr_qualifies: bool  = False,
     rr_ratio:     float = 0.0,
+    session:      str   = "",
+    regime:       str   = "",
+    vwap_event:   str   = "",
+    rsi_zone:     str   = "",
+    entry_type:   str   = "",
 ) -> Optional[int]:
     """
     Open a paper trade when signal passes the adaptive confidence gate AND R:R qualifies.
-    The gate starts at 65% and tightens automatically until 90% win rate is reached.
+    Full context (session, regime, etc.) is stored so losses can be attributed and learned from.
     Returns trade id or None.
     """
     if direction not in ("BUY", "SELL"):
@@ -104,7 +120,6 @@ def maybe_open_trade(
     if not rr_qualifies:
         return None
 
-    # Don't open if one already open for this ticker
     with _lock:
         with _conn() as c:
             existing = c.execute(
@@ -116,25 +131,28 @@ def maybe_open_trade(
             cur = c.execute("""
                 INSERT INTO paper_trades
                   (opened_at, ticker, direction, entry_price, target, stop,
-                   confidence, rr_ratio, rr_qualifies)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                   confidence, rr_ratio, rr_qualifies,
+                   session, regime, vwap_event, rsi_zone, entry_type)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
                 round(price, 4), round(target, 4), round(stop, 4),
                 round(confidence, 2), round(rr_ratio, 2), int(rr_qualifies),
+                session, regime, vwap_event, rsi_zone, entry_type,
             ))
             c.commit()
-            rr_flag = "✓ R:R" if rr_qualifies else "✗ R:R"
             logger.info(
                 f"[PAPER] Opened {direction} {ticker} @ ${price:.2f} "
-                f"T:${target:.2f}  S:${stop:.2f}  conf:{confidence:.0f}%  {rr_flag}"
+                f"T:${target:.2f}  S:${stop:.2f}  conf:{confidence:.0f}%  "
+                f"sess:{session}  regime:{regime}  vwap:{vwap_event}"
             )
             return cur.lastrowid
 
 
 def update_open_trades(ticker: str, df, current_price: float) -> None:
     """Check open trades for ticker and close if exit conditions met."""
+    closed_any = False
     with _lock:
         with _conn() as c:
             rows = c.execute("""
@@ -181,7 +199,88 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                         f"[PAPER] Closed {row['direction']} {ticker} @ ${ep:.2f} | "
                         f"{outcome} {pnl_pct:+.2f}% | Reason: {reason}"
                     )
+                    closed_any = True
             c.commit()
+
+    if closed_any:
+        # Feed outcomes back to adaptive filter immediately after any close
+        _trigger_paper_feedback()
+
+
+def _trigger_paper_feedback() -> None:
+    """
+    Build context-breakdown stats from all closed paper trades and push them
+    into the adaptive filter so it learns from real paper trading outcomes,
+    not just backtest simulations.
+    """
+    try:
+        from agent.adaptive_filter import update_from_paper_trades
+        stats = _build_paper_stats()
+        if stats["overall"]["total"] >= 5:
+            update_from_paper_trades(stats)
+    except Exception as e:
+        logger.debug(f"[PAPER] Filter feedback skipped: {e}")
+
+
+def _build_paper_stats() -> dict:
+    """
+    Aggregate closed paper trades into the same stats format that
+    live_backtest produces, so adaptive_filter.update_filter() can consume it.
+    """
+    with _lock:
+        with _conn() as c:
+            rows = c.execute("""
+                SELECT direction, pnl_pct, confidence,
+                       session, regime, vwap_event, rsi_zone, entry_type
+                FROM paper_trades
+                WHERE status='CLOSED' AND pnl_pct IS NOT NULL
+            """).fetchall()
+
+    trades = [dict(r) for r in rows]
+    if not trades:
+        return {"overall": {"total": 0, "win_rate": 0.0, "wins": 0}}
+
+    def _stats(group):
+        n    = len(group)
+        wins = sum(1 for t in group if (t["pnl_pct"] or 0) > 0)
+        return {"total": n, "wins": wins, "win_rate": round(wins / n, 4) if n else 0.0}
+
+    def _breakdown(field):
+        buckets: dict = {}
+        for t in trades:
+            val = (t.get(field) or "").strip()
+            if not val:
+                continue
+            buckets.setdefault(val, []).append(t)
+        return {k: _stats(v) for k, v in buckets.items()}
+
+    def _conf_band(conf):
+        if conf is None:
+            return "unknown"
+        if conf < 50:   return "<50"
+        if conf < 60:   return "50-60"
+        if conf < 70:   return "60-70"
+        if conf < 80:   return "70-80"
+        return "80+"
+
+    conf_buckets: dict = {}
+    for t in trades:
+        band = _conf_band(t.get("confidence"))
+        conf_buckets.setdefault(band, []).append(t)
+    by_conf = {k: _stats(v) for k, v in conf_buckets.items()}
+
+    return {
+        "overall":       _stats(trades),
+        "by_direction":  _breakdown("direction"),
+        "by_session":    _breakdown("session"),
+        "by_regime":     _breakdown("regime"),
+        "by_vwap_event": _breakdown("vwap_event"),
+        "by_rsi_zone":   _breakdown("rsi_zone"),
+        "by_entry_type": _breakdown("entry_type"),
+        "by_confidence": by_conf,
+        # not available at paper trade level, but expected by update_filter
+        "by_sector_trend": {},
+    }
 
 
 def get_open_trades() -> list[dict]:
