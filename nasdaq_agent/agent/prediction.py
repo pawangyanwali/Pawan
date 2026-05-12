@@ -36,7 +36,13 @@ _VOL_CLIMAX_MULT = 2.5     # last bar vol > 2.5× 20-bar avg = climax
 _RSI_OB          = 70      # RSI overbought (bull exhaustion)
 _RSI_OS          = 30      # RSI oversold   (bear exhaustion)
 
-# ── Bounce / oversold entry thresholds ───────────────────────────────────────
+# ── RSI zone thresholds (hard gate) ──────────────────────────────────────────
+_RSI_EXTREME_OB   = 80   # extreme overbought → flip to SELL bias
+_RSI_OB_GATE      = 70   # overbought → suppress BUY, cap at NEUTRAL
+_RSI_OS_GATE      = 30   # oversold   → suppress SELL, cap at NEUTRAL
+_RSI_EXTREME_OS   = 20   # extreme oversold   → flip to BUY bias
+_RSI_NEUTRAL_LOW  = 45   # below here: bullish zone allowed
+_RSI_NEUTRAL_HIGH = 55   # above here: bearish zone allowed
 _BOUNCE_RSI_DEEP  = 30     # deeply oversold → very high probability bounce
 _BOUNCE_RSI_ZONE  = 42     # oversold zone   → watch for bounce
 _BOUNCE_BB_LOW    = 0.15   # near lower Bollinger Band
@@ -80,6 +86,9 @@ def _empty_prediction() -> dict:
         "bounce_signals":   [],
         "rr_quality":       "LOW",   # LOW | OK | GOOD | EXCELLENT
         "rr_qualifies":     False,
+        "rsi_zone":         "NEUTRAL",   # EXTREME_OB | OB | NEUTRAL | OS | EXTREME_OS
+        "rsi_value":        50.0,
+        "rsi_gated":        False,   # True when RSI overrode the composite direction
     }
 
 
@@ -241,6 +250,119 @@ def _compute_confidence(
     confidence = (votes / total * 100) if total > 0 else 50.0
     # NEUTRAL cap + absolute bounds
     return round(float(np.clip(confidence, 25.0, 95.0)), 1)
+
+
+def _rsi_zone(rsi: float | None) -> str:
+    """Classify RSI into a named zone."""
+    if rsi is None:
+        return "NEUTRAL"
+    if rsi >= _RSI_EXTREME_OB:
+        return "EXTREME_OB"
+    if rsi >= _RSI_OB_GATE:
+        return "OB"
+    if rsi <= _RSI_EXTREME_OS:
+        return "EXTREME_OS"
+    if rsi <= _RSI_OS_GATE:
+        return "OS"
+    return "NEUTRAL"
+
+
+def _apply_rsi_gate(
+    composite:  float,
+    direction:  str,
+    rsi:        float | None,
+    trend:      str,
+    trend_prob: float,
+) -> tuple[float, str, bool, list[str]]:
+    """
+    Hard RSI gate — the single most important mean-reversion rule.
+
+    Overbought stocks are statistically likely to pull back.
+    Oversold stocks are statistically likely to bounce.
+    No matter what trend/ML says, we respect these extremes on short timeframes.
+
+    RSI zone   │ If signal is BUY    │ If signal is SELL
+    ───────────┼─────────────────────┼────────────────────
+    EXTREME_OB │ → SELL (80+ = top)  │ keep SELL ✓
+    OB (70-80) │ → NEUTRAL (don't buy│ keep SELL ✓
+    NEUTRAL    │ keep as-is          │ keep as-is
+    OS (20-30) │ keep BUY ✓          │ → NEUTRAL
+    EXTREME_OS │ keep BUY ✓          │ → BUY  (20- = bottom)
+
+    Exception: if the trend is very strong (prob > 0.80) and RSI is
+    in 70-75 range, allow it — strong momentum can stay OB for a while.
+    """
+    if rsi is None:
+        return composite, direction, False, []
+
+    zone    = _rsi_zone(rsi)
+    gated   = False
+    reasons: list[str] = []
+    is_buy  = direction in ("BUY", "STRONG BUY")
+    is_sell = direction in ("SELL", "STRONG SELL")
+
+    if zone == "EXTREME_OB" and is_buy:
+        composite  = -0.20           # flip bearish
+        direction  = "SELL"
+        gated      = True
+        reasons.append(
+            f"RSI {rsi:.1f} — EXTREME OVERBOUGHT (>80). "
+            "Statistically at peak. BUY signal overridden → SELL. "
+            "High probability of sharp reversal."
+        )
+
+    elif zone == "OB" and is_buy:
+        # Allow strong-trend momentum exception (RSI 70-75 + strong uptrend)
+        momentum_exception = (trend == "UPTREND" and trend_prob >= 0.80 and rsi < 75)
+        if not momentum_exception:
+            composite  = 0.0
+            direction  = "NEUTRAL"
+            gated      = True
+            reasons.append(
+                f"RSI {rsi:.1f} — OVERBOUGHT. "
+                "Do NOT buy here — pullback to support is the high-probability move. "
+                "Wait for RSI to cool below 60 or a retest of support."
+            )
+        else:
+            reasons.append(
+                f"RSI {rsi:.1f} — overbought but strong UPTREND ({trend_prob*100:.0f}% conf) "
+                "allows momentum continuation. Watch for reversal candles."
+            )
+
+    elif zone == "EXTREME_OS" and is_sell:
+        composite  = 0.20
+        direction  = "BUY"
+        gated      = True
+        reasons.append(
+            f"RSI {rsi:.1f} — EXTREME OVERSOLD (<20). "
+            "Statistically at bottom. SELL signal overridden → BUY. "
+            "High probability of sharp bounce."
+        )
+
+    elif zone == "OS" and is_sell:
+        momentum_exception = (trend == "DOWNTREND" and trend_prob >= 0.80 and rsi > 25)
+        if not momentum_exception:
+            composite  = 0.0
+            direction  = "NEUTRAL"
+            gated      = True
+            reasons.append(
+                f"RSI {rsi:.1f} — OVERSOLD. "
+                "Do NOT short here — bounce to resistance is the high-probability move. "
+                "Wait for RSI to recover above 40 or a retest of resistance."
+            )
+        else:
+            reasons.append(
+                f"RSI {rsi:.1f} — oversold but strong DOWNTREND ({trend_prob*100:.0f}% conf) "
+                "allows continuation. Watch for bounce candles as exit."
+            )
+
+    elif zone in ("OS", "EXTREME_OS") and is_buy:
+        reasons.append(
+            f"RSI {rsi:.1f} — OVERSOLD. This is the correct zone to buy. "
+            "Mean-reversion edge is on your side."
+        )
+
+    return composite, direction, gated, reasons
 
 
 def _detect_bounce_setup(
@@ -620,8 +742,16 @@ def generate_prediction(
     if trend == "DOWNTREND" and composite > 0.0:
         composite = min(composite, 0.0)
 
-    # ── 6. Direction and confidence ───────────────────────────────────────────
-    direction  = _label_direction(composite)
+    # ── 6. Direction ──────────────────────────────────────────────────────────
+    direction = _label_direction(composite)
+
+    # ── 6b. RSI hard gate — overbought suppresses BUY, oversold suppresses SELL
+    rsi_val = _safe_float(last_row, "rsi_14")
+    composite, direction, rsi_gated, rsi_gate_reasons = _apply_rsi_gate(
+        composite, direction, rsi_val, trend, trend_prob
+    )
+    zone_label = _rsi_zone(rsi_val)
+
     confidence = _compute_confidence(
         direction, trend, trend_prob,
         float(tech_score), float(vol_score),
@@ -629,6 +759,9 @@ def generate_prediction(
         pa_score, pattern_score, float(sent_score),
         mtf_score_f,
     )
+    # RSI-gated signals get a confidence penalty — the gate went against the composite
+    if rsi_gated:
+        confidence = round(float(np.clip(confidence * 0.75, 25.0, 95.0)), 1)
 
     # ── 7. Optimised stops, targets and R:R ──────────────────────────────────
     stop_loss, target, rr_ratio, rr_quality, rr_qualifies = _evaluate_rr(
@@ -689,7 +822,8 @@ def generate_prediction(
         )
 
     all_reasons = (
-        exhaustion["exhaustion_flags"] +   # exhaustion / overextension first
+        rsi_gate_reasons               +   # RSI gate overrides shown first — most important
+        exhaustion["exhaustion_flags"] +   # then exhaustion / overextension
         bounce["bounce_signals"]       +   # then bounce signals
         [rr_reason]                    +   # R:R quality always visible
         trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
@@ -727,4 +861,7 @@ def generate_prediction(
         "bounce_signals":    bounce["bounce_signals"],
         "rr_quality":        rr_quality,
         "rr_qualifies":      rr_qualifies,
+        "rsi_zone":          zone_label,
+        "rsi_value":         round(float(rsi_val), 1) if rsi_val is not None else 50.0,
+        "rsi_gated":         rsi_gated,
     }

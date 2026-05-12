@@ -181,6 +181,14 @@
     .rr-OK        { background:rgba(234,179,8,.15); color:#facc15; }
     .rr-LOW       { background:rgba(239,68,68,.15); color:var(--red); }
 
+    /* RSI zone badge */
+    .rsi-badge { display:inline-block; padding:1px 5px; border-radius:3px; font-size:9px; font-weight:700; }
+    .rsi-EXTREME_OB { background:rgba(255,51,102,.25);  color:var(--red-s); border:1px solid var(--red-s); }
+    .rsi-OB         { background:rgba(239,68,68,.15);   color:var(--red); }
+    .rsi-NEUTRAL    { background:rgba(100,116,139,.12); color:var(--muted); }
+    .rsi-OS         { background:rgba(34,197,94,.15);   color:var(--green); }
+    .rsi-EXTREME_OS { background:rgba(0,255,136,.25);   color:var(--green-s); border:1px solid var(--green-s); }
+
     /* Loading */
     .loading-overlay { position:fixed; inset:0; background:var(--bg); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; z-index:999; transition:opacity .5s; }
     .loading-overlay.hidden { opacity:0; pointer-events:none; }
@@ -258,6 +266,7 @@
         <th>Price</th>
         <th>Chg %</th>
         <th>Prediction</th>
+        <th title="RSI Zone">RSI</th>
         <th>Confidence</th>
         <th>Trend</th>
         <th title="Multi-Timeframe Alignment">MTF</th>
@@ -270,7 +279,7 @@
       </tr>
     </thead>
     <tbody id="table-body">
-      <tr><td colspan="13" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
+      <tr><td colspan="14" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
     </tbody>
   </table>
 </div>
@@ -313,6 +322,11 @@
       <span id="dp-trend-badge" class="trend-badge">—</span>
       <span id="dp-price-badge" style="font-size:11px;color:var(--muted)"></span>
     </div>
+  </div>
+
+  <!-- RSI Zone Box -->
+  <div id="dp-rsi-box" style="margin:0 16px 10px;padding:8px 12px;border-left:3px solid var(--muted);border-radius:4px;background:rgba(100,116,139,.05)">
+    <div id="dp-rsi-desc" style="font-size:11px;color:var(--muted)">—</div>
   </div>
 
   <!-- Entry Zone / Exhaustion -->
@@ -463,7 +477,7 @@ function filteredSorted() {
 function renderTable() {
   const data  = filteredSorted();
   const tbody = document.getElementById('table-body');
-  if (!data.length) { tbody.innerHTML = `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
+  if (!data.length) { tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
 
   tbody.innerHTML = data.map(s => {
     const chgC = s.change_pct >= 0 ? 'pos' : 'neg';
@@ -485,6 +499,11 @@ function renderTable() {
           : s.entry_type==='BOUNCE_SETUP'
             ? `<span class="signal-badge badge-BOUNCE-SETUP" style="margin-left:3px;font-size:9px">BOUNCE</span>`
             : ''}
+        ${s.rsi_gated ? `<span style="font-size:9px;color:var(--red);display:block;margin-top:2px" title="RSI gate overrode composite">⛔ RSI gated</span>` : ''}
+      </td>
+      <td>
+        <span class="rsi-badge rsi-${s.rsi_zone||'NEUTRAL'}">${fmt(s.rsi_value,0)}</span>
+        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${(s.rsi_zone||'NEUTRAL').replace('_',' ')}</span>
       </td>
       <td>
         <div style="display:flex;align-items:center;gap:5px">
@@ -551,11 +570,35 @@ function openDetail(ticker) {
   const rrQual = s.rr_quality || 'LOW';
   document.getElementById('dp-rr').innerHTML = `${fmt(s.rr_ratio,1)} : 1 <span class="rr-badge rr-${rrQual}">${rrQual}</span>`;
 
+  // RSI zone display
+  const rsiZone  = s.rsi_zone  || 'NEUTRAL';
+  const rsiLabel = rsiZone.replace('_', ' ');
+  const rsiColor = {'EXTREME_OB':'var(--red-s)','OB':'var(--red)','NEUTRAL':'var(--muted)','OS':'var(--green)','EXTREME_OS':'var(--green-s)'}[rsiZone] || 'var(--muted)';
+  const rsiDesc  = {
+    'EXTREME_OB': '⛔ Extreme overbought — very high probability of reversal down. Avoid buying.',
+    'OB':         '⚠ Overbought — pullback likely. Only buy on confirmed retest of support.',
+    'NEUTRAL':    'RSI in neutral zone — no strong mean-reversion edge either way.',
+    'OS':         '✓ Oversold — bounce probability elevated. This is the zone to buy.',
+    'EXTREME_OS': '✓✓ Extreme oversold — very high probability bounce. High-edge buy zone.',
+  }[rsiZone] || '';
+  document.getElementById('dp-price-badge').innerHTML =
+    `$${fmt(s.price,4)} | ${s.change_pct>=0?'+':''}${fmt(s.change_pct)}% today` +
+    `<span class="rsi-badge rsi-${rsiZone}" style="margin-left:8px">RSI ${fmt(s.rsi_value,0)} ${rsiLabel}</span>` +
+    (s.rsi_gated ? `<span style="font-size:9px;color:var(--red);margin-left:6px">⛔ Direction overridden by RSI gate</span>` : '');
+
+  // RSI description box
+  const rsiBox = document.getElementById('dp-rsi-box');
+  rsiBox.style.borderLeftColor = rsiColor;
+  rsiBox.style.background = rsiZone === 'EXTREME_OB' || rsiZone === 'OB'
+    ? 'rgba(239,68,68,.06)' : rsiZone === 'OS' || rsiZone === 'EXTREME_OS'
+    ? 'rgba(34,197,94,.06)' : 'rgba(100,116,139,.05)';
+  document.getElementById('dp-rsi-desc').style.color = rsiColor;
+  document.getElementById('dp-rsi-desc').textContent = rsiDesc;
+
   const tb = document.getElementById('dp-trend-badge');
   const trendPct = Math.round((s.trend_probability || 0.5) * 100);
   tb.textContent  = `${s.trend}  ${trendPct}%`;
   tb.className    = `trend-badge trend-${s.trend}`;
-  document.getElementById('dp-price-badge').textContent = `$${fmt(s.price,4)} | ${s.change_pct>=0?'+':''}${fmt(s.change_pct)}% today`;
 
   // Entry zone / exhaustion / bounce panel
   const ezEl = document.getElementById('dp-entry-zone');

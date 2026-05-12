@@ -89,6 +89,11 @@ class StockSignal:
     pivots:       dict  = field(default_factory=dict)
     poc:          float = 0.0
 
+    # ── RSI zone ──────────────────────────────────────────────────────────────
+    rsi_zone:         str   = "NEUTRAL"   # EXTREME_OB | OB | NEUTRAL | OS | EXTREME_OS
+    rsi_value:        float = 50.0
+    rsi_gated:        bool  = False       # True when RSI overrode composite direction
+
     # ── Exhaustion / retest / bounce entry ───────────────────────────────────
     entry_type:       str   = "IMMEDIATE"
     retest_level:     float = 0.0
@@ -222,6 +227,9 @@ def analyse_ticker(
             mtf_bull_count    = int(mtf["bull_count"]),
             mtf_bear_count    = int(mtf["bear_count"]),
             mtf_timeframes    = mtf["timeframes"],
+            rsi_zone          = pred.get("rsi_zone",          "NEUTRAL"),
+            rsi_value         = float(pred.get("rsi_value", 50.0)),
+            rsi_gated         = bool(pred.get("rsi_gated",  False)),
             entry_type        = pred.get("entry_type",       "IMMEDIATE"),
             retest_level      = pred.get("retest_level",     0.0),
             entry_zone_low    = pred.get("entry_zone_low",   0.0),
