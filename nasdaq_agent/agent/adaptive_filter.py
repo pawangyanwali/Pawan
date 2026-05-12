@@ -127,6 +127,7 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
         ("entry_type",   stats.get("by_entry_type",   {})),
         ("direction",    stats.get("by_direction",    {})),
         ("sector_trend", stats.get("by_sector_trend", {})),
+        ("ah_bias",      stats.get("by_ah_bias",      {})),
     ]
 
     for dim, breakdown in context_keys:

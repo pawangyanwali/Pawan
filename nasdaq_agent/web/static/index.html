@@ -360,6 +360,7 @@
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
     <button onclick="openBacktest()" id="bt-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📈 Backtest</button>
     <button onclick="openLearning()" id="learn-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧠 Learning</button>
+    <button onclick="openAfterHours()" id="ah-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🌙 After-Hours</button>
     <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="toggleAlerts()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Toggle browser alerts">🔔 Alerts OFF</button>
@@ -727,6 +728,30 @@
   </div>
 </div>
 
+<!-- After-Hours Monitor Modal -->
+<div class="bt-modal" id="ah-modal">
+  <div class="bt-modal-inner">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">🌙 After-Hours Monitor</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Pre-market &amp; AH moves — predicting opening direction for each ticker</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button onclick="loadAfterHours()" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:5px 12px;cursor:pointer;font-family:inherit;font-size:11px">Refresh</button>
+        <button onclick="closeAfterHours()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:16px;padding:10px 14px;background:var(--surface2);border-radius:8px;border-left:3px solid var(--accent)">
+      During <strong style="color:var(--text)">AFTER_HOURS</strong> and <strong style="color:var(--text)">PRE_MARKET</strong> the scanner silently collects price moves for every ticker.
+      At <strong style="color:var(--green-s)">market open</strong>, tickers with AH moves <strong>confirming</strong> the signal direction get a confidence boost (up to +10pts);
+      tickers <strong>opposing</strong> the signal get a confidence reduction. The ✓/✗ on each row shows alignment.
+    </div>
+    <div id="ah-table-wrap">
+      <div style="color:var(--muted);font-size:11px;padding:20px;text-align:center">Loading after-hours data…</div>
+    </div>
+  </div>
+</div>
+
 <!-- Learning Status Modal -->
 <div class="learn-modal" id="learn-modal">
   <div class="learn-modal-inner">
@@ -899,8 +924,19 @@ function renderTable() {
       ? `<span style="display:inline-block;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(59,130,246,.2);color:var(--blue);border:1px solid var(--blue);margin-left:4px" title="Paper trade already open — no duplicate will be placed">📍 OPEN</span>` : '';
     const supTag = s.is_suppressed
       ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)" title="${s.suppress_reason||'Suppressed by adaptive filter'}">🚫 FILTERED</span>` : '';
+    // AH badge: show when AH data is available for this ticker
+    const ahChg = s.ah_change_pct ?? 0;
+    const ahTag = (s.ah_direction && s.ah_direction !== '')
+      ? (() => {
+          const ahCol = s.ah_direction==='BULLISH' ? 'var(--green)' : s.ah_direction==='BEARISH' ? 'var(--red)' : 'var(--muted)';
+          const ahArrow = s.ah_direction==='BULLISH' ? '↑' : s.ah_direction==='BEARISH' ? '↓' : '→';
+          const confTag = s.ah_confirms_signal ? '✓' : '✗';
+          const confCol = s.ah_confirms_signal ? 'var(--green-s)' : 'var(--red)';
+          const newsTag = s.ah_news_likely ? ' 📰' : '';
+          return `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(100,116,139,.12);color:${ahCol};border:1px solid ${ahCol}" title="AH: ${s.ah_direction} ${ahChg>=0?'+':''}${ahChg.toFixed(2)}% (${s.ah_magnitude||''})${s.ah_news_likely?' — News likely':''}">AH ${ahArrow} ${ahChg>=0?'+':''}${ahChg.toFixed(1)}%${newsTag} <span style="color:${confCol}">${confTag}</span></span>`;
+        })() : '';
     return `<tr data-ticker="${s.ticker}" style="${s.is_suppressed?'opacity:0.65':''}${s.has_open_position?';background:rgba(59,130,246,.04)':''}">
-      <td class="ticker-cell">${s.ticker}${uvol}${posTag}</td>
+      <td class="ticker-cell">${s.ticker}${uvol}${posTag}${ahTag}</td>
       <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
       <td style="font-weight:600">$${fmt(s.price)}</td>
       <td class="chg-cell ${chgC}">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%</td>
@@ -1921,6 +1957,77 @@ async function loadBtRecent() {
   } catch {
     document.getElementById('bt-recent-table').innerHTML = `<div style="color:var(--muted);font-size:11px">Error loading recent data.</div>`;
   }
+}
+
+// ─── After-Hours Modal ───────────────────────────────────────────────────────
+
+async function openAfterHours() {
+  document.getElementById('ah-modal').classList.add('open');
+  await loadAfterHours();
+}
+function closeAfterHours() { document.getElementById('ah-modal').classList.remove('open'); }
+
+async function loadAfterHours() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/after-hours`)).json();
+    renderAfterHours(d.snapshots || []);
+  } catch(e) {
+    document.getElementById('ah-table-wrap').innerHTML = `<div style="color:var(--muted);font-size:11px;padding:20px;text-align:center">No after-hours data yet — data is collected during AFTER_HOURS and PRE_MARKET sessions.</div>`;
+  }
+}
+
+function renderAfterHours(snaps) {
+  if (!snaps.length) {
+    document.getElementById('ah-table-wrap').innerHTML = `<div style="color:var(--muted);font-size:11px;padding:20px;text-align:center">No after-hours data yet — data accumulates during extended trading hours.</div>`;
+    return;
+  }
+  const bullish  = snaps.filter(s => s.direction === 'BULLISH').sort((a,b) => b.ah_change_pct - a.ah_change_pct);
+  const bearish  = snaps.filter(s => s.direction === 'BEARISH').sort((a,b) => a.ah_change_pct - b.ah_change_pct);
+  const neutral  = snaps.filter(s => s.direction === 'NEUTRAL');
+
+  function _row(s) {
+    const chg = s.ah_change_pct ?? 0;
+    const col = chg > 0 ? 'var(--green)' : chg < 0 ? 'var(--red)' : 'var(--muted)';
+    const magCol = s.magnitude==='STRONG' ? 'var(--green-s)' : s.magnitude==='MODERATE' ? 'var(--yellow)' : 'var(--muted)';
+    const newsTag = s.news_likely ? '<span style="font-size:9px;color:#fbbf24;margin-left:4px">📰 News</span>' : '';
+    const volRat = (s.ah_volume_ratio ?? 0).toFixed(1);
+    const gapEst = (s.gap_estimate_pct ?? 0);
+    const ts = s.recorded_at ? new Date(s.recorded_at).toLocaleTimeString() : '—';
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="font-weight:700;padding:7px 10px">${s.ticker}${newsTag}</td>
+      <td style="padding:7px 10px;color:${col};font-weight:700">${chg>=0?'+':''}${chg.toFixed(2)}%</td>
+      <td style="padding:7px 10px"><span style="color:${magCol};font-weight:700;font-size:10px">${s.magnitude||'—'}</span></td>
+      <td style="padding:7px 10px;color:var(--muted);font-size:10px">${volRat}× vol</td>
+      <td style="padding:7px 10px;color:${gapEst>0?'var(--green)':'var(--red)'};font-size:10px">${gapEst>=0?'+':''}${gapEst.toFixed(2)}% gap est</td>
+      <td style="padding:7px 10px;color:var(--muted);font-size:10px">${s.session_recorded||s.session||'—'}</td>
+      <td style="padding:7px 10px;color:var(--muted);font-size:9px">${ts}</td>
+    </tr>`;
+  }
+
+  function _section(title, color, rows) {
+    if (!rows.length) return '';
+    return `
+      <div style="margin-bottom:20px">
+        <div style="font-size:11px;font-weight:700;color:${color};text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">${title} (${rows.length})</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead><tr style="border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);font-size:10px">Ticker</th>
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);font-size:10px">AH Move</th>
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);font-size:10px">Strength</th>
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);font-size:10px">Volume</th>
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);font-size:10px">Gap Est.</th>
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);font-size:10px">Session</th>
+            <th style="text-align:left;padding:5px 10px;color:var(--muted);font-size:10px">Recorded</th>
+          </tr></thead>
+          <tbody>${rows.map(_row).join('')}</tbody>
+        </table>
+      </div>`;
+  }
+
+  document.getElementById('ah-table-wrap').innerHTML =
+    _section('📈 Bullish AH Movers', 'var(--green)', bullish) +
+    _section('📉 Bearish AH Movers', 'var(--red)', bearish) +
+    (_neutral => _neutral.length ? _section('➡ Neutral / Flat', 'var(--muted)', _neutral) : '')(neutral);
 }
 
 // ─── Learning Status Modal ────────────────────────────────────────────────────

@@ -59,6 +59,12 @@ from agent.backtest_reporter import maybe_trigger_feedback_retrain, adjust_confi
 from agent.adaptive_filter import (
     should_suppress, get_confidence_boost, increment_suppressed,
 )
+from agent.after_hours_monitor import (
+    init_db as ah_init_db,
+    record_snapshot as ah_record,
+    get_opening_bias,
+    get_ah_context_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +209,14 @@ class StockSignal:
     suppress_reason: str  = ""      # Why it was suppressed
     has_open_position: bool = False # True when ticker already has an open paper trade
 
+    # ── After-hours / pre-market context ─────────────────────────────────────
+    ah_change_pct:      float = 0.0   # AH price move from previous close (%)
+    ah_direction:       str   = ""    # BULLISH | BEARISH | NEUTRAL | ""
+    ah_magnitude:       str   = ""    # STRONG | MODERATE | WEAK | ""
+    ah_confirms_signal: bool  = False # True when AH direction aligns with prediction
+    ah_news_likely:     bool  = False # True when large AH move + elevated volume
+    ah_gap_estimate:    float = 0.0   # Expected gap at open (%)
+
     def to_dict(self) -> dict:
         import math
         d = asdict(self)
@@ -340,6 +354,33 @@ def analyse_ticker(
             direction=pred["direction"],
         )
 
+        # ── After-hours / pre-market data collection & opening bias ─────────────
+        _ah_bias: dict = {}
+        _current_session = sess_info.get("session", "")
+
+        if _current_session in ("AFTER_HOURS", "PRE_MARKET"):
+            # Collect AH observations — use previous day close from daily data
+            _prev_close = 0.0
+            if not df_1d.empty and len(df_1d) >= 2:
+                _prev_close = float(df_1d.iloc[-2]["Close"]) if "Close" in df_1d.columns else 0.0
+            if _prev_close <= 0 and not df_1d.empty:
+                _prev_close = float(df_1d.iloc[-1]["Open"]) if "Open" in df_1d.columns else price
+            _ah_vol   = float(df_ind["Volume"].sum()) if "Volume" in df_ind.columns else 0.0
+            _avg_vol  = float(df_ind["Volume"].mean() * 390) if "Volume" in df_ind.columns else 0.0
+            if _prev_close > 0:
+                ah_record(
+                    ticker     = ticker,
+                    ah_price   = price,
+                    prev_close = _prev_close,
+                    ah_volume  = _ah_vol,
+                    avg_volume = _avg_vol,
+                    session    = _current_session,
+                )
+
+        else:
+            # During regular session: read stored AH bias to inform confidence
+            _ah_bias = get_opening_bias(ticker)
+
         # Apply backtest-derived confidence calibration
         pred["confidence"] = adjust_confidence(
             confidence  = pred["confidence"],
@@ -364,6 +405,35 @@ def analyse_ticker(
             pred["confidence"] = round(
                 float(min(max(pred["confidence"] + boost, 25.0), 95.0)), 1
             )
+
+        # Apply after-hours opening bias to confidence
+        _ah_confirms = False
+        _ah_change   = 0.0
+        _ah_dir      = ""
+        _ah_mag      = ""
+        _ah_news     = False
+        _ah_gap_est  = 0.0
+        if _ah_bias and pred["direction"] in ("BUY", "SELL"):
+            _ah_dir     = _ah_bias.get("direction", "")
+            _ah_mag     = _ah_bias.get("magnitude", "")
+            _ah_change  = float(_ah_bias.get("ah_change_pct", 0.0))
+            _ah_news    = bool(_ah_bias.get("news_likely", False))
+            _ah_gap_est = float(_ah_bias.get("gap_estimate_pct", 0.0))
+            _base_adj   = float(_ah_bias.get("confidence_adj", 0.0))
+            # Confirms when AH direction matches prediction
+            _ah_confirms = (
+                (_ah_dir == "BULLISH" and pred["direction"] == "BUY") or
+                (_ah_dir == "BEARISH" and pred["direction"] == "SELL")
+            )
+            if _base_adj > 0:
+                _conf_delta = _base_adj if _ah_confirms else -_base_adj
+                pred["confidence"] = round(
+                    float(min(max(pred["confidence"] + _conf_delta, 25.0), 95.0)), 1
+                )
+                _label = "confirms" if _ah_confirms else "opposes"
+                pred["reasons"].append(
+                    f"AH {_ah_dir} {_ah_change:+.1f}% ({_ah_mag}) {_label} signal"
+                )
 
         # Check if ticker already has an open paper trade
         _has_open_position = False
@@ -546,6 +616,12 @@ def analyse_ticker(
             is_suppressed       = _is_suppressed,
             suppress_reason     = _suppress_reason,
             has_open_position   = _has_open_position,
+            ah_change_pct       = _ah_change,
+            ah_direction        = _ah_dir,
+            ah_magnitude        = _ah_mag,
+            ah_confirms_signal  = _ah_confirms,
+            ah_news_likely      = _ah_news,
+            ah_gap_estimate     = _ah_gap_est,
         )
     except Exception as e:
         logger.warning(f"[{ticker}] analysis error: {e}", exc_info=True)
@@ -663,6 +739,7 @@ class Scanner:
         init_db()      # signal_history.db
         pt_init_db()   # paper_trades.db
         bt_init_db()   # live_backtest.db
+        ah_init_db()   # ah_snapshots.db
 
         # Thread 1: ML training (waits 30s for first scan to warm cache)
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
