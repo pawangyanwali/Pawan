@@ -21,6 +21,7 @@ from agent.price_action import (
     analyze_trend_with_confidence,
     score_price_action,
 )
+from agent.reversal import compute_reversal_zone
 
 
 # ── Direction thresholds ──────────────────────────────────────────────────────
@@ -88,7 +89,11 @@ def _empty_prediction() -> dict:
         "rr_qualifies":     False,
         "rsi_zone":         "NEUTRAL",   # EXTREME_OB | OB | NEUTRAL | OS | EXTREME_OS
         "rsi_value":        50.0,
-        "rsi_gated":        False,   # True when RSI overrode the composite direction
+        "rsi_gated":        False,
+        "reversal_score":   0.0,
+        "reversal_type":    "NONE",
+        "divergence_type":  "NONE",
+        "reversal_signals": [],
     }
 
 
@@ -644,14 +649,15 @@ def _compute_rr(price: float, target: float, stop: float) -> float:
 # ── Main prediction function ──────────────────────────────────────────────────
 
 def generate_prediction(
-    ticker:     str,
-    df:         pd.DataFrame,
-    tech_score: float,
-    vol_score:  float,
-    ml_prob:    float,
-    sent_score: float,
-    last_row:   pd.Series,
-    mtf_score:  float = 0.0,
+    ticker:            str,
+    df:                pd.DataFrame,
+    tech_score:        float,
+    vol_score:         float,
+    ml_prob:           float,
+    sent_score:        float,
+    last_row:          pd.Series,
+    mtf_score:         float = 0.0,
+    ml_reversal_prob:  float = 0.5,
 ) -> dict:
     """
     Generate a complete, actionable scalping prediction for ``ticker``.
@@ -793,6 +799,25 @@ def generate_prediction(
     if bounce["detected"] and entry_type == "IMMEDIATE":
         entry_type = "BOUNCE_SETUP"
 
+    # ── 7d. Reversal zone detection ───────────────────────────────────────────
+    rev = compute_reversal_zone(df, last_row, support, resistance, ml_reversal_prob)
+
+    # Reversal zone can upgrade BOUNCE_SETUP or IMMEDIATE when strong enough
+    if rev["entry_type_hint"] in ("REVERSAL_ZONE", "STRONG_REVERSAL"):
+        if rev["reversal_type"] == "BULLISH" and entry_type in ("IMMEDIATE", "BOUNCE_SETUP"):
+            entry_type = rev["entry_type_hint"]
+            # Boost composite toward BUY when RSI gate hasn't suppressed it
+            if not rsi_gated and composite >= 0:
+                rev_boost  = rev["reversal_score"] * 0.20
+                composite  = round(float(np.clip(composite + rev_boost, -1.0, 1.0)), 4)
+                direction  = _label_direction(composite)
+        elif rev["reversal_type"] == "BEARISH" and entry_type in ("IMMEDIATE",):
+            entry_type = rev["entry_type_hint"]
+            if not rsi_gated and composite <= 0:
+                rev_boost  = rev["reversal_score"] * 0.20
+                composite  = round(float(np.clip(composite - rev_boost, -1.0, 1.0)), 4)
+                direction  = _label_direction(composite)
+
     # ── 8. Trend reason ───────────────────────────────────────────────────────
     trend_reasons: list[str] = []
     if trend == "UPTREND":
@@ -822,9 +847,10 @@ def generate_prediction(
         )
 
     all_reasons = (
-        rsi_gate_reasons               +   # RSI gate overrides shown first — most important
-        exhaustion["exhaustion_flags"] +   # then exhaustion / overextension
-        bounce["bounce_signals"]       +   # then bounce signals
+        rsi_gate_reasons               +   # RSI gate overrides shown first
+        rev["signals"]                 +   # divergence / reversal signals next
+        exhaustion["exhaustion_flags"] +   # exhaustion / overextension
+        bounce["bounce_signals"]       +   # bounce signals
         [rr_reason]                    +   # R:R quality always visible
         trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
     )
@@ -864,4 +890,8 @@ def generate_prediction(
         "rsi_zone":          zone_label,
         "rsi_value":         round(float(rsi_val), 1) if rsi_val is not None else 50.0,
         "rsi_gated":         rsi_gated,
+        "reversal_score":    rev["reversal_score"],
+        "reversal_type":     rev["reversal_type"],
+        "divergence_type":   rev["divergence_type"],
+        "reversal_signals":  rev["signals"],
     }

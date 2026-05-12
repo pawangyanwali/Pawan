@@ -31,7 +31,7 @@ from agent.data_fetcher import (
 )
 from agent.technical import compute_indicators, score_technical
 from agent.volume import score_volume, relative_volume, detect_unusual_volume
-from agent.ml_model import predict, predict_daily, retrain_all
+from agent.ml_model import predict, predict_daily, predict_reversal, retrain_all
 from agent.sentiment import score_sentiment
 from agent.prediction import generate_prediction
 from agent.mtf_analysis import multi_timeframe_analysis
@@ -90,9 +90,15 @@ class StockSignal:
     poc:          float = 0.0
 
     # ── RSI zone ──────────────────────────────────────────────────────────────
-    rsi_zone:         str   = "NEUTRAL"   # EXTREME_OB | OB | NEUTRAL | OS | EXTREME_OS
+    rsi_zone:         str   = "NEUTRAL"
     rsi_value:        float = 50.0
-    rsi_gated:        bool  = False       # True when RSI overrode composite direction
+    rsi_gated:        bool  = False
+
+    # ── Reversal zone ─────────────────────────────────────────────────────────
+    reversal_score:   float = 0.0
+    reversal_type:    str   = "NONE"     # BULLISH | BEARISH | NONE
+    divergence_type:  str   = "NONE"     # BULLISH | BEARISH | NONE
+    reversal_signals: list  = field(default_factory=list)
 
     # ── Exhaustion / retest / bounce entry ───────────────────────────────────
     entry_type:       str   = "IMMEDIATE"
@@ -175,6 +181,7 @@ def analyse_ticker(
         vol             = score_volume(df_ind)
         ml_scalp        = predict(ticker, df_ind)
         ml_daily_p      = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
+        ml_reversal_p   = predict_reversal(ticker, df_ind)
         # Blend: 40% daily (swing context) + 60% intraday (scalp timing)
         ml_combined     = round(0.4 * ml_daily_p + 0.6 * ml_scalp, 4)
         sent, headlines = score_sentiment(ticker)
@@ -188,6 +195,7 @@ def analyse_ticker(
         pred = generate_prediction(
             ticker, df_ind, tech, vol, ml_combined, sent, last,
             mtf_score=mtf["mtf_score"],
+            ml_reversal_prob=ml_reversal_p,
         )
 
         score   = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
@@ -228,8 +236,12 @@ def analyse_ticker(
             mtf_bear_count    = int(mtf["bear_count"]),
             mtf_timeframes    = mtf["timeframes"],
             rsi_zone          = pred.get("rsi_zone",          "NEUTRAL"),
-            rsi_value         = float(pred.get("rsi_value", 50.0)),
-            rsi_gated         = bool(pred.get("rsi_gated",  False)),
+            rsi_value         = float(pred.get("rsi_value",  50.0)),
+            rsi_gated         = bool(pred.get("rsi_gated",   False)),
+            reversal_score    = float(pred.get("reversal_score",  0.0)),
+            reversal_type     = pred.get("reversal_type",    "NONE"),
+            divergence_type   = pred.get("divergence_type",  "NONE"),
+            reversal_signals  = pred.get("reversal_signals", []),
             entry_type        = pred.get("entry_type",       "IMMEDIATE"),
             retest_level      = pred.get("retest_level",     0.0),
             entry_zone_low    = pred.get("entry_zone_low",   0.0),
