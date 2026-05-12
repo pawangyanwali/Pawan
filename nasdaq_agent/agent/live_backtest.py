@@ -267,12 +267,20 @@ def update_tracking(ticker: str, current_price: float, vwap: float = 0.0) -> lis
 # ── Query helpers ──────────────────────────────────────────────────────────────
 
 def get_tracking_signals() -> list[dict]:
-    """Return all currently-tracking signals."""
+    """Return all currently-tracking signals with live current_r from latest price path bar."""
     with _lock:
         with _conn() as c:
             rows = c.execute("""
-                SELECT * FROM bt_signals WHERE status='TRACKING'
-                ORDER BY fired_at DESC
+                SELECT s.*,
+                       COALESCE(p.r_val, 0.0) AS current_r,
+                       COALESCE(p.price, s.entry_price) AS current_price
+                FROM bt_signals s
+                LEFT JOIN bt_price_path p ON p.signal_id = s.signal_id
+                    AND p.bar = (
+                        SELECT MAX(bar) FROM bt_price_path WHERE signal_id = s.signal_id
+                    )
+                WHERE s.status='TRACKING'
+                ORDER BY s.fired_at DESC
             """).fetchall()
     return [dict(r) for r in rows]
 
@@ -328,7 +336,7 @@ def get_performance_stats(
         wins   = sum(1 for r in subset if r["status"] == "WIN")
         losses = sum(1 for r in subset if r["status"] == "LOSS")
         timeouts = sum(1 for r in subset if r["status"] == "TIMEOUT")
-        wr     = round(wins / n * 100, 1) if n > 0 else 0.0
+        wr     = round(wins / n, 4) if n > 0 else 0.0
         pnls   = [r["pnl_pct"]    for r in subset if r["pnl_pct"]    is not None]
         rmults = [r["r_multiple"] for r in subset if r["r_multiple"] is not None]
         max_rs = [r["max_favorable_r"] for r in subset if r["max_favorable_r"] is not None]

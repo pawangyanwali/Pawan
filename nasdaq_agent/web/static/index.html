@@ -1745,7 +1745,6 @@ function _attrTable(rows, title) {
 }
 
 function renderBtAttribution(stats) {
-  const br = stats.breakdowns || {};
   const sections = [
     { key:'by_vwap_event',  title:'By VWAP Event' },
     { key:'by_session',     title:'By Session' },
@@ -1753,15 +1752,21 @@ function renderBtAttribution(stats) {
     { key:'by_rsi_zone',    title:'By RSI Zone' },
     { key:'by_entry_type',  title:'By Entry Type' },
     { key:'by_direction',   title:'By Direction' },
-    { key:'by_conf_band',   title:'By Confidence Band' },
+    { key:'by_confidence',  title:'By Confidence Band' },
     { key:'by_sector_trend',title:'By Sector Trend' },
   ];
   let html = '';
   sections.forEach(s => {
-    const rows = br[s.key];
-    if (rows && rows.length) html += `<div>${_attrTable(rows, s.title)}</div>`;
+    const data = stats[s.key];
+    if (!data || typeof data !== 'object') return;
+    // Backend returns {context_value: stats_dict} — convert to sorted array
+    const rows = Object.entries(data)
+      .map(([k, v]) => ({ value: k, ...v }))
+      .filter(r => (r.total ?? 0) >= 1)
+      .sort((a, b) => (b.win_rate ?? 0) - (a.win_rate ?? 0));
+    if (rows.length) html += `<div>${_attrTable(rows, s.title)}</div>`;
   });
-  document.getElementById('bt-attr-grids').innerHTML = html || `<div style="color:var(--muted);font-size:11px;padding:8px">No attribution data yet — fire some signals first.</div>`;
+  document.getElementById('bt-attr-grids').innerHTML = html || `<div style="color:var(--muted);font-size:11px;padding:8px">No attribution data yet — signals need to resolve first.</div>`;
 }
 
 async function loadBtTracking() {
