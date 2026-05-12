@@ -148,15 +148,22 @@ def _on_signals(signals: list[StockSignal]) -> None:
     except Exception:
         learn_compact = {}
 
+    try:
+        from agent.paper_trading import get_open_trades as _pt_open
+        open_trades = {t["ticker"]: t for t in _pt_open()}
+    except Exception:
+        open_trades = {}
+
     payload = _dumps({
-        "type":     "update",
-        "signals":  [s.to_dict() for s in signals],
-        "regime":   regime.to_dict(),
-        "session":  session,
-        "alerts":   alerts,
-        "macro":    macro,
-        "backtest": bt_summary,
-        "learning": learn_compact,
+        "type":        "update",
+        "signals":     [s.to_dict() for s in signals],
+        "regime":      regime.to_dict(),
+        "session":     session,
+        "alerts":      alerts,
+        "macro":       macro,
+        "backtest":    bt_summary,
+        "learning":    learn_compact,
+        "open_trades": open_trades,
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 

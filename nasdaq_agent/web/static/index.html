@@ -434,17 +434,16 @@
       <tr>
         <th>Ticker</th>
         <th>Name</th>
-        <th>Price</th>
         <th>Chg %</th>
         <th>Prediction</th>
+        <th title="Trade status — open position P&L or watching">Status</th>
+        <th title="Entry · Take Profit · Stop Loss">Levels</th>
+        <th title="Risk:Reward ratio">R:R</th>
         <th title="RSI Zone">RSI</th>
         <th>Confidence</th>
         <th>Trend</th>
         <th title="Multi-Timeframe Alignment">MTF</th>
         <th>Score</th>
-        <th>Target</th>
-        <th>Stop</th>
-        <th>R:R</th>
         <th>ML%</th>
         <th title="Relative Strength vs SPY">RS</th>
         <th title="Gap at open">Gap</th>
@@ -826,6 +825,7 @@
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'confidence', searchQ = '';
+let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let _chart = null, _candleSeries = null, _volSeries = null;
 let _alertsEnabled = false, _currentSignal = null;
 let _sessionInfo = null, _regimeInfo = null;
@@ -844,6 +844,7 @@ function connectWS() {
     const m = JSON.parse(e.data);
     if (m.type === 'update') {
       allSignals = m.signals;
+      if (m.open_trades) allOpenTrades = m.open_trades;
       if (m.session)  { _sessionInfo = m.session; updateSessionBanner(m.session); }
       if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
       if (m.macro)    updateMacroBanner(m.macro);
@@ -927,18 +928,15 @@ function renderTable() {
   if (!data.length) { tbody.innerHTML = `<tr><td colspan="20" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
 
   tbody.innerHTML = data.map(s => {
-    const chgC = s.change_pct >= 0 ? 'pos' : 'neg';
-    const sigC = 'badge-' + s.prediction.replace(/ /g,'-');
-    const trC  = 'trend-' + s.trend;
+    const chgC  = s.change_pct >= 0 ? 'pos' : 'neg';
+    const sigC  = 'badge-' + s.prediction.replace(/ /g,'-');
+    const trC   = 'trend-' + s.trend;
     const confW = Math.round(s.confidence);
     const confC = confW > 60 ? 'var(--green-s)' : confW > 35 ? 'var(--yellow)' : 'var(--muted)';
     const rrC   = s.rr_ratio >= 2 ? 'var(--green)' : s.rr_ratio >= 1 ? 'var(--yellow)' : 'var(--red)';
     const uvol  = s.unusual_vol ? ' ⚡' : '';
-    const posTag = s.has_open_position
-      ? `<span style="display:inline-block;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(59,130,246,.2);color:var(--blue);border:1px solid var(--blue);margin-left:4px" title="Paper trade already open — no duplicate will be placed">📍 OPEN</span>` : '';
-    const supTag = s.is_suppressed
-      ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)" title="${s.suppress_reason||'Suppressed by adaptive filter'}">🚫 FILTERED</span>` : '';
-    // AH badge: show when AH data is available for this ticker
+
+    // AH badge
     const ahChg = s.ah_change_pct ?? 0;
     const ahTag = (s.ah_direction && s.ah_direction !== '')
       ? (() => {
@@ -947,12 +945,66 @@ function renderTable() {
           const confTag = s.ah_confirms_signal ? '✓' : '✗';
           const confCol = s.ah_confirms_signal ? 'var(--green-s)' : 'var(--red)';
           const newsTag = s.ah_news_likely ? ' 📰' : '';
-          return `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(100,116,139,.12);color:${ahCol};border:1px solid ${ahCol}" title="AH: ${s.ah_direction} ${ahChg>=0?'+':''}${ahChg.toFixed(2)}% (${s.ah_magnitude||''})${s.ah_news_likely?' — News likely':''}">AH ${ahArrow} ${ahChg>=0?'+':''}${ahChg.toFixed(1)}%${newsTag} <span style="color:${confCol}">${confTag}</span></span>`;
+          return `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(100,116,139,.12);color:${ahCol};border:1px solid ${ahCol}" title="AH ${s.ah_direction} ${ahChg>=0?'+':''}${ahChg.toFixed(2)}% (${s.ah_magnitude||''})">AH ${ahArrow}${ahChg>=0?'+':''}${ahChg.toFixed(1)}%${newsTag} <span style="color:${confCol}">${confTag}</span></span>`;
         })() : '';
-    return `<tr data-ticker="${s.ticker}" style="${s.is_suppressed?'opacity:0.65':''}${s.has_open_position?';background:rgba(59,130,246,.04)':''}">
-      <td class="ticker-cell">${s.ticker}${uvol}${posTag}${ahTag}</td>
+
+    // ── Trade STATUS cell ──────────────────────────────────────────────────
+    const trade = allOpenTrades[s.ticker];
+    let statusCell = '';
+    if (s.is_suppressed) {
+      statusCell = `<div style="padding:5px 7px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:9px">
+        <div style="color:var(--red);font-weight:700">🚫 FILTERED</div>
+        <div style="color:#94a3b8;margin-top:2px;font-size:8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.suppress_reason||''}">${s.suppress_reason||'Adaptive filter'}</div>
+      </div>`;
+    } else if (trade) {
+      const ep     = trade.entry_price || 1;
+      const cur    = s.price || ep;
+      const pnl    = trade.direction === 'BUY' ? (cur - ep) / ep * 100 : (ep - cur) / ep * 100;
+      const pnlCol = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--muted)';
+      const bars   = trade.bars_held || 0;
+      const dirCol = trade.direction === 'BUY' ? 'var(--green-s)' : 'var(--red-s)';
+      statusCell = `<div style="padding:5px 7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.35);border-radius:6px;min-width:110px">
+        <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
+          <span style="color:var(--blue);font-weight:700;font-size:9px">📍 IN TRADE</span>
+          <span style="color:${dirCol};font-size:9px;font-weight:700">${trade.direction}</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted)">Entry: <strong style="color:var(--text)">$${fmt(ep)}</strong></div>
+        <div style="font-size:11px;font-weight:700;color:${pnlCol}">${pnl>=0?'+':''}${pnl.toFixed(2)}% <span style="font-size:9px;color:var(--muted);font-weight:400">· Bar ${bars}</span></div>
+      </div>`;
+    } else if (s.prediction === 'BUY' || s.prediction === 'SELL' || s.prediction === 'STRONG BUY' || s.prediction === 'STRONG SELL') {
+      const watchCol = s.rr_qualifies ? 'var(--green)' : 'var(--yellow)';
+      statusCell = `<div style="padding:5px 7px;background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.25);border-radius:6px;font-size:9px">
+        <div style="color:${watchCol};font-weight:700">👁 WATCHING</div>
+        <div style="color:var(--muted);margin-top:2px">${s.rr_qualifies ? 'R:R qualifies' : 'R:R too low'}</div>
+      </div>`;
+    }
+
+    // ── Trade LEVELS cell — Entry / TP / SL ───────────────────────────────
+    const entryPrice = trade ? trade.entry_price : s.price;
+    const tpPct  = entryPrice > 0 ? ((s.target_price - entryPrice) / entryPrice * 100) : 0;
+    const slPct  = entryPrice > 0 ? ((s.stop_loss    - entryPrice) / entryPrice * 100) : 0;
+    const levelsCell = `<div style="font-size:10px;line-height:1.7;min-width:130px">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="color:var(--muted)">Entry</span>
+        <strong style="color:var(--text)">$${fmt(entryPrice)}</strong>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="color:var(--muted)">TP</span>
+        <span style="color:var(--green);font-weight:700">$${fmt(s.target_price)} <span style="font-size:9px;opacity:.7">${tpPct>=0?'+':''}${tpPct.toFixed(1)}%</span></span>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="color:var(--muted)">SL</span>
+        <span style="color:var(--red);font-weight:700">$${fmt(s.stop_loss)} <span style="font-size:9px;opacity:.7">${slPct.toFixed(1)}%</span></span>
+      </div>
+    </div>`;
+
+    const supInlineTag = s.is_suppressed
+      ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)">🚫 FILTERED</span>` : '';
+
+    const rowBg = trade ? 'background:rgba(59,130,246,.04)' : s.is_suppressed ? 'opacity:0.65' : '';
+    return `<tr data-ticker="${s.ticker}" style="${rowBg}">
+      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}</td>
       <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
-      <td style="font-weight:600">$${fmt(s.price)}</td>
       <td class="chg-cell ${chgC}">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%</td>
       <td>
         <span class="signal-badge ${sigC}">${s.prediction}</span>
@@ -965,40 +1017,12 @@ function renderTable() {
           : s.entry_type==='BOUNCE_SETUP'
             ? `<span class="signal-badge badge-BOUNCE-SETUP" style="margin-left:3px;font-size:9px">BOUNCE</span>`
             : ''}
-        ${s.rsi_gated ? `<span style="font-size:9px;color:var(--red);display:block;margin-top:2px" title="RSI gate overrode composite">⛔ RSI gated</span>` : ''}
+        ${s.rsi_gated ? `<span style="font-size:9px;color:var(--red);display:block;margin-top:2px">⛔ RSI gated</span>` : ''}
         ${s.divergence_type!=='NONE' ? `<span class="divergence-badge div-${s.divergence_type}" style="display:block;margin-top:2px">${s.divergence_type} DIV</span>` : ''}
-        ${supTag}
+        ${supInlineTag}
       </td>
-      <td>
-        <span class="rsi-badge rsi-${s.rsi_zone||'NEUTRAL'}">${fmt(s.rsi_value,0)}</span>
-        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${(s.rsi_zone||'NEUTRAL').replace('_',' ')}</span>
-      </td>
-      <td>
-        <div style="display:flex;align-items:center;gap:5px">
-          <div class="conf-bar"><div class="conf-fill" style="width:${confW}%;background:${confC}"></div></div>
-          <span style="font-size:11px;color:${confC}">${fmt(s.confidence,0)}%</span>
-        </div>
-      </td>
-      <td class="trend-cell">
-        <span class="trend-badge ${trC}">${s.trend}</span>
-        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${Math.round((s.trend_probability||0.5)*100)}% conf</span>
-      </td>
-      <td style="font-size:10px;white-space:nowrap">
-        ${(() => {
-          const b = s.mtf_bull_count||0, br = s.mtf_bear_count||0;
-          const al = s.mtf_alignment||'MIXED';
-          const c = al==='STRONGLY BULLISH'?'var(--green)':al==='BULLISH'?'#86efac':al==='STRONGLY BEARISH'?'var(--red)':al==='BEARISH'?'#f87171':'var(--muted)';
-          return `<span style="color:${c};font-weight:700">${b}↑ ${br}↓</span>`;
-        })()}
-      </td>
-      <td>
-        <div class="score-bar-wrap">
-          ${miniBar(s.score, 44)}
-          <span style="font-size:11px;color:${scoreColor(s.score)};min-width:34px">${s.score>=0?'+':''}${fmt(s.score,2)}</span>
-        </div>
-      </td>
-      <td style="color:var(--green);font-size:11px">$${fmt(s.target_price)}</td>
-      <td style="color:var(--red);font-size:11px">$${fmt(s.stop_loss)}</td>
+      <td>${statusCell}</td>
+      <td>${levelsCell}</td>
       <td>
         <span style="color:${rrC};font-weight:600">${fmt(s.rr_ratio,1)}:1</span>
         <span class="rr-badge rr-${s.rr_quality||'LOW'}" style="display:block;margin-top:1px">${s.rr_quality||'LOW'}</span>
