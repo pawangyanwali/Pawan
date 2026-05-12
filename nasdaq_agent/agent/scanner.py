@@ -198,6 +198,11 @@ class StockSignal:
     headlines:  list = field(default_factory=list)
     scanned_at: str  = field(default_factory=lambda: datetime.utcnow().isoformat())
 
+    # ── Adaptive filter ───────────────────────────────────────────────────────
+    is_suppressed:   bool = False   # True when adaptive filter blocked this signal
+    suppress_reason: str  = ""      # Why it was suppressed
+    has_open_position: bool = False # True when ticker already has an open paper trade
+
     def to_dict(self) -> dict:
         import math
         d = asdict(self)
@@ -360,7 +365,18 @@ def analyse_ticker(
                 float(min(max(pred["confidence"] + boost, 25.0), 95.0)), 1
             )
 
+        # Check if ticker already has an open paper trade
+        _has_open_position = False
+        try:
+            from agent.paper_trading import get_open_trades as _get_open
+            _open_tickers = {t["ticker"] for t in _get_open()}
+            _has_open_position = ticker in _open_tickers
+        except Exception:
+            pass
+
         # Adaptive filter — suppress signals matching learned losing patterns
+        _is_suppressed   = False
+        _suppress_reason = ""
         if pred["direction"] in ("BUY", "SELL"):
             suppress, suppress_reason = should_suppress(
                 vwap_event   = vwap_sig["event"],
@@ -373,8 +389,10 @@ def analyse_ticker(
                 confidence   = pred["confidence"],
             )
             if suppress:
-                pred["direction"] = "NEUTRAL"
-                pred["reasons"]   = [f"⚡ {suppress_reason}"] + pred.get("reasons", [])
+                pred["direction"]  = "NEUTRAL"
+                pred["reasons"]    = [f"⚡ {suppress_reason}"] + pred.get("reasons", [])
+                _is_suppressed     = True
+                _suppress_reason   = suppress_reason
                 increment_suppressed()
 
         # Record signal in tracker + open paper trade (BUY/SELL only)
@@ -522,9 +540,12 @@ def analyse_ticker(
             macro_event       = macro_ev["event_name"],
             macro_description = macro_ev["description"],
             # Trade plan
-            trade_plan        = tp.to_dict(),
-            candles           = candles,
-            headlines         = headlines[:5],
+            trade_plan          = tp.to_dict(),
+            candles             = candles,
+            headlines           = headlines[:5],
+            is_suppressed       = _is_suppressed,
+            suppress_reason     = _suppress_reason,
+            has_open_position   = _has_open_position,
         )
     except Exception as e:
         logger.warning(f"[{ticker}] analysis error: {e}", exc_info=True)

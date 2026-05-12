@@ -391,6 +391,20 @@
   <div class="pill"><div class="pill-label">Sell</div><div class="pill-value" style="color:var(--red);font-size:16px" id="s-sell">—</div></div>
   <div class="pill"><div class="pill-label">Strong Sell</div><div class="pill-value" style="color:var(--red-s)" id="s-ssell">—</div></div>
   <div class="pill"><div class="pill-label">Vol Spike ⚡</div><div class="pill-value" style="color:var(--yellow)" id="s-uvol">—</div></div>
+  <!-- Self-learning pill -->
+  <div class="pill" id="learn-pill" onclick="openLearning()" style="cursor:pointer;border-color:var(--border);min-width:160px" title="Click to open Learning Status">
+    <div class="pill-label">🧠 Self-Learning</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+      <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
+        <div id="learn-pill-bar" style="height:100%;border-radius:3px;background:var(--muted);width:0%;transition:width .6s"></div>
+      </div>
+      <span id="learn-pill-val" style="font-size:12px;font-weight:700;color:var(--muted)">—</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:2px;font-size:9px;color:var(--muted)">
+      <span>Gate: <strong id="learn-pill-gate" style="color:var(--text)">—</strong></span>
+      <span>Suppressed: <strong id="learn-pill-sup" style="color:var(--yellow)">—</strong></span>
+    </div>
+  </div>
 </div>
 
 <div class="toolbar">
@@ -795,6 +809,7 @@ function connectWS() {
       if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
       if (m.macro)    updateMacroBanner(m.macro);
       if (m.backtest) updateBtHeaderBtn(m.backtest);
+      if (m.learning) updateLearnPill(m.learning);
       if (m.alerts?.length) handleAlerts(m.alerts);
       renderAll();
       hideLoading();
@@ -880,8 +895,12 @@ function renderTable() {
     const confC = confW > 60 ? 'var(--green-s)' : confW > 35 ? 'var(--yellow)' : 'var(--muted)';
     const rrC   = s.rr_ratio >= 2 ? 'var(--green)' : s.rr_ratio >= 1 ? 'var(--yellow)' : 'var(--red)';
     const uvol  = s.unusual_vol ? ' ⚡' : '';
-    return `<tr data-ticker="${s.ticker}">
-      <td class="ticker-cell">${s.ticker}${uvol}</td>
+    const posTag = s.has_open_position
+      ? `<span style="display:inline-block;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(59,130,246,.2);color:var(--blue);border:1px solid var(--blue);margin-left:4px" title="Paper trade already open — no duplicate will be placed">📍 OPEN</span>` : '';
+    const supTag = s.is_suppressed
+      ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)" title="${s.suppress_reason||'Suppressed by adaptive filter'}">🚫 FILTERED</span>` : '';
+    return `<tr data-ticker="${s.ticker}" style="${s.is_suppressed?'opacity:0.65':''}${s.has_open_position?';background:rgba(59,130,246,.04)':''}">
+      <td class="ticker-cell">${s.ticker}${uvol}${posTag}</td>
       <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
       <td style="font-weight:600">$${fmt(s.price)}</td>
       <td class="chg-cell ${chgC}">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%</td>
@@ -898,6 +917,7 @@ function renderTable() {
             : ''}
         ${s.rsi_gated ? `<span style="font-size:9px;color:var(--red);display:block;margin-top:2px" title="RSI gate overrode composite">⛔ RSI gated</span>` : ''}
         ${s.divergence_type!=='NONE' ? `<span class="divergence-badge div-${s.divergence_type}" style="display:block;margin-top:2px">${s.divergence_type} DIV</span>` : ''}
+        ${supTag}
       </td>
       <td>
         <span class="rsi-badge rsi-${s.rsi_zone||'NEUTRAL'}">${fmt(s.rsi_value,0)}</span>
@@ -2022,6 +2042,28 @@ function _updateLearnHeaderBtn(wr, thresh, isLearning) {
 }
 
 // Update backtest header button live with win rate from WebSocket
+function updateLearnPill(l) {
+  if (!l) return;
+  const wr     = l.win_rate ?? 0;          // already in % (0-100)
+  const target = l.target_win_rate ?? 90;
+  const gate   = l.dynamic_threshold ?? 65;
+  const sup    = l.suppressed_count ?? 0;
+  const pct    = Math.min(100, (wr / target) * 100);
+  const col    = wr >= target ? 'var(--green-s)' : wr >= 72 ? 'var(--green)' : wr >= 54 ? 'var(--yellow)' : 'var(--red)';
+
+  const bar = document.getElementById('learn-pill-bar');
+  const val = document.getElementById('learn-pill-val');
+  const gateEl = document.getElementById('learn-pill-gate');
+  const supEl  = document.getElementById('learn-pill-sup');
+  if (bar) { bar.style.width = pct + '%'; bar.style.background = col; }
+  if (val) { val.textContent = wr.toFixed(1) + '%'; val.style.color = col; }
+  if (gateEl) gateEl.textContent = gate.toFixed(0) + '%';
+  if (supEl)  supEl.textContent  = sup;
+
+  // Also update header button
+  _updateLearnHeaderBtn(wr, gate, l.is_learning ?? false);
+}
+
 function updateBtHeaderBtn(bt) {
   if (!bt || bt.total == null || bt.total === 0) return;
   const btn = document.getElementById('bt-header-btn');

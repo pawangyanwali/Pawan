@@ -133,6 +133,19 @@ def _on_signals(signals: list[StockSignal]) -> None:
     except Exception:
         bt_summary = {}
 
+    try:
+        learn_summary = af_get_status()
+        learn_compact = {
+            "win_rate":          learn_summary.get("current_win_rate", 0.0),
+            "target_win_rate":   learn_summary.get("target_win_rate", 90.0),
+            "dynamic_threshold": learn_summary.get("dynamic_threshold", 65.0),
+            "suppressed_count":  learn_summary.get("suppressed_count", 0),
+            "blocked_count":     len(learn_summary.get("blocked_contexts", {})),
+            "is_learning":       learn_summary.get("is_learning", False),
+        }
+    except Exception:
+        learn_compact = {}
+
     payload = _dumps({
         "type":     "update",
         "signals":  [s.to_dict() for s in signals],
@@ -141,6 +154,7 @@ def _on_signals(signals: list[StockSignal]) -> None:
         "alerts":   alerts,
         "macro":    macro,
         "backtest": bt_summary,
+        "learning": learn_compact,
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
