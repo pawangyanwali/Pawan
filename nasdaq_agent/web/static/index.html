@@ -283,6 +283,25 @@
     .history-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:500; align-items:center; justify-content:center; }
     .history-modal.open { display:flex; }
     .history-modal-inner { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:90vw; max-width:900px; max-height:80vh; overflow-y:auto; padding:20px; }
+
+    /* Backtest modal */
+    .bt-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.8); z-index:500; align-items:flex-start; justify-content:center; padding:20px; overflow-y:auto; }
+    .bt-modal.open { display:flex; }
+    .bt-modal-inner { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:100%; max-width:1100px; padding:24px; margin:auto; }
+    .bt-kpi-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; margin-bottom:20px; }
+    .bt-kpi { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px 14px; }
+    .bt-kpi-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; }
+    .bt-kpi-value { font-size:20px; font-weight:700; margin-top:2px; }
+    .bt-section-title { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin:16px 0 8px; }
+    .bt-attr-table { width:100%; border-collapse:collapse; font-size:11px; }
+    .bt-attr-table th { padding:6px 8px; text-align:left; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.5px; border-bottom:1px solid var(--border); }
+    .bt-attr-table td { padding:6px 8px; border-bottom:1px solid rgba(37,42,53,.6); }
+    .bt-attr-table tr:last-child td { border-bottom:none; }
+    .bt-win-bar { display:inline-block; height:6px; background:var(--green); border-radius:3px; margin-left:6px; vertical-align:middle; }
+    .bt-tracking-row { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; background:var(--surface2); border-radius:6px; margin-bottom:4px; font-size:11px; gap:8px; }
+    .bt-tabs { display:flex; gap:6px; margin-bottom:16px; }
+    .bt-tab { background:var(--surface2); border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:5px 14px; cursor:pointer; font-family:inherit; font-size:11px; }
+    .bt-tab.active { border-color:var(--accent); color:var(--text); background:#1e1f3a; }
     .history-stat { padding:8px 14px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); }
     .hist-win   { color:var(--green); }
     .hist-loss  { color:var(--red); }
@@ -324,6 +343,7 @@
     <span id="ws-status">Connecting…</span>
     <span>Last scan: <span id="last-scan">—</span></span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
+    <button onclick="openBacktest()" id="bt-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📈 Backtest</button>
     <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="toggleAlerts()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Toggle browser alerts">🔔 Alerts OFF</button>
@@ -629,6 +649,54 @@
   </div>
 </div>
 
+<!-- Live Backtest Dashboard Modal -->
+<div class="bt-modal" id="bt-modal">
+  <div class="bt-modal-inner">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">📈 Live Backtest Dashboard</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Real-time signal accuracy — every BUY/SELL tracked to resolution</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <select id="bt-lookback" onchange="loadBacktestData()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 8px;font-family:inherit;font-size:11px;cursor:pointer;outline:none">
+          <option value="7">Last 7 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+        <button onclick="loadBacktestData()" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:5px 12px;cursor:pointer;font-family:inherit;font-size:11px">Refresh</button>
+        <button onclick="closeBacktest()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+      </div>
+    </div>
+
+    <!-- KPI pills -->
+    <div class="bt-kpi-grid" id="bt-kpis"></div>
+
+    <!-- Tabs -->
+    <div class="bt-tabs">
+      <button class="bt-tab active" data-tab="attribution" onclick="switchBtTab(this,'attribution')">Attribution</button>
+      <button class="bt-tab" data-tab="tracking" onclick="switchBtTab(this,'tracking')">Live Tracking</button>
+      <button class="bt-tab" data-tab="recent" onclick="switchBtTab(this,'recent')">Recent Resolved</button>
+    </div>
+
+    <!-- Attribution panel -->
+    <div id="bt-panel-attribution">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px" id="bt-attr-grids"></div>
+    </div>
+
+    <!-- Tracking panel -->
+    <div id="bt-panel-tracking" style="display:none">
+      <div class="bt-section-title">Currently Tracking (<span id="bt-tracking-count">0</span> open signals)</div>
+      <div id="bt-tracking-list"></div>
+    </div>
+
+    <!-- Recent resolved panel -->
+    <div id="bt-panel-recent" style="display:none">
+      <div id="bt-recent-table"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'confidence', searchQ = '';
@@ -653,6 +721,7 @@ function connectWS() {
       if (m.session)  { _sessionInfo = m.session; updateSessionBanner(m.session); }
       if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
       if (m.macro)    updateMacroBanner(m.macro);
+      if (m.backtest) updateBtHeaderBtn(m.backtest);
       if (m.alerts?.length) handleAlerts(m.alerts);
       renderAll();
       hideLoading();
@@ -1603,6 +1672,167 @@ async function removeWatchlistTicker(ticker) {
     await fetch(`${BACKEND_HTTP}/api/watchlist/remove?ticker=${ticker}`, {method:'POST'});
     await refreshWatchlistUI();
   } catch {}
+}
+
+// ─── Live Backtest Dashboard ──────────────────────────────────────────────────
+let _btTab = 'attribution';
+
+function openBacktest() {
+  document.getElementById('bt-modal').classList.add('open');
+  loadBacktestData();
+}
+function closeBacktest() { document.getElementById('bt-modal').classList.remove('open'); }
+
+function switchBtTab(el, tab) {
+  document.querySelectorAll('.bt-tab').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  _btTab = tab;
+  ['attribution','tracking','recent'].forEach(t => {
+    document.getElementById(`bt-panel-${t}`).style.display = t === tab ? '' : 'none';
+  });
+  if (tab === 'tracking') loadBtTracking();
+  if (tab === 'recent')   loadBtRecent();
+}
+
+async function loadBacktestData() {
+  const days = document.getElementById('bt-lookback').value;
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/stats?lookback_days=${days}`)).json();
+    renderBtKpis(d.stats);
+    renderBtAttribution(d.stats);
+  } catch(e) {
+    document.getElementById('bt-kpis').innerHTML = `<div style="color:var(--muted);font-size:11px">No backtest data yet — signals are tracked as they fire.</div>`;
+  }
+  if (_btTab === 'tracking') loadBtTracking();
+  if (_btTab === 'recent')   loadBtRecent();
+}
+
+function renderBtKpis(stats) {
+  const o = stats.overall || {};
+  const kpis = [
+    { label:'Total Signals', value: o.total ?? 0, color: 'var(--text)' },
+    { label:'Win Rate', value: o.win_rate != null ? `${(o.win_rate*100).toFixed(1)}%` : '—', color: o.win_rate >= 0.55 ? 'var(--green)' : o.win_rate >= 0.45 ? 'var(--yellow)' : 'var(--red)' },
+    { label:'Avg R-Multiple', value: o.avg_r != null ? o.avg_r.toFixed(2)+'R' : '—', color: o.avg_r > 0 ? 'var(--green)' : 'var(--red)' },
+    { label:'Expectancy', value: o.expectancy != null ? o.expectancy.toFixed(2) : '—', color: o.expectancy > 0 ? 'var(--green)' : 'var(--red)' },
+    { label:'Wins', value: o.wins ?? 0, color: 'var(--green)' },
+    { label:'Losses', value: o.losses ?? 0, color: 'var(--red)' },
+    { label:'Timeouts', value: o.timeouts ?? 0, color: 'var(--muted)' },
+    { label:'Tracking', value: stats.tracking_count ?? 0, color: 'var(--blue)' },
+  ];
+  document.getElementById('bt-kpis').innerHTML = kpis.map(k =>
+    `<div class="bt-kpi"><div class="bt-kpi-label">${k.label}</div><div class="bt-kpi-value" style="color:${k.color}">${k.value}</div></div>`
+  ).join('');
+}
+
+function _attrTable(rows, title) {
+  if (!rows || !rows.length) return `<div style="color:var(--muted);font-size:11px;padding:8px">No data</div>`;
+  return `
+    <div class="bt-section-title">${title}</div>
+    <table class="bt-attr-table">
+      <thead><tr><th>Context</th><th>Win%</th><th>Avg R</th><th>Total</th></tr></thead>
+      <tbody>${rows.map(r => {
+        const wr = r.win_rate ?? 0;
+        const barW = Math.round(wr * 60);
+        const col = wr >= 0.55 ? 'var(--green)' : wr >= 0.45 ? 'var(--yellow)' : 'var(--red)';
+        return `<tr>
+          <td style="color:var(--text)">${r.value ?? r.key ?? '—'}</td>
+          <td><span style="color:${col}">${(wr*100).toFixed(0)}%</span><span class="bt-win-bar" style="width:${barW}px;background:${col}"></span></td>
+          <td style="color:${(r.avg_r??0)>0?'var(--green)':'var(--red)'}">${(r.avg_r??0).toFixed(2)}R</td>
+          <td style="color:var(--muted)">${r.total??0}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+}
+
+function renderBtAttribution(stats) {
+  const br = stats.breakdowns || {};
+  const sections = [
+    { key:'by_vwap_event',  title:'By VWAP Event' },
+    { key:'by_session',     title:'By Session' },
+    { key:'by_regime',      title:'By Market Regime' },
+    { key:'by_rsi_zone',    title:'By RSI Zone' },
+    { key:'by_entry_type',  title:'By Entry Type' },
+    { key:'by_direction',   title:'By Direction' },
+    { key:'by_conf_band',   title:'By Confidence Band' },
+    { key:'by_sector_trend',title:'By Sector Trend' },
+  ];
+  let html = '';
+  sections.forEach(s => {
+    const rows = br[s.key];
+    if (rows && rows.length) html += `<div>${_attrTable(rows, s.title)}</div>`;
+  });
+  document.getElementById('bt-attr-grids').innerHTML = html || `<div style="color:var(--muted);font-size:11px;padding:8px">No attribution data yet — fire some signals first.</div>`;
+}
+
+async function loadBtTracking() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/tracking`)).json();
+    const list = d.tracking || [];
+    document.getElementById('bt-tracking-count').textContent = list.length;
+    if (!list.length) {
+      document.getElementById('bt-tracking-list').innerHTML = `<div style="color:var(--muted);font-size:11px;padding:8px">No signals currently being tracked.</div>`;
+      return;
+    }
+    document.getElementById('bt-tracking-list').innerHTML = list.map(t => {
+      const rCol = (t.current_r ?? 0) >= 0 ? 'var(--green)' : 'var(--red)';
+      const dirCol = t.direction === 'BUY' ? 'var(--green-s)' : 'var(--red-s)';
+      return `<div class="bt-tracking-row">
+        <span style="font-weight:700;color:var(--text);min-width:60px">${t.ticker}</span>
+        <span style="color:${dirCol};min-width:40px">${t.direction}</span>
+        <span style="color:var(--muted)">Entry: <strong style="color:var(--text)">$${(t.entry_price??0).toFixed(2)}</strong></span>
+        <span style="color:var(--muted)">T: <strong style="color:var(--green)">$${(t.target??0).toFixed(2)}</strong></span>
+        <span style="color:var(--muted)">S: <strong style="color:var(--red)">$${(t.stop??0).toFixed(2)}</strong></span>
+        <span style="color:${rCol};font-weight:700">R: ${(t.current_r??0).toFixed(2)}</span>
+        <span style="color:var(--muted)">${t.bars_tracked??0} bars</span>
+        <span style="color:var(--muted);font-size:10px">${t.session||''} · ${t.vwap_event||''}</span>
+      </div>`;
+    }).join('');
+  } catch {
+    document.getElementById('bt-tracking-list').innerHTML = `<div style="color:var(--muted);font-size:11px">Error loading tracking data.</div>`;
+  }
+}
+
+async function loadBtRecent() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/recent?limit=50`)).json();
+    const list = d.recent || [];
+    if (!list.length) {
+      document.getElementById('bt-recent-table').innerHTML = `<div style="color:var(--muted);font-size:11px;padding:8px">No resolved signals yet.</div>`;
+      return;
+    }
+    document.getElementById('bt-recent-table').innerHTML = `
+      <table class="bt-attr-table">
+        <thead><tr><th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th><th>R-Mult</th><th>Status</th><th>Exit Reason</th><th>Session</th><th>VWAP</th><th>Bars</th></tr></thead>
+        <tbody>${list.map(r => {
+          const col = r.outcome_color || 'var(--muted)';
+          const dirCol = r.direction === 'BUY' ? 'var(--green-s)' : 'var(--red-s)';
+          return `<tr>
+            <td style="font-weight:700;color:var(--text)">${r.ticker}</td>
+            <td style="color:${dirCol}">${r.direction}</td>
+            <td>$${(r.entry_price??0).toFixed(2)}</td>
+            <td>${r.exit_price ? '$'+r.exit_price.toFixed(2) : '—'}</td>
+            <td style="color:${(r.r_multiple??0)>=0?'var(--green)':'var(--red)'};font-weight:700">${r.r_multiple != null ? r.r_multiple.toFixed(2)+'R' : '—'}</td>
+            <td><span style="color:${col};font-weight:700">${r.status}</span></td>
+            <td style="color:var(--muted)">${r.exit_reason||'—'}</td>
+            <td style="color:var(--muted)">${r.session||'—'}</td>
+            <td style="color:var(--muted)">${r.vwap_event||'—'}</td>
+            <td style="color:var(--muted)">${r.bars_tracked??'—'}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>`;
+  } catch {
+    document.getElementById('bt-recent-table').innerHTML = `<div style="color:var(--muted);font-size:11px">Error loading recent data.</div>`;
+  }
+}
+
+// Update backtest header button live with win rate from WebSocket
+function updateBtHeaderBtn(bt) {
+  if (!bt || bt.total == null || bt.total === 0) return;
+  const btn = document.getElementById('bt-header-btn');
+  if (!btn) return;
+  const wr = bt.win_rate != null ? `${(bt.win_rate*100).toFixed(0)}%` : '';
+  const col = bt.win_rate >= 0.55 ? 'var(--green)' : bt.win_rate >= 0.45 ? 'var(--yellow)' : 'var(--red)';
+  btn.innerHTML = `📈 Backtest <span style="color:${col};font-weight:700">${wr}</span>`;
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────

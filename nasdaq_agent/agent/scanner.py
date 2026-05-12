@@ -50,6 +50,12 @@ from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.exit_signals import analyse_exits
 from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades
 from agent.macro_calendar import check_macro_event
+from agent.live_backtest import (
+    init_db as bt_init_db,
+    record_signal as bt_record,
+    update_tracking as bt_update,
+)
+from agent.backtest_reporter import maybe_trigger_feedback_retrain, adjust_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +328,17 @@ def analyse_ticker(
             direction=pred["direction"],
         )
 
+        # Apply backtest-derived confidence calibration
+        pred["confidence"] = adjust_confidence(
+            confidence  = pred["confidence"],
+            vwap_event  = vwap_sig["event"],
+            rsi_zone    = pred.get("rsi_zone", ""),
+            session     = sess_info.get("session", ""),
+            regime      = regime.regime,
+            entry_type  = pred.get("entry_type", ""),
+            direction   = pred["direction"],
+        )
+
         # Record signal in tracker + open paper trade (BUY/SELL only)
         if pred["direction"] in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:
             resolve_pending(ticker, price)
@@ -332,14 +349,33 @@ def analyse_ticker(
                 session=sess_info.get("session", ""),
                 regime=regime.regime,
             )
+            bt_record(
+                ticker       = ticker,
+                direction    = pred["direction"],
+                entry_price  = price,
+                target       = pred["target_price"],
+                stop         = pred["stop_loss"],
+                rr_ratio     = pred["rr_ratio"],
+                confidence   = pred["confidence"],
+                session      = sess_info.get("session", ""),
+                regime       = regime.regime,
+                vwap_event   = vwap_sig["event"],
+                rsi_zone     = pred.get("rsi_zone", ""),
+                rsi_value    = float(pred.get("rsi_value", 50.0)),
+                sector_etf   = sector_ctx.etf,
+                sector_trend = sector_ctx.sector_trend,
+                entry_type   = pred.get("entry_type", "IMMEDIATE"),
+                mtf_alignment = mtf["alignment"],
+            )
             maybe_open_trade(
                 ticker=ticker, direction=pred["direction"], price=price,
                 target=pred["target_price"], stop=pred["stop_loss"],
                 confidence=pred["confidence"], rr_qualifies=bool(pred.get("rr_qualifies", False)),
             )
 
-        # Update open paper trades
+        # Update open paper trades + live backtest tracking
         update_open_trades(ticker, df_ind, price)
+        bt_update(ticker, price, vwap_sig["vwap"])
 
         candles = _build_candles(df_1m)
         info    = _get_info(ticker)
@@ -533,6 +569,9 @@ class Scanner:
         elapsed = round(time.time() - t0, 1)
         logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(NASDAQ_TICKERS)} tickers analysed")
 
+        # ML feedback: retrain if enough new backtest outcomes have accumulated
+        maybe_trigger_feedback_retrain(active_tickers)
+
         if self._should_retrain():
             logger.info("Scheduled ML retrain starting…")
             daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
@@ -554,6 +593,7 @@ class Scanner:
     def start_background(self) -> None:
         init_db()      # signal_history.db
         pt_init_db()   # paper_trades.db
+        bt_init_db()   # live_backtest.db
 
         # Thread 1: ML training (waits 30s for first scan to warm cache)
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)

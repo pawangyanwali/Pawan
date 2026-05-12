@@ -24,6 +24,8 @@ from agent.signal_tracker import get_stats, get_recent_signals
 from agent.position_sizing import calculate as calc_position
 from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades
 from agent.macro_calendar import check_macro_event, get_upcoming_events
+from agent.live_backtest import get_performance_stats, get_tracking_signals, get_recent_resolved, get_price_path
+from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from config import (
     DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT,
     load_watchlist, save_watchlist, NASDAQ_TICKERS,
@@ -102,13 +104,19 @@ def _on_signals(signals: list[StockSignal]) -> None:
     session = get_session_info()
     macro   = check_macro_event()
 
+    try:
+        bt_summary = get_broadcast_summary()
+    except Exception:
+        bt_summary = {}
+
     payload = _dumps({
-        "type":    "update",
-        "signals": [s.to_dict() for s in signals],
-        "regime":  regime.to_dict(),
-        "session": session,
-        "alerts":  alerts,
-        "macro":   macro,
+        "type":     "update",
+        "signals":  [s.to_dict() for s in signals],
+        "regime":   regime.to_dict(),
+        "session":  session,
+        "alerts":   alerts,
+        "macro":    macro,
+        "backtest": bt_summary,
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
@@ -252,6 +260,39 @@ async def remove_from_watchlist(ticker: str):
     wl = [t for t in load_watchlist() if t != ticker]
     save_watchlist(wl)
     return {"watchlist": load_watchlist()}
+
+
+# ── Live backtest endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/backtest/stats")
+async def backtest_stats(lookback_days: int = 30):
+    """Full backtest performance report with attribution breakdown."""
+    return get_full_report(lookback_days=lookback_days)
+
+
+@app.get("/api/backtest/tracking")
+async def backtest_tracking():
+    """Currently open (TRACKING) signals being monitored."""
+    return {"tracking": get_tracking_signals()}
+
+
+@app.get("/api/backtest/recent")
+async def backtest_recent(limit: int = 50):
+    """Recently resolved backtest signals."""
+    recent = get_recent_resolved(limit=limit)
+    for r in recent:
+        r["outcome_color"] = (
+            "#00ff88" if r["status"] == "WIN" else
+            "#ef4444" if r["status"] == "LOSS" else
+            "#64748b"
+        )
+    return {"recent": recent}
+
+
+@app.get("/api/backtest/path/{signal_id}")
+async def backtest_path(signal_id: str):
+    """Price path bars for a specific signal (for replay/chart)."""
+    return {"signal_id": signal_id, "path": get_price_path(signal_id)}
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
