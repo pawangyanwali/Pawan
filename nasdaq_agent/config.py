@@ -91,6 +91,34 @@ TICKER_NAMES = {
 # ── Market regime / benchmark tickers ────────────────────────────────────────
 REGIME_TICKERS = ["SPY", "QQQ"]   # fetched each scan cycle for regime detection
 
+# ── Sector ETF universe (fetched alongside regime tickers) ───────────────────
+from agent.sector_etf import ALL_SECTOR_ETFS as _SECTOR_ETFS   # noqa: E402
+SECTOR_ETF_TICKERS = list(set(REGIME_TICKERS + _SECTOR_ETFS))
+
+# ── Paper trading ─────────────────────────────────────────────────────────────
+PAPER_TRADE_MIN_CONFIDENCE = 65.0   # min confidence to auto-paper-trade
+
+# ── Watchlist persistence ─────────────────────────────────────────────────────
+import json as _json, pathlib as _pathlib
+_WATCHLIST_PATH = _pathlib.Path(__file__).parent / "data" / "watchlist.json"
+
+def load_watchlist() -> list:
+    try:
+        if _WATCHLIST_PATH.exists():
+            return _json.loads(_WATCHLIST_PATH.read_text())
+    except Exception:
+        pass
+    return []
+
+def save_watchlist(tickers: list) -> None:
+    _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _WATCHLIST_PATH.write_text(_json.dumps(sorted(set(tickers))))
+
+# Active ticker universe = base NASDAQ_TICKERS + any user-added watchlist items
+def get_active_tickers() -> list:
+    extra = [t for t in load_watchlist() if t not in NASDAQ_TICKERS]
+    return NASDAQ_TICKERS + extra
+
 # ── Earnings blackout ─────────────────────────────────────────────────────────
 PRE_EARNINGS_BLACKOUT_DAYS  = 3   # suppress signals N days before earnings
 POST_EARNINGS_COOLDOWN_DAYS = 1   # suppress 1 day after earnings

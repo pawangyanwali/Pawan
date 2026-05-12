@@ -24,6 +24,8 @@ from config import (
     CACHE_TTL_1H,
     CACHE_TTL_1D,
     REGIME_TICKERS,
+    SECTOR_ETF_TICKERS,
+    get_active_tickers,
 )
 from agent.data_fetcher import (
     fetch_batch_realtime,
@@ -43,6 +45,11 @@ from agent.gap_analysis import analyse_gap
 from agent.relative_strength import compute_relative_strength
 from agent.trade_management import build_trade_plan
 from agent.signal_tracker import init_db, record_signal, resolve_pending
+from agent.vwap import compute_vwap_signal
+from agent.sector_etf import get_sector_context, update_etf_cache
+from agent.exit_signals import analyse_exits
+from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades
+from agent.macro_calendar import check_macro_event
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +156,29 @@ class StockSignal:
     rs_score:   float = 0.0
     rs_label:   str   = "IN_LINE"
 
+    # ── VWAP signal ───────────────────────────────────────────────────────────
+    vwap_event:       str   = "FLAT"
+    vwap_score:       float = 0.0
+    vwap_price:       float = 0.0
+    vwap_deviation:   float = 0.0
+    vwap_description: str   = ""
+
+    # ── Sector ETF context ────────────────────────────────────────────────────
+    sector_etf:         str   = "QQQ"
+    sector_trend:       str   = "NEUTRAL"
+    sector_change:      float = 0.0
+    stock_vs_sector:    str   = "IN_LINE"
+
+    # ── Exit signals ──────────────────────────────────────────────────────────
+    exit_recommendation: str  = "HOLD"
+    exit_signals:        list = field(default_factory=list)
+    exit_summary:        str  = ""
+
+    # ── Macro calendar ────────────────────────────────────────────────────────
+    macro_blocked:      bool  = False
+    macro_event:        str   = ""
+    macro_description:  str   = ""
+
     # ── Trade management plan ─────────────────────────────────────────────────
     trade_plan: dict  = field(default_factory=dict)
 
@@ -248,20 +278,41 @@ def analyse_ticker(
         regime = get_regime()
         rs = compute_relative_strength(df_1m, _spy_df_cache.get("SPY"))
 
+        # VWAP signal
+        vwap_sig = compute_vwap_signal(df_ind)
+
+        # Sector ETF context
+        sector_ctx = get_sector_context(ticker, df_1m)
+
+        # Macro calendar blackout
+        macro_ev = check_macro_event()
+
         # Professional prediction
         pred = generate_prediction(
             ticker, df_ind, tech, vol, ml_combined, sent, last,
             mtf_score=mtf["mtf_score"],
             ml_reversal_prob=ml_reversal_p,
+            vwap_score=vwap_sig["score"],
+            sector_mult=sector_ctx.score_mult,
         )
 
         # Apply regime multiplier to score
         raw_score = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
         score     = round(float(np.clip(apply_regime(raw_score, regime), -1, 1)), 4)
 
-        # Override direction to NEUTRAL if earnings blackout
-        if eb["blocked"]:
+        # Override direction to NEUTRAL if earnings or macro blackout
+        if eb["blocked"] or macro_ev["blocked"]:
             pred["direction"] = "NEUTRAL"
+
+        # Exit signals (for open paper trades / active signals)
+        exit_analysis = analyse_exits(
+            df=df_ind,
+            direction=pred["direction"],
+            entry_price=price,
+            target=pred["target_price"],
+            stop=pred["stop_loss"],
+            bars_held=0,
+        )
 
         # Build trade plan
         tp = build_trade_plan(
@@ -271,8 +322,8 @@ def analyse_ticker(
             direction=pred["direction"],
         )
 
-        # Record signal in tracker (BUY/SELL only, skip NEUTRAL)
-        if pred["direction"] in ("BUY", "SELL") and not eb["blocked"]:
+        # Record signal in tracker + open paper trade (BUY/SELL only)
+        if pred["direction"] in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:
             resolve_pending(ticker, price)
             record_signal(
                 ticker=ticker, direction=pred["direction"], entry=price,
@@ -281,6 +332,14 @@ def analyse_ticker(
                 session=sess_info.get("session", ""),
                 regime=regime.regime,
             )
+            maybe_open_trade(
+                ticker=ticker, direction=pred["direction"], price=price,
+                target=pred["target_price"], stop=pred["stop_loss"],
+                confidence=pred["confidence"], rr_qualifies=bool(pred.get("rr_qualifies", False)),
+            )
+
+        # Update open paper trades
+        update_open_trades(ticker, df_ind, price)
 
         candles = _build_candles(df_1m)
         info    = _get_info(ticker)
@@ -359,6 +418,25 @@ def analyse_ticker(
             rs_ratio          = float(rs["rs_ratio"]),
             rs_score          = float(rs["rs_score"]),
             rs_label          = rs["rs_label"],
+            # VWAP signal
+            vwap_event        = vwap_sig["event"],
+            vwap_score        = float(vwap_sig["score"]),
+            vwap_price        = float(vwap_sig["vwap"]),
+            vwap_deviation    = float(vwap_sig["deviation"]),
+            vwap_description  = vwap_sig["description"],
+            # Sector
+            sector_etf        = sector_ctx.etf,
+            sector_trend      = sector_ctx.sector_trend,
+            sector_change     = float(sector_ctx.sector_change),
+            stock_vs_sector   = sector_ctx.stock_vs_sector,
+            # Exit signals
+            exit_recommendation = exit_analysis.recommendation,
+            exit_signals      = [s.__dict__ for s in exit_analysis.signals],
+            exit_summary      = exit_analysis.summary,
+            # Macro
+            macro_blocked     = bool(macro_ev["blocked"]),
+            macro_event       = macro_ev["event_name"],
+            macro_description = macro_ev["description"],
             # Trade plan
             trade_plan        = tp.to_dict(),
             candles           = candles,
@@ -415,26 +493,29 @@ class Scanner:
 
     def run_once(self) -> list[StockSignal]:
         t0 = time.time()
-        logger.info(f"Scan starting — {len(NASDAQ_TICKERS)} tickers…")
+        active_tickers = get_active_tickers()
+        logger.info(f"Scan starting — {len(active_tickers)} tickers…")
 
         # Always-fresh 1M data (live signal)
-        batch_1m = fetch_batch_realtime(NASDAQ_TICKERS)
+        batch_1m = fetch_batch_realtime(active_tickers)
 
         # Cached higher-TF data (only refetched when TTL expires)
-        batch_5m = fetch_batch_interval(NASDAQ_TICKERS, "5min", 500,  ttl=CACHE_TTL_5M)
-        batch_1h = fetch_batch_interval(NASDAQ_TICKERS, "1h",   500,  ttl=CACHE_TTL_1H)
-        batch_1d = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500,  ttl=CACHE_TTL_1D)
+        batch_5m = fetch_batch_interval(active_tickers, "5min", 500,  ttl=CACHE_TTL_5M)
+        batch_1h = fetch_batch_interval(active_tickers, "1h",   500,  ttl=CACHE_TTL_1H)
+        batch_1d = fetch_batch_interval(active_tickers, "1day", 500,  ttl=CACHE_TTL_1D)
 
-        # Fetch SPY/QQQ for regime detection + RS calculation
-        regime_1m = fetch_batch_realtime(REGIME_TICKERS)
-        _spy_df_cache.update(regime_1m)
+        # Fetch SPY/QQQ + sector ETFs for regime, RS and sector context
+        etf_1m = fetch_batch_realtime(SECTOR_ETF_TICKERS)
+        _spy_df_cache.update(etf_1m)
+        update_etf_cache(etf_1m)
         update_regime(
-            df_spy=regime_1m.get("SPY"),
-            df_qqq=regime_1m.get("QQQ"),
+            df_spy=etf_1m.get("SPY"),
+            df_qqq=etf_1m.get("QQQ"),
         )
 
+        active_tickers = get_active_tickers()
         results = []
-        for ticker in NASDAQ_TICKERS:
+        for ticker in active_tickers:
             sig = analyse_ticker(
                 ticker,
                 df_1m = batch_1m.get(ticker),
@@ -471,7 +552,8 @@ class Scanner:
             time.sleep(SCAN_INTERVAL_SECONDS)
 
     def start_background(self) -> None:
-        init_db()   # ensure signal_history.db schema exists
+        init_db()      # signal_history.db
+        pt_init_db()   # paper_trades.db
 
         # Thread 1: ML training (waits 30s for first scan to warm cache)
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)

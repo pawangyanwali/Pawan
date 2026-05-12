@@ -4,6 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NASDAQ Scalping Agent</title>
+  <!-- PWA -->
+  <link rel="manifest" href="/static/manifest.json" />
+  <meta name="theme-color" content="#00ff88" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <!-- TradingView Lightweight Charts -->
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <style>
@@ -239,6 +244,41 @@
     .pos-size-result { margin-top:8px; font-size:12px; font-weight:700; color:var(--purple); }
     .pos-size-desc { font-size:10px; color:var(--muted); margin-top:3px; }
 
+    /* VWAP event badge */
+    .vwap-badge { display:inline-block; padding:2px 7px; border-radius:3px; font-size:9px; font-weight:700; }
+    .vwap-RECLAIM       { background:rgba(0,255,136,.22); color:var(--green-s); border:1px solid var(--green-s); }
+    .vwap-ABOVE         { background:rgba(34,197,94,.15); color:var(--green); }
+    .vwap-FLAT          { background:rgba(100,116,139,.12); color:var(--muted); }
+    .vwap-BELOW         { background:rgba(239,68,68,.15); color:var(--red); }
+    .vwap-REJECTION     { background:rgba(255,51,102,.22); color:var(--red-s); border:1px solid var(--red-s); }
+    .vwap-EXTENDED_UP   { background:rgba(245,158,11,.2); color:#fbbf24; }
+    .vwap-EXTENDED_DOWN { background:rgba(245,158,11,.2); color:#fbbf24; }
+
+    /* Macro event banner */
+    .macro-banner { display:flex; align-items:center; gap:10px; padding:6px 20px; font-size:11px; background:rgba(239,68,68,.1); border-bottom:1px solid rgba(239,68,68,.3); }
+    .macro-banner.medium { background:rgba(245,158,11,.1); border-color:rgba(245,158,11,.3); }
+
+    /* Exit signal */
+    .exit-badge { display:inline-block; padding:2px 7px; border-radius:3px; font-size:9px; font-weight:700; }
+    .exit-EXIT_NOW  { background:rgba(255,51,102,.2); color:var(--red-s); border:1px solid var(--red-s); }
+    .exit-SCALE_OUT { background:rgba(245,158,11,.2); color:#fbbf24; border:1px solid #ca8a04; }
+    .exit-WATCH     { background:rgba(59,130,246,.15); color:var(--blue); }
+    .exit-HOLD      { background:rgba(34,197,94,.12); color:var(--green); }
+
+    /* Paper trading panel */
+    .paper-box { background:rgba(59,130,246,.06); border:1px solid rgba(59,130,246,.25); border-radius:6px; padding:10px 12px; }
+    .paper-stat { display:flex; flex-direction:column; padding:6px 10px; background:var(--surface2); border-radius:6px; min-width:80px; }
+    .paper-trade-row { padding:5px 0; border-bottom:1px solid var(--border); font-size:11px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .paper-trade-row:last-child { border-bottom:none; }
+
+    /* Watchlist modal */
+    .watchlist-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:500; align-items:center; justify-content:center; }
+    .watchlist-modal.open { display:flex; }
+    .watchlist-modal-inner { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:400px; max-height:80vh; overflow-y:auto; padding:20px; }
+    .wl-tag { display:inline-flex; align-items:center; gap:4px; padding:3px 8px; background:var(--surface2); border:1px solid var(--border); border-radius:4px; font-size:11px; margin:3px; }
+    .wl-tag.custom { border-color:var(--accent); color:var(--accent); }
+    .wl-remove { cursor:pointer; color:var(--red); font-size:11px; }
+
     /* Signal history modal */
     .history-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:500; align-items:center; justify-content:center; }
     .history-modal.open { display:flex; }
@@ -284,9 +324,18 @@
     <span id="ws-status">Connecting…</span>
     <span>Last scan: <span id="last-scan">—</span></span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
+    <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
+    <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="toggleAlerts()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Toggle browser alerts">🔔 Alerts OFF</button>
   </div>
 </header>
+
+<!-- Macro Event Banner (hidden by default) -->
+<div class="macro-banner" id="macro-banner" style="display:none">
+  <span id="macro-icon">🚫</span>
+  <span id="macro-text" style="font-weight:700;color:var(--red)"></span>
+  <span id="macro-desc" style="color:var(--muted)"></span>
+</div>
 
 <!-- Session & Regime Banner -->
 <div class="session-banner">
@@ -348,11 +397,14 @@
         <th>ML%</th>
         <th title="Relative Strength vs SPY">RS</th>
         <th title="Gap at open">Gap</th>
+        <th title="VWAP signal">VWAP</th>
+        <th title="Sector ETF trend">Sector</th>
+        <th title="Exit signal">Exit</th>
         <th>Vol×</th>
       </tr>
     </thead>
     <tbody id="table-body">
-      <tr><td colspan="17" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
+      <tr><td colspan="20" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
     </tbody>
   </table>
 </div>
@@ -466,6 +518,30 @@
     <div id="dp-gap-content"></div>
   </div>
 
+  <!-- VWAP Signal -->
+  <div class="section" id="dp-vwap-section">
+    <div class="section-title">VWAP Signal</div>
+    <div id="dp-vwap-content"></div>
+  </div>
+
+  <!-- Sector ETF Context -->
+  <div class="section" id="dp-sector-section">
+    <div class="section-title">Sector ETF Context</div>
+    <div id="dp-sector-content"></div>
+  </div>
+
+  <!-- Exit Signals -->
+  <div class="section" id="dp-exit-section">
+    <div class="section-title">Exit Signal Analysis</div>
+    <div id="dp-exit-content"></div>
+  </div>
+
+  <!-- Macro Calendar -->
+  <div class="section" id="dp-macro-section">
+    <div class="section-title">Macro Events</div>
+    <div id="dp-macro-content"></div>
+  </div>
+
   <!-- Relative Strength -->
   <div class="section" id="dp-rs-section">
     <div class="section-title">Relative Strength vs SPY</div>
@@ -505,6 +581,42 @@
   </div>
 </div>
 
+<!-- Paper Trading Modal -->
+<div class="history-modal" id="paper-modal">
+  <div class="history-modal-inner">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:14px;font-weight:700;color:var(--text)">🧪 Paper Trading Simulation</div>
+      <button onclick="closePaperTrading()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <div id="paper-stats" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px"></div>
+    <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Open Trades</div>
+    <div id="paper-open" style="margin-bottom:16px"></div>
+    <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Closed Trades</div>
+    <div id="paper-closed"></div>
+  </div>
+</div>
+
+<!-- Watchlist Modal -->
+<div class="watchlist-modal" id="watchlist-modal">
+  <div class="watchlist-modal-inner">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:14px;font-weight:700;color:var(--text)">📋 Watchlist</div>
+      <button onclick="closeWatchlist()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <div style="margin-bottom:12px">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Add Custom Ticker</div>
+      <div style="display:flex;gap:8px">
+        <input id="wl-input" class="search-input" type="text" placeholder="e.g. PLTR, RKLB…" style="flex:1;text-transform:uppercase" onkeydown="if(event.key==='Enter')addWatchlistTicker()" />
+        <button onclick="addWatchlistTicker()" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:5px 12px;cursor:pointer;font-family:inherit;font-size:11px">Add</button>
+      </div>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Custom Tickers</div>
+    <div id="wl-custom" style="margin-bottom:12px"></div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Base Universe (50 tickers)</div>
+    <div id="wl-base" style="line-height:2"></div>
+  </div>
+</div>
+
 <!-- Signal History Modal -->
 <div class="history-modal" id="history-modal">
   <div class="history-modal-inner">
@@ -540,6 +652,7 @@ function connectWS() {
       allSignals = m.signals;
       if (m.session)  { _sessionInfo = m.session; updateSessionBanner(m.session); }
       if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
+      if (m.macro)    updateMacroBanner(m.macro);
       if (m.alerts?.length) handleAlerts(m.alerts);
       renderAll();
       hideLoading();
@@ -615,7 +728,7 @@ function filteredSorted() {
 function renderTable() {
   const data  = filteredSorted();
   const tbody = document.getElementById('table-body');
-  if (!data.length) { tbody.innerHTML = `<tr><td colspan="17" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
+  if (!data.length) { tbody.innerHTML = `<tr><td colspan="20" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
 
   tbody.innerHTML = data.map(s => {
     const chgC = s.change_pct >= 0 ? 'pos' : 'neg';
@@ -692,6 +805,17 @@ function renderTable() {
           : `<span style="font-size:10px;color:var(--muted)">FLAT</span>`
         }
         ${s.earnings_blocked ? `<span class="earnings-badge" title="${s.earnings_reason}">⚠ ERN ${s.earnings_days_away}d</span>` : ''}
+      </td>
+      <td>
+        <span class="vwap-badge vwap-${s.vwap_event||'FLAT'}">${(s.vwap_event||'FLAT').replace('_',' ')}</span>
+        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${(s.vwap_deviation||0)>=0?'+':''}${fmt(s.vwap_deviation,2)}%</span>
+      </td>
+      <td>
+        <span style="font-size:10px;font-weight:700;color:${s.sector_trend==='BULLISH'?'var(--green)':s.sector_trend==='BEARISH'?'var(--red)':'var(--muted)'}">${s.sector_etf||'—'}</span>
+        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${s.sector_trend||''}</span>
+      </td>
+      <td>
+        <span class="exit-badge exit-${s.exit_recommendation||'HOLD'}">${s.exit_recommendation||'HOLD'}</span>
       </td>
       <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':'var(--muted)'}">${fmt(s.rel_volume,1)}x</td>
     </tr>`;
@@ -1018,6 +1142,12 @@ function openDetail(ticker) {
     tpEl.innerHTML = '<div style="font-size:11px;color:var(--muted)">No trade plan available.</div>';
   }
 
+  // VWAP, sector, exit, macro
+  populateVwapSection(s);
+  populateSectorSection(s);
+  populateExitSection(s);
+  populateMacroSection(s);
+
   // Position sizing (populate defaults)
   calcPS();
 
@@ -1300,11 +1430,192 @@ async function openHistory() {
 }
 function closeHistory() { document.getElementById('history-modal').classList.remove('open'); }
 
+// ─── Macro Banner ─────────────────────────────────────────────────────────────
+function updateMacroBanner(macro) {
+  if (!macro) return;
+  const el = document.getElementById('macro-banner');
+  if (macro.blocked || macro.impact === 'HIGH' || macro.impact === 'MEDIUM') {
+    el.style.display = 'flex';
+    el.className = 'macro-banner' + (macro.impact === 'MEDIUM' ? ' medium' : '');
+    document.getElementById('macro-icon').textContent = macro.impact === 'HIGH' ? '🚫' : '⚠';
+    const textColor = macro.impact === 'HIGH' ? 'var(--red)' : '#fbbf24';
+    document.getElementById('macro-text').style.color = textColor;
+    document.getElementById('macro-text').textContent = macro.event_name || 'Macro Event';
+    document.getElementById('macro-desc').textContent = macro.description || '';
+  } else if (macro.description) {
+    el.style.display = 'flex';
+    el.className = 'macro-banner medium';
+    document.getElementById('macro-icon').textContent = '📅';
+    document.getElementById('macro-text').style.color = 'var(--muted)';
+    document.getElementById('macro-text').textContent = macro.description;
+    document.getElementById('macro-desc').textContent = '';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+// Update WS handler to also handle macro
+const _origOnMsg = ws?.onmessage;
+
+// ─── Detail Panel — new sections ──────────────────────────────────────────────
+function populateVwapSection(s) {
+  const el = document.getElementById('dp-vwap-content');
+  const ev = s.vwap_event || 'FLAT';
+  const evColor = {
+    RECLAIM:'var(--green-s)', ABOVE:'var(--green)', FLAT:'var(--muted)',
+    BELOW:'var(--red)', REJECTION:'var(--red-s)',
+    EXTENDED_UP:'#fbbf24', EXTENDED_DOWN:'#fbbf24'
+  }[ev] || 'var(--muted)';
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+      <span class="vwap-badge vwap-${ev}" style="font-size:12px;padding:4px 10px">${ev.replace('_',' ')}</span>
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">VWAP</div>
+        <div style="font-size:14px;font-weight:700;color:var(--blue)">$${fmt(s.vwap_price)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Deviation</div>
+        <div style="font-size:14px;font-weight:700;color:${evColor}">${(s.vwap_deviation||0)>=0?'+':''}${fmt(s.vwap_deviation,2)}%</div></div>
+    </div>
+    <div style="font-size:11px;color:${evColor};background:rgba(0,0,0,.2);border-left:3px solid ${evColor};padding:6px 10px;border-radius:4px">
+      ${s.vwap_description || '—'}
+    </div>`;
+}
+
+function populateSectorSection(s) {
+  const el = document.getElementById('dp-sector-content');
+  const trendColor = s.sector_trend==='BULLISH'?'var(--green)':s.sector_trend==='BEARISH'?'var(--red)':'var(--muted)';
+  const vsColor = s.stock_vs_sector==='LEADING'?'var(--green)':s.stock_vs_sector==='LAGGING'?'var(--red)':s.stock_vs_sector==='COUNTER'?'#fbbf24':'var(--muted)';
+  el.innerHTML = `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Sector ETF</div>
+        <div style="font-size:14px;font-weight:700;color:var(--blue)">${s.sector_etf||'—'}</div></div>
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">ETF Trend</div>
+        <div style="font-size:14px;font-weight:700;color:${trendColor}">${s.sector_trend||'—'}</div></div>
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">ETF Change</div>
+        <div style="font-size:14px;font-weight:700;color:${trendColor}">${(s.sector_change||0)>=0?'+':''}${fmt(s.sector_change,2)}%</div></div>
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Stock vs Sector</div>
+        <div style="font-size:14px;font-weight:700;color:${vsColor}">${s.stock_vs_sector||'IN_LINE'}</div></div>
+    </div>`;
+}
+
+function populateExitSection(s) {
+  const el = document.getElementById('dp-exit-content');
+  const rec = s.exit_recommendation || 'HOLD';
+  const recColor = {EXIT_NOW:'var(--red-s)',SCALE_OUT:'#fbbf24',WATCH:'var(--blue)',HOLD:'var(--green)'}[rec]||'var(--muted)';
+  const sigs = s.exit_signals || [];
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span class="exit-badge exit-${rec}" style="font-size:12px;padding:4px 10px">${rec.replace('_',' ')}</span>
+      <span style="font-size:11px;color:${recColor}">${s.exit_summary||''}</span>
+    </div>
+    ${sigs.length ? `<div style="background:var(--surface2);border-radius:6px;padding:8px 10px">
+      ${sigs.map(sig => `<div style="font-size:10px;padding:3px 0;border-bottom:1px solid var(--border);color:${
+        sig.priority==='CRITICAL'?'var(--red-s)':sig.priority==='HIGH'?'var(--red)':'var(--muted)'
+      }">
+        <span style="font-weight:700">[${sig.signal}]</span> ${sig.description}
+      </div>`).join('')}
+    </div>` : '<div style="font-size:11px;color:var(--muted)">No exit signals — trade on track.</div>'}`;
+}
+
+function populateMacroSection(s) {
+  const el = document.getElementById('dp-macro-content');
+  if (s.macro_blocked || s.macro_event) {
+    const color = s.macro_blocked ? 'var(--red)' : '#fbbf24';
+    el.innerHTML = `<div style="border-left:3px solid ${color};padding:6px 10px;border-radius:4px;background:rgba(0,0,0,.2)">
+      <div style="font-size:11px;font-weight:700;color:${color}">${s.macro_blocked?'🚫':'⚠'} ${s.macro_event||'Macro Event Nearby'}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:3px">${s.macro_description||''}</div>
+    </div>`;
+  } else {
+    el.innerHTML = '<div style="font-size:11px;color:var(--muted)">No macro events in blackout window.</div>';
+  }
+}
+
+// ─── Paper Trading ─────────────────────────────────────────────────────────────
+async function openPaperTrading() {
+  document.getElementById('paper-modal').classList.add('open');
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/paper-trading`)).json();
+    const s = d.summary;
+    document.getElementById('paper-stats').innerHTML = [
+      ['Open', s.open, 'var(--blue)'], ['Closed', s.closed, 'var(--text)'],
+      ['Wins', s.wins, 'var(--green)'], ['Losses', s.losses, 'var(--red)'],
+      ['Win Rate', s.win_rate+'%', s.win_rate>=50?'var(--green)':'var(--red)'],
+      ['Avg P&L', (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
+      ['Total P&L', (s.total_pnl>=0?'+':'')+s.total_pnl+'%', s.total_pnl>=0?'var(--green-s)':'var(--red-s)'],
+    ].map(([l,v,c])=>`<div class="paper-stat"><div style="font-size:9px;color:var(--muted)">${l}</div><div style="font-size:16px;font-weight:700;color:${c}">${v}</div></div>`).join('');
+
+    const openRows = d.open_trades.map(t=>`<div class="paper-trade-row">
+      <span style="font-weight:700">${t.ticker}</span>
+      <span class="signal-badge badge-${t.direction}" style="font-size:9px">${t.direction}</span>
+      <span style="font-size:10px">Entry $${(t.entry_price||0).toFixed(2)}</span>
+      <span style="color:var(--green);font-size:10px">T $${(t.target||0).toFixed(2)}</span>
+      <span style="color:var(--red);font-size:10px">S $${(t.stop||0).toFixed(2)}</span>
+      <span style="font-size:10px;color:var(--muted)">Bar ${t.bars_held||0}</span>
+    </div>`).join('') || '<div style="color:var(--muted);font-size:11px">No open paper trades.</div>';
+    document.getElementById('paper-open').innerHTML = openRows;
+
+    const closedRows = d.closed_trades.map(t=>`<div class="paper-trade-row">
+      <span style="font-weight:700">${t.ticker}</span>
+      <span class="signal-badge badge-${t.direction}" style="font-size:9px">${t.direction}</span>
+      <span style="font-size:10px;color:var(--muted)">${(t.opened_at||'').slice(0,10)}</span>
+      <span style="font-size:10px;color:var(--muted)">${t.exit_reason||'—'}</span>
+      <span style="font-weight:700;font-size:11px;color:${(t.pnl_pct||0)>=0?'var(--green)':'var(--red)'}">${(t.pnl_pct||0)>=0?'+':''}${(t.pnl_pct||0).toFixed(2)}%</span>
+    </div>`).join('') || '<div style="color:var(--muted);font-size:11px">No closed paper trades yet.</div>';
+    document.getElementById('paper-closed').innerHTML = closedRows;
+  } catch(e) {
+    document.getElementById('paper-stats').innerHTML = '<span style="color:var(--red)">Failed to load paper trading data.</span>';
+  }
+}
+function closePaperTrading() { document.getElementById('paper-modal').classList.remove('open'); }
+
+// ─── Watchlist ─────────────────────────────────────────────────────────────────
+async function openWatchlist() {
+  document.getElementById('watchlist-modal').classList.add('open');
+  await refreshWatchlistUI();
+}
+function closeWatchlist() { document.getElementById('watchlist-modal').classList.remove('open'); }
+
+async function refreshWatchlistUI() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/watchlist`)).json();
+    document.getElementById('wl-base').innerHTML = d.base.map(t=>
+      `<span class="wl-tag">${t}</span>`
+    ).join('');
+    document.getElementById('wl-custom').innerHTML = d.watchlist.length
+      ? d.watchlist.map(t=>
+          `<span class="wl-tag custom">${t} <span class="wl-remove" onclick="removeWatchlistTicker('${t}')">✕</span></span>`
+        ).join('')
+      : '<div style="font-size:11px;color:var(--muted)">No custom tickers added yet.</div>';
+  } catch{}
+}
+
+async function addWatchlistTicker() {
+  const input = document.getElementById('wl-input');
+  const ticker = (input.value || '').trim().toUpperCase();
+  if (!ticker) return;
+  input.value = '';
+  try {
+    await fetch(`${BACKEND_HTTP}/api/watchlist/add?ticker=${ticker}`, {method:'POST'});
+    await refreshWatchlistUI();
+  } catch {}
+}
+
+async function removeWatchlistTicker(ticker) {
+  try {
+    await fetch(`${BACKEND_HTTP}/api/watchlist/remove?ticker=${ticker}`, {method:'POST'});
+    await refreshWatchlistUI();
+  } catch {}
+}
+
 // ─── Init ──────────────────────────────────────────────────────────────────────
 connectWS();
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
 // Load session/regime on startup
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/regime`)).json(); if(d.session) updateSessionBanner(d.session); if(d.regime) updateRegimeBanner(d.regime); } catch {} })();
+// Load macro calendar on startup
+(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/macro-calendar`)).json(); if(d.current) updateMacroBanner(d.current); } catch {} })();
+// Register service worker for PWA
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js').catch(()=>{});
+}
 </script>
 </body>
 </html>

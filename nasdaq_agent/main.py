@@ -22,7 +22,12 @@ from agent.market_hours import get_session_info
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals
 from agent.position_sizing import calculate as calc_position
-from config import DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT
+from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades
+from agent.macro_calendar import check_macro_event, get_upcoming_events
+from config import (
+    DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT,
+    load_watchlist, save_watchlist, NASDAQ_TICKERS,
+)
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -93,8 +98,9 @@ def _on_signals(signals: list[StockSignal]) -> None:
            and s.rr_qualifies and not s.earnings_blocked
     ]
 
-    regime = get_regime()
+    regime  = get_regime()
     session = get_session_info()
+    macro   = check_macro_event()
 
     payload = _dumps({
         "type":    "update",
@@ -102,6 +108,7 @@ def _on_signals(signals: list[StockSignal]) -> None:
         "regime":  regime.to_dict(),
         "session": session,
         "alerts":  alerts,
+        "macro":   macro,
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
@@ -197,6 +204,54 @@ async def position_size_endpoint(
         max_position_pct=MAX_POSITION_PCT,
     )
     return ps.to_dict()
+
+
+@app.get("/api/paper-trading")
+async def paper_trading_endpoint():
+    """Return paper trading summary, open and recent closed trades."""
+    return {
+        "summary":       pt_summary(),
+        "open_trades":   get_open_trades(),
+        "closed_trades": get_closed_trades(limit=30),
+    }
+
+
+@app.get("/api/macro-calendar")
+async def macro_calendar_endpoint():
+    """Return current macro event status and upcoming events."""
+    return {
+        "current": check_macro_event(),
+        "upcoming": get_upcoming_events(days=14),
+    }
+
+
+@app.get("/api/watchlist")
+async def get_watchlist_endpoint():
+    """Return user watchlist + base tickers."""
+    return {
+        "base":      NASDAQ_TICKERS,
+        "watchlist": load_watchlist(),
+    }
+
+
+@app.post("/api/watchlist/add")
+async def add_to_watchlist(ticker: str):
+    """Add a ticker to the watchlist."""
+    ticker = ticker.upper().strip()
+    wl = load_watchlist()
+    if ticker not in wl and ticker not in NASDAQ_TICKERS:
+        wl.append(ticker)
+        save_watchlist(wl)
+    return {"watchlist": load_watchlist()}
+
+
+@app.post("/api/watchlist/remove")
+async def remove_from_watchlist(ticker: str):
+    """Remove a ticker from the user watchlist (base tickers cannot be removed)."""
+    ticker = ticker.upper().strip()
+    wl = [t for t in load_watchlist() if t != ticker]
+    save_watchlist(wl)
+    return {"watchlist": load_watchlist()}
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────

@@ -658,6 +658,8 @@ def generate_prediction(
     last_row:          pd.Series,
     mtf_score:         float = 0.0,
     ml_reversal_prob:  float = 0.5,
+    vwap_score:        float = 0.0,
+    sector_mult:       float = 1.0,
 ) -> dict:
     """
     Generate a complete, actionable scalping prediction for ``ticker``.
@@ -718,16 +720,17 @@ def generate_prediction(
     # traders only enter when higher timeframes agree with the setup.
     # When ML is untrained its weight redistributes to tech and MTF.
     if ml_trained:
-        # tech  vol   ml    pa    mtf   pat   sent
-        w_t, w_v, w_m, w_p, w_f, w_pat, w_s = 0.18, 0.10, 0.15, 0.08, 0.30, 0.12, 0.07
+        # tech  vol   ml    pa    mtf   pat   sent  vwap
+        w_t, w_v, w_m, w_p, w_f, w_pat, w_s, w_vw = 0.15, 0.09, 0.13, 0.07, 0.26, 0.10, 0.06, 0.14
     else:
-        w_t, w_v, w_m, w_p, w_f, w_pat, w_s = 0.22, 0.12,  0.0, 0.12, 0.35, 0.12, 0.07
+        w_t, w_v, w_m, w_p, w_f, w_pat, w_s, w_vw = 0.18, 0.10,  0.0, 0.10, 0.30, 0.11, 0.07, 0.14
 
     # Direct trend bias: intraday trend acts as an additional nudge
     trend_signal = 1.0 if trend == "UPTREND" else (-1.0 if trend == "DOWNTREND" else 0.0)
-    trend_bias   = 0.12 * trend_signal * trend_prob
+    trend_bias   = 0.10 * trend_signal * trend_prob
 
-    mtf_score_f = float(np.clip(float(mtf_score), -1.0, 1.0))
+    mtf_score_f  = float(np.clip(float(mtf_score),  -1.0, 1.0))
+    vwap_score_f = float(np.clip(float(vwap_score), -1.0, 1.0))
 
     composite = (
         w_t   * float(tech_score)  +
@@ -737,9 +740,13 @@ def generate_prediction(
         w_f   * mtf_score_f        +
         w_pat * pattern_score      +
         w_s   * float(sent_score)  +
+        w_vw  * vwap_score_f       +
         trend_bias
     )
     composite = round(float(np.clip(composite, -1.0, 1.0)), 4)
+
+    # Apply sector ETF multiplier (scales composite without flipping sign)
+    composite = round(float(np.clip(composite * float(sector_mult), -1.0, 1.0)), 4)
 
     # Enforce trend–direction consistency:
     # Never label a clear UPTREND stock as SELL / STRONG SELL and vice-versa
