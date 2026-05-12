@@ -201,6 +201,53 @@
     .rsi-OS         { background:rgba(34,197,94,.15);   color:var(--green); }
     .rsi-EXTREME_OS { background:rgba(0,255,136,.25);   color:var(--green-s); border:1px solid var(--green-s); }
 
+    /* Session / Regime banner */
+    .session-banner { display:flex; align-items:center; gap:12px; padding:7px 20px; border-bottom:1px solid var(--border); background:var(--surface2); font-size:11px; flex-wrap:wrap; }
+    .session-pill { display:flex; align-items:center; gap:6px; padding:3px 10px; border-radius:12px; border:1px solid; font-weight:700; font-size:11px; }
+    .regime-pill  { display:flex; align-items:center; gap:6px; padding:3px 10px; border-radius:12px; border:1px solid; font-weight:700; font-size:11px; }
+    .banner-sep   { color:var(--border); }
+    .earnings-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; font-weight:700; background:rgba(239,68,68,.2); color:var(--red); border:1px solid var(--red); }
+    .earnings-warn  { background:rgba(245,158,11,.12); border-left:3px solid #f59e0b; padding:5px 10px; border-radius:4px; font-size:10px; color:#fbbf24; }
+    .gap-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; font-weight:700; }
+    .gap-UP   { background:rgba(34,197,94,.2);  color:var(--green); }
+    .gap-DOWN { background:rgba(239,68,68,.2);  color:var(--red); }
+    .gap-FLAT { background:rgba(100,116,139,.15);color:var(--muted); }
+    .rs-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; font-weight:700; }
+    .rs-LEADING  { background:rgba(34,197,94,.2); color:var(--green); }
+    .rs-IN_LINE  { background:rgba(100,116,139,.15); color:var(--muted); }
+    .rs-LAGGING  { background:rgba(239,68,68,.2); color:var(--red); }
+    .rs-COUNTER  { background:rgba(245,158,11,.2); color:#fbbf24; }
+
+    /* Alert toast */
+    .alert-toast { position:fixed; bottom:20px; right:20px; background:var(--surface); border:1px solid var(--green-s); border-radius:10px; padding:12px 16px; z-index:9999; max-width:320px; animation:slideUp .3s ease; box-shadow:0 0 20px rgba(0,255,136,.2); }
+    @keyframes slideUp { from{transform:translateY(20px);opacity:0} to{transform:translateY(0);opacity:1} }
+    .alert-toast-title { font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--green-s); margin-bottom:4px; }
+    .alert-toast-body  { font-size:13px; font-weight:700; }
+    .alert-toast-sub   { font-size:10px; color:var(--muted); margin-top:3px; }
+
+    /* Trade plan panel */
+    .trade-plan-box { background:rgba(59,130,246,.07); border:1px solid rgba(59,130,246,.3); border-radius:6px; padding:10px 12px; margin-bottom:12px; }
+    .trade-plan-title { font-size:11px; font-weight:700; color:var(--blue); margin-bottom:8px; }
+    .trade-rule { font-size:10px; color:#93c5fd; padding:3px 0; border-bottom:1px solid rgba(59,130,246,.12); }
+    .trade-rule:last-child { border-bottom:none; }
+
+    /* Position sizing */
+    .pos-size-box { background:rgba(168,85,247,.06); border:1px solid rgba(168,85,247,.3); border-radius:6px; padding:10px 12px; margin-bottom:12px; }
+    .pos-size-title { font-size:11px; font-weight:700; color:var(--purple); margin-bottom:8px; }
+    .pos-size-input { background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:4px; padding:4px 8px; font-family:inherit; font-size:11px; width:100%; outline:none; }
+    .pos-size-input:focus { border-color:var(--purple); }
+    .pos-size-result { margin-top:8px; font-size:12px; font-weight:700; color:var(--purple); }
+    .pos-size-desc { font-size:10px; color:var(--muted); margin-top:3px; }
+
+    /* Signal history modal */
+    .history-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:500; align-items:center; justify-content:center; }
+    .history-modal.open { display:flex; }
+    .history-modal-inner { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:90vw; max-width:900px; max-height:80vh; overflow-y:auto; padding:20px; }
+    .history-stat { padding:8px 14px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); }
+    .hist-win   { color:var(--green); }
+    .hist-loss  { color:var(--red); }
+    .hist-pend  { color:var(--muted); }
+
     /* Loading */
     .loading-overlay { position:fixed; inset:0; background:var(--bg); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; z-index:999; transition:opacity .5s; }
     .loading-overlay.hidden { opacity:0; pointer-events:none; }
@@ -236,8 +283,20 @@
   <div class="header-right">
     <span id="ws-status">Connecting…</span>
     <span>Last scan: <span id="last-scan">—</span></span>
+    <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
+    <button id="alert-toggle" onclick="toggleAlerts()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Toggle browser alerts">🔔 Alerts OFF</button>
   </div>
 </header>
+
+<!-- Session & Regime Banner -->
+<div class="session-banner">
+  <span class="session-pill" id="session-pill" style="color:#94a3b8;border-color:#252a35">⏰ Loading…</span>
+  <span class="banner-sep">|</span>
+  <span class="regime-pill" id="regime-pill" style="color:#94a3b8;border-color:#252a35">Market: —</span>
+  <span class="banner-sep">|</span>
+  <span style="color:var(--muted)" id="session-advice">Waiting for market data…</span>
+  <span style="margin-left:auto;color:#475569" id="session-time"></span>
+</div>
 
 <div class="summary-bar">
   <div class="pill"><div class="pill-label">Tracked</div><div class="pill-value" style="color:var(--blue)" id="s-total">—</div></div>
@@ -287,11 +346,13 @@
         <th>Stop</th>
         <th>R:R</th>
         <th>ML%</th>
+        <th title="Relative Strength vs SPY">RS</th>
+        <th title="Gap at open">Gap</th>
         <th>Vol×</th>
       </tr>
     </thead>
     <tbody id="table-body">
-      <tr><td colspan="14" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
+      <tr><td colspan="17" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
     </tbody>
   </table>
 </div>
@@ -335,6 +396,9 @@
       <span id="dp-price-badge" style="font-size:11px;color:var(--muted)"></span>
     </div>
   </div>
+
+  <!-- Earnings Warning -->
+  <div id="dp-earnings-warn" style="margin:0 16px 10px;display:none"></div>
 
   <!-- RSI Zone Box -->
   <div id="dp-rsi-box" style="margin:0 16px 10px;padding:8px 12px;border-left:3px solid var(--muted);border-radius:4px;background:rgba(100,116,139,.05)">
@@ -396,6 +460,44 @@
     <div id="dp-components"></div>
   </div>
 
+  <!-- Gap Analysis -->
+  <div class="section" id="dp-gap-section">
+    <div class="section-title">Gap Analysis &amp; Pre-Market Levels</div>
+    <div id="dp-gap-content"></div>
+  </div>
+
+  <!-- Relative Strength -->
+  <div class="section" id="dp-rs-section">
+    <div class="section-title">Relative Strength vs SPY</div>
+    <div id="dp-rs-content"></div>
+  </div>
+
+  <!-- Trade Management Plan -->
+  <div class="section" id="dp-trade-plan-section">
+    <div class="section-title">Trade Management Rules</div>
+    <div id="dp-trade-plan-content"></div>
+  </div>
+
+  <!-- Position Sizing Calculator -->
+  <div class="section">
+    <div class="section-title">Position Sizing Calculator</div>
+    <div class="pos-size-box">
+      <div class="pos-size-title">💰 Risk-Based Position Sizing (1% Rule)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase">Account Size ($)</div>
+          <input class="pos-size-input" id="ps-account" type="number" value="10000" min="100" step="100" oninput="calcPS()" />
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase">Risk % per Trade</div>
+          <input class="pos-size-input" id="ps-risk-pct" type="number" value="1" min="0.1" max="5" step="0.1" oninput="calcPS()" />
+        </div>
+      </div>
+      <div id="ps-result" class="pos-size-result">Enter account size to calculate</div>
+      <div id="ps-desc"   class="pos-size-desc"></div>
+    </div>
+  </div>
+
   <!-- News -->
   <div class="section" id="dp-news-section" style="display:none">
     <div class="section-title">Latest News</div>
@@ -403,10 +505,24 @@
   </div>
 </div>
 
+<!-- Signal History Modal -->
+<div class="history-modal" id="history-modal">
+  <div class="history-modal-inner">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:14px;font-weight:700;color:var(--text)">📊 Signal History &amp; Accuracy</div>
+      <button onclick="closeHistory()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <div id="hist-stats" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px"></div>
+    <div id="hist-table" style="overflow-x:auto"></div>
+  </div>
+</div>
+
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'confidence', searchQ = '';
 let _chart = null, _candleSeries = null, _volSeries = null;
+let _alertsEnabled = false, _currentSignal = null;
+let _sessionInfo = null, _regimeInfo = null;
 
 // ─── Backend URLs ─────────────────────────────────────────────────────────────
 const BACKEND_HOST = `${location.hostname}:8000`;
@@ -418,7 +534,17 @@ let ws, reconnectDelay = 2000;
 function connectWS() {
   ws = new WebSocket(`${BACKEND_WS}/ws`);
   ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('ws-status').textContent = 'Live ●'; reconnectDelay = 2000; };
-  ws.onmessage = e => { const m = JSON.parse(e.data); if (m.type === 'update') { allSignals = m.signals; renderAll(); hideLoading(); } };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'update') {
+      allSignals = m.signals;
+      if (m.session)  { _sessionInfo = m.session; updateSessionBanner(m.session); }
+      if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
+      if (m.alerts?.length) handleAlerts(m.alerts);
+      renderAll();
+      hideLoading();
+    }
+  };
   ws.onclose = () => { document.getElementById('dot').classList.remove('live'); document.getElementById('ws-status').textContent = `Reconnecting…`; setTimeout(connectWS, reconnectDelay); reconnectDelay = Math.min(reconnectDelay*2, 30000); };
   ws.onerror = () => ws.close();
 }
@@ -489,7 +615,7 @@ function filteredSorted() {
 function renderTable() {
   const data  = filteredSorted();
   const tbody = document.getElementById('table-body');
-  if (!data.length) { tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
+  if (!data.length) { tbody.innerHTML = `<tr><td colspan="17" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
 
   tbody.innerHTML = data.map(s => {
     const chgC = s.change_pct >= 0 ? 'pos' : 'neg';
@@ -555,6 +681,18 @@ function renderTable() {
       <td style="font-size:11px;color:${s.ml_trained?(s.ml_prob>=.55?'var(--green)':s.ml_prob<=.45?'var(--red)':'var(--muted)'):'var(--muted)'}">
         ${s.ml_trained ? fmt(s.ml_prob*100,0)+'%' : '<span title="ML model training in background…" style="font-size:10px">Training…</span>'}
       </td>
+      <td>
+        <span class="rs-badge rs-${s.rs_label||'IN_LINE'}">${s.rs_label||'IN_LINE'}</span>
+        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt(s.rs_ratio,2)}x</span>
+      </td>
+      <td>
+        ${s.gap_type!=='FLAT'
+          ? `<span class="gap-badge gap-${s.gap_type}">${s.gap_type==='GAP_UP'?'↑':s.gap_type==='GAP_DOWN'?'↓':''} ${fmt(Math.abs(s.gap_pct),1)}%</span>
+             <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${Math.round((s.gap_fill_prob||0)*100)}% fill</span>`
+          : `<span style="font-size:10px;color:var(--muted)">FLAT</span>`
+        }
+        ${s.earnings_blocked ? `<span class="earnings-badge" title="${s.earnings_reason}">⚠ ERN ${s.earnings_days_away}d</span>` : ''}
+      </td>
       <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':'var(--muted)'}">${fmt(s.rel_volume,1)}x</td>
     </tr>`;
   }).join('');
@@ -568,6 +706,7 @@ function renderAll() { updateSummary(); renderTable(); }
 function openDetail(ticker) {
   const s = allSignals.find(x => x.ticker === ticker);
   if (!s) return;
+  _currentSignal = s;
 
   // Header
   document.getElementById('dp-ticker').textContent = s.ticker;
@@ -822,6 +961,66 @@ function openDetail(ticker) {
     </div>`;
   }).join('');
 
+  // Earnings warning
+  const ewEl = document.getElementById('dp-earnings-warn');
+  if (s.earnings_blocked || s.earnings_reason) {
+    ewEl.style.display = '';
+    const ico = s.earnings_blocked ? '⛔' : '⚠';
+    const clr = s.earnings_blocked ? '#ef4444' : '#fbbf24';
+    ewEl.innerHTML = `<div class="earnings-warn" style="border-color:${clr}">
+      <span style="color:${clr};font-weight:700">${ico} ${s.earnings_reason || 'Earnings event nearby'}</span>
+      ${s.earnings_date ? `<span style="color:var(--muted);margin-left:8px">Next: ${s.earnings_date} (${s.earnings_days_away}d)</span>` : ''}
+    </div>`;
+  } else {
+    ewEl.style.display = 'none';
+  }
+
+  // Gap analysis
+  const gapEl = document.getElementById('dp-gap-content');
+  const gColor = s.gap_type==='GAP_UP' ? 'var(--green)' : s.gap_type==='GAP_DOWN' ? 'var(--red)' : 'var(--muted)';
+  gapEl.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+    <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Gap Type</div>
+      <span class="gap-badge gap-${s.gap_type||'FLAT'}" style="font-size:11px;padding:3px 8px">${s.gap_type||'FLAT'}</span></div>
+    <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Gap %</div>
+      <div style="font-size:13px;font-weight:700;color:${gColor}">${(s.gap_pct||0)>=0?'+':''}${fmt(s.gap_pct,2)}%</div></div>
+    <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Fill Prob</div>
+      <div style="font-size:13px;font-weight:700;color:var(--blue)">${Math.round((s.gap_fill_prob||0)*100)}%</div></div>
+    <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Filled</div>
+      <div style="font-size:13px;font-weight:700;color:${s.gap_filled?'var(--green)':'var(--muted)'}">${s.gap_filled?'Yes':'No'}</div></div>
+  </div>
+  ${(s.premarket_high||0) > 0 ? `
+    <div style="display:flex;gap:12px;background:var(--surface2);border-radius:6px;padding:8px 10px;border:1px solid var(--border)">
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Pre-Market High</div>
+        <div style="font-size:13px;font-weight:700;color:var(--green)">$${fmt(s.premarket_high)}</div></div>
+      <div><div style="font-size:9px;color:var(--muted);text-transform:uppercase">Pre-Market Low</div>
+        <div style="font-size:13px;font-weight:700;color:var(--red)">$${fmt(s.premarket_low)}</div></div>
+    </div>` : '<div style="font-size:11px;color:var(--muted)">No pre-market data available.</div>'}`;
+
+  // Relative Strength
+  const rsEl = document.getElementById('dp-rs-content');
+  const rsColor = s.rs_label==='LEADING'?'var(--green)':s.rs_label==='LAGGING'?'var(--red)':s.rs_label==='COUNTER'?'#fbbf24':'var(--muted)';
+  rsEl.innerHTML = `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <span class="rs-badge rs-${s.rs_label||'IN_LINE'}" style="font-size:12px;padding:4px 10px">${s.rs_label||'IN_LINE'}</span>
+    <div><span style="font-size:9px;color:var(--muted)">RS Ratio</span>
+      <div style="font-size:14px;font-weight:700;color:${rsColor}">${fmt(s.rs_ratio,2)}x</div></div>
+    <div style="font-size:10px;color:var(--muted)">${s.rs_label==='LEADING'?'Stock outperforming SPY — bullish edge on longs':s.rs_label==='LAGGING'?'Stock underperforming SPY — caution on longs':s.rs_label==='COUNTER'?'Moving against market — mean-reversion only':'Moving in-line with broader market'}</div>
+  </div>`;
+
+  // Trade Management Plan
+  const tpEl = document.getElementById('dp-trade-plan-content');
+  const tp = s.trade_plan;
+  if (tp && tp.rules && tp.rules.length) {
+    tpEl.innerHTML = `<div class="trade-plan-box">
+      <div class="trade-plan-title">📋 Trade Plan — ${s.prediction}</div>
+      ${tp.rules.map(r => `<div class="trade-rule">▸ ${r}</div>`).join('')}
+    </div>`;
+  } else {
+    tpEl.innerHTML = '<div style="font-size:11px;color:var(--muted)">No trade plan available.</div>';
+  }
+
+  // Position sizing (populate defaults)
+  calcPS();
+
   // News
   if (s.headlines?.length) {
     document.getElementById('dp-news-section').style.display = '';
@@ -832,7 +1031,7 @@ function openDetail(ticker) {
     document.getElementById('dp-news-section').style.display = 'none';
   }
 
-  // Chart
+  // Chart — pre-market levels added
   renderChart(s);
 
   document.getElementById('detail-panel').classList.add('open');
@@ -918,6 +1117,14 @@ function renderChart(s) {
     candleSeries.createPriceLine({ price:s.price, color:'rgba(74,222,128,0.9)', lineWidth:2, lineStyle:LightweightCharts.LineStyle.Solid, axisLabelVisible:true, title:'BOUNCE ENTRY' });
   }
 
+  // Pre-market high/low
+  if (s.premarket_high > 0) {
+    candleSeries.createPriceLine({ price:s.premarket_high, color:'rgba(34,197,94,0.5)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dotted, axisLabelVisible:true, title:'PM High' });
+  }
+  if (s.premarket_low > 0) {
+    candleSeries.createPriceLine({ price:s.premarket_low,  color:'rgba(239,68,68,0.5)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dotted, axisLabelVisible:true, title:'PM Low' });
+  }
+
   // Target & Stop lines
   if (s.target_price) {
     candleSeries.createPriceLine({ price:s.target_price, color:'rgba(0,255,136,0.9)', lineWidth:2, lineStyle:LightweightCharts.LineStyle.Solid, axisLabelVisible:true, title:'TARGET' });
@@ -954,9 +1161,150 @@ document.querySelectorAll('.filter-btn').forEach(b => b.addEventListener('click'
 document.getElementById('search').addEventListener('input', e => { searchQ = e.target.value.trim(); renderTable(); });
 document.getElementById('sort-select').addEventListener('change', e => { sortKey = e.target.value; renderTable(); });
 
+// ─── Session Banner ───────────────────────────────────────────────────────────
+function updateSessionBanner(s) {
+  const pill = document.getElementById('session-pill');
+  pill.textContent = s.label || s.session;
+  pill.style.color       = s.color || '#94a3b8';
+  pill.style.borderColor = s.color || '#252a35';
+  pill.style.background  = (s.color||'#94a3b8') + '18';
+
+  const adv = document.getElementById('session-advice');
+  adv.textContent = s.advice || '';
+
+  const timeEl = document.getElementById('session-time');
+  timeEl.textContent = s.time_et || '';
+}
+
+function updateRegimeBanner(r) {
+  const pill = document.getElementById('regime-pill');
+  pill.textContent = '📊 ' + (r.label || r.regime);
+  pill.style.color       = r.color || '#94a3b8';
+  pill.style.borderColor = r.color || '#252a35';
+  pill.style.background  = (r.color||'#94a3b8') + '18';
+}
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+function toggleAlerts() {
+  if (!_alertsEnabled) {
+    if ('Notification' in window && Notification.permission !== 'granted') {
+      Notification.requestPermission().then(p => {
+        if (p === 'granted') { _alertsEnabled = true; updateAlertBtn(); }
+      });
+    } else {
+      _alertsEnabled = true;
+    }
+  } else {
+    _alertsEnabled = false;
+  }
+  updateAlertBtn();
+}
+function updateAlertBtn() {
+  const btn = document.getElementById('alert-toggle');
+  btn.textContent = _alertsEnabled ? '🔔 Alerts ON' : '🔔 Alerts OFF';
+  btn.style.color = _alertsEnabled ? 'var(--green-s)' : 'var(--muted)';
+  btn.style.borderColor = _alertsEnabled ? 'var(--green-s)' : 'var(--border)';
+}
+let _alertedSignals = new Set();
+function handleAlerts(alerts) {
+  if (!_alertsEnabled) return;
+  alerts.forEach(a => {
+    const key = `${a.ticker}-${a.direction}`;
+    if (_alertedSignals.has(key)) return;
+    _alertedSignals.add(key);
+    setTimeout(() => _alertedSignals.delete(key), 120000);  // reset after 2 min
+    showToast(a);
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(`${a.direction}: ${a.ticker}`, {
+        body: `Confidence ${a.confidence}% | $${a.price?.toFixed(2)} | ${a.session}`,
+        icon: '/static/favicon.ico',
+      });
+    }
+  });
+}
+function showToast(a) {
+  const toast = document.createElement('div');
+  toast.className = 'alert-toast';
+  toast.innerHTML = `
+    <div class="alert-toast-title">🔔 HIGH CONFIDENCE SIGNAL</div>
+    <div class="alert-toast-body" style="color:${a.direction==='BUY'?'var(--green-s)':'var(--red-s)'}">${a.direction}: ${a.ticker}</div>
+    <div class="alert-toast-sub">Confidence ${a.confidence}% · $${(a.price||0).toFixed(2)} · ${a.session||''}</div>
+    <div style="font-size:9px;color:#334155;margin-top:6px;cursor:pointer" onclick="this.parentElement.remove()">Click to dismiss</div>
+  `;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 8000);
+}
+
+// ─── Position Sizing ──────────────────────────────────────────────────────────
+function calcPS() {
+  if (!_currentSignal) return;
+  const s         = _currentSignal;
+  const account   = parseFloat(document.getElementById('ps-account').value)   || 10000;
+  const riskPct   = parseFloat(document.getElementById('ps-risk-pct').value)  || 1.0;
+  const entry     = s.price      || 0;
+  const stop      = s.stop_loss  || 0;
+  const riskPerSh = Math.abs(entry - stop);
+  if (riskPerSh <= 0 || entry <= 0) {
+    document.getElementById('ps-result').textContent = 'Invalid entry/stop';
+    return;
+  }
+  const confMult  = s.confidence >= 75 ? 1.25 : s.confidence >= 60 ? 1.0 : s.confidence < 50 ? 0.5 : 0.75;
+  const dollarRisk = account * (riskPct / 100) * confMult;
+  let shares       = Math.floor(dollarRisk / riskPerSh);
+  const maxShares  = Math.floor(account * 0.05 / entry);
+  shares           = Math.min(shares, maxShares);
+  if (shares <= 0) { document.getElementById('ps-result').textContent = 'Position too small'; return; }
+  const posVal    = shares * entry;
+  const actualRisk = shares * riskPerSh;
+  const actualRiskPct = actualRisk / account * 100;
+  document.getElementById('ps-result').textContent = `${shares} shares × $${entry.toFixed(2)} = $${posVal.toLocaleString('en-US',{maximumFractionDigits:0})}`;
+  document.getElementById('ps-desc').textContent   = `Risk: $${actualRisk.toFixed(0)} (${actualRiskPct.toFixed(2)}% of account) | Confidence multiplier: ${confMult}×`;
+}
+
+// ─── Signal History ───────────────────────────────────────────────────────────
+async function openHistory() {
+  document.getElementById('history-modal').classList.add('open');
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/signal-history?limit=50`)).json();
+    const st = d.stats;
+    document.getElementById('hist-stats').innerHTML = `
+      <div class="history-stat"><div style="font-size:9px;color:var(--muted)">Total Signals</div><div style="font-size:18px;font-weight:700;color:var(--blue)">${st.total}</div></div>
+      <div class="history-stat"><div style="font-size:9px;color:var(--muted)">Win Rate</div><div style="font-size:18px;font-weight:700;color:var(--green-s)">${st.win_rate}%</div></div>
+      <div class="history-stat"><div style="font-size:9px;color:var(--muted)">Wins</div><div style="font-size:18px;font-weight:700" class="hist-win">${st.wins}</div></div>
+      <div class="history-stat"><div style="font-size:9px;color:var(--muted)">Losses</div><div style="font-size:18px;font-weight:700" class="hist-loss">${st.losses}</div></div>
+      <div class="history-stat"><div style="font-size:9px;color:var(--muted)">Avg P&L</div><div style="font-size:18px;font-weight:700;color:${st.avg_pnl>=0?'var(--green)':'var(--red)'}">${st.avg_pnl>=0?'+':''}${st.avg_pnl}%</div></div>
+      <div class="history-stat"><div style="font-size:9px;color:var(--muted)">Pending</div><div style="font-size:18px;font-weight:700" class="hist-pend">${st.pending}</div></div>
+    `;
+    const rows = d.signals.map(r => `<tr>
+      <td style="color:var(--muted);font-size:10px">${(r.ts||'').slice(0,16).replace('T',' ')}</td>
+      <td style="font-weight:700">${r.ticker}</td>
+      <td><span class="signal-badge badge-${(r.direction||'NEUTRAL').replace(/ /g,'-')}" style="font-size:9px">${r.direction}</span></td>
+      <td style="font-size:11px">$${(r.entry_price||0).toFixed(2)}</td>
+      <td style="color:var(--green);font-size:11px">$${(r.target||0).toFixed(2)}</td>
+      <td style="color:var(--red);font-size:11px">$${(r.stop||0).toFixed(2)}</td>
+      <td style="font-size:11px">${(r.confidence||0).toFixed(0)}%</td>
+      <td><span class="${r.outcome==='WIN'?'hist-win':r.outcome==='LOSS'?'hist-loss':'hist-pend'}" style="font-weight:700;font-size:11px">${r.outcome||'PENDING'}</span></td>
+      <td style="font-size:11px;color:${(r.pnl_pct||0)>=0?'var(--green)':'var(--red)'}">
+        ${r.pnl_pct!=null?(r.pnl_pct>=0?'+':'')+r.pnl_pct.toFixed(2)+'%':'—'}
+      </td>
+      <td style="font-size:10px;color:var(--muted)">${r.session||''}</td>
+    </tr>`).join('');
+    document.getElementById('hist-table').innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="background:var(--surface2)">${['Time','Ticker','Dir','Entry','Target','Stop','Conf','Outcome','P&L','Session'].map(h=>`<th style="padding:6px 8px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:1px solid var(--border)">${h}</th>`).join('')}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch(e) {
+    document.getElementById('hist-stats').innerHTML = '<span style="color:var(--red)">Failed to load signal history.</span>';
+  }
+}
+function closeHistory() { document.getElementById('history-modal').classList.remove('open'); }
+
 // ─── Init ──────────────────────────────────────────────────────────────────────
 connectWS();
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
+// Load session/regime on startup
+(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/regime`)).json(); if(d.session) updateSessionBanner(d.session); if(d.regime) updateRegimeBanner(d.regime); } catch {} })();
 </script>
 </body>
 </html>

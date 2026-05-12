@@ -23,6 +23,7 @@ from config import (
     CACHE_TTL_5M,
     CACHE_TTL_1H,
     CACHE_TTL_1D,
+    REGIME_TICKERS,
 )
 from agent.data_fetcher import (
     fetch_batch_realtime,
@@ -35,6 +36,13 @@ from agent.ml_model import predict, predict_daily, predict_reversal, retrain_all
 from agent.sentiment import score_sentiment
 from agent.prediction import generate_prediction
 from agent.mtf_analysis import multi_timeframe_analysis
+from agent.market_hours import get_session_info, confidence_multiplier
+from agent.market_regime import update_regime, get_regime, apply_regime
+from agent.earnings import earnings_blackout
+from agent.gap_analysis import analyse_gap
+from agent.relative_strength import compute_relative_strength
+from agent.trade_management import build_trade_plan
+from agent.signal_tracker import init_db, record_signal, resolve_pending
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +118,40 @@ class StockSignal:
     rr_quality:       str   = "LOW"
     rr_qualifies:     bool  = False
 
+    # ── Market session ────────────────────────────────────────────────────────
+    session:        str   = "UNKNOWN"
+    session_label:  str   = ""
+    session_color:  str   = "#94a3b8"
+    session_mult:   float = 1.0
+    session_advice: str   = ""
+
+    # ── Market regime (SPY/QQQ) ───────────────────────────────────────────────
+    regime:        str   = "NEUTRAL"
+    regime_label:  str   = "Neutral"
+    regime_color:  str   = "#94a3b8"
+
+    # ── Earnings blackout ─────────────────────────────────────────────────────
+    earnings_blocked:  bool  = False
+    earnings_reason:   str   = ""
+    earnings_date:     str   = ""
+    earnings_days_away: int  = 0
+
+    # ── Gap analysis ──────────────────────────────────────────────────────────
+    gap_type:         str   = "FLAT"
+    gap_pct:          float = 0.0
+    gap_filled:       bool  = False
+    gap_fill_prob:    float = 0.0
+    premarket_high:   float = 0.0
+    premarket_low:    float = 0.0
+
+    # ── Relative strength vs SPY ──────────────────────────────────────────────
+    rs_ratio:   float = 1.0
+    rs_score:   float = 0.0
+    rs_label:   str   = "IN_LINE"
+
+    # ── Trade management plan ─────────────────────────────────────────────────
+    trade_plan: dict  = field(default_factory=dict)
+
     # ── Chart candles (last 80 × 1-min bars) ─────────────────────────────────
     candles:    list = field(default_factory=list)
 
@@ -129,7 +171,8 @@ class StockSignal:
 
 # ── Ticker metadata cache ─────────────────────────────────────────────────────
 
-_info_cache: dict[str, dict] = {}
+_info_cache:    dict[str, dict]         = {}
+_spy_df_cache:  dict[str, pd.DataFrame] = {}   # SPY/QQQ 1M frames for RS/regime
 
 
 def _get_info(ticker: str) -> dict:
@@ -191,6 +234,20 @@ def analyse_ticker(
         # Multi-timeframe analysis (6 TFs: 5M, 15M, 30M, 1H, 4H, 1D)
         mtf = multi_timeframe_analysis(df_1m, df_5m, df_1h, df_1d)
 
+        # Market session
+        sess_info = get_session_info()
+        sess_mult = confidence_multiplier()
+
+        # Earnings blackout
+        eb = earnings_blackout(ticker)
+
+        # Gap analysis
+        gap = analyse_gap(df_1m, df_1d)
+
+        # Relative strength vs SPY (regime spy data available via get_regime())
+        regime = get_regime()
+        rs = compute_relative_strength(df_1m, _spy_df_cache.get("SPY"))
+
         # Professional prediction
         pred = generate_prediction(
             ticker, df_ind, tech, vol, ml_combined, sent, last,
@@ -198,7 +255,33 @@ def analyse_ticker(
             ml_reversal_prob=ml_reversal_p,
         )
 
-        score   = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
+        # Apply regime multiplier to score
+        raw_score = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
+        score     = round(float(np.clip(apply_regime(raw_score, regime), -1, 1)), 4)
+
+        # Override direction to NEUTRAL if earnings blackout
+        if eb["blocked"]:
+            pred["direction"] = "NEUTRAL"
+
+        # Build trade plan
+        tp = build_trade_plan(
+            entry=price,
+            stop=pred["stop_loss"],
+            target=pred["target_price"],
+            direction=pred["direction"],
+        )
+
+        # Record signal in tracker (BUY/SELL only, skip NEUTRAL)
+        if pred["direction"] in ("BUY", "SELL") and not eb["blocked"]:
+            resolve_pending(ticker, price)
+            record_signal(
+                ticker=ticker, direction=pred["direction"], entry=price,
+                target=pred["target_price"], stop=pred["stop_loss"],
+                confidence=pred["confidence"],
+                session=sess_info.get("session", ""),
+                regime=regime.regime,
+            )
+
         candles = _build_candles(df_1m)
         info    = _get_info(ticker)
 
@@ -250,6 +333,34 @@ def analyse_ticker(
             bounce_signals    = pred.get("bounce_signals",   []),
             rr_quality        = pred.get("rr_quality",       "LOW"),
             rr_qualifies      = bool(pred.get("rr_qualifies", False)),
+            # Market session
+            session           = sess_info.get("session",   "UNKNOWN"),
+            session_label     = sess_info.get("label",     ""),
+            session_color     = sess_info.get("color",     "#94a3b8"),
+            session_mult      = float(sess_info.get("mult", 1.0)),
+            session_advice    = sess_info.get("advice",    ""),
+            # Market regime
+            regime            = regime.regime,
+            regime_label      = regime.label,
+            regime_color      = regime.color,
+            # Earnings
+            earnings_blocked   = bool(eb["blocked"]),
+            earnings_reason    = eb["reason"],
+            earnings_date      = eb["next_date"],
+            earnings_days_away = int(eb["days_away"]),
+            # Gap analysis
+            gap_type          = gap["gap_type"],
+            gap_pct           = float(gap["gap_pct"]),
+            gap_filled        = bool(gap["gap_filled"]),
+            gap_fill_prob     = float(gap["fill_probability"]),
+            premarket_high    = float(gap["premarket_high"]),
+            premarket_low     = float(gap["premarket_low"]),
+            # Relative strength
+            rs_ratio          = float(rs["rs_ratio"]),
+            rs_score          = float(rs["rs_score"]),
+            rs_label          = rs["rs_label"],
+            # Trade plan
+            trade_plan        = tp.to_dict(),
             candles           = candles,
             headlines         = headlines[:5],
         )
@@ -314,6 +425,14 @@ class Scanner:
         batch_1h = fetch_batch_interval(NASDAQ_TICKERS, "1h",   500,  ttl=CACHE_TTL_1H)
         batch_1d = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500,  ttl=CACHE_TTL_1D)
 
+        # Fetch SPY/QQQ for regime detection + RS calculation
+        regime_1m = fetch_batch_realtime(REGIME_TICKERS)
+        _spy_df_cache.update(regime_1m)
+        update_regime(
+            df_spy=regime_1m.get("SPY"),
+            df_qqq=regime_1m.get("QQQ"),
+        )
+
         results = []
         for ticker in NASDAQ_TICKERS:
             sig = analyse_ticker(
@@ -352,6 +471,8 @@ class Scanner:
             time.sleep(SCAN_INTERVAL_SECONDS)
 
     def start_background(self) -> None:
+        init_db()   # ensure signal_history.db schema exists
+
         # Thread 1: ML training (waits 30s for first scan to warm cache)
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
         ml_thread.start()

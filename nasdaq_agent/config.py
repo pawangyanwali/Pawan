@@ -88,6 +88,18 @@ TICKER_NAMES = {
     "SNOW":"Snowflake","MSTR":"MicroStrategy",
 }
 
+# ── Market regime / benchmark tickers ────────────────────────────────────────
+REGIME_TICKERS = ["SPY", "QQQ"]   # fetched each scan cycle for regime detection
+
+# ── Earnings blackout ─────────────────────────────────────────────────────────
+PRE_EARNINGS_BLACKOUT_DAYS  = 3   # suppress signals N days before earnings
+POST_EARNINGS_COOLDOWN_DAYS = 1   # suppress 1 day after earnings
+
+# ── Position sizing defaults ──────────────────────────────────────────────────
+DEFAULT_ACCOUNT_SIZE = 10_000   # default $ account size shown in UI calculator
+DEFAULT_RISK_PCT     = 1.0      # % of account risked per trade
+MAX_POSITION_PCT     = 5.0      # never allocate more than this % to one trade
+
 # Legacy aliases (kept for any code that still references them)
 INTRADAY_INTERVAL = "5m"
 REALTIME_INTERVAL = "1m"

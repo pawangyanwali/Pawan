@@ -18,6 +18,11 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent.scanner import scanner, StockSignal
+from agent.market_hours import get_session_info
+from agent.market_regime import get_regime
+from agent.signal_tracker import get_stats, get_recent_signals
+from agent.position_sizing import calculate as calc_position
+from config import DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -77,9 +82,26 @@ def _on_signals(signals: list[StockSignal]) -> None:
     """Callback invoked by the scanner thread; schedule a broadcast on the main loop."""
     if _event_loop is None:
         return
+
+    # Build alert list: high-confidence BUY/SELL signals only
+    alerts = [
+        {"ticker": s.ticker, "direction": s.prediction,
+         "confidence": s.confidence, "price": s.price,
+         "session": s.session, "regime": s.regime}
+        for s in signals
+        if s.prediction in ("BUY", "SELL") and s.confidence >= 70
+           and s.rr_qualifies and not s.earnings_blocked
+    ]
+
+    regime = get_regime()
+    session = get_session_info()
+
     payload = _dumps({
-        "type": "update",
+        "type":    "update",
         "signals": [s.to_dict() for s in signals],
+        "regime":  regime.to_dict(),
+        "session": session,
+        "alerts":  alerts,
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
@@ -137,6 +159,44 @@ async def health():
         "tickers_tracked": len(scanner.signals),
         "ws_clients": len(manager.active),
     }
+
+
+@app.get("/api/regime")
+async def get_regime_endpoint():
+    """Return current market regime (SPY/QQQ based)."""
+    regime = get_regime()
+    session = get_session_info()
+    return {"regime": regime.to_dict(), "session": session}
+
+
+@app.get("/api/signal-history")
+async def signal_history(ticker: str = None, limit: int = 50):
+    """Return recent signal history from SQLite tracker."""
+    return {
+        "signals": get_recent_signals(limit=limit),
+        "stats":   get_stats(ticker=ticker),
+    }
+
+
+@app.get("/api/position-size")
+async def position_size_endpoint(
+    entry:        float,
+    stop:         float,
+    account_size: float = DEFAULT_ACCOUNT_SIZE,
+    risk_pct:     float = DEFAULT_RISK_PCT,
+    confidence:   float = 50.0,
+    direction:    str   = "BUY",
+):
+    """Calculate position size for given entry/stop/account parameters."""
+    ps = calc_position(
+        account_size=account_size,
+        entry=entry,
+        stop=stop,
+        risk_pct=risk_pct,
+        confidence=confidence,
+        max_position_pct=MAX_POSITION_PCT,
+    )
+    return ps.to_dict()
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
