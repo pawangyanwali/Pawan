@@ -1428,14 +1428,40 @@ function renderChart(s) {
     timeScale: { borderColor:'#252a35', timeVisible:true, secondsVisible:false },
   });
 
-  // Candles
+  // Split candles into regular-session and extended-hours groups.
+  // Extended bars (pre/after-market) are rendered on a separate series
+  // with a muted gray palette so they're visually distinct.
+  const regularCandles  = s.candles.filter(c => !c.extended);
+  const extendedCandles = s.candles.filter(c =>  c.extended);
+  const hasExtended     = extendedCandles.length > 0;
+
+  // Regular-session candles — full color
   const candleSeries = chart.addCandlestickSeries({
     upColor:'#22c55e', downColor:'#ef4444',
     borderUpColor:'#22c55e', borderDownColor:'#ef4444',
     wickUpColor:'#22c55e', wickDownColor:'#ef4444',
   });
-  const candles = s.candles.map(c => ({ time:c.time, open:c.open, high:c.high, low:c.low, close:c.close }));
+  // Use whichever set has data; fall back to all candles if session split is unavailable
+  const regularData = regularCandles.length ? regularCandles : s.candles;
+  const candles = regularData.map(c => ({ time:c.time, open:c.open, high:c.high, low:c.low, close:c.close }));
   candleSeries.setData(candles);
+
+  // Extended-hours candles — muted gray/blue so they read as AH/PM context
+  if (hasExtended) {
+    const extSeries = chart.addCandlestickSeries({
+      upColor:'#4a6fa5', downColor:'#6b4a5e',
+      borderUpColor:'#4a6fa5', borderDownColor:'#6b4a5e',
+      wickUpColor:'#6b8cba', wickDownColor:'#9b6a7e',
+    });
+    extSeries.setData(extendedCandles.map(c => ({ time:c.time, open:c.open, high:c.high, low:c.low, close:c.close })));
+
+    // Overlay a legend label in the top-left of the chart div
+    const legend = document.createElement('div');
+    legend.style.cssText = 'position:absolute;top:6px;left:8px;font-size:9px;color:#6b8cba;pointer-events:none;z-index:10;background:rgba(21,24,32,.7);padding:2px 6px;border-radius:4px;border:1px solid rgba(74,111,165,.35)';
+    legend.textContent = '■ Extended hours (AH/PM)';
+    container.style.position = 'relative';
+    container.appendChild(legend);
+  }
 
   // EMA 9
   if (s.candles.length >= 9) {

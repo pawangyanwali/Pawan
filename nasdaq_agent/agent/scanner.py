@@ -244,18 +244,31 @@ def _get_info(ticker: str) -> dict:
 
 
 def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
-    """Serialise the last N OHLCV bars for TradingView Lightweight Charts."""
+    """
+    Serialise the last N OHLCV bars for TradingView Lightweight Charts.
+    Bars outside regular NYSE hours (09:30–16:00 ET) are flagged with
+    ``extended=True`` so the frontend can render them with a distinct style.
+    """
+    import pytz
+    _et = pytz.timezone("America/New_York")
+    _regular_open  = pd.Timedelta(hours=9,  minutes=30)
+    _regular_close = pd.Timedelta(hours=16, minutes=0)
+
     tail    = df.tail(n)
     candles = []
     for ts, row in tail.iterrows():
         try:
+            ts_et  = pd.Timestamp(ts).tz_localize("UTC").tz_convert(_et) if pd.Timestamp(ts).tzinfo is None else pd.Timestamp(ts).tz_convert(_et)
+            tod    = ts_et - ts_et.normalize()
+            is_ext = (tod < _regular_open) or (tod >= _regular_close)
             candles.append({
-                "time":   int(pd.Timestamp(ts).timestamp()),
-                "open":   round(float(row["Open"]),  4),
-                "high":   round(float(row["High"]),  4),
-                "low":    round(float(row["Low"]),   4),
-                "close":  round(float(row["Close"]), 4),
-                "volume": int(row["Volume"]),
+                "time":     int(pd.Timestamp(ts).timestamp()),
+                "open":     round(float(row["Open"]),  4),
+                "high":     round(float(row["High"]),  4),
+                "low":      round(float(row["Low"]),   4),
+                "close":    round(float(row["Close"]), 4),
+                "volume":   int(row["Volume"]),
+                "extended": bool(is_ext),
             })
         except Exception:
             pass
@@ -677,8 +690,13 @@ class Scanner:
         active_tickers = get_active_tickers()
         logger.info(f"Scan starting — {len(active_tickers)} tickers…")
 
-        # Always-fresh 1M data (live signal)
-        batch_1m = fetch_batch_realtime(active_tickers)
+        # Detect session once so the data fetch uses the right mode
+        _sess = get_session_info()
+        _is_extended = _sess.get("session", "") in ("AFTER_HOURS", "PRE_MARKET")
+
+        # Always-fresh 1M data — include extended-hours bars during AH/PM so
+        # the chart reflects actual after-market price action, not stale closes.
+        batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
 
         # Cached higher-TF data (only refetched when TTL expires)
         batch_5m = fetch_batch_interval(active_tickers, "5min", 500,  ttl=CACHE_TTL_5M)
@@ -686,7 +704,7 @@ class Scanner:
         batch_1d = fetch_batch_interval(active_tickers, "1day", 500,  ttl=CACHE_TTL_1D)
 
         # Fetch SPY/QQQ + sector ETFs for regime, RS and sector context
-        etf_1m = fetch_batch_realtime(SECTOR_ETF_TICKERS)
+        etf_1m = fetch_batch_realtime(SECTOR_ETF_TICKERS, extended_hours=_is_extended)
         _spy_df_cache.update(etf_1m)
         update_etf_cache(etf_1m)
         update_regime(

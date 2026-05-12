@@ -134,32 +134,40 @@ def _cache_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
 # ── Core batch fetcher ────────────────────────────────────────────────────────
 
 def fetch_batch_interval(
-    tickers:    list,
-    interval:   str,
-    outputsize: int,
-    ttl:        float = 0.0,
+    tickers:        list,
+    interval:       str,
+    outputsize:     int,
+    ttl:            float = 0.0,
+    extended_hours: bool  = False,
 ) -> dict[str, pd.DataFrame]:
     """
     Fetch OHLCV data for multiple tickers at a given interval.
 
     Parameters
     ----------
-    tickers    : List of ticker symbols.
-    interval   : Twelve Data interval string ('1min', '5min', '1h', '1day', …).
-    outputsize : Number of bars to return per symbol.
-    ttl        : Cache TTL in seconds. 0 = always fetch fresh.
+    tickers        : List of ticker symbols.
+    interval       : Twelve Data interval string ('1min', '5min', '1h', '1day', …).
+    outputsize     : Number of bars to return per symbol.
+    ttl            : Cache TTL in seconds. 0 = always fetch fresh.
+    extended_hours : When True, include pre/after-market bars (Twelve Data
+                     ``extended_trading_hours`` parameter).  Only meaningful
+                     for intraday intervals (≤ 4h).
 
     Returns
     -------
     Dict mapping ticker → DataFrame (oldest bar first).
     Only successfully-fetched tickers are present.
     """
+    # Use a distinct cache key when extended hours data is requested so
+    # regular-session and extended-session caches don't collide.
+    interval_key = f"{interval}:ext" if extended_hours else interval
+
     result: dict[str, pd.DataFrame] = {}
     to_fetch: list[str] = []
 
     # Serve cached tickers
     for ticker in tickers:
-        cached = _cache_get(ticker, interval, ttl)
+        cached = _cache_get(ticker, interval_key, ttl)
         if cached is not None:
             result[ticker] = cached
         else:
@@ -172,35 +180,40 @@ def fetch_batch_interval(
     for i in range(0, len(to_fetch), BATCH_SIZE):
         batch     = to_fetch[i: i + BATCH_SIZE]
         batch_num = i // BATCH_SIZE + 1
-        logger.debug(f"[{interval}] batch {batch_num}/{n_batches}: {len(batch)} symbols")
+        logger.debug(f"[{interval_key}] batch {batch_num}/{n_batches}: {len(batch)} symbols")
 
-        data = _get("/time_series", {
+        params: dict = {
             "symbol":     ",".join(batch),
             "interval":   interval,
             "outputsize": outputsize,
             "order":      "ASC",
-        })
+        }
+        if extended_hours:
+            params["extended_trading_hours"] = "true"
+
+        data = _get("/time_series", params)
 
         if not data:
-            logger.warning(f"[{interval}] batch {batch_num} returned empty response")
+            logger.warning(f"[{interval_key}] batch {batch_num} returned empty response")
             continue
 
         parsed = _parse_batch_response(data, batch)
         for ticker, df in parsed.items():
             result[ticker] = df
             if ttl > 0:
-                _cache_set(ticker, interval, df)
+                _cache_set(ticker, interval_key, df)
 
     fetched = len([t for t in to_fetch if t in result])
-    logger.info(f"[{interval}] fetched {fetched}/{len(to_fetch)} new + {len(tickers)-len(to_fetch)} cached")
+    logger.info(f"[{interval_key}] fetched {fetched}/{len(to_fetch)} new + {len(tickers)-len(to_fetch)} cached")
     return result
 
 
 # ── Convenience wrappers ──────────────────────────────────────────────────────
 
-def fetch_batch_realtime(tickers: list) -> dict[str, pd.DataFrame]:
+def fetch_batch_realtime(tickers: list, extended_hours: bool = False) -> dict[str, pd.DataFrame]:
     """Fetch fresh 1-min bars for all tickers (no caching — always live)."""
-    return fetch_batch_interval(tickers, "1min", REALTIME_OUTPUTSIZE, ttl=0)
+    return fetch_batch_interval(tickers, "1min", REALTIME_OUTPUTSIZE, ttl=0,
+                                extended_hours=extended_hours)
 
 
 def fetch_historical(ticker: str) -> pd.DataFrame:
