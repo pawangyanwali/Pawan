@@ -26,22 +26,30 @@ if (Test-Path $EnvFile) {
     }
 }
 
+function Find-Python {
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if ($py) { return $py.Source }
+    $py3 = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($py3) { return $py3.Source }
+    Write-Host "ERROR: python not found in PATH." -ForegroundColor Red
+    exit 1
+}
+
 function Find-Uvicorn {
+    # Prefer the standalone uvicorn.exe if it is on PATH
     $uv = Get-Command uvicorn -ErrorAction SilentlyContinue
     if ($uv) { return $uv.Source }
-    $candidates = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts\uvicorn.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python311\Scripts\uvicorn.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python310\Scripts\uvicorn.exe",
-        "$env:APPDATA\Python\Python312\Scripts\uvicorn.exe",
-        "C:\Python312\Scripts\uvicorn.exe",
-        "C:\Python311\Scripts\uvicorn.exe"
-    )
-    foreach ($c in $candidates) {
-        if (Test-Path $c) { return $c }
-    }
-    Write-Host "ERROR: uvicorn not found. Run: pip install uvicorn" -ForegroundColor Red
-    exit 1
+
+    # Always-works fallback: run uvicorn as a Python module.
+    # Wrap it as a tiny launcher script so Start-Process can use it.
+    $python = Find-Python
+    $launcher = Join-Path $LogDir "run_agent.bat"
+    @"
+@echo off
+cd /d "$ScriptDir"
+"$python" -m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log
+"@ | Set-Content $launcher
+    return $launcher
 }
 
 function Get-RunningPid {
@@ -51,8 +59,8 @@ function Get-RunningPid {
             return $stored
         }
     }
-    $proc = Get-WmiObject Win32_Process -Filter "Name='uvicorn.exe'" |
-            Where-Object { $_.CommandLine -like "*main:app*" } |
+    $proc = Get-WmiObject Win32_Process |
+            Where-Object { $_.CommandLine -like "*uvicorn*main:app*" } |
             Select-Object -First 1
     if ($proc) { return $proc.ProcessId }
     return $null
@@ -68,12 +76,12 @@ if ($cmd -eq "start") {
         Write-Host "Already running (PID $running)" -ForegroundColor Green
         exit 0
     }
-    $uvicorn   = Find-Uvicorn
+    $python    = Find-Python
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content $LogFile "[$timestamp] === Agent starting ==="
     $proc = Start-Process `
-        -FilePath $uvicorn `
-        -ArgumentList "main:app --host 0.0.0.0 --port 8000 --no-access-log" `
+        -FilePath $python `
+        -ArgumentList "-m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log" `
         -WorkingDirectory $ScriptDir `
         -WindowStyle Hidden `
         -RedirectStandardOutput $LogFile `
@@ -113,10 +121,10 @@ if ($cmd -eq "start") {
 } elseif ($cmd -eq "install") {
     # Registers a Task Scheduler task that starts the agent at every login.
     # Run this once from an elevated (Administrator) PowerShell prompt.
-    $uvicorn   = Find-Uvicorn
-    $ta        = New-ScheduledTaskAction `
-                    -Execute $uvicorn `
-                    -Argument "main:app --host 0.0.0.0 --port 8000 --no-access-log" `
+    $python  = Find-Python
+    $ta      = New-ScheduledTaskAction `
+                    -Execute $python `
+                    -Argument "-m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log" `
                     -WorkingDirectory $ScriptDir
     $trigger   = New-ScheduledTaskTrigger -AtLogOn
     $settings  = New-ScheduledTaskSettingsSet `
