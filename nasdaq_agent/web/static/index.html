@@ -1002,10 +1002,11 @@ function renderTable() {
       ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)">🚫 FILTERED</span>` : '';
 
     const rowBg = trade ? 'background:rgba(59,130,246,.04)' : s.is_suppressed ? 'opacity:0.65' : '';
-    // Price cell — show current price + % change; badge if extended session
-    const isExtended = s.session === 'AFTER_HOURS' || s.session === 'PRE_MARKET';
-    const sessionTag = isExtended
-      ? `<span style="display:inline-block;margin-left:4px;padding:1px 4px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(59,130,246,.15);color:var(--blue);border:1px solid rgba(59,130,246,.3)">${s.session==='AFTER_HOURS'?'AH':'PM'}</span>`
+    // Extended = anything outside regular market hours (OPEN / POWER_HOUR / AVOID_ZONE)
+    const isExtended = !['OPEN','POWER_HOUR','AVOID_ZONE'].includes(s.session);
+    const extLabel   = s.session === 'PRE_MARKET' ? 'PM' : s.session === 'AFTER_HOURS' ? 'AH' : s.session === 'CLOSED' ? 'CLOSED' : '';
+    const sessionTag = isExtended && extLabel
+      ? `<span style="display:inline-block;margin-left:4px;padding:1px 4px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(59,130,246,.15);color:var(--blue);border:1px solid rgba(59,130,246,.3)">${extLabel}</span>`
       : '';
 
     return `<tr data-ticker="${s.ticker}" style="${rowBg}">
@@ -1045,25 +1046,29 @@ function renderTable() {
       </td>
       <td>
         ${s.gap_type!=='FLAT'
-          ? `<span class="gap-badge gap-${s.gap_type}">${s.gap_type==='GAP_UP'?'↑':s.gap_type==='GAP_DOWN'?'↓':''} ${fmt(Math.abs(s.gap_pct),1)}%</span>
+          ? `<span class="gap-badge gap-${s.gap_type}">${s.gap_type==='GAP_UP'?'↑':'↓'} ${fmt(Math.abs(s.gap_pct),1)}%</span>
              <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${Math.round((s.gap_fill_prob||0)*100)}% fill</span>`
-          : isExtended
-            ? `<span style="font-size:9px;color:var(--blue);opacity:.7">AH — at open</span>`
-            : `<span style="font-size:10px;color:var(--muted)">FLAT</span>`
+          : isExtended && Math.abs(s.ah_change_pct||0) >= 0.1
+            ? (() => { const ac=s.ah_change_pct||0; const gc=ac>0?'var(--green)':'var(--red)';
+                return `<span style="font-size:10px;font-weight:700;color:${gc}">${ac>=0?'↑':'↓'} ${fmt(Math.abs(ac),1)}%</span>
+                        <span style="font-size:8px;color:var(--muted);display:block;margin-top:1px">AH est.</span>`; })()
+            : `<span style="font-size:10px;color:var(--muted)">—</span>`
         }
         ${s.earnings_blocked ? `<span class="earnings-badge" title="${s.earnings_reason}">⚠ ERN ${s.earnings_days_away}d</span>` : ''}
       </td>
       <td>
-        ${isExtended && (!s.vwap_event || s.vwap_event==='FLAT')
-          ? `<span style="font-size:9px;color:var(--blue);opacity:.7">AH — resets open</span>`
-          : `<span class="vwap-badge vwap-${s.vwap_event||'FLAT'}">${(s.vwap_event||'FLAT').replace('_',' ')}</span>
-             <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${(s.vwap_deviation||0)>=0?'+':''}${fmt(s.vwap_deviation,2)}%</span>`
+        ${s.vwap_event && s.vwap_event!=='FLAT'
+          ? `<span class="vwap-badge vwap-${s.vwap_event}">${s.vwap_event.replace('_',' ')}</span>
+             <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${(s.vwap_deviation||0)>=0?'+':''}${fmt(s.vwap_deviation,2)}%${isExtended?' ↩':''}</span>`
+          : isExtended
+            ? `<span style="font-size:9px;color:var(--muted)">resets open</span>`
+            : `<span class="vwap-badge vwap-FLAT">FLAT</span>`
         }
       </td>
       <td>
         ${s.sector_etf
           ? `<span style="font-size:10px;font-weight:700;color:${s.sector_trend==='BULLISH'?'var(--green)':s.sector_trend==='BEARISH'?'var(--red)':'var(--muted)'}">${s.sector_etf}</span>
-             <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${s.sector_trend||''}</span>`
+             <span style="font-size:9px;color:${s.sector_trend==='BULLISH'?'var(--green)':s.sector_trend==='BEARISH'?'var(--red)':'var(--muted)'};display:block;margin-top:1px">${s.sector_trend||'NEUTRAL'}</span>`
           : `<span style="font-size:9px;color:var(--muted)">—</span>`
         }
       </td>
@@ -2296,6 +2301,8 @@ connectWS();
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
 // Load session/regime on startup
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/regime`)).json(); if(d.session) updateSessionBanner(d.session); if(d.regime) updateRegimeBanner(d.regime); } catch {} })();
+// Pre-populate Self-Learning pill immediately on page load (don't wait for WS scan)
+(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/learning-status`)).json(); if (d) updateLearnPill(d); } catch {} })();
 // Load macro calendar on startup
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/macro-calendar`)).json(); if(d.current) updateMacroBanner(d.current); } catch {} })();
 // Refresh learning header button on startup
