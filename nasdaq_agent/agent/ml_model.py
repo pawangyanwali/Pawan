@@ -32,6 +32,10 @@ from agent.reversal import compute_reversal_features, REVERSAL_FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
+import threading as _threading
+_retrain_lock   = _threading.Lock()
+_is_retraining  = False   # quick non-blocking check before acquiring lock
+
 FEATURE_COLS = [
     "rsi_14", "rsi_7", "macd", "macd_signal", "macd_hist",
     "bb_pct", "bb_width", "stoch_k", "stoch_d", "cci_20", "mfi_14",
@@ -170,6 +174,24 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None) -> N
                  provided, each ticker's DailyMLModel is also retrained from
                  the supplied DataFrame (no extra API call required).
     """
+    global _is_retraining
+    # Non-blocking guard: if another retrain is already running, skip this call
+    if _is_retraining:
+        logger.info("[retrain_all] Skipped — another retrain already in progress")
+        return
+    if not _retrain_lock.acquire(blocking=False):
+        logger.info("[retrain_all] Skipped — lock held by concurrent retrain")
+        return
+    _is_retraining = True
+    try:
+        _retrain_all_locked(tickers, delay=delay, daily_data=daily_data)
+    finally:
+        _is_retraining = False
+        _retrain_lock.release()
+
+
+def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = None) -> None:
+    """Internal retrain — only called while _retrain_lock is held."""
     from agent.data_fetcher import fetch_batch_interval
 
     # Batch-fetch all 5-min historical data upfront — 4 API calls for 80 tickers

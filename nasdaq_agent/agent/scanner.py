@@ -418,6 +418,15 @@ def analyse_ticker(
         if eb["blocked"] or macro_ev["blocked"]:
             pred["direction"] = "NEUTRAL"
 
+        # Hard-block trading during AFTER_HOURS and CLOSED sessions.
+        # Backtest data shows 0-2% win rates outside regular hours — no edge.
+        # Chart data and position tracking still run; only new signals are blocked.
+        _session_now = sess_info.get("session", "")
+        if _session_now in ("AFTER_HOURS", "CLOSED"):
+            if pred["direction"] in ("BUY", "SELL"):
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"]   = ["⛔ No new trades outside regular hours (AH/CLOSED 0-2% WR)"] + pred.get("reasons", [])
+
         # Exit signals (for open paper trades / active signals)
         exit_analysis = analyse_exits(
             df=df_ind,
@@ -473,6 +482,11 @@ def analyse_ticker(
             entry_type  = pred.get("entry_type", ""),
             direction   = pred["direction"],
         )
+
+        # IMMEDIATE entries are structurally weaker (57% WR vs 62-70% for setups).
+        # Apply a small penalty to raise the bar — forces IMMEDIATE to be higher conviction.
+        if pred.get("entry_type") == "IMMEDIATE" and pred["direction"] in ("BUY", "SELL"):
+            pred["confidence"] = round(float(max(pred["confidence"] - 5.0, 25.0)), 1)
 
         # Apply adaptive boost for high-win-rate contexts
         boost = get_confidence_boost(
