@@ -825,7 +825,8 @@
         <div class="bt-section-title" style="margin:0">📡 Live Learning Log</div>
         <div style="display:flex;align-items:center;gap:8px">
           <span id="learn-engine-status" style="font-size:10px;color:var(--muted)">—</span>
-          <button onclick="loadLearningLog()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;cursor:pointer;font-family:inherit;font-size:10px">Refresh</button>
+          <span id="learn-last-refresh" style="font-size:9px;color:var(--muted)">—</span>
+          <button onclick="Promise.all([loadLearningStatus(),loadLearningLog()])" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;cursor:pointer;font-family:inherit;font-size:10px">Refresh</button>
         </div>
       </div>
       <div id="learn-log-box" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:220px;overflow-y:auto;font-size:10px;font-family:'SF Mono','Fira Code',monospace;line-height:1.7">
@@ -863,7 +864,13 @@ function connectWS() {
       if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
       if (m.macro)    updateMacroBanner(m.macro);
       if (m.backtest) updateBtHeaderBtn(m.backtest);
-      if (m.learning) updateLearnPill(m.learning);
+      if (m.learning) {
+        updateLearnPill(m.learning);
+        // If the full learning panel is open, refresh it with live data
+        if (document.getElementById('learn-modal')?.classList.contains('open')) {
+          loadLearningStatus();
+        }
+      }
       if (m.alerts?.length) handleAlerts(m.alerts);
       if (m.breadth) { allBreadth = m.breadth; }
       renderAll();
@@ -2202,11 +2209,25 @@ function renderAfterHours(snaps) {
 
 // ─── Learning Status Modal ────────────────────────────────────────────────────
 
+let _learnPollTimer = null;
+
 async function openLearning() {
   document.getElementById('learn-modal').classList.add('open');
   await Promise.all([loadLearningStatus(), loadLearningLog()]);
+  // Poll every 15s while panel is open so log and stats stay live
+  if (!_learnPollTimer) {
+    _learnPollTimer = setInterval(async () => {
+      if (!document.getElementById('learn-modal')?.classList.contains('open')) {
+        clearInterval(_learnPollTimer); _learnPollTimer = null; return;
+      }
+      await Promise.all([loadLearningStatus(), loadLearningLog()]);
+    }, 15000);
+  }
 }
-function closeLearning() { document.getElementById('learn-modal').classList.remove('open'); }
+function closeLearning() {
+  document.getElementById('learn-modal').classList.remove('open');
+  if (_learnPollTimer) { clearInterval(_learnPollTimer); _learnPollTimer = null; }
+}
 
 async function loadLearningLog() {
   try {
@@ -2219,6 +2240,8 @@ async function loadLearningLog() {
     }
     const logEl = document.getElementById('learn-log-box');
     if (!logEl) return;
+    const refreshEl = document.getElementById('learn-last-refresh');
+    if (refreshEl) refreshEl.textContent = 'Updated ' + new Date().toLocaleTimeString();
     const entries = (d.log || []).slice().reverse(); // newest first
     if (!entries.length) {
       logEl.innerHTML = `<div style="color:var(--muted)">No log entries yet — engine starts on first scan.</div>`;
@@ -2264,9 +2287,11 @@ function renderLearningStatus(d) {
   const tLblEl = document.getElementById('learn-target-label');
   if (tSubEl) tSubEl.textContent = target;
   if (tLblEl) tLblEl.textContent = target + '%';
+  const sessionNow = _sessionInfo?.session || '';
+  const marketClosed = sessionNow === 'CLOSED';
   document.getElementById('learn-learning-badge').innerHTML = isLearning
-    ? `<span style="color:var(--green-s);font-weight:700">● ACTIVE</span>`
-    : `<span style="color:var(--muted)">● Needs ${8 - total} more trades</span>`;
+    ? `<span style="color:var(--green-s);font-weight:700">● ACTIVE</span>${marketClosed ? '<span style="color:var(--muted);font-size:9px;margin-left:6px">· Win rate updates when trades close during market hours</span>' : ''}`
+    : `<span style="color:var(--muted)">● Needs ${Math.max(0, 8 - total)} more trades</span>`;
 
   // KPI cards
   const eng = d.engine || {};
