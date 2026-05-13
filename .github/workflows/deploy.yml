@@ -17,10 +17,11 @@ jobs:
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key:      ${{ secrets.DEPLOY_SSH_KEY }}
-          port:     22
+          host:          ${{ secrets.DEPLOY_HOST }}
+          username:      ${{ secrets.DEPLOY_USER }}
+          key:           ${{ secrets.DEPLOY_SSH_KEY }}
+          port:          22
+          known_hosts:   unnecessary
           script: |
             set -e
             APP_DIR="/opt/nasdaq-agent"
