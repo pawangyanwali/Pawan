@@ -36,6 +36,14 @@ jobs:
             echo "=== Installing any new dependencies ==="
             sudo -u "$APP_USER" "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
 
+            echo "=== Ensure agent.err is cleared on each restart ==="
+            SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+            if ! grep -q "ExecStartPre" "$SERVICE_FILE"; then
+              sudo sed -i '/^ExecStart=/i ExecStartPre=/bin/truncate -s 0 /opt/nasdaq-agent/logs/agent.err' "$SERVICE_FILE"
+              sudo systemctl daemon-reload
+              echo "Patched service file with ExecStartPre"
+            fi
+
             echo "=== Restarting service ==="
             sudo systemctl restart "$SERVICE"
             sleep 5

@@ -95,6 +95,7 @@ Type=simple
 User=${APP_USER}
 WorkingDirectory=${APP_DIR}/nasdaq_agent
 EnvironmentFile=${ENV_FILE}
+ExecStartPre=/bin/truncate -s 0 ${APP_DIR}/logs/agent.err
 ExecStart=${VENV}/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log
 Restart=on-failure
 RestartSec=10
