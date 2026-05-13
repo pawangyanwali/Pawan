@@ -96,6 +96,19 @@ def get_learning_log(limit: int = 100) -> list[dict]:
     return entries[-limit:]
 
 
+def clear_log() -> None:
+    """Wipe both the in-memory buffer and the on-disk JSONL file."""
+    with _buf_lock:
+        _LOG_BUFFER.clear()
+    try:
+        with _log_file_lock:
+            if _LOG_PATH.exists():
+                _LOG_PATH.write_text("")
+    except Exception as e:
+        logger.warning(f"[Learning] Could not clear log file: {e}")
+    logger.info("[Learning] Log cleared on service restart.")
+
+
 # Load persisted log entries on module import so dashboard shows history immediately
 _load_log_from_disk()
 
