@@ -836,6 +836,42 @@ def generate_prediction(
                 composite  = round(float(np.clip(composite - rev_boost, -1.0, 1.0)), 4)
                 direction  = _label_direction(composite)
 
+    # ── 7e. Momentum confirmation — recent candle direction consistency ───────
+    _momentum_confirmed = False
+    _momentum_adj = 0.0
+    try:
+        if len(df) >= 3 and "Close" in df.columns and "Open" in df.columns:
+            recent = df.iloc[-3:]
+            bull_bars = sum(1 for _, r in recent.iterrows() if r["Close"] > r["Open"])
+            bear_bars = sum(1 for _, r in recent.iterrows() if r["Close"] < r["Open"])
+            if direction in ("BUY", "STRONG BUY") and bull_bars >= 2:
+                _momentum_confirmed = True
+                _momentum_adj = +3.0
+            elif direction in ("SELL", "STRONG SELL") and bear_bars >= 2:
+                _momentum_confirmed = True
+                _momentum_adj = +3.0
+            elif direction in ("BUY", "STRONG BUY") and bear_bars == 3:
+                _momentum_adj = -4.0   # 3 consecutive red bars into BUY = bad entry timing
+            elif direction in ("SELL", "STRONG SELL") and bull_bars == 3:
+                _momentum_adj = -4.0   # 3 consecutive green bars into SELL = bad entry timing
+    except Exception:
+        pass
+    if _momentum_adj != 0.0:
+        confidence = round(float(np.clip(confidence + _momentum_adj, 25.0, 95.0)), 1)
+
+    # ── 7f. Volume quality gate — low volume reduces conviction ───────────────
+    try:
+        rvol = _safe_float(last_row, "vol_ratio")
+        if rvol is not None:
+            if rvol < 0.4:
+                confidence = round(float(np.clip(confidence - 6.0, 25.0, 95.0)), 1)
+            elif rvol < 0.7:
+                confidence = round(float(np.clip(confidence - 3.0, 25.0, 95.0)), 1)
+            elif rvol >= 2.0 and _momentum_confirmed:
+                confidence = round(float(np.clip(confidence + 3.0, 25.0, 95.0)), 1)
+    except Exception:
+        pass
+
     # ── 8. Trend reason ───────────────────────────────────────────────────────
     # Apply R:R quality adjustment to confidence — aligns confidence with trade geometry
     _rr_adj = {
@@ -874,12 +910,19 @@ def generate_prediction(
             "Consider skipping or waiting for better entry."
         )
 
+    momentum_reasons: list[str] = []
+    if _momentum_confirmed:
+        momentum_reasons.append("✓ Momentum confirmed — recent candles align with signal direction")
+    elif _momentum_adj < 0:
+        momentum_reasons.append("⚠ Counter-candle entry — recent bars oppose signal direction (wait for pullback)")
+
     all_reasons = (
         rsi_gate_reasons               +   # RSI gate overrides shown first
         rev["signals"]                 +   # divergence / reversal signals next
         exhaustion["exhaustion_flags"] +   # exhaustion / overextension
         bounce["bounce_signals"]       +   # bounce signals
         [rr_reason]                    +   # R:R quality always visible
+        momentum_reasons               +   # momentum confirmation
         trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
     )
 

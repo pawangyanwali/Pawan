@@ -373,3 +373,70 @@ def get_summary() -> dict:
         "avg_pnl":    avg_pnl,
         "total_pnl":  total_pnl,
     }
+
+
+def get_equity_curve(days: int = 30) -> list[dict]:
+    """Return cumulative P&L curve (daily close values) for the last N days."""
+    conn = _conn()
+    try:
+        rows = conn.execute("""
+            SELECT
+                date(closed_at) as trade_date,
+                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2) as day_pnl
+            FROM paper_trades
+            WHERE status='CLOSED' AND closed_at >= date('now', ?)
+            GROUP BY date(closed_at)
+            ORDER BY trade_date ASC
+        """, (f'-{days} days',)).fetchall()
+        cumulative = 0.0
+        result = []
+        for r in rows:
+            cumulative = round(cumulative + (r["day_pnl"] or 0), 2)
+            result.append({"date": r["trade_date"], "day_pnl": r["day_pnl"], "cumulative": cumulative})
+        return result
+    finally:
+        conn.close()
+
+
+def get_weekly_pnl() -> list[dict]:
+    """Return per-week P&L for the last 12 weeks."""
+    conn = _conn()
+    try:
+        rows = conn.execute("""
+            SELECT
+                strftime('%Y-W%W', closed_at) as week,
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2) as pnl_dollar,
+                ROUND(SUM(pnl_pct), 2) as pnl_pct
+            FROM paper_trades
+            WHERE status='CLOSED' AND closed_at >= date('now', '-84 days')
+            GROUP BY week
+            ORDER BY week DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_ticker_pnl() -> list[dict]:
+    """Return per-ticker P&L breakdown (top 20 by trade count)."""
+    conn = _conn()
+    try:
+        rows = conn.execute("""
+            SELECT
+                ticker,
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2) as pnl_dollar,
+                ROUND(AVG(pnl_pct), 2) as avg_pnl_pct,
+                ROUND(SUM(pnl_pct), 2) as total_pnl_pct
+            FROM paper_trades
+            WHERE status='CLOSED'
+            GROUP BY ticker
+            ORDER BY total DESC
+            LIMIT 20
+        """).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()

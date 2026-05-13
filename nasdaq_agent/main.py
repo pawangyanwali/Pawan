@@ -22,7 +22,7 @@ from agent.market_hours import get_session_info
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals, get_observation_summary
 from agent.position_sizing import calculate as calc_position
-from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl
+from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl, get_equity_curve, get_weekly_pnl, get_ticker_pnl
 from agent.macro_calendar import check_macro_event, get_upcoming_events
 from agent.live_backtest import get_performance_stats, get_tracking_signals, get_recent_resolved, get_price_path
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
@@ -323,6 +323,19 @@ async def paper_trading_endpoint():
 async def paper_daily_pnl():
     """Per-day P&L summary for last 14 days."""
     return {"daily": get_daily_pnl(days=14), "today": get_today_pnl()}
+
+
+@app.get("/api/paper-trading/performance")
+async def paper_performance():
+    """Full P&L performance dashboard data."""
+    return {
+        "summary":       pt_summary(),
+        "today":         get_today_pnl(),
+        "daily":         get_daily_pnl(days=30),
+        "weekly":        get_weekly_pnl(),
+        "equity_curve":  get_equity_curve(days=60),
+        "ticker_pnl":    get_ticker_pnl(),
+    }
 
 
 @app.get("/api/macro-calendar")
