@@ -319,6 +319,13 @@ async def paper_trading_endpoint():
     }
 
 
+@app.get("/api/deep-model/status")
+async def deep_model_status():
+    """Deep BiLSTM model training status and architecture info."""
+    from agent.deep_model import get_model_info
+    return get_model_info()
+
+
 @app.get("/api/risk-status")
 async def risk_status():
     """Daily loss circuit breaker + sector concentration status."""

@@ -60,6 +60,7 @@ from agent.adaptive_filter import (
     should_suppress, get_confidence_boost, increment_suppressed,
 )
 from agent.ensemble_model import get_meta_prediction
+from agent.deep_model import predict_deep
 from agent.risk_controls import check_circuit_breaker, check_sector_concentration
 from agent.after_hours_monitor import (
     init_db as ah_init_db,
@@ -379,7 +380,18 @@ def analyse_ticker(
         ml_daily_p                 = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
         ml_reversal_p              = predict_reversal(ticker, _df_ml)
         ml_ensemble_p, ml_agree    = predict_ensemble(ticker, _df_ml)
-        # MetaEnsemble: calibrated fusion of all ML sources.
+
+        # Deep BiLSTM model — uses 15-min bars resampled from 5-min data so
+        # it gets ~6 months of context without an extra API call each scan.
+        _df_15m = None
+        try:
+            from agent.data_fetcher import resample_ohlcv
+            _df_15m = resample_ohlcv(_df_ml, "15min") if _df_ml is not None else None
+        except Exception:
+            pass
+        ml_deep_p = predict_deep(ticker, _df_15m) if _df_15m is not None and len(_df_15m) >= 20 else 0.5
+
+        # MetaEnsemble: calibrated fusion of all ML sources including deep model.
         # When trained (≥30 outcomes), uses a meta-XGBoost to combine signals
         # optimally; before that, falls back to a weighted average.
         ml_combined, _meta_mult    = get_meta_prediction(
@@ -392,6 +404,11 @@ def analyse_ticker(
             tech_score         = float(tech),
             vol_score          = float(vol),
         )
+        # Blend deep model probability directly into ml_combined.
+        # Weight: 20% deep, 80% meta-ensemble — increases as deep model trains.
+        from agent.deep_model import is_trained as _deep_is_trained
+        if _deep_is_trained():
+            ml_combined = round(0.80 * ml_combined + 0.20 * ml_deep_p, 4)
         sent, headlines = score_sentiment(ticker)
         rvol            = relative_volume(df_ind)
         uvol            = detect_unusual_volume(df_ind)

@@ -245,11 +245,19 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
     """Internal retrain — only called while _retrain_lock is held."""
     from agent.data_fetcher import fetch_batch_interval
 
+    # ── 5-min data: ~64 trading days (XGBoost scalp/ensemble models) ─────────
     # Batch-fetch all 5-min historical data upfront — 4 API calls for 80 tickers
     # TTL=1800 so subsequent retrain cycles within 30 min reuse cached data
     logger.info(f"[retrain_all] Batch-fetching 5min history for {len(tickers)} tickers…")
     hist_5m = fetch_batch_interval(tickers, "5min", 5000, ttl=1800)
     logger.info(f"[retrain_all] Got history for {len(hist_5m)}/{len(tickers)} tickers")
+
+    # ── 15-min data: ~6 months (deep BiLSTM model) ───────────────────────────
+    # 5000 × 15min = 75,000 min ÷ (6.5h/day × 60) = ~192 trading days ≈ 9 months
+    # TTL=3600 — refreshed once per hour, always covers the full lookback window
+    logger.info(f"[retrain_all] Batch-fetching 15min history for deep model ({len(tickers)} tickers)…")
+    hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600)
+    logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
 
     for t in tickers:
         df5m = hist_5m.get(t)
@@ -282,6 +290,15 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
 
         if delay > 0:
             time.sleep(delay)
+
+    # ── Deep BiLSTM model: universal, trained across all tickers ─────────────
+    # Runs after per-ticker XGBoost so it can also incorporate backtest outcomes.
+    try:
+        from agent.deep_model import retrain_deep_all
+        logger.info(f"[retrain_all] Training deep BiLSTM model on {len(hist_15m)} tickers (6-month 15min data)…")
+        retrain_deep_all(hist_15m)
+    except Exception as e:
+        logger.warning(f"[retrain_all] Deep model training failed: {e}")
 
 
 def predict(ticker: str, df: pd.DataFrame) -> float:
