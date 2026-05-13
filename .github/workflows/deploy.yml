@@ -29,6 +29,7 @@ jobs:
             SERVICE="nasdaq-agent"
 
             echo "=== Pulling latest code ==="
+            git config --global --add safe.directory "$APP_DIR"
             git -C "$APP_DIR" fetch origin
             git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
 
