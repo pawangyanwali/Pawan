@@ -112,10 +112,18 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
     """Shared logic for update_filter and update_from_paper_trades."""
     overall = stats.get("overall", {})
     total   = overall.get("total", 0)
+    current_wr = float(overall.get("win_rate", 0.0))
+
+    # Always update win_rate and total so the dashboard shows live progress
+    # even before MIN_SAMPLE is reached for context blocking decisions.
+    if total > 0 and current_wr > 0:
+        with _lock:
+            _state["current_win_rate"] = current_wr
+            _state["total_resolved"]   = total
+        _save()
+
     if total < MIN_SAMPLE:
         return
-
-    current_wr = float(overall.get("win_rate", 0.0))
     new_blocked: dict = {}
     new_boosted: dict = {}
 

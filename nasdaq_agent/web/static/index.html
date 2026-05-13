@@ -3162,7 +3162,8 @@ function _updateLearnHeaderBtn(wr, thresh, isLearning) {
 // Update backtest header button live with win rate from WebSocket
 function updateLearnPill(l) {
   if (!l) return;
-  const wr     = l.win_rate ?? 0;          // already in % (0-100)
+  // API returns current_win_rate; WS broadcast wraps it as win_rate — accept both
+  const wr     = l.win_rate ?? l.current_win_rate ?? 0;
   const target = l.target_win_rate ?? 62;
   const gate   = l.dynamic_threshold ?? 60;
   const sup    = l.suppressed_count ?? 0;
@@ -3177,6 +3178,11 @@ function updateLearnPill(l) {
   if (val) { val.textContent = wr.toFixed(1) + '%'; val.style.color = col; }
   if (gateEl) gateEl.textContent = gate.toFixed(0) + '%';
   if (supEl)  supEl.textContent  = sup;
+
+  // Persist to localStorage so next refresh restores instantly
+  if (wr > 0) {
+    localStorage.setItem('lastLearnState', JSON.stringify({ win_rate: wr, target_win_rate: target, dynamic_threshold: gate, suppressed_count: sup, is_learning: l.is_learning }));
+  }
 
   // Also update header button
   _updateLearnHeaderBtn(wr, gate, l.is_learning ?? false);
@@ -3194,6 +3200,11 @@ function updateBtHeaderBtn(bt) {
 // ─── Init ──────────────────────────────────────────────────────────────────────
 _loadAlertSettings();
 updateAlertBtn();
+// Restore last known learning state immediately so the pill never shows blank on refresh
+try {
+  const cached = JSON.parse(localStorage.getItem('lastLearnState') || 'null');
+  if (cached && cached.win_rate > 0) updateLearnPill(cached);
+} catch(e) {}
 connectWS();
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
 // Load session/regime on startup
