@@ -178,7 +178,7 @@ def update_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
     lstm_regime = "UNKNOWN"
     try:
         from agent.lstm_regime import get_lstm_regime
-        lstm_regime = get_lstm_regime(df_spy)   # NEUTRAL/BULL_TREND/BEAR_TREND/CHOPPY
+        lstm_regime, _ = get_lstm_regime(df_spy)   # returns (label, confidence)
     except Exception:
         pass
 
