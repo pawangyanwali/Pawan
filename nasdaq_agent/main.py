@@ -29,6 +29,9 @@ from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from agent.adaptive_filter import get_status as af_get_status
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
+from agent.broker.schwab_auth import load_stored_tokens, get_token_status, start_auth_flow
+from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
+from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
 from config import (
     DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT,
     load_watchlist, save_watchlist, NASDAQ_TICKERS,
@@ -169,6 +172,22 @@ def _on_signals(signals: list[StockSignal]) -> None:
     except Exception:
         open_trades = {}
 
+    # ThinkorSwim auto-trade: attempt bracket orders for qualifying signals
+    if _tos_auto_trade:
+        _tos_results = []
+        for sig in signals:
+            if sig.prediction in ("BUY", "STRONG BUY", "SELL", "STRONG SELL"):
+                try:
+                    r = maybe_place_tos_order(sig)
+                    if r.get("placed"):
+                        _tos_results.append(r)
+                except Exception as _te:
+                    pass
+        if _tos_results:
+            logging.getLogger(__name__).info(
+                f"TOS auto-trade: {len(_tos_results)} orders placed this cycle"
+            )
+
     payload = _dumps({
         "type":        "update",
         "signals":     [s.to_dict() for s in signals],
@@ -184,15 +203,26 @@ def _on_signals(signals: list[StockSignal]) -> None:
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
 
+# ── ThinkorSwim auto-trade toggle ────────────────────────────────────────────
+_tos_auto_trade: bool = os.getenv("SCHWAB_AUTO_TRADE", "false").lower() == "true"
+
 # ── App lifespan ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _event_loop
-    _event_loop = asyncio.get_running_loop()   # capture before spawning thread
+    _event_loop = asyncio.get_running_loop()
     scanner.register_callback(_on_signals)
     scanner.start_background()
-    learning_engine.start()   # continuous 24/7 learning — independent of scan loop
+    learning_engine.start()
+    # Try to load stored Schwab tokens (silent if not configured)
+    try:
+        if os.getenv("SCHWAB_CLIENT_ID"):
+            ok = load_stored_tokens()
+            if ok:
+                logging.getLogger(__name__).info("Schwab broker connected from stored tokens.")
+    except Exception as _be:
+        logging.getLogger(__name__).warning(f"Schwab token load skipped: {_be}")
     yield
     scanner.stop()
     learning_engine.stop()
@@ -392,6 +422,86 @@ async def after_hours_endpoint():
     Sorted by absolute AH move descending — biggest movers first.
     """
     return {"snapshots": ah_get_all()}
+
+
+# ── ThinkorSwim / Schwab Broker API ──────────────────────────────────────────
+
+@app.get("/api/broker/status")
+async def broker_status():
+    """Connection status, token TTLs, account info."""
+    try:
+        ts = get_token_status()
+        acct = {}
+        if ts.get("connected"):
+            try:
+                acct = get_account_summary()
+            except Exception:
+                pass
+        daily = get_daily_status()
+        return {
+            **ts,
+            "account":    acct,
+            "daily":      daily,
+            "auto_trade": _tos_auto_trade,
+        }
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+@app.post("/api/broker/auth")
+async def broker_auth():
+    """
+    Initiate Schwab OAuth flow.
+    Opens the user's browser to Schwab login (including MFA).
+    Blocks until the user completes login (up to 5 min).
+    """
+    import asyncio
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, start_auth_flow)
+        return {"success": True, **result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/broker/positions")
+async def broker_positions():
+    """Current open positions in the ThinkorSwim paper account."""
+    try:
+        return {"positions": get_positions()}
+    except Exception as e:
+        return {"positions": [], "error": str(e)}
+
+
+@app.get("/api/broker/orders")
+async def broker_orders():
+    """Recent working orders."""
+    try:
+        return {"orders": get_orders()}
+    except Exception as e:
+        return {"orders": [], "error": str(e)}
+
+
+@app.post("/api/broker/auto-trade/{enabled}")
+async def broker_auto_trade(enabled: str):
+    """Toggle fully-automatic order placement (true/false)."""
+    global _tos_auto_trade
+    _tos_auto_trade = enabled.lower() == "true"
+    return {"auto_trade": _tos_auto_trade}
+
+
+@app.post("/api/broker/order")
+async def broker_manual_order(body: dict):
+    """
+    Manually trigger a bracket order for a ticker already in the signal list.
+    Body: { "ticker": "NVDA" }
+    """
+    ticker = body.get("ticker", "").upper()
+    sig = next((s for s in scanner.signals if s.ticker == ticker), None)
+    if not sig:
+        return {"placed": False, "reason": f"{ticker} not in current scan"}
+    result = maybe_place_tos_order(sig)
+    return result
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
