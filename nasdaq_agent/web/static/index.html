@@ -1258,9 +1258,9 @@ let _alertsEnabled = false, _currentSignal = null;
 let _sessionInfo = null, _regimeInfo = null;
 
 // ─── Backend URLs ─────────────────────────────────────────────────────────────
-const BACKEND_HOST = `${location.hostname}:8000`;
-const BACKEND_HTTP = `${location.protocol}//${BACKEND_HOST}`;
-const BACKEND_WS   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${BACKEND_HOST}`;
+// Use relative paths so nginx proxies correctly (no direct :8000 exposure)
+const BACKEND_HTTP = '';
+const BACKEND_WS   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────────
 let ws, reconnectDelay = 2000;
