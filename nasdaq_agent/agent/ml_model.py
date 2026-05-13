@@ -53,7 +53,7 @@ def add_live_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # time-of-day cyclical encoding
     if isinstance(df.index, pd.DatetimeIndex):
-        minutes = df.index.hour * 60 + df.index.minute
+        minutes = pd.Series(df.index.hour * 60 + df.index.minute, index=df.index, dtype=float)
         day_min = (16 * 60) - (9 * 60 + 30)  # 390 min trading day
         norm = (minutes - (9 * 60 + 30)) / day_min
         norm = norm.clip(0, 1)
