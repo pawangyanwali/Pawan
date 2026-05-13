@@ -559,7 +559,7 @@ def analyse_ticker(
                 trading_tier=pred.get("trading_tier", "REGULAR"),
                 vwap_event=vwap_sig.get("event", ""),
                 rsi_zone=pred.get("rsi_zone", ""),
-                rel_volume=float(rel_vol),
+                rel_volume=float(rvol),
                 trend=pred.get("trend", ""),
             )
             bt_record(

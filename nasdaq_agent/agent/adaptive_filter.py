@@ -195,11 +195,12 @@ def _compute_threshold(by_confidence: dict, current_wr: float) -> float:
     """
     band_order = [("<50", 0), ("50-60", 50), ("60-70", 60), ("70-80", 70), ("80+", 80)]
 
-    # Build cumulative stats starting from the highest band and working down
-    # "signals with confidence >= X" — find the lowest X giving >= 90% WR
-    cumulative_wins   = 0
-    cumulative_total  = 0
-    best_threshold    = MAX_THRESHOLD  # default: very selective
+    # Start at the default gate. Only raise if win rate is below target;
+    # only lower if confidence-band data shows we can achieve the target
+    # at a less restrictive threshold.
+    best_threshold   = DEFAULT_THRESHOLD
+    cumulative_wins  = 0
+    cumulative_total = 0
 
     for band_label, lower_bound in reversed(band_order):
         s = by_confidence.get(band_label, {})
@@ -211,18 +212,19 @@ def _compute_threshold(by_confidence: dict, current_wr: float) -> float:
             continue
         cum_wr = cumulative_wins / cumulative_total
         if cum_wr >= TARGET_WIN_RATE:
-            # This band and above achieves the target — lower threshold to this band
+            # This band and above achieves the target — we can lower the gate here
             best_threshold = float(lower_bound) if lower_bound > 0 else DEFAULT_THRESHOLD
 
-    # If overall win rate is above target already, we can relax slightly
+    # If overall win rate exceeds the relax ceiling, ease the gate slightly
     if current_wr >= RELAX_ABOVE:
         best_threshold = max(MIN_THRESHOLD, best_threshold - 5.0)
 
-    # If no band achieves 90%, progressively raise the threshold
-    if best_threshold == MAX_THRESHOLD and current_wr < TARGET_WIN_RATE:
-        gap = TARGET_WIN_RATE - current_wr
-        # Raise proportionally: 10% below target → raise by 10 points
-        best_threshold = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + gap * 100)
+    # Win rate below target and no confidence band hit TARGET_WIN_RATE →
+    # raise gate proportionally (10 pp below target raises gate by 10 points)
+    if current_wr < TARGET_WIN_RATE:
+        gap    = TARGET_WIN_RATE - current_wr
+        raised = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + gap * 100)
+        best_threshold = max(best_threshold, raised)
 
     return round(float(max(MIN_THRESHOLD, min(MAX_THRESHOLD, best_threshold))), 1)
 
