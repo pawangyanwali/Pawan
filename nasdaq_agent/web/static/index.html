@@ -1009,8 +1009,17 @@ function renderTable() {
       ? `<span style="display:inline-block;margin-left:4px;padding:1px 4px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(59,130,246,.15);color:var(--blue);border:1px solid rgba(59,130,246,.3)">${extLabel}</span>`
       : '';
 
+    // Trading-hours tier badge on the ticker cell
+    const tier = s.trading_tier || 'REGULAR';
+    const tierMeta = {
+      HIGH:     { icon:'🌙', label:'Extended',  col:'#22c55e', bg:'rgba(34,197,94,.12)',   title:'High AH liquidity — extended-hours signals reliable' },
+      MODERATE: { icon:'🌙', label:'Mod-AH',    col:'#f59e0b', bg:'rgba(245,158,11,.12)',  title:'Moderate AH liquidity — use extended-hours signals with caution' },
+      REGULAR:  { icon:'🕐', label:'Reg only',  col:'#64748b', bg:'rgba(100,116,139,.12)', title:'Thin AH liquidity — regular session signals only recommended' },
+    }[tier] || { icon:'🕐', label:'Reg', col:'#64748b', bg:'rgba(100,116,139,.12)', title:'' };
+    const tierTag = `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:600;background:${tierMeta.bg};color:${tierMeta.col};border:1px solid ${tierMeta.col}33" title="${tierMeta.title}">${tierMeta.icon} ${tierMeta.label}</span>`;
+
     return `<tr data-ticker="${s.ticker}" style="${rowBg}">
-      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}</td>
+      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${tierTag}</td>
       <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
       <td class="chg-cell ${chgC}" style="white-space:nowrap">
         <div style="font-size:13px;font-weight:700">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%${sessionTag}</div>

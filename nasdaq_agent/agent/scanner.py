@@ -65,6 +65,7 @@ from agent.after_hours_monitor import (
     get_opening_bias,
     get_ah_context_key,
 )
+from agent.trading_hours import get_trading_tier, is_signal_recommended
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,9 @@ class StockSignal:
     ah_confirms_signal: bool  = False # True when AH direction aligns with prediction
     ah_news_likely:     bool  = False # True when large AH move + elevated volume
     ah_gap_estimate:    float = 0.0   # Expected gap at open (%)
+
+    # ── Trading hours classification ──────────────────────────────────────────
+    trading_tier: str = "MODERATE"    # HIGH | MODERATE | REGULAR (see trading_hours.py)
 
     def to_dict(self) -> dict:
         import math
@@ -641,6 +645,10 @@ def analyse_ticker(
             ah_confirms_signal  = _ah_confirms,
             ah_news_likely      = _ah_news,
             ah_gap_estimate     = _ah_gap_est,
+            trading_tier        = get_trading_tier(
+                ticker,
+                float(_ah_bias.get("ah_volume_ratio", 0.0)) if _ah_bias else 0.0,
+            ),
         )
     except Exception as e:
         logger.warning(f"[{ticker}] analysis error: {e}", exc_info=True)
