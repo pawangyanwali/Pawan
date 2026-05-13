@@ -288,6 +288,12 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         except Exception as e:
             logger.warning(f"[{t}] ensemble retrain failed: {e}")
 
+        try:
+            sm = get_or_create_swing(t)
+            sm.train_from_df(hist_15m.get(t))
+        except Exception as e:
+            logger.warning(f"[{t}] swing retrain failed: {e}")
+
         if delay > 0:
             time.sleep(delay)
 
@@ -596,6 +602,147 @@ def get_or_create_reversal(ticker: str) -> ReversalMLModel:
 def predict_reversal(ticker: str, df: pd.DataFrame) -> float:
     """Return bullish-reversal probability from the ReversalMLModel. 0.5 if untrained."""
     return get_or_create_reversal(ticker).predict_proba(df)
+
+
+# ── Swing ML Model ────────────────────────────────────────────────────────────
+
+class SwingMLModel:
+    """
+    XGBoost classifier trained on 15-min bars (~9 months of data).
+
+    Predicts whether price will be higher LOOKAHEAD × 15min = 2 hours ahead.
+    Using 15-min bars instead of 5-min gives 3× more history for the same
+    API limit (5000 bars × 15min ≈ 9 months vs ≈ 64 days for 5-min).
+
+    Train and infer on the same 15-min timeframe — no mismatch with the scalp
+    model; only the output probability (P(up)) is blended at inference time.
+    """
+
+    LOOKAHEAD = 8   # 8 × 15min = 2 hours ahead
+
+    def __init__(self, ticker: str):
+        self.ticker  = ticker
+        self.model   = None
+        self.scaler  = StandardScaler()
+        self.trained = False
+        self._load()
+
+    def _path(self) -> Path:
+        return _MODEL_DIR / f"swing_{self.ticker}.joblib"
+
+    def _save(self) -> None:
+        try:
+            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] swing save failed: {e}")
+
+    def _load(self) -> None:
+        try:
+            p = self._path()
+            if p.exists():
+                d = joblib.load(p)
+                self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                logger.debug(f"[{self.ticker}] swing model loaded from disk")
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] swing load failed (will retrain): {e}")
+
+    def train_from_df(self, df_15m: pd.DataFrame | None) -> bool:
+        """Train from a pre-fetched 15-min OHLCV DataFrame (no API call)."""
+        if df_15m is None or len(df_15m) < 150:
+            return False
+
+        df = compute_indicators(df_15m.copy())
+        df = add_live_features(df)
+        df = df.dropna(subset=FEATURE_COLS)
+
+        df["label"] = (df["Close"].shift(-self.LOOKAHEAD) > df["Close"]).astype(int)
+        df.dropna(inplace=True)
+
+        X = df[FEATURE_COLS].values
+        y = df["label"].values
+
+        if len(X) < 60:
+            return False
+
+        class_counts = np.bincount(y)
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
+            return False
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, shuffle=False
+        )
+
+        if len(np.unique(y_train)) < 2:
+            return False
+
+        self.scaler.fit(X_train)
+        X_train_s = self.scaler.transform(X_train)
+        X_test_s  = self.scaler.transform(X_test)
+
+        base = XGBClassifier(
+            n_estimators=300,
+            max_depth=5,
+            learning_rate=0.04,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_weight=3,
+            eval_metric="logloss",
+            verbosity=0,
+        )
+        self.model = CalibratedClassifierCV(base, cv=3, method="isotonic")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                    message="invalid value encountered in divide")
+            self.model.fit(X_train_s, y_train)
+        self.trained = True
+        self._save()
+
+        acc = self.model.score(X_test_s, y_test)
+        logger.info(
+            f"[{self.ticker}] SwingML trained | acc={acc:.3f} | samples={len(X_train)} "
+            f"(15min bars, 2h lookahead)"
+        )
+        return True
+
+    def predict_proba(self, df_15m: pd.DataFrame) -> float:
+        """
+        Return probability [0, 1] that price will be higher 2h ahead.
+        Returns 0.5 (neutral) when untrained or features are missing.
+        """
+        if not self.trained or self.model is None:
+            return 0.5
+
+        df = compute_indicators(df_15m.copy())
+        df = add_live_features(df)
+        df = df.dropna(subset=FEATURE_COLS)
+        if df.empty:
+            return 0.5
+
+        row = df[FEATURE_COLS].iloc[[-1]].values
+        expected = getattr(self.scaler, "n_features_in_", None)
+        if expected is not None and row.shape[1] != expected:
+            logger.debug(f"[{self.ticker}] swing scaler expects {expected} features, got {row.shape[1]} — resetting model")
+            self.trained = False
+            return 0.5
+        row_s = self.scaler.transform(row)
+        prob  = float(self.model.predict_proba(row_s)[0][1])
+        return round(prob, 4)
+
+
+# ── Swing model registry ──────────────────────────────────────────────────────
+
+_swing_model_registry: dict[str, SwingMLModel] = {}
+
+
+def get_or_create_swing(ticker: str) -> SwingMLModel:
+    if ticker not in _swing_model_registry:
+        _swing_model_registry[ticker] = SwingMLModel(ticker)
+    return _swing_model_registry[ticker]
+
+
+def predict_swing(ticker: str, df_15m: pd.DataFrame) -> float:
+    """Return 2h-ahead up-probability from the SwingMLModel on 15-min bars; 0.5 if untrained."""
+    return get_or_create_swing(ticker).predict_proba(df_15m)
 
 
 # ── Ensemble ML Model ─────────────────────────────────────────────────────────

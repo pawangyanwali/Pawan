@@ -34,7 +34,7 @@ from agent.data_fetcher import (
 )
 from agent.technical import compute_indicators, score_technical
 from agent.volume import score_volume, relative_volume, detect_unusual_volume
-from agent.ml_model import predict, predict_daily, predict_reversal, predict_ensemble, retrain_all
+from agent.ml_model import predict, predict_daily, predict_reversal, predict_ensemble, predict_swing, get_or_create_swing, retrain_all
 from agent.sentiment import score_sentiment
 from agent.prediction import generate_prediction
 from agent.mtf_analysis import multi_timeframe_analysis
@@ -381,17 +381,22 @@ def analyse_ticker(
         ml_reversal_p              = predict_reversal(ticker, _df_ml)
         ml_ensemble_p, ml_agree    = predict_ensemble(ticker, _df_ml)
 
-        # Deep BiLSTM model — uses 15-min bars resampled from 5-min data so
-        # it gets ~6 months of context without an extra API call each scan.
+        # 15-min bars — resampled from 5-min (no extra API call).
+        # Used by both SwingML (XGBoost on 9 months of 15-min data) and
+        # the deep BiLSTM model. Both train AND infer on 15-min so there
+        # is no feature-distribution mismatch.
         _df_15m = None
         try:
             from agent.data_fetcher import resample_ohlcv
             _df_15m = resample_ohlcv(_df_ml, "15min") if _df_ml is not None else None
         except Exception:
             pass
-        ml_deep_p = predict_deep(ticker, _df_15m) if _df_15m is not None and len(_df_15m) >= 20 else 0.5
+        _has_15m = _df_15m is not None and len(_df_15m) >= 20
 
-        # MetaEnsemble: calibrated fusion of all ML sources including deep model.
+        ml_swing_p = predict_swing(ticker, _df_15m) if _has_15m else 0.5
+        ml_deep_p  = predict_deep(ticker, _df_15m)  if _has_15m else 0.5
+
+        # MetaEnsemble: calibrated fusion of all ML sources.
         # When trained (≥30 outcomes), uses a meta-XGBoost to combine signals
         # optimally; before that, falls back to a weighted average.
         ml_combined, _meta_mult    = get_meta_prediction(
@@ -404,10 +409,18 @@ def analyse_ticker(
             tech_score         = float(tech),
             vol_score          = float(vol),
         )
-        # Blend deep model probability directly into ml_combined.
-        # Weight: 20% deep, 80% meta-ensemble — increases as deep model trains.
+
+        # Blend 15-min models into ml_combined after MetaEnsemble.
+        # SwingML adds 9-month XGBoost context; Deep BiLSTM adds sequence learning.
+        # Both contribute only when trained to avoid noise from untrained models.
         from agent.deep_model import is_trained as _deep_is_trained
-        if _deep_is_trained():
+        _swing_trained = get_or_create_swing(ticker).trained
+        _deep_trained  = _deep_is_trained()
+        if _swing_trained and _deep_trained:
+            ml_combined = round(0.70 * ml_combined + 0.15 * ml_swing_p + 0.15 * ml_deep_p, 4)
+        elif _swing_trained:
+            ml_combined = round(0.80 * ml_combined + 0.20 * ml_swing_p, 4)
+        elif _deep_trained:
             ml_combined = round(0.80 * ml_combined + 0.20 * ml_deep_p, 4)
         sent, headlines = score_sentiment(ticker)
         rvol            = relative_volume(df_ind)
