@@ -281,7 +281,6 @@ class LearningEngine:
         except Exception as e:
             _log(f"obs_stats error: {e}", level="WARN")
             return {}, 0
-            return {}, 0
 
     # ── Stat merger ───────────────────────────────────────────────────────────
 

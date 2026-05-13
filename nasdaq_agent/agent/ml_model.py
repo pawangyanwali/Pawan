@@ -186,7 +186,12 @@ class StockMLModel:
         if df.empty:
             return 0.5
 
-        row   = df[FEATURE_COLS].iloc[[-1]].values
+        row = df[FEATURE_COLS].iloc[[-1]].values
+        expected = getattr(self.scaler, "n_features_in_", None)
+        if expected is not None and row.shape[1] != expected:
+            logger.debug(f"[{self.ticker}] scalp scaler expects {expected} features, got {row.shape[1]} — resetting model")
+            self.trained = False
+            return 0.5
         row_s = self.scaler.transform(row)
         prob  = float(self.model.predict_proba(row_s)[0][1])
         return round(prob, 4)
@@ -398,7 +403,12 @@ class DailyMLModel:
         if df.empty:
             return 0.5
 
-        row   = df[FEATURE_COLS].iloc[[-1]].values
+        row = df[FEATURE_COLS].iloc[[-1]].values
+        expected = getattr(self.scaler, "n_features_in_", None)
+        if expected is not None and row.shape[1] != expected:
+            logger.debug(f"[{self.ticker}] daily scaler expects {expected} features, got {row.shape[1]} — resetting model")
+            self.trained = False
+            return 0.5
         row_s = self.scaler.transform(row)
         prob  = float(self.model.predict_proba(row_s)[0][1])
         return round(prob, 4)
@@ -667,7 +677,13 @@ class EnsembleMLModel:
             df = df.dropna(subset=FEATURE_COLS)
             if df.empty:
                 return 0.5, 0.0
-            row = self.scaler.transform(df[FEATURE_COLS].iloc[[-1]].values)
+            raw = df[FEATURE_COLS].iloc[[-1]].values
+            expected = getattr(self.scaler, "n_features_in_", None)
+            if expected is not None and raw.shape[1] != expected:
+                logger.debug(f"[{self.ticker}] ensemble scaler expects {expected} features, got {raw.shape[1]} — resetting model")
+                self.trained = False
+                return 0.5, 0.0
+            row = self.scaler.transform(raw)
             probs = np.array([m.predict_proba(row)[0][1] for m in self.models])
             avg_prob   = float(probs.mean())
             # agreement: how consistently models agree on direction
