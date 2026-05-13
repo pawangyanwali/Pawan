@@ -28,7 +28,7 @@ from agent.live_backtest import get_performance_stats, get_tracking_signals, get
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from agent.adaptive_filter import get_status as af_get_status, reset_filter as af_reset_filter
 from agent.after_hours_monitor import get_all_biases as ah_get_all
-from agent.learning_engine import learning_engine, get_learning_log, clear_log as clear_learning_log
+from agent.learning_engine import learning_engine, get_learning_log
 from agent.broker.schwab_auth import load_stored_tokens, get_token_status, start_auth_flow
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
@@ -212,7 +212,6 @@ _tos_auto_trade: bool = os.getenv("SCHWAB_AUTO_TRADE", "false").lower() == "true
 async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
-    clear_learning_log()
     scanner.register_callback(_on_signals)
     scanner.start_background()
     learning_engine.start()
