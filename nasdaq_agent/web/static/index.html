@@ -1073,6 +1073,22 @@ function renderTable() {
         <span style="color:${rrC};font-weight:600">${fmt(s.rr_ratio,1)}:1</span>
         <span class="rr-badge rr-${s.rr_quality||'LOW'}" style="display:block;margin-top:1px">${s.rr_quality||'LOW'}</span>
       </td>
+      <td style="font-size:11px">
+        ${(() => { const z=s.rsi_zone||'NEUTRAL'; const c=z==='OVERBOUGHT'?'var(--red)':z==='OVERSOLD'?'var(--green)':z==='HIGH'?'var(--yellow)':z==='LOW'?'#60a5fa':'var(--muted)'; return `<span style="color:${c};font-weight:600">${z}</span>`; })()}
+      </td>
+      <td>
+        ${(() => { const c=s.confidence>60?'var(--green-s)':s.confidence>35?'var(--yellow)':'var(--muted)'; return `<span style="font-size:12px;font-weight:700;color:${c}">${fmt(s.confidence,0)}%</span><div class="conf-bar" style="margin-top:3px"><div class="conf-fill" style="width:${Math.min(s.confidence,100)}%;background:${c}"></div></div>`; })()}
+      </td>
+      <td>
+        <span class="trend-badge trend-${(s.trend||'SIDEWAYS').replace(/ /g,'-')}">${s.trend||'—'}</span>
+        <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt((s.trend_probability||0.5)*100,0)}%</span>
+      </td>
+      <td style="font-size:11px">
+        ${(() => { const ma=s.mtf_alignment||'MIXED'; const mc=ma==='BULLISH'?'var(--green)':ma==='BEARISH'?'var(--red)':'var(--muted)'; return `<span style="color:${mc};font-weight:600">${ma}</span><span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt(s.mtf_score||0,2)}</span>`; })()}
+      </td>
+      <td style="font-size:12px;font-weight:700;color:${(s.score||0)>=0.3?'var(--green)':(s.score||0)<=-0.3?'var(--red)':'var(--muted)'}">
+        ${fmt((s.score||0)*100,0)}
+      </td>
       <td style="font-size:11px;color:${s.ml_trained?(s.ml_prob>=.55?'var(--green)':s.ml_prob<=.45?'var(--red)':'var(--muted)'):'var(--muted)'}">
         ${s.ml_trained ? fmt(s.ml_prob*100,0)+'%' : '<span title="ML model training in background…" style="font-size:10px">Training…</span>'}
       </td>
