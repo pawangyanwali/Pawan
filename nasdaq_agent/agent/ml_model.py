@@ -12,6 +12,7 @@ it only when fresh data is available.
 
 import logging
 import time
+import warnings
 from pathlib import Path
 
 import joblib
@@ -99,9 +100,20 @@ class StockMLModel:
         if len(X) < 60:
             return False
 
+        # Require both classes to be present and neither dominating >92%.
+        # Severely imbalanced datasets produce empty calibrated_classifiers_ lists
+        # in CalibratedClassifierCV which triggers a divide-by-zero RuntimeWarning.
+        class_counts = np.bincount(y)
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.92:
+            return False
+
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, shuffle=False
         )
+
+        # Require both classes in the training split as well
+        if len(np.unique(y_train)) < 2:
+            return False
 
         self.scaler.fit(X_train)
         X_train_s = self.scaler.transform(X_train)
@@ -117,7 +129,10 @@ class StockMLModel:
             verbosity=0,
         )
         self.model = CalibratedClassifierCV(base, cv=3, method="isotonic")
-        self.model.fit(X_train_s, y_train)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                    message="invalid value encountered in divide")
+            self.model.fit(X_train_s, y_train)
         self.trained = True
         self._save()
 
@@ -291,9 +306,16 @@ class DailyMLModel:
         if len(X) < 60:
             return False
 
+        class_counts = np.bincount(y)
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.92:
+            return False
+
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, shuffle=False
         )
+
+        if len(np.unique(y_train)) < 2:
+            return False
 
         self.scaler.fit(X_train)
         X_train_s = self.scaler.transform(X_train)
@@ -309,7 +331,10 @@ class DailyMLModel:
             verbosity=0,
         )
         self.model = CalibratedClassifierCV(base, cv=3, method="isotonic")
-        self.model.fit(X_train_s, y_train)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                    message="invalid value encountered in divide")
+            self.model.fit(X_train_s, y_train)
         self.trained = True
         self._save()
 
@@ -431,9 +456,18 @@ class ReversalMLModel:
         if len(X) < 60 or y.sum() < 10:
             return False
 
+        # Imbalance check: reversal labels are rare by design, but if >92% one class
+        # the calibration folds will fail, producing a divide-by-zero RuntimeWarning.
+        class_counts = np.bincount(y)
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.92:
+            return False
+
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, shuffle=False
         )
+
+        if len(np.unique(y_train)) < 2:
+            return False
 
         self.scaler.fit(X_train)
         X_tr = self.scaler.transform(X_train)
@@ -451,7 +485,10 @@ class ReversalMLModel:
             verbosity=0,
         )
         self.model = CalibratedClassifierCV(base, cv=3, method="isotonic")
-        self.model.fit(X_tr, y_train)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                    message="invalid value encountered in divide")
+            self.model.fit(X_tr, y_train)
         self.trained = True
         self._save()
 
