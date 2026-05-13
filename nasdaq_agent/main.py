@@ -154,8 +154,8 @@ def _on_signals(signals: list[StockSignal]) -> None:
         learn_summary = af_get_status()
         learn_compact = {
             "win_rate":          learn_summary.get("current_win_rate", 0.0),
-            "target_win_rate":   learn_summary.get("target_win_rate", 90.0),
-            "dynamic_threshold": learn_summary.get("dynamic_threshold", 65.0),
+            "target_win_rate":   learn_summary.get("target_win_rate", 62.0),
+            "dynamic_threshold": learn_summary.get("dynamic_threshold", 60.0),
             "suppressed_count":  learn_summary.get("suppressed_count", 0),
             "blocked_count":     len(learn_summary.get("blocked_contexts", {})),
             "is_learning":       learn_summary.get("is_learning", False),

@@ -770,7 +770,7 @@
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
       <div>
         <div style="font-size:16px;font-weight:700;color:var(--text)">🧠 Self-Learning Filter Status</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px">Adaptive system suppressing losing patterns until win rate ≥ 90%</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Adaptive system suppressing losing patterns until win rate ≥ <span id="learn-target-subtitle">62</span>%</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <button onclick="loadLearningStatus()" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:5px 12px;cursor:pointer;font-family:inherit;font-size:11px">Refresh</button>
@@ -782,7 +782,7 @@
     <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <span style="font-size:12px;font-weight:700;color:var(--text)">Win Rate Progress</span>
-        <span style="font-size:11px;color:var(--muted)">Target: <strong style="color:var(--green-s)">90%</strong></span>
+        <span style="font-size:11px;color:var(--muted)">Target: <strong id="learn-target-label" style="color:var(--green-s)">62%</strong></span>
       </div>
       <div class="learn-progress-bar">
         <div class="learn-progress-fill" id="learn-wr-fill" style="width:0%;background:var(--muted)"></div>
@@ -2246,8 +2246,8 @@ async function loadLearningStatus() {
 
 function renderLearningStatus(d) {
   const wr      = d.current_win_rate ?? 0;   // already in % (0-100)
-  const target  = d.target_win_rate  ?? 90;
-  const thresh  = d.dynamic_threshold ?? 65;
+  const target  = d.target_win_rate  ?? 62;
+  const thresh  = d.dynamic_threshold ?? 60;
   const total   = d.total_resolved ?? 0;
   const isLearning = d.is_learning ?? false;
   const suppressed = d.suppressed_count ?? 0;
@@ -2260,6 +2260,10 @@ function renderLearningStatus(d) {
   document.getElementById('learn-wr-val').textContent = wr.toFixed(1) + '%';
   document.getElementById('learn-wr-val').style.color = col;
   document.getElementById('learn-resolved').textContent = total;
+  const tSubEl = document.getElementById('learn-target-subtitle');
+  const tLblEl = document.getElementById('learn-target-label');
+  if (tSubEl) tSubEl.textContent = target;
+  if (tLblEl) tLblEl.textContent = target + '%';
   document.getElementById('learn-learning-badge').innerHTML = isLearning
     ? `<span style="color:var(--green-s);font-weight:700">● ACTIVE</span>`
     : `<span style="color:var(--muted)">● Needs ${8 - total} more trades</span>`;
@@ -2287,8 +2291,8 @@ function renderLearningStatus(d) {
   // Threshold history bar chart
   const hist = d.threshold_history || [];
   if (hist.length) {
-    const maxTh = Math.max(...hist.map(h => h.threshold), 90);
-    const minTh = Math.min(...hist.map(h => h.threshold), 55);
+    const maxTh = Math.max(...hist.map(h => h.threshold), target);
+    const minTh = Math.min(...hist.map(h => h.threshold), 50);
     const range = maxTh - minTh || 1;
     document.getElementById('learn-thresh-history').innerHTML = hist.map(h => {
       const barH = Math.max(4, Math.round(((h.threshold - minTh) / range) * 50));
@@ -2352,11 +2356,11 @@ function _updateLearnHeaderBtn(wr, thresh, isLearning) {
 function updateLearnPill(l) {
   if (!l) return;
   const wr     = l.win_rate ?? 0;          // already in % (0-100)
-  const target = l.target_win_rate ?? 90;
-  const gate   = l.dynamic_threshold ?? 65;
+  const target = l.target_win_rate ?? 62;
+  const gate   = l.dynamic_threshold ?? 60;
   const sup    = l.suppressed_count ?? 0;
   const pct    = Math.min(100, (wr / target) * 100);
-  const col    = wr >= target ? 'var(--green-s)' : wr >= 72 ? 'var(--green)' : wr >= 54 ? 'var(--yellow)' : 'var(--red)';
+  const col    = wr >= target ? 'var(--green-s)' : wr >= target*0.88 ? 'var(--green)' : wr >= target*0.72 ? 'var(--yellow)' : 'var(--red)';
 
   const bar = document.getElementById('learn-pill-bar');
   const val = document.getElementById('learn-pill-val');
