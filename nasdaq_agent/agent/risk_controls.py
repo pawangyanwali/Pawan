@@ -91,6 +91,7 @@ def check_circuit_breaker() -> tuple[bool, str]:
     Returns (blocked: bool, reason: str).
     Pulls today's closed paper trade P&L to decide.
     """
+    global _circuit_open, _circuit_reason, _circuit_date
     _reset_if_new_day()
     with _lock:
         if _circuit_open:
