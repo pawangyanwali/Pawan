@@ -9,14 +9,15 @@
 
 param([string]$Action = "start")
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$LogDir    = Join-Path $ScriptDir "logs"
-$LogFile   = Join-Path $LogDir "agent.log"
-$PidFile   = Join-Path $LogDir "agent.pid"
-$TaskName  = "NasdaqScalpingAgent"
-$EnvFile   = Join-Path $ScriptDir ".env"
+$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LogDir      = Join-Path $ScriptDir "logs"
+$StdoutLog   = Join-Path $LogDir "agent.log"
+$StderrLog   = Join-Path $LogDir "agent.err"
+$PidFile     = Join-Path $LogDir "agent.pid"
+$TaskName    = "NasdaqScalpingAgent"
+$EnvFile     = Join-Path $ScriptDir ".env"
 
-# Load .env file into current process so API key is passed to uvicorn
+# Load .env into the current process — child processes inherit these vars
 if (Test-Path $EnvFile) {
     Get-Content $EnvFile | Where-Object { $_ -match "^\s*[^#]" } | ForEach-Object {
         $parts = $_ -split "=", 2
@@ -27,29 +28,12 @@ if (Test-Path $EnvFile) {
 }
 
 function Find-Python {
-    $py = Get-Command python -ErrorAction SilentlyContinue
-    if ($py) { return $py.Source }
-    $py3 = Get-Command python3 -ErrorAction SilentlyContinue
-    if ($py3) { return $py3.Source }
-    Write-Host "ERROR: python not found in PATH." -ForegroundColor Red
+    foreach ($name in @("python", "python3")) {
+        $found = Get-Command $name -ErrorAction SilentlyContinue
+        if ($found) { return $found.Source }
+    }
+    Write-Host "ERROR: python not found in PATH. Install Python and retry." -ForegroundColor Red
     exit 1
-}
-
-function Find-Uvicorn {
-    # Prefer the standalone uvicorn.exe if it is on PATH
-    $uv = Get-Command uvicorn -ErrorAction SilentlyContinue
-    if ($uv) { return $uv.Source }
-
-    # Always-works fallback: run uvicorn as a Python module.
-    # Wrap it as a tiny launcher script so Start-Process can use it.
-    $python = Find-Python
-    $launcher = Join-Path $LogDir "run_agent.bat"
-    @"
-@echo off
-cd /d "$ScriptDir"
-"$python" -m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log
-"@ | Set-Content $launcher
-    return $launcher
 }
 
 function Get-RunningPid {
@@ -59,10 +43,11 @@ function Get-RunningPid {
             return $stored
         }
     }
-    $proc = Get-WmiObject Win32_Process |
-            Where-Object { $_.CommandLine -like "*uvicorn*main:app*" } |
-            Select-Object -First 1
-    if ($proc) { return $proc.ProcessId }
+    # Fallback: search running processes for our uvicorn command
+    $match = Get-WmiObject Win32_Process |
+             Where-Object { $_.CommandLine -like "*uvicorn*main:app*" } |
+             Select-Object -First 1
+    if ($match) { return $match.ProcessId }
     return $null
 }
 
@@ -70,28 +55,46 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 $cmd = $Action.ToLower()
 
+# ── start ──────────────────────────────────────────────────────────────────────
 if ($cmd -eq "start") {
     $running = Get-RunningPid
     if ($running) {
         Write-Host "Already running (PID $running)" -ForegroundColor Green
         exit 0
     }
+
     $python    = Find-Python
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content $LogFile "[$timestamp] === Agent starting ==="
-    # cmd /c merges stderr into stdout (2>&1) so both go to the same log file
+    Add-Content $StdoutLog "[$timestamp] === Agent starting ==="
+
+    # Use separate stdout/stderr files — PowerShell requires distinct paths.
+    # 'logs' command merges them for display.
     $proc = Start-Process `
-        -FilePath "cmd.exe" `
-        -ArgumentList "/c `"$python`" -m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log >> `"$LogFile`" 2>&1" `
+        -FilePath $python `
+        -ArgumentList "-m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log" `
         -WorkingDirectory $ScriptDir `
         -WindowStyle Hidden `
+        -RedirectStandardOutput $StdoutLog `
+        -RedirectStandardError  $StderrLog `
         -PassThru
+
+    Start-Sleep -Milliseconds 1500   # give it a moment to either bind or crash
+    if ($proc.HasExited) {
+        Write-Host "ERROR: Agent exited immediately (code $($proc.ExitCode))." -ForegroundColor Red
+        Write-Host "--- stdout ---"
+        if (Test-Path $StdoutLog) { Get-Content $StdoutLog | Select-Object -Last 20 }
+        Write-Host "--- stderr ---"
+        if (Test-Path $StderrLog) { Get-Content $StderrLog | Select-Object -Last 20 }
+        exit 1
+    }
+
     $proc.Id | Set-Content $PidFile
     Write-Host "Started  PID $($proc.Id)" -ForegroundColor Green
-    Write-Host "Logs:    $LogFile"
+    Write-Host "Logs:    $StdoutLog  (errors: $StderrLog)"
     Write-Host "Stop:    .\start.ps1 stop"
     Write-Host "Dashboard: http://localhost:8000"
 
+# ── stop ───────────────────────────────────────────────────────────────────────
 } elseif ($cmd -eq "stop") {
     $running = Get-RunningPid
     if ($running) {
@@ -102,26 +105,49 @@ if ($cmd -eq "start") {
         Write-Host "Not running." -ForegroundColor Gray
     }
 
+# ── status ─────────────────────────────────────────────────────────────────────
 } elseif ($cmd -eq "status") {
     $running = Get-RunningPid
     if ($running) {
         Write-Host "Running OK  (PID $running)  http://localhost:8000" -ForegroundColor Green
     } else {
         Write-Host "Stopped" -ForegroundColor Red
+        if (Test-Path $StderrLog) {
+            $errs = Get-Content $StderrLog -ErrorAction SilentlyContinue
+            if ($errs) {
+                Write-Host "Last errors:" -ForegroundColor Yellow
+                $errs | Select-Object -Last 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+            }
+        }
     }
 
+# ── logs ───────────────────────────────────────────────────────────────────────
 } elseif ($cmd -eq "logs") {
-    if (Test-Path $LogFile) {
-        Get-Content $LogFile -Wait -Tail 40
-    } else {
+    if (-not (Test-Path $StdoutLog)) {
         Write-Host "No log file yet. Start the agent first." -ForegroundColor Gray
+        exit 0
+    }
+    Write-Host "(Ctrl+C to stop tailing)" -ForegroundColor DarkGray
+    # Interleave stdout + stderr by watching both files
+    $jobs = @()
+    $jobs += Start-Job { Get-Content $using:StdoutLog -Wait -Tail 30 }
+    if (Test-Path $StderrLog) {
+        $jobs += Start-Job { Get-Content $using:StderrLog -Wait -Tail 5 }
+    }
+    try {
+        while ($true) {
+            $jobs | Receive-Job
+            Start-Sleep -Milliseconds 500
+        }
+    } finally {
+        $jobs | Stop-Job
+        $jobs | Remove-Job
     }
 
+# ── install ────────────────────────────────────────────────────────────────────
 } elseif ($cmd -eq "install") {
-    # Registers a Task Scheduler task that starts the agent at every login.
-    # Run this once from an elevated (Administrator) PowerShell prompt.
-    $python  = Find-Python
-    $ta      = New-ScheduledTaskAction `
+    $python    = Find-Python
+    $ta        = New-ScheduledTaskAction `
                     -Execute $python `
                     -Argument "-m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log" `
                     -WorkingDirectory $ScriptDir
@@ -141,6 +167,7 @@ if ($cmd -eq "start") {
     Write-Host "Start it now:  Start-ScheduledTask -TaskName '$TaskName'"
     Write-Host "Remove it:     .\start.ps1 uninstall"
 
+# ── uninstall ──────────────────────────────────────────────────────────────────
 } elseif ($cmd -eq "uninstall") {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Write-Host "Task '$TaskName' removed." -ForegroundColor Yellow
