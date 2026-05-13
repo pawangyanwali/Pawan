@@ -147,11 +147,13 @@ def analyse_sector_context(
         vs = "IN_LINE"
     ctx.stock_vs_sector = vs
 
-    # Composite score multiplier
+    # Composite score multiplier.
+    # BEARISH+LEADING: stock holding up vs falling sector → don't punish, it's relative strength.
+    # BULLISH+COUNTER: stock falling vs rising sector → mild caution, not a ban.
     if ctx.sector_trend == "BULLISH":
-        mult = {"LEADING": 1.20, "IN_LINE": 1.05, "COUNTER": 0.80}.get(vs, 0.90)
+        mult = {"LEADING": 1.20, "IN_LINE": 1.05, "COUNTER": 0.88, "LAGGING": 0.92}.get(vs, 1.0)
     elif ctx.sector_trend == "BEARISH":
-        mult = {"LAGGING": 1.20, "IN_LINE": 1.05, "LEADING": 0.80}.get(vs, 0.85)
+        mult = {"LAGGING": 1.20, "IN_LINE": 1.05, "LEADING": 0.95, "COUNTER": 0.88}.get(vs, 0.90)
     else:
         mult = 1.0
     ctx.score_mult = mult

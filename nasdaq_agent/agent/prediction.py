@@ -26,10 +26,10 @@ from agent.reversal import compute_reversal_zone
 
 # ── Direction thresholds ──────────────────────────────────────────────────────
 
-_STRONG_BUY_THRESH  =  0.50
-_BUY_THRESH         =  0.15
-_SELL_THRESH        = -0.15
-_STRONG_SELL_THRESH = -0.50
+_STRONG_BUY_THRESH  =  0.45   # was 0.50 — easier to reach strong buy
+_BUY_THRESH         =  0.12   # was 0.15 — sector dampening can push 0.18 → 0.144, still valid
+_SELL_THRESH        = -0.12   # was -0.15
+_STRONG_SELL_THRESH = -0.45   # was -0.50
 
 # ── Exhaustion / retest thresholds ────────────────────────────────────────────
 _EXTENDED_PCT    = 0.015   # >1.5% from nearest S/R = extended move
@@ -51,7 +51,7 @@ _BOUNCE_SUP_PCT   = 0.006  # within 0.6% of key support = "at support"
 _VOL_DRY_FACTOR   = 0.65   # last bar < 65% of avg = sellers drying up
 
 # ── R:R gate ─────────────────────────────────────────────────────────────────
-_MIN_RR           = 2.0    # minimum acceptable reward-to-risk ratio
+_MIN_RR           = 1.5    # minimum acceptable R:R for scalping (was 2.0; 1.5:1 is profitable at 60%+ WR)
 _MIN_TARGET_PCT   = 0.003  # target must be at least 0.3% from entry (avoids degenerate targets)
 
 # ── Pattern classification ────────────────────────────────────────────────────
@@ -318,8 +318,8 @@ def _apply_rsi_gate(
         )
 
     elif zone == "OB" and is_buy:
-        # Allow strong-trend momentum exception (RSI 70-75 + strong uptrend)
-        momentum_exception = (trend == "UPTREND" and trend_prob >= 0.80 and rsi < 75)
+        # Allow momentum continuation exception (RSI 70-75 + solid uptrend)
+        momentum_exception = (trend == "UPTREND" and trend_prob >= 0.70 and rsi < 75)
         if not momentum_exception:
             composite  = 0.0
             direction  = "NEUTRAL"
@@ -346,7 +346,7 @@ def _apply_rsi_gate(
         )
 
     elif zone == "OS" and is_sell:
-        momentum_exception = (trend == "DOWNTREND" and trend_prob >= 0.80 and rsi > 25)
+        momentum_exception = (trend == "DOWNTREND" and trend_prob >= 0.70 and rsi > 25)
         if not momentum_exception:
             composite  = 0.0
             direction  = "NEUTRAL"
@@ -873,12 +873,15 @@ def generate_prediction(
         pass
 
     # ── 8. Trend reason ───────────────────────────────────────────────────────
-    # Apply R:R quality adjustment to confidence — aligns confidence with trade geometry
+    # Apply R:R quality adjustment to confidence.
+    # R:R reflects position sizing quality, NOT signal direction quality.
+    # Penalty for LOW is mild so good setups with tight S/R aren't killed.
+    # Traders can manage bad R:R with smaller size — the signal is still valid.
     _rr_adj = {
-        "EXCELLENT": +8.0,   # ≥4:1 R:R — rare, high reward
-        "GOOD":      +4.0,   # ≥3:1 R:R — solid setup
-        "OK":         0.0,   # ≥2:1 R:R — minimum acceptable, no change
-        "LOW":       -15.0,  # <2:1 R:R — mathematically penalised
+        "EXCELLENT": +4.0,   # ≥4:1 R:R — extra conviction
+        "GOOD":      +2.0,   # ≥3:1 R:R — solid geometry
+        "OK":         0.0,   # ≥1.5:1 R:R — acceptable, no change
+        "LOW":       -4.0,   # <1.5:1 R:R — reduce size but still show signal
     }.get(rr_quality, 0.0)
     if _rr_adj != 0.0:
         confidence = round(float(np.clip(confidence + _rr_adj, 25.0, 95.0)), 1)
