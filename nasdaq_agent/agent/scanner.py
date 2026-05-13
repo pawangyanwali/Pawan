@@ -767,9 +767,11 @@ class Scanner:
 
         # Detect session once so the data fetch uses the right mode
         _sess = get_session_info()
-        _is_extended = _sess.get("session", "") in ("AFTER_HOURS", "PRE_MARKET")
+        # CLOSED (8pm–4am ET) still needs extended bars so the chart shows the
+        # 4pm–8pm AH session candles rather than stopping at the 4pm close.
+        _is_extended = _sess.get("session", "") in ("AFTER_HOURS", "PRE_MARKET", "CLOSED")
 
-        # Always-fresh 1M data — include extended-hours bars during AH/PM so
+        # Always-fresh 1M data — include extended-hours bars during AH/PM/CLOSED so
         # the chart reflects actual after-market price action, not stale closes.
         batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
 
