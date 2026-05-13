@@ -5,7 +5,8 @@ on:
     branches:
       - claude/nasdaq-stock-prediction-agent-kDe60
     paths:
-      - 'nasdaq_agent/**'   # only deploy when agent code changes
+      - 'nasdaq_agent/**'
+      - '.github/workflows/deploy.yml'
 
 jobs:
   deploy:
