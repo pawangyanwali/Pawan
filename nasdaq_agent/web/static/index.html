@@ -374,6 +374,11 @@
   <span id="macro-desc" style="color:var(--muted)"></span>
 </div>
 
+<!-- Dead Zone Warning Banner -->
+<div id="dead-zone-banner" style="display:none;background:rgba(234,179,8,.08);border-bottom:1px solid rgba(234,179,8,.25);padding:5px 20px;font-size:11px;color:#fbbf24;text-align:center">
+  ⚠ <strong>Dead Zone</strong> — 11:30 AM – 2:00 PM ET — Low volatility, choppy price action. Reduce position size or wait for 2pm momentum.
+</div>
+
 <!-- Session & Regime Banner -->
 <div class="session-banner">
   <span class="session-pill" id="session-pill" style="color:#94a3b8;border-color:#252a35">⏰ Loading…</span>
@@ -382,6 +387,9 @@
   <span class="banner-sep">|</span>
   <span style="color:var(--muted)" id="session-advice">Waiting for market data…</span>
   <span style="margin-left:auto;color:#475569" id="session-time"></span>
+</div>
+<div id="dead-zone-banner" style="display:none;background:rgba(234,179,8,.1);border-bottom:1px solid rgba(234,179,8,.3);padding:4px 20px;font-size:11px;color:#fbbf24;text-align:center">
+  ⚠ <strong>Dead Zone</strong> — 11:30am–2:00pm ET — Low volatility, wide spreads. Reduce size or wait for 2pm momentum.
 </div>
 
 <div class="summary-bar">
@@ -392,6 +400,11 @@
   <div class="pill"><div class="pill-label">Sell</div><div class="pill-value" style="color:var(--red);font-size:16px" id="s-sell">—</div></div>
   <div class="pill"><div class="pill-label">Strong Sell</div><div class="pill-value" style="color:var(--red-s)" id="s-ssell">—</div></div>
   <div class="pill"><div class="pill-label">Vol Spike ⚡</div><div class="pill-value" style="color:var(--yellow)" id="s-uvol">—</div></div>
+  <div class="pill" id="breadth-pill" style="min-width:120px">
+    <div class="pill-label">Breadth</div>
+    <div class="pill-value" id="breadth-bias" style="font-size:13px">—</div>
+    <div style="font-size:10px;color:var(--muted)"><span id="breadth-pct">—</span>% above VWAP</div>
+  </div>
   <!-- Self-learning pill -->
   <div class="pill" id="learn-pill" onclick="openLearning()" style="cursor:pointer;border-color:var(--border);min-width:160px" title="Click to open Learning Status">
     <div class="pill-label">🧠 Self-Learning</div>
@@ -826,6 +839,7 @@
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'confidence', searchQ = '';
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
+let allBreadth = null;
 let _chart = null, _candleSeries = null, _volSeries = null;
 let _alertsEnabled = false, _currentSignal = null;
 let _sessionInfo = null, _regimeInfo = null;
@@ -851,6 +865,7 @@ function connectWS() {
       if (m.backtest) updateBtHeaderBtn(m.backtest);
       if (m.learning) updateLearnPill(m.learning);
       if (m.alerts?.length) handleAlerts(m.alerts);
+      if (m.breadth) { allBreadth = m.breadth; }
       renderAll();
       hideLoading();
     }
@@ -902,6 +917,13 @@ function updateSummary() {
   document.getElementById('s-uvol').textContent    = c['UVOL'];
   document.getElementById('scan-count').textContent = `${allSignals.length} stocks scanned`;
   if (allSignals[0]?.scanned_at) document.getElementById('last-scan').textContent = new Date(allSignals[0].scanned_at+'Z').toLocaleTimeString();
+  // breadth is passed via allBreadth global
+  if (allBreadth) {
+    const bEl = document.getElementById('breadth-bias');
+    const pEl = document.getElementById('breadth-pct');
+    if (bEl) { bEl.textContent = allBreadth.bias; bEl.style.color = allBreadth.bias==='BULLISH'?'var(--green)':allBreadth.bias==='BEARISH'?'var(--red)':'var(--muted)'; }
+    if (pEl) pEl.textContent = allBreadth.pct_above_vwap ?? '—';
+  }
 }
 
 // ─── Table ─────────────────────────────────────────────────────────────────────
@@ -1038,6 +1060,11 @@ function renderTable() {
             : ''}
         ${s.rsi_gated ? `<span style="font-size:9px;color:var(--red);display:block;margin-top:2px">⛔ RSI gated</span>` : ''}
         ${s.divergence_type!=='NONE' ? `<span class="divergence-badge div-${s.divergence_type}" style="display:block;margin-top:2px">${s.divergence_type} DIV</span>` : ''}
+        ${s.orb_breakout === 'BULL'
+          ? `<span style="display:block;margin-top:2px;font-size:8px;font-weight:700;color:#22c55e;background:rgba(34,197,94,.12);padding:1px 5px;border-radius:3px;border:1px solid rgba(34,197,94,.3)" title="Price above 30-min Opening Range">⚡ ORB BULL</span>`
+          : s.orb_breakout === 'BEAR'
+            ? `<span style="display:block;margin-top:2px;font-size:8px;font-weight:700;color:#ef4444;background:rgba(239,68,68,.12);padding:1px 5px;border-radius:3px;border:1px solid rgba(239,68,68,.3)" title="Price below 30-min Opening Range">⚡ ORB BEAR</span>`
+            : ''}
         ${supInlineTag}
       </td>
       <td>${statusCell}</td>
@@ -1547,6 +1574,20 @@ function renderChart(s) {
   if (s.premarket_low > 0) {
     candleSeries.createPriceLine({ price:s.premarket_low,  color:'rgba(239,68,68,0.5)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dotted, axisLabelVisible:true, title:'PM Low' });
   }
+  // Previous day high/low
+  if (s.prev_day_high > 0) {
+    candleSeries.createPriceLine({ price:s.prev_day_high, color:'rgba(251,191,36,0.8)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dashed, axisLabelVisible:true, title:'PDH' });
+  }
+  if (s.prev_day_low > 0) {
+    candleSeries.createPriceLine({ price:s.prev_day_low, color:'rgba(251,191,36,0.5)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dashed, axisLabelVisible:true, title:'PDL' });
+  }
+  // Opening Range Breakout high/low
+  if (s.orb_high > 0) {
+    candleSeries.createPriceLine({ price:s.orb_high, color:'rgba(168,85,247,0.8)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Solid, axisLabelVisible:true, title:'ORB Hi' });
+  }
+  if (s.orb_low > 0) {
+    candleSeries.createPriceLine({ price:s.orb_low,  color:'rgba(168,85,247,0.5)', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Solid, axisLabelVisible:true, title:'ORB Lo' });
+  }
 
   // Target & Stop lines
   if (s.target_price) {
@@ -1585,6 +1626,24 @@ document.getElementById('search').addEventListener('input', e => { searchQ = e.t
 document.getElementById('sort-select').addEventListener('change', e => { sortKey = e.target.value; renderTable(); });
 
 // ─── Session Banner ───────────────────────────────────────────────────────────
+function checkDeadZone() {
+    const now = new Date();
+    // Convert to ET (UTC-4 or UTC-5 depending on DST)
+    const etOffset = -4; // Approximate; fine for display
+    const etHour = (now.getUTCHours() + etOffset + 24) % 24;
+    const etMin  = now.getUTCMinutes();
+    const etTime = etHour + etMin / 60;
+    const el = document.getElementById('dead-zone-banner');
+    if (!el) return;
+    if (etTime >= 11.5 && etTime < 14.0) {
+        el.style.display = 'block';
+    } else {
+        el.style.display = 'none';
+    }
+}
+setInterval(checkDeadZone, 60000);
+checkDeadZone();
+
 function updateSessionBanner(s) {
   const pill = document.getElementById('session-pill');
   pill.textContent = s.label || s.session;

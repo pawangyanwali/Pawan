@@ -22,7 +22,7 @@ from agent.market_hours import get_session_info
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals
 from agent.position_sizing import calculate as calc_position
-from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades
+from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl
 from agent.macro_calendar import check_macro_event, get_upcoming_events
 from agent.live_backtest import get_performance_stats, get_tracking_signals, get_recent_resolved, get_price_path
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
@@ -126,6 +126,21 @@ def _on_signals(signals: list[StockSignal]) -> None:
            and s.rr_qualifies and not s.earnings_blocked
     ]
 
+    # Market breadth — computed from current scan signals
+    _above_vwap = sum(1 for s in signals if s.vwap_event in ("ABOVE","RECLAIM","EXTENDED_UP"))
+    _below_vwap = sum(1 for s in signals if s.vwap_event in ("BELOW","REJECTION","EXTENDED_DOWN"))
+    _bullish_signals = sum(1 for s in signals if s.prediction in ("BUY","STRONG BUY"))
+    _bearish_signals = sum(1 for s in signals if s.prediction in ("SELL","STRONG SELL"))
+    _total = len(signals) or 1
+    breadth = {
+        "above_vwap":     _above_vwap,
+        "below_vwap":     _below_vwap,
+        "pct_above_vwap": round(_above_vwap / _total * 100, 1),
+        "bullish":        _bullish_signals,
+        "bearish":        _bearish_signals,
+        "bias":           "BULLISH" if _bullish_signals > _bearish_signals else "BEARISH" if _bearish_signals > _bullish_signals else "NEUTRAL",
+    }
+
     regime  = get_regime()
     session = get_session_info()
     macro   = check_macro_event()
@@ -164,6 +179,7 @@ def _on_signals(signals: list[StockSignal]) -> None:
         "backtest":    bt_summary,
         "learning":    learn_compact,
         "open_trades": open_trades,
+        "breadth":     breadth,
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
@@ -271,6 +287,12 @@ async def paper_trading_endpoint():
         "open_trades":   get_open_trades(),
         "closed_trades": get_closed_trades(limit=30),
     }
+
+
+@app.get("/api/paper-trading/daily")
+async def paper_daily_pnl():
+    """Per-day P&L summary for last 14 days."""
+    return {"daily": get_daily_pnl(days=14), "today": get_today_pnl()}
 
 
 @app.get("/api/macro-calendar")

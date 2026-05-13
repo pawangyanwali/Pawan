@@ -16,7 +16,7 @@ How it works
     If suppressed the signal direction is forced to NEUTRAL so it never reaches
     paper trading or the signal table as a tradeable idea.
 
-Target: 90% win rate. The filter tightens automatically until reached.
+Target: 62% win rate. The filter tightens automatically until reached.
 """
 from __future__ import annotations
 
@@ -29,13 +29,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
-TARGET_WIN_RATE   = 0.90   # goal win rate — system tightens until reached
-SUPPRESS_BELOW    = 0.45   # suppress context if win_rate < this
+TARGET_WIN_RATE   = 0.62   # goal win rate — system tightens until reached
+SUPPRESS_BELOW    = 0.35   # suppress context if win_rate < this
 BOOST_ABOVE       = 0.72   # boost confidence if win_rate >= this
 MIN_SAMPLE        = 8      # minimum resolved trades before suppressing a context
 RELAX_ABOVE       = 0.92   # if win rate exceeds this, slightly relax threshold
-DEFAULT_THRESHOLD = 65.0   # starting dynamic confidence gate
-MIN_THRESHOLD     = 55.0   # never go below this (avoids suppressing all signals)
+DEFAULT_THRESHOLD = 60.0   # starting dynamic confidence gate
+MIN_THRESHOLD     = 50.0   # never go below this (avoids suppressing all signals)
 MAX_THRESHOLD     = 85.0   # never require more than this
 
 _FILTER_PATH = Path(__file__).parent.parent / "data" / "adaptive_filter.json"

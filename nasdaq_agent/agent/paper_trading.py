@@ -283,6 +283,51 @@ def _build_paper_stats() -> dict:
     }
 
 
+def get_daily_pnl(days: int = 14) -> list[dict]:
+    """Return per-day P&L summary for the last N calendar days."""
+    conn = _conn()
+    try:
+        rows = conn.execute("""
+            SELECT
+                date(closed_at) as trade_date,
+                COUNT(*)        as total,
+                SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(SUM(pnl_pct), 2)  as total_pnl_pct,
+                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2) as total_pnl_dollar,
+                ROUND(AVG(pnl_pct), 2)  as avg_pnl_pct,
+                ROUND(MAX(pnl_pct), 2)  as best_trade,
+                ROUND(MIN(pnl_pct), 2)  as worst_trade
+            FROM paper_trades
+            WHERE status='CLOSED' AND closed_at >= date('now', ?)
+            GROUP BY date(closed_at)
+            ORDER BY trade_date DESC
+        """, (f'-{days} days',)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_today_pnl() -> dict:
+    """Return today's running P&L stats."""
+    conn = _conn()
+    try:
+        row = conn.execute("""
+            SELECT
+                COUNT(*)        as total,
+                SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(SUM(pnl_pct), 2)  as total_pnl_pct,
+                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2) as total_pnl_dollar,
+                ROUND(MAX(pnl_pct), 2)  as best_trade,
+                ROUND(MIN(pnl_pct), 2)  as worst_trade
+            FROM paper_trades
+            WHERE status='CLOSED' AND date(closed_at) = date('now')
+        """).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
 def get_open_trades() -> list[dict]:
     with _lock:
         with _conn() as c:

@@ -167,6 +167,14 @@ class StockSignal:
     premarket_high:   float = 0.0
     premarket_low:    float = 0.0
 
+    # ── PDH / PDL / ORB levels ────────────────────────────────────────────────
+    prev_day_high:  float = 0.0   # Previous day high
+    prev_day_low:   float = 0.0   # Previous day low
+    prev_day_close: float = 0.0   # Previous day close
+    orb_high:       float = 0.0   # Opening range breakout high (first 30-min)
+    orb_low:        float = 0.0   # Opening range breakout low (first 30-min)
+    orb_breakout:   str   = ""    # "BULL" | "BEAR" | "" — if price broke ORB
+
     # ── Relative strength vs SPY ──────────────────────────────────────────────
     rs_ratio:   float = 1.0
     rs_score:   float = 0.0
@@ -279,6 +287,49 @@ def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
     return candles
 
 
+def _compute_levels(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
+    """Compute PDH, PDL, PDC, and ORB (first 30-min high/low) from market data."""
+    import pytz
+    result = {"prev_day_high": 0.0, "prev_day_low": 0.0, "prev_day_close": 0.0,
+              "orb_high": 0.0, "orb_low": 0.0, "orb_breakout": ""}
+    try:
+        if not df_1d.empty and len(df_1d) >= 2:
+            prev = df_1d.iloc[-2]
+            result["prev_day_high"]  = round(float(prev.get("High",  0)), 4)
+            result["prev_day_low"]   = round(float(prev.get("Low",   0)), 4)
+            result["prev_day_close"] = round(float(prev.get("Close", 0)), 4)
+    except Exception:
+        pass
+    try:
+        if not df_1m.empty:
+            et = pytz.timezone("America/New_York")
+            df_et = df_1m.copy()
+            df_et.index = pd.to_datetime(df_et.index)
+            if df_et.index.tzinfo is None:
+                df_et.index = df_et.index.tz_localize("UTC").tz_convert(et)
+            else:
+                df_et.index = df_et.index.tz_convert(et)
+            today = df_et.index[-1].date()
+            orb_mask = (
+                (df_et.index.date == today) &
+                (df_et.index.time >= pd.Timestamp("09:30").time()) &
+                (df_et.index.time <= pd.Timestamp("10:00").time())
+            )
+            orb_bars = df_et[orb_mask]
+            if not orb_bars.empty:
+                result["orb_high"] = round(float(orb_bars["High"].max()), 4)
+                result["orb_low"]  = round(float(orb_bars["Low"].min()),  4)
+                last_price = float(df_et.iloc[-1]["Close"])
+                if result["orb_high"] > 0:
+                    if last_price > result["orb_high"]:
+                        result["orb_breakout"] = "BULL"
+                    elif last_price < result["orb_low"]:
+                        result["orb_breakout"] = "BEAR"
+    except Exception:
+        pass
+    return result
+
+
 # ── Single ticker analysis ────────────────────────────────────────────────────
 
 def analyse_ticker(
@@ -328,6 +379,9 @@ def analyse_ticker(
 
         # Gap analysis
         gap = analyse_gap(df_1m, df_1d)
+
+        # PDH / PDL / ORB levels
+        levels = _compute_levels(df_1m, df_1d)
 
         # Relative strength vs SPY (regime spy data available via get_regime())
         regime = get_regime()
@@ -609,6 +663,13 @@ def analyse_ticker(
             gap_fill_prob     = float(gap["fill_probability"]),
             premarket_high    = float(gap["premarket_high"]),
             premarket_low     = float(gap["premarket_low"]),
+            # PDH / PDL / ORB levels
+            prev_day_high     = levels["prev_day_high"],
+            prev_day_low      = levels["prev_day_low"],
+            prev_day_close    = levels["prev_day_close"],
+            orb_high          = levels["orb_high"],
+            orb_low           = levels["orb_low"],
+            orb_breakout      = levels["orb_breakout"],
             # Relative strength
             rs_ratio          = float(rs["rs_ratio"]),
             rs_score          = float(rs["rs_score"]),
