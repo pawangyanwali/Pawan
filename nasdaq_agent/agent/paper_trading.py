@@ -351,27 +351,30 @@ def get_summary() -> dict:
     with _lock:
         with _conn() as c:
             closed = c.execute("""
-                SELECT pnl_pct, direction FROM paper_trades WHERE status='CLOSED'
+                SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'
             """).fetchall()
             open_count = c.execute(
                 "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
             ).fetchone()[0]
 
-    total   = len(closed)
-    wins    = sum(1 for r in closed if (r["pnl_pct"] or 0) > 0)
-    losses  = sum(1 for r in closed if (r["pnl_pct"] or 0) <= 0)
-    pnls    = [r["pnl_pct"] for r in closed if r["pnl_pct"] is not None]
-    avg_pnl = round(sum(pnls) / len(pnls), 3) if pnls else 0.0
+    total     = len(closed)
+    wins      = sum(1 for r in closed if (r["pnl_pct"] or 0) > 0)
+    losses    = sum(1 for r in closed if (r["pnl_pct"] or 0) <= 0)
+    pnls      = [r["pnl_pct"] for r in closed if r["pnl_pct"] is not None]
+    dollars   = [r["pnl_dollar"] for r in closed if r["pnl_dollar"] is not None]
+    avg_pnl   = round(sum(pnls) / len(pnls), 3) if pnls else 0.0
     total_pnl = round(sum(pnls), 2)
+    total_dollar_pnl = round(sum(dollars), 2) if dollars else 0.0
 
     return {
-        "open":       open_count,
-        "closed":     total,
-        "wins":       wins,
-        "losses":     losses,
-        "win_rate":   round(wins / total * 100, 1) if total > 0 else 0.0,
-        "avg_pnl":    avg_pnl,
-        "total_pnl":  total_pnl,
+        "open":             open_count,
+        "closed":           total,
+        "wins":             wins,
+        "losses":           losses,
+        "win_rate":         round(wins / total * 100, 1) if total > 0 else 0.0,
+        "avg_pnl":          avg_pnl,
+        "total_pnl":        total_pnl,
+        "total_dollar_pnl": total_dollar_pnl,
     }
 
 

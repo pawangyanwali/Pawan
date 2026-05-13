@@ -267,9 +267,24 @@
 
     /* Paper trading panel */
     .paper-box { background:rgba(59,130,246,.06); border:1px solid rgba(59,130,246,.25); border-radius:6px; padding:10px 12px; }
-    .paper-stat { display:flex; flex-direction:column; padding:6px 10px; background:var(--surface2); border-radius:6px; min-width:80px; }
+    .paper-stat { display:flex; flex-direction:column; padding:8px 12px; background:var(--surface2); border-radius:6px; min-width:88px; }
     .paper-trade-row { padding:5px 0; border-bottom:1px solid var(--border); font-size:11px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
     .paper-trade-row:last-child { border-bottom:none; }
+    /* Enhanced paper trading table */
+    .pt-tab { background:none; border:1px solid transparent; border-radius:6px; padding:5px 12px; font-size:11px; font-weight:600; color:var(--muted); cursor:pointer; font-family:inherit; transition:all .15s; }
+    .pt-tab:hover { color:var(--text); background:var(--surface2); }
+    .pt-tab-active { background:var(--surface2); border-color:var(--border); color:var(--text); }
+    .pt-table { width:100%; border-collapse:collapse; font-size:11px; }
+    .pt-table th { text-align:left; padding:6px 8px; color:var(--muted); font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.4px; border-bottom:1px solid var(--border); white-space:nowrap; }
+    .pt-table td { padding:7px 8px; border-bottom:1px solid rgba(255,255,255,.04); vertical-align:middle; }
+    .pt-table tr:last-child td { border-bottom:none; }
+    .pt-table tr:hover td { background:rgba(255,255,255,.02); }
+    .pt-tag { display:inline-block; font-size:9px; font-weight:600; padding:1px 5px; border-radius:3px; background:var(--surface2); color:var(--muted); margin:1px; }
+    .pt-win { color:var(--green); font-weight:700; }
+    .pt-loss { color:var(--red); font-weight:700; }
+    .pt-learn-card { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin-bottom:10px; }
+    .pt-rr-bar { height:5px; border-radius:3px; background:var(--surface2); margin-top:4px; overflow:hidden; }
+    .pt-rr-fill { height:100%; border-radius:3px; }
 
     /* Watchlist modal */
     .watchlist-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:500; align-items:center; justify-content:center; }
@@ -765,16 +780,28 @@
 
 <!-- Paper Trading Modal -->
 <div class="history-modal" id="paper-modal">
-  <div class="history-modal-inner">
+  <div class="history-modal-inner" style="max-width:1100px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-      <div style="font-size:14px;font-weight:700;color:var(--text)">🧪 Paper Trading Simulation</div>
+      <div>
+        <div style="font-size:14px;font-weight:700;color:var(--text)">Paper Trading Simulation</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">All trades simulated · 100 shares per position · System learns from every outcome</div>
+      </div>
       <button onclick="closePaperTrading()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
     </div>
-    <div id="paper-stats" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px"></div>
-    <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Open Trades</div>
-    <div id="paper-open" style="margin-bottom:16px"></div>
-    <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Recent Closed Trades</div>
-    <div id="paper-closed"></div>
+
+    <!-- Summary stats -->
+    <div id="paper-stats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px"></div>
+
+    <!-- Tab bar -->
+    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px">
+      <button id="pt-tab-open"   onclick="ptTab('open')"   class="pt-tab pt-tab-active">Open Trades</button>
+      <button id="pt-tab-closed" onclick="ptTab('closed')" class="pt-tab">Closed Trades</button>
+      <button id="pt-tab-learn"  onclick="ptTab('learn')"  class="pt-tab">What We're Learning</button>
+    </div>
+
+    <div id="pt-panel-open"   style="display:block"></div>
+    <div id="pt-panel-closed" style="display:none"></div>
+    <div id="pt-panel-learn"  style="display:none"></div>
   </div>
 </div>
 
@@ -2439,41 +2466,257 @@ function populateMacroSection(s) {
 }
 
 // ─── Paper Trading ─────────────────────────────────────────────────────────────
+let _ptData = null, _ptLearn = null;
+
+function ptTab(name) {
+  ['open','closed','learn'].forEach(t => {
+    document.getElementById('pt-panel-'+t).style.display = t===name ? 'block' : 'none';
+    document.getElementById('pt-tab-'+t).classList.toggle('pt-tab-active', t===name);
+  });
+}
+
+function _ptExitBadge(reason) {
+  const map = {
+    TARGET_HIT:  ['#16a34a','TARGET HIT'], STOP_HIT: ['#dc2626','STOP HIT'],
+    TIME_STOP:   ['#64748b','TIME STOP'],  VWAP_LOSS: ['#f59e0b','VWAP EXIT'],
+    MACD_CROSS:  ['#8b5cf6','MACD EXIT'],  RSI_EXIT:  ['#0ea5e9','RSI EXIT'],
+  };
+  const [col, label] = map[reason] || ['#64748b', reason||'—'];
+  return `<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;background:${col}22;color:${col}">${label}</span>`;
+}
+
+function _ptRRBar(ratio, maxRR=3) {
+  const pct = Math.min((ratio/maxRR)*100, 100);
+  const col = ratio >= 1.5 ? '#16a34a' : ratio >= 1.0 ? '#f59e0b' : '#dc2626';
+  return `<div style="font-size:10px;font-weight:700;color:${col}">${ratio.toFixed(2)}:1</div>
+    <div class="pt-rr-bar" style="width:60px"><div class="pt-rr-fill" style="width:${pct}%;background:${col}"></div></div>`;
+}
+
+function _ptContextTags(t) {
+  const tags = [];
+  if (t.session)    tags.push(t.session);
+  if (t.regime)     tags.push(t.regime);
+  if (t.vwap_event && t.vwap_event !== 'NONE') tags.push(t.vwap_event);
+  if (t.entry_type) tags.push(t.entry_type);
+  if (t.rsi_zone && t.rsi_zone !== 'NEUTRAL')  tags.push(t.rsi_zone);
+  return tags.map(tg=>`<span class="pt-tag">${tg}</span>`).join('');
+}
+
 async function openPaperTrading() {
   document.getElementById('paper-modal').classList.add('open');
+  ptTab('open');
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/paper-trading`)).json();
+    const [d, ls] = await Promise.all([
+      fetch(`${BACKEND_HTTP}/api/paper-trading`).then(r=>r.json()),
+      fetch(`${BACKEND_HTTP}/api/learning-status`).then(r=>r.json()).catch(()=>({})),
+    ]);
+    _ptData = d; _ptLearn = ls;
     const s = d.summary;
+
+    // ── Summary stats ──
+    const avgDollar = (s.avg_pnl||0) * 100;  // ~100 shares × avg entry ~$100
+    const totalDollar = (s.total_dollar_pnl || ((s.total_pnl||0) * 100));
     document.getElementById('paper-stats').innerHTML = [
-      ['Open', s.open, 'var(--blue)'], ['Closed', s.closed, 'var(--text)'],
-      ['Wins', s.wins, 'var(--green)'], ['Losses', s.losses, 'var(--red)'],
-      ['Win Rate', s.win_rate+'%', s.win_rate>=50?'var(--green)':'var(--red)'],
-      ['Avg P&L', (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
+      ['Open',      s.open,                              'var(--blue)'],
+      ['Closed',    s.closed,                            'var(--text)'],
+      ['Wins',      s.wins,                              'var(--green)'],
+      ['Losses',    s.losses,                            'var(--red)'],
+      ['Win Rate',  s.win_rate+'%',                      s.win_rate>=62?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
+      ['Avg P&L',   (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
       ['Total P&L', (s.total_pnl>=0?'+':'')+s.total_pnl+'%', s.total_pnl>=0?'var(--green-s)':'var(--red-s)'],
-    ].map(([l,v,c])=>`<div class="paper-stat"><div style="font-size:9px;color:var(--muted)">${l}</div><div style="font-size:16px;font-weight:700;color:${c}">${v}</div></div>`).join('');
+      ['Target',    '62% WR',                            'var(--muted)'],
+    ].map(([l,v,c])=>`<div class="paper-stat">
+      <div style="font-size:9px;color:var(--muted);margin-bottom:2px">${l}</div>
+      <div style="font-size:15px;font-weight:700;color:${c}">${v}</div>
+    </div>`).join('');
 
-    const openRows = d.open_trades.map(t=>`<div class="paper-trade-row">
-      <span style="font-weight:700">${t.ticker}</span>
-      <span class="signal-badge badge-${t.direction}" style="font-size:9px">${t.direction}</span>
-      <span style="font-size:10px">Entry $${(t.entry_price||0).toFixed(2)}</span>
-      <span style="color:var(--green);font-size:10px">T $${(t.target||0).toFixed(2)}</span>
-      <span style="color:var(--red);font-size:10px">S $${(t.stop||0).toFixed(2)}</span>
-      <span style="font-size:10px;color:var(--muted)">Bar ${t.bars_held||0}</span>
-    </div>`).join('') || '<div style="color:var(--muted);font-size:11px">No open paper trades.</div>';
-    document.getElementById('paper-open').innerHTML = openRows;
+    // ── Open trades table ──
+    if (!d.open_trades || d.open_trades.length === 0) {
+      document.getElementById('pt-panel-open').innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">No open paper trades right now.</div>';
+    } else {
+      document.getElementById('pt-panel-open').innerHTML = `
+        <table class="pt-table">
+          <thead><tr>
+            <th>Ticker</th><th>Side</th><th>Entry</th><th>Target</th><th>Stop</th>
+            <th>R:R Setup</th><th>Conf</th><th>Context</th><th>Bars</th>
+          </tr></thead>
+          <tbody>${d.open_trades.map(t => {
+            const rr = t.rr_ratio || 0;
+            const risk = Math.abs((t.entry_price||0) - (t.stop||0));
+            const reward = Math.abs((t.target||0) - (t.entry_price||0));
+            return `<tr>
+              <td style="font-weight:700">${t.ticker}</td>
+              <td><span class="signal-badge badge-${t.direction}" style="font-size:9px">${t.direction}</span></td>
+              <td>$${(t.entry_price||0).toFixed(2)}</td>
+              <td style="color:var(--green)">$${(t.target||0).toFixed(2)}<div style="font-size:9px;color:var(--muted)">+$${(reward*100).toFixed(0)}</div></td>
+              <td style="color:var(--red)">$${(t.stop||0).toFixed(2)}<div style="font-size:9px;color:var(--muted)">-$${(risk*100).toFixed(0)}</div></td>
+              <td>${_ptRRBar(rr)}</td>
+              <td style="color:${t.confidence>=68?'var(--green)':'var(--muted)'}">${(t.confidence||0).toFixed(0)}%</td>
+              <td>${_ptContextTags(t)}</td>
+              <td style="color:var(--muted)">${t.bars_held||0}</td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>`;
+    }
 
-    const closedRows = d.closed_trades.map(t=>`<div class="paper-trade-row">
-      <span style="font-weight:700">${t.ticker}</span>
-      <span class="signal-badge badge-${t.direction}" style="font-size:9px">${t.direction}</span>
-      <span style="font-size:10px;color:var(--muted)">${(t.opened_at||'').slice(0,10)}</span>
-      <span style="font-size:10px;color:var(--muted)">${t.exit_reason||'—'}</span>
-      <span style="font-weight:700;font-size:11px;color:${(t.pnl_pct||0)>=0?'var(--green)':'var(--red)'}">${(t.pnl_pct||0)>=0?'+':''}${(t.pnl_pct||0).toFixed(2)}%</span>
-    </div>`).join('') || '<div style="color:var(--muted);font-size:11px">No closed paper trades yet.</div>';
-    document.getElementById('paper-closed').innerHTML = closedRows;
+    // ── Closed trades table ──
+    if (!d.closed_trades || d.closed_trades.length === 0) {
+      document.getElementById('pt-panel-closed').innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">No closed trades yet.</div>';
+    } else {
+      document.getElementById('pt-panel-closed').innerHTML = `
+        <table class="pt-table">
+          <thead><tr>
+            <th>Ticker</th><th>Side</th><th>Entry</th><th>Exit</th><th>Result</th>
+            <th>P&L %</th><th>P&L $</th><th>R:R Target</th><th>Exit Reason</th><th>Context</th><th>Date</th>
+          </tr></thead>
+          <tbody>${d.closed_trades.map(t => {
+            const pnl = t.pnl_pct || 0;
+            const pnlD = t.pnl_dollar || (pnl * (t.entry_price||100));
+            const win = pnl > 0;
+            const rr = t.rr_ratio || 0;
+            return `<tr>
+              <td style="font-weight:700">${t.ticker}</td>
+              <td><span class="signal-badge badge-${t.direction}" style="font-size:9px">${t.direction}</span></td>
+              <td>$${(t.entry_price||0).toFixed(2)}</td>
+              <td>$${(t.exit_price||0).toFixed(2)}</td>
+              <td><span style="font-size:11px;font-weight:700;color:${win?'var(--green)':'var(--red)'}">${win?'WIN':'LOSS'}</span></td>
+              <td class="${win?'pt-win':'pt-loss'}">${pnl>=0?'+':''}${pnl.toFixed(2)}%</td>
+              <td class="${win?'pt-win':'pt-loss'}">${pnlD>=0?'+':''}$${Math.abs(pnlD).toFixed(2)}</td>
+              <td>${_ptRRBar(rr)}</td>
+              <td>${_ptExitBadge(t.exit_reason)}</td>
+              <td>${_ptContextTags(t)}</td>
+              <td style="color:var(--muted);white-space:nowrap">${(t.opened_at||'').slice(0,10)}</td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>`;
+    }
+
+    // ── What We're Learning panel ──
+    _ptRenderLearning(ls, d.summary);
+
   } catch(e) {
+    console.error(e);
     document.getElementById('paper-stats').innerHTML = '<span style="color:var(--red)">Failed to load paper trading data.</span>';
   }
 }
+
+function _ptRenderLearning(ls, summary) {
+  const wr = ls.current_win_rate || 0;
+  const target = ls.target_win_rate || 62;
+  const threshold = ls.dynamic_threshold || 60;
+  const blocked = ls.blocked_contexts || {};
+  const boosted = ls.boosted_contexts || {};
+  const total = ls.total_resolved || 0;
+  const isLearning = ls.is_learning || false;
+
+  const wrColor = wr >= target ? '#16a34a' : wr >= 50 ? '#f59e0b' : '#dc2626';
+  const progressPct = Math.min((wr / target) * 100, 100);
+
+  let html = `
+    <!-- Learning status header -->
+    <div class="pt-learn-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:12px;font-weight:700">Self-Learning Status</div>
+        <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${isLearning?'#16a34a22':'#64748b22'};color:${isLearning?'#16a34a':'#64748b'};font-weight:700">
+          ${isLearning ? 'ACTIVE' : 'WARMING UP'}
+        </span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px">
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:2px">Current Win Rate</div>
+          <div style="font-size:20px;font-weight:700;color:${wrColor}">${wr.toFixed(1)}%</div>
+          <div style="font-size:9px;color:var(--muted)">Target: ${target}%</div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:2px">Confidence Gate</div>
+          <div style="font-size:20px;font-weight:700;color:var(--text)">${threshold.toFixed(0)}%</div>
+          <div style="font-size:9px;color:var(--muted)">Min to trade</div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:2px">Resolved Trades</div>
+          <div style="font-size:20px;font-weight:700;color:var(--text)">${total}</div>
+          <div style="font-size:9px;color:var(--muted)">Need 8+ per context</div>
+        </div>
+      </div>
+      <div style="font-size:9px;color:var(--muted);margin-bottom:4px">Progress to target win rate</div>
+      <div style="height:6px;background:var(--surface);border-radius:3px;overflow:hidden">
+        <div style="width:${progressPct}%;height:100%;background:${wrColor};border-radius:3px;transition:width .4s"></div>
+      </div>
+    </div>`;
+
+  // Suppressed contexts (losing patterns the system avoids)
+  const blockedKeys = Object.keys(blocked);
+  if (blockedKeys.length > 0) {
+    html += `<div class="pt-learn-card">
+      <div style="font-size:12px;font-weight:700;margin-bottom:8px;color:var(--red)">Patterns Being Avoided (${blockedKeys.length})</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">These setups had <35% win rate — system auto-suppresses them</div>
+      <table class="pt-table">
+        <thead><tr><th>Pattern</th><th>Win Rate</th><th>Trades</th><th>Reason</th></tr></thead>
+        <tbody>${blockedKeys.map(k => {
+          const v = blocked[k];
+          return `<tr>
+            <td><span class="pt-tag" style="background:#dc262622;color:#dc2626">${k}</span></td>
+            <td style="color:var(--red);font-weight:700">${(v.win_rate*100).toFixed(0)}%</td>
+            <td style="color:var(--muted)">${v.count}</td>
+            <td style="color:var(--muted);font-size:10px">${v.reason||'Low win rate'}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+  } else {
+    html += `<div class="pt-learn-card">
+      <div style="font-size:12px;font-weight:700;margin-bottom:6px;color:var(--muted)">Patterns Being Avoided</div>
+      <div style="font-size:11px;color:var(--muted)">${total < 8 ? 'Need more trades to identify losing patterns. Keep running.' : 'No losing patterns identified yet — all contexts performing OK.'}</div>
+    </div>`;
+  }
+
+  // Boosted contexts (winning patterns)
+  const boostedKeys = Object.keys(boosted);
+  if (boostedKeys.length > 0) {
+    html += `<div class="pt-learn-card">
+      <div style="font-size:12px;font-weight:700;margin-bottom:8px;color:var(--green)">High-Probability Setups (${boostedKeys.length})</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">These setups have ≥72% win rate — system boosts their confidence score</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${boostedKeys.map(k => {
+        const v = boosted[k];
+        const wr2 = (v.win_rate*100).toFixed(0);
+        return `<div style="background:#16a34a22;border:1px solid #16a34a44;border-radius:6px;padding:6px 10px;min-width:120px">
+          <div style="font-size:9px;color:#16a34a;font-weight:700">${k}</div>
+          <div style="font-size:14px;font-weight:700;color:var(--green)">${wr2}% WR</div>
+          <div style="font-size:9px;color:var(--muted)">${v.count} trades</div>
+        </div>`;
+      }).join('')}</div>
+    </div>`;
+  }
+
+  // Threshold history
+  const hist = ls.threshold_history || [];
+  if (hist.length >= 2) {
+    html += `<div class="pt-learn-card">
+      <div style="font-size:12px;font-weight:700;margin-bottom:8px">Confidence Gate History</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">Gate tightens when win rate is below 62%, relaxes when above 92%</div>
+      <div style="display:flex;align-items:flex-end;gap:4px;height:50px">${hist.slice(-10).map(h => {
+        const pct = Math.round(((h.threshold-50)/35)*100);
+        const col = h.win_rate*100 >= target ? '#16a34a' : '#f59e0b';
+        return `<div style="flex:1;background:${col};border-radius:2px 2px 0 0;height:${pct}%;min-height:4px;position:relative" title="Gate:${h.threshold}% WR:${(h.win_rate*100).toFixed(0)}%"></div>`;
+      }).join('')}</div>
+      <div style="font-size:9px;color:var(--muted);margin-top:4px">Last ${hist.slice(-10).length} updates · Current gate: ${threshold.toFixed(0)}%</div>
+    </div>`;
+  }
+
+  // What to watch next
+  html += `<div class="pt-learn-card">
+    <div style="font-size:12px;font-weight:700;margin-bottom:8px">What to Watch Next</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      ${summary.wins + summary.losses < 50 ? `<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#f59e0b">⚡</span><span style="font-size:11px">Only ${summary.wins+summary.losses} resolved trades so far — need 50+ for reliable pattern detection. Keep running.</span></div>` : ''}
+      ${wr < target ? `<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#f59e0b">📈</span><span style="font-size:11px">Win rate ${wr.toFixed(1)}% is below ${target}% target — system is raising confidence gate to filter weaker signals.</span></div>` : `<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#16a34a">✅</span><span style="font-size:11px">Win rate ${wr.toFixed(1)}% is above ${target}% target. System is operating well.</span></div>`}
+      <div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#0ea5e9">🎯</span><span style="font-size:11px">Best setups historically: POWER_HOUR session, BEAR_TREND regime, EXTENDED_DOWN VWAP. System automatically favors these.</span></div>
+      <div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#8b5cf6">🧠</span><span style="font-size:11px">Ready for live trading when: 200+ resolved trades AND win rate ≥62% sustained for 5+ days.</span></div>
+    </div>
+  </div>`;
+
+  document.getElementById('pt-panel-learn').innerHTML = html;
+}
+
 function closePaperTrading() { document.getElementById('paper-modal').classList.remove('open'); }
 
 // ─── Watchlist ─────────────────────────────────────────────────────────────────
