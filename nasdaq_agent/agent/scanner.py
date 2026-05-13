@@ -291,9 +291,15 @@ def analyse_ticker(
         df_ind = compute_indicators(df_1m.copy())
         last   = df_ind.iloc[-1]
 
-        price      = float(last["Close"])
-        open_price = float(df_ind.iloc[0]["Open"])
-        change_pct = round((price - open_price) / open_price * 100, 3) if open_price else 0.0
+        price = float(last["Close"])
+        # Change % vs previous daily close (works for both regular session and AH).
+        # During AH, df_1d.iloc[-1] is today's close → gives true AH move.
+        # During regular session, Twelve Data daily bars lag until EOD so
+        # df_1d.iloc[-1] is yesterday's close → gives correct intraday change.
+        _prev_close = float(df_1d.iloc[-1]["Close"]) if not df_1d.empty else 0.0
+        if _prev_close <= 0:
+            _prev_close = float(df_ind.iloc[0]["Open"]) or price
+        change_pct = round((price - _prev_close) / _prev_close * 100, 3) if _prev_close else 0.0
 
         tech            = score_technical(last)
         vol             = score_volume(df_ind)
