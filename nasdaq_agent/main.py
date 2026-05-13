@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from agent.scanner import scanner, StockSignal
 from agent.market_hours import get_session_info
 from agent.market_regime import get_regime
-from agent.signal_tracker import get_stats, get_recent_signals
+from agent.signal_tracker import get_stats, get_recent_signals, get_observation_summary
 from agent.position_sizing import calculate as calc_position
 from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl
 from agent.macro_calendar import check_macro_event, get_upcoming_events
@@ -371,7 +371,8 @@ async def learning_status():
     """Adaptive filter state — blocked contexts, dynamic threshold, win rate progress."""
     return {
         **af_get_status(),
-        "engine": learning_engine.get_status(),
+        "engine":       learning_engine.get_status(),
+        "observations": get_observation_summary(),
     }
 
 

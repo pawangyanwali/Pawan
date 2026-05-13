@@ -44,7 +44,7 @@ from agent.earnings import earnings_blackout
 from agent.gap_analysis import analyse_gap
 from agent.relative_strength import compute_relative_strength
 from agent.trade_management import build_trade_plan
-from agent.signal_tracker import init_db, record_signal, resolve_pending
+from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term
 from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.exit_signals import analyse_exits
@@ -551,6 +551,11 @@ def analyse_ticker(
                 confidence=pred["confidence"],
                 session=sess_info.get("session", ""),
                 regime=regime.regime,
+                trading_tier=pred.get("trading_tier", "REGULAR"),
+                vwap_event=vwap_sig.get("event", ""),
+                rsi_zone=pred.get("rsi_zone", ""),
+                rel_volume=float(rel_vol),
+                trend=pred.get("trend", ""),
             )
             bt_record(
                 ticker       = ticker,
@@ -805,6 +810,15 @@ class Scanner:
         results.sort(key=lambda s: abs(s.score), reverse=True)
         self.signals   = results
         self.last_scan = datetime.utcnow().isoformat()
+
+        # Market-observation learning: record all signals with full context,
+        # then check short-term price accuracy against previous scan's signals.
+        try:
+            resolve_short_term(results)
+            record_signals_batch(results)
+        except Exception as _st_err:
+            logger.debug(f"signal_tracker batch error: {_st_err}")
+
         self._notify(results)
         elapsed = round(time.time() - t0, 1)
         logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(NASDAQ_TICKERS)} tickers analysed")

@@ -2295,16 +2295,22 @@ function renderLearningStatus(d) {
 
   // KPI cards
   const eng = d.engine || {};
+  const obs = d.observations || {};
+  const obsWR = obs.observation_wr ?? 0;
+  const obsCol = obsWR >= 62 ? 'var(--green)' : obsWR >= 45 ? 'var(--yellow)' : 'var(--red)';
   const kpis = [
-    { label:'Confidence Gate', value: thresh.toFixed(1) + '%', color:'var(--blue)' },
-    { label:'Win Rate', value: wr.toFixed(1) + '%', color: col },
-    { label:'Target', value: target + '%', color:'var(--green-s)' },
-    { label:'Signals Suppressed', value: suppressed, color:'var(--yellow)' },
-    { label:'Blocked Contexts', value: Object.keys(d.blocked_contexts||{}).length, color:'var(--red)' },
-    { label:'Boosted Contexts', value: Object.keys(d.boosted_contexts||{}).length, color:'var(--green)' },
-    { label:'Engine Cycle', value: eng.cycle_count != null ? `#${eng.cycle_count}` : '—', color: eng.running ? 'var(--green-s)' : 'var(--muted)' },
-    { label:'Learn Interval', value: eng.interval_secs ? `${eng.interval_secs}s` : '—', color:'var(--muted)' },
-    { label:'Last Updated', value: d.last_updated ? new Date(d.last_updated).toLocaleTimeString() : '—', color:'var(--muted)' },
+    { label:'Confidence Gate',     value: thresh.toFixed(1) + '%',                     color:'var(--blue)' },
+    { label:'Win Rate (trades)',   value: wr.toFixed(1) + '%',                          color: col },
+    { label:'Market Obs. WR',      value: obs.observation_wr != null ? obsWR.toFixed(1)+'%' : '—', color: obsCol },
+    { label:'Signals Observed',    value: obs.total_signals ?? '—',                     color:'var(--muted)' },
+    { label:'Obs. Resolved',       value: obs.resolved ?? '—',                          color: obsWR >= 62 ? 'var(--green)' : 'var(--muted)' },
+    { label:'Target',              value: target + '%',                                 color:'var(--green-s)' },
+    { label:'Signals Suppressed',  value: suppressed,                                   color:'var(--yellow)' },
+    { label:'Blocked Contexts',    value: Object.keys(d.blocked_contexts||{}).length,   color:'var(--red)' },
+    { label:'Boosted Contexts',    value: Object.keys(d.boosted_contexts||{}).length,   color:'var(--green)' },
+    { label:'Engine Cycle',        value: eng.cycle_count != null ? `#${eng.cycle_count}` : '—', color: eng.running ? 'var(--green-s)' : 'var(--muted)' },
+    { label:'Learn Interval',      value: eng.interval_secs ? `${eng.interval_secs}s` : '—',     color:'var(--muted)' },
+    { label:'Last Updated',        value: d.last_updated ? new Date(d.last_updated).toLocaleTimeString() : '—', color:'var(--muted)' },
   ];
   document.getElementById('learn-kpis').innerHTML = kpis.map(k =>
     `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 14px">

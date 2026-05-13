@@ -129,15 +129,23 @@ class LearningEngine:
         # ── 2. Fetch latest paper trade stats ────────────────────────────────
         pt_stats, pt_count = self._get_pt_stats()
 
-        # ── 3. Merge both stat sources ────────────────────────────────────────
+        # ── 3. Fetch real-time market observation stats ───────────────────────
+        # These come from every signal fired, not just closed trades.
+        # Includes session accuracy, AH tier performance, volume patterns, etc.
+        # Updates every 90s so learning is live even during non-trading hours.
+        obs_stats, obs_count = self._get_observation_stats()
+
+        # ── 4. Merge all three stat sources ──────────────────────────────────
         merged = self._merge_stats(bt_stats, pt_stats)
+        merged = self._merge_stats(merged, obs_stats)   # layer observations on top
+
         if merged["overall"]["total"] < 3:
             _log(f"Cycle #{self._cycle_count}: only {merged['overall']['total']} "
                  "resolved — waiting for more data", level="DEBUG")
             self._last_cycle_ts = ts
             return
 
-        # ── 4. Push merged stats into adaptive filter ─────────────────────────
+        # ── 5. Push merged stats into adaptive filter ─────────────────────────
         from agent.adaptive_filter import update_filter, get_status as af_status
         prev_threshold = self._last_threshold
         update_filter(merged)
@@ -152,7 +160,7 @@ class LearningEngine:
         _log(
             f"Cycle #{self._cycle_count} — WR:{new_wr:.1f}%  "
             f"gate:{new_threshold:.1f}%  blocked:{blocked_n}  boosted:{boosted_n}  "
-            f"bt:{bt_count} pt:{pt_count} total:{merged['overall']['total']}"
+            f"bt:{bt_count} pt:{pt_count} obs:{obs_count} total:{merged['overall']['total']}"
         )
 
         # Only surface significant changes to console
@@ -207,6 +215,32 @@ class LearningEngine:
             return stats, count
         except Exception as e:
             _log(f"pt_stats error: {e}", level="WARN")
+            return {}, 0
+
+    def _get_observation_stats(self) -> tuple[dict, int]:
+        """
+        Fetch real-time market observation stats from signal_tracker.
+        These are computed from short-term price checks (every 90s) across all
+        context dimensions: session, trading tier, AH tier, regime, VWAP, RSI,
+        volume bucket. Updates continuously regardless of paper trade activity.
+        """
+        try:
+            from agent.signal_tracker import get_market_breakdown_stats, get_observation_summary
+            stats   = get_market_breakdown_stats(min_count=5, lookback_days=30)
+            summary = get_observation_summary()
+            count   = summary.get("resolved", 0)
+            if count > 0 and count != getattr(self, "_last_obs_count", -1):
+                _log(
+                    f"Market observations: {count} resolved, "
+                    f"WR={summary.get('observation_wr', 0):.1f}% "
+                    f"across {stats.get('overall', {}).get('total', 0)} signals",
+                    level="DEBUG",
+                )
+                self._last_obs_count = count  # type: ignore[attr-defined]
+            return stats, count
+        except Exception as e:
+            _log(f"obs_stats error: {e}", level="WARN")
+            return {}, 0
             return {}, 0
 
     # ── Stat merger ───────────────────────────────────────────────────────────
