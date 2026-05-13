@@ -26,7 +26,7 @@ from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_
 from agent.macro_calendar import check_macro_event, get_upcoming_events
 from agent.live_backtest import get_performance_stats, get_tracking_signals, get_recent_resolved, get_price_path
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
-from agent.adaptive_filter import get_status as af_get_status
+from agent.adaptive_filter import get_status as af_get_status, reset_filter as af_reset_filter
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
 from agent.broker.schwab_auth import load_stored_tokens, get_token_status, start_auth_flow
@@ -417,6 +417,13 @@ async def learning_status():
         "engine":       learning_engine.get_status(),
         "observations": get_observation_summary(),
     }
+
+
+@app.post("/api/adaptive-filter/reset")
+async def reset_adaptive_filter():
+    """Reset the adaptive filter to factory defaults (threshold 60%, no blocked contexts)."""
+    af_reset_filter()
+    return {"ok": True, **af_get_status()}
 
 
 @app.get("/api/learning-log")

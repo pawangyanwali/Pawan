@@ -323,3 +323,26 @@ def get_status() -> dict:
 def increment_suppressed():
     with _lock:
         _state["suppressed_count"] = _state.get("suppressed_count", 0) + 1
+
+
+def reset_filter() -> None:
+    """Reset all learned state to factory defaults and delete the persisted file."""
+    global _state
+    fresh = {
+        "blocked_contexts":    {},
+        "boosted_contexts":    {},
+        "dynamic_threshold":   DEFAULT_THRESHOLD,
+        "current_win_rate":    0.0,
+        "total_resolved":      0,
+        "last_updated":        None,
+        "suppressed_count":    0,
+        "threshold_history":   [],
+    }
+    with _lock:
+        _state = fresh
+    try:
+        if _FILTER_PATH.exists():
+            _FILTER_PATH.unlink()
+    except Exception as e:
+        logger.warning(f"[AdaptiveFilter] Could not delete persisted state: {e}")
+    logger.info(f"[AdaptiveFilter] Reset to defaults — threshold={DEFAULT_THRESHOLD}%")
