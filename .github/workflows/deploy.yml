@@ -1,0 +1,54 @@
+name: Deploy to AWS Lightsail
+
+on:
+  push:
+    branches:
+      - claude/nasdaq-stock-prediction-agent-kDe60
+    paths:
+      - 'nasdaq_agent/**'   # only deploy when agent code changes
+
+jobs:
+  deploy:
+    name: SSH deploy & restart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          port:     22
+          script: |
+            set -e
+            APP_DIR="/opt/nasdaq-agent"
+            VENV="$APP_DIR/venv"
+            SERVICE="nasdaq-agent"
+
+            echo "=== Pulling latest code ==="
+            git -C "$APP_DIR" fetch origin
+            git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
+
+            echo "=== Installing any new dependencies ==="
+            "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
+
+            echo "=== Restarting service ==="
+            systemctl restart "$SERVICE"
+            sleep 5
+
+            echo "=== Health check ==="
+            status=$(systemctl is-active "$SERVICE")
+            if [ "$status" != "active" ]; then
+              echo "ERROR: Service failed to start"
+              journalctl -u "$SERVICE" --no-pager -n 30
+              exit 1
+            fi
+
+            echo "=== Deployed successfully ==="
+            curl -sf http://localhost:8000/api/status | python3 -c "import sys,json; d=json.load(sys.stdin); print('Scan count:', d.get('scan_count','?'))" || true
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "Deployment FAILED — check GitHub Actions logs"
