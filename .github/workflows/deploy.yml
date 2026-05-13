@@ -22,30 +22,29 @@ jobs:
           username:      ${{ secrets.DEPLOY_USER }}
           key:           ${{ secrets.DEPLOY_SSH_KEY }}
           port:          22
-          known_hosts:   unnecessary
           script: |
             set -e
             APP_DIR="/opt/nasdaq-agent"
             VENV="$APP_DIR/venv"
             SERVICE="nasdaq-agent"
+            APP_USER="nasdaq"
 
             echo "=== Pulling latest code ==="
-            git config --global --add safe.directory "$APP_DIR"
-            git -C "$APP_DIR" fetch origin
-            git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
+            sudo -u "$APP_USER" git -C "$APP_DIR" fetch origin
+            sudo -u "$APP_USER" git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
 
             echo "=== Installing any new dependencies ==="
-            "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
+            sudo -u "$APP_USER" "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
 
             echo "=== Restarting service ==="
-            systemctl restart "$SERVICE"
+            sudo systemctl restart "$SERVICE"
             sleep 5
 
             echo "=== Health check ==="
             status=$(systemctl is-active "$SERVICE")
             if [ "$status" != "active" ]; then
               echo "ERROR: Service failed to start"
-              journalctl -u "$SERVICE" --no-pager -n 30
+              sudo journalctl -u "$SERVICE" --no-pager -n 30
               exit 1
             fi
 
