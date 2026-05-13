@@ -75,6 +75,10 @@ _MODEL_DIR.mkdir(parents=True, exist_ok=True)
 _lock    = threading.Lock()
 _trained = False
 
+_training_history: list[dict] = []   # [{epoch, total_epochs, loss, ts, tickers}]
+_is_training_now:  bool       = False
+_MAX_HISTORY       = 500
+
 # ── Feature columns (must match ml_model.FEATURE_COLS) ───────────────────────
 FEATURE_COLS = [
     "rsi_14", "rsi_7", "macd", "macd_signal", "macd_hist",
@@ -248,137 +252,152 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
     Returns True on success.
     """
     global _model, _scaler, _trained
+    global _is_training_now, _training_history
+    _is_training_now = True
 
     try:
-        import torch
-        import torch.nn as nn
-        import torch.optim as optim
-        from torch.utils.data import DataLoader, TensorDataset
-        from sklearn.preprocessing import StandardScaler
-    except ImportError:
-        logger.warning("[DeepModel] torch/sklearn not available — skipping deep training")
-        return False
+        try:
+            import torch
+            import torch.nn as nn
+            import torch.optim as optim
+            from torch.utils.data import DataLoader, TensorDataset
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            logger.warning("[DeepModel] torch/sklearn not available — skipping deep training")
+            return False
 
-    logger.info(f"[DeepModel] Building training set from {len(ticker_dfs_15m)} tickers…")
+        logger.info(f"[DeepModel] Building training set from {len(ticker_dfs_15m)} tickers…")
 
-    # ── 1. Build training sequences ───────────────────────────────────────────
-    all_X, all_y, all_w = [], [], []
+        # ── 1. Build training sequences ───────────────────────────────────────────
+        all_X, all_y, all_w = [], [], []
 
-    # Incorporate live backtest outcomes as weighted samples
-    bt_weights: dict[str, float] = {}   # ticker → weight multiplier
-    try:
-        from agent.live_backtest import get_outcomes_for_ml
-        outcomes = get_outcomes_for_ml(min_count=1)
-        if outcomes is not None and not outcomes.empty:
-            for _, row in outcomes.iterrows():
-                t = str(row.get("ticker", ""))
-                won = int(row.get("won", 0))
-                bt_weights[t] = 2.0 if won else 1.0   # WIN → 2× weight
-    except Exception:
-        pass
+        # Incorporate live backtest outcomes as weighted samples
+        bt_weights: dict[str, float] = {}   # ticker → weight multiplier
+        try:
+            from agent.live_backtest import get_outcomes_for_ml
+            outcomes = get_outcomes_for_ml(min_count=1)
+            if outcomes is not None and not outcomes.empty:
+                for _, row in outcomes.iterrows():
+                    t = str(row.get("ticker", ""))
+                    won = int(row.get("won", 0))
+                    bt_weights[t] = 2.0 if won else 1.0   # WIN → 2× weight
+        except Exception:
+            pass
 
-    for ticker, df_raw in ticker_dfs_15m.items():
-        if df_raw is None or len(df_raw) < SEQ_LEN + LOOKAHEAD_BARS + 20:
-            continue
-        df = _prepare_df(df_raw)
-        if df.empty:
-            continue
-        w = bt_weights.get(ticker, 1.0)
-        X, y, weights = _make_sequences(df, sample_weight=w)
-        if len(X) < 10:
-            continue
-        all_X.append(X)
-        all_y.append(y)
-        all_w.append(weights)
+        for ticker, df_raw in ticker_dfs_15m.items():
+            if df_raw is None or len(df_raw) < SEQ_LEN + LOOKAHEAD_BARS + 20:
+                continue
+            df = _prepare_df(df_raw)
+            if df.empty:
+                continue
+            w = bt_weights.get(ticker, 1.0)
+            X, y, weights = _make_sequences(df, sample_weight=w)
+            if len(X) < 10:
+                continue
+            all_X.append(X)
+            all_y.append(y)
+            all_w.append(weights)
 
-    if not all_X:
-        logger.warning("[DeepModel] No training sequences — skipping")
-        return False
+        if not all_X:
+            logger.warning("[DeepModel] No training sequences — skipping")
+            return False
 
-    X_all = np.concatenate(all_X, axis=0)
-    y_all = np.concatenate(all_y, axis=0)
-    w_all = np.concatenate(all_w, axis=0)
+        X_all = np.concatenate(all_X, axis=0)
+        y_all = np.concatenate(all_y, axis=0)
+        w_all = np.concatenate(all_w, axis=0)
 
-    if len(X_all) < MIN_TRAIN_SAMPLES:
-        logger.warning(f"[DeepModel] Only {len(X_all)} sequences — need {MIN_TRAIN_SAMPLES}")
-        return False
+        if len(X_all) < MIN_TRAIN_SAMPLES:
+            logger.warning(f"[DeepModel] Only {len(X_all)} sequences — need {MIN_TRAIN_SAMPLES}")
+            return False
 
-    logger.info(f"[DeepModel] Training on {len(X_all):,} sequences from {len(ticker_dfs_15m)} tickers")
+        logger.info(f"[DeepModel] Training on {len(X_all):,} sequences from {len(ticker_dfs_15m)} tickers")
 
-    # ── 2. Scale features ─────────────────────────────────────────────────────
-    flat = X_all.reshape(-1, N_FEATURES)
-    scaler = StandardScaler()
-    scaler.fit(flat)
-    X_scaled = scaler.transform(flat).reshape(X_all.shape).astype(np.float32)
-    _save_scaler(scaler)
+        # ── 2. Scale features ─────────────────────────────────────────────────────
+        flat = X_all.reshape(-1, N_FEATURES)
+        scaler = StandardScaler()
+        scaler.fit(flat)
+        X_scaled = scaler.transform(flat).reshape(X_all.shape).astype(np.float32)
+        _save_scaler(scaler)
 
-    # ── 3. Build tensors + dataset ────────────────────────────────────────────
-    X_t = torch.from_numpy(X_scaled)
-    y_t = torch.from_numpy(y_all)
-    w_t = torch.from_numpy(w_all)
+        # ── 3. Build tensors + dataset ────────────────────────────────────────────
+        X_t = torch.from_numpy(X_scaled)
+        y_t = torch.from_numpy(y_all)
+        w_t = torch.from_numpy(w_all)
 
-    dataset = TensorDataset(X_t, y_t, w_t)
-    loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+        dataset = TensorDataset(X_t, y_t, w_t)
+        loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
 
-    # ── 4. Build or reset model ───────────────────────────────────────────────
-    model = _build_model()
-    if model is None:
-        return False
+        # ── 4. Build or reset model ───────────────────────────────────────────────
+        model = _build_model()
+        if model is None:
+            return False
 
-    # ── 5. Class imbalance: pos_weight ────────────────────────────────────────
-    n_pos = float(y_all.sum())
-    n_neg = float(len(y_all) - n_pos)
-    pos_weight = torch.tensor([n_neg / max(n_pos, 1.0)])
+        # ── 5. Class imbalance: pos_weight ────────────────────────────────────────
+        n_pos = float(y_all.sum())
+        n_neg = float(len(y_all) - n_pos)
+        pos_weight = torch.tensor([n_neg / max(n_pos, 1.0)])
 
-    criterion = nn.BCELoss(reduction="none")
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+        criterion = nn.BCELoss(reduction="none")
+        optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    model.train()
-    best_loss = float("inf")
-    best_state = None
+        model.train()
+        best_loss = float("inf")
+        best_state = None
 
-    for epoch in range(EPOCHS):
-        epoch_loss = 0.0
-        n_batches  = 0
-        for xb, yb, wb in loader:
-            optimizer.zero_grad()
-            pred = model(xb)
-            # Weighted BCE: WIN samples count twice as much
-            loss = (criterion(pred, yb) * wb).mean()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            epoch_loss += loss.item()
-            n_batches  += 1
-        scheduler.step()
-        avg_loss = epoch_loss / max(n_batches, 1)
-        if avg_loss < best_loss:
-            best_loss  = avg_loss
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
-        logger.info(f"[DeepModel] Epoch {epoch+1}/{EPOCHS} — loss={avg_loss:.4f}")
+        for epoch in range(EPOCHS):
+            epoch_loss = 0.0
+            n_batches  = 0
+            for xb, yb, wb in loader:
+                optimizer.zero_grad()
+                pred = model(xb)
+                # Weighted BCE: WIN samples count twice as much
+                loss = (criterion(pred, yb) * wb).mean()
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                epoch_loss += loss.item()
+                n_batches  += 1
+            scheduler.step()
+            avg_loss = epoch_loss / max(n_batches, 1)
+            if avg_loss < best_loss:
+                best_loss  = avg_loss
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            logger.info(f"[DeepModel] Epoch {epoch+1}/{EPOCHS} — loss={avg_loss:.4f}")
+            import time as _time
+            _training_history.append({
+                "epoch":        epoch + 1,
+                "total_epochs": EPOCHS,
+                "loss":         round(avg_loss, 6),
+                "ts":           _time.time(),
+                "tickers":      len(ticker_dfs_15m),
+            })
+            if len(_training_history) > _MAX_HISTORY:
+                _training_history = _training_history[-_MAX_HISTORY:]
 
-    # ── 6. Save best checkpoint ───────────────────────────────────────────────
-    if best_state:
-        model.load_state_dict(best_state)
+        # ── 6. Save best checkpoint ───────────────────────────────────────────────
+        if best_state:
+            model.load_state_dict(best_state)
 
-    model.eval()
-    torch.save(model.state_dict(), _MODEL_PATH)
+        model.eval()
+        torch.save(model.state_dict(), _MODEL_PATH)
 
-    with _lock:
-        _model   = model
-        _scaler  = scaler
-        _trained = True
+        with _lock:
+            _model   = model
+            _scaler  = scaler
+            _trained = True
 
-    # Accuracy on training set (quick sanity check)
-    with torch.no_grad():
-        preds = model(X_t).numpy()
-    acc = float(((preds >= 0.5).astype(int) == y_all.astype(int)).mean())
-    logger.info(
-        f"[DeepModel] Training complete — acc={acc:.3f}  "
-        f"samples={len(X_all):,}  best_loss={best_loss:.4f}"
-    )
-    return True
+        # Accuracy on training set (quick sanity check)
+        with torch.no_grad():
+            preds = model(X_t).numpy()
+        acc = float(((preds >= 0.5).astype(int) == y_all.astype(int)).mean())
+        logger.info(
+            f"[DeepModel] Training complete — acc={acc:.3f}  "
+            f"samples={len(X_all):,}  best_loss={best_loss:.4f}"
+        )
+        return True
+    finally:
+        _is_training_now = False
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
@@ -433,3 +452,11 @@ def get_model_info() -> dict:
         "epochs":       EPOCHS,
         "model_path":   str(_MODEL_PATH),
     }
+
+
+def get_training_history() -> list[dict]:
+    return list(_training_history)
+
+
+def is_training_active() -> bool:
+    return _is_training_now
