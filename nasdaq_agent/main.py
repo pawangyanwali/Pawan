@@ -333,6 +333,34 @@ async def risk_status():
     return get_risk_status()
 
 
+@app.get("/api/ml-status")
+async def ml_status():
+    """Aggregate status for all ML model types."""
+    from agent.deep_model import get_model_info, get_training_history, is_training_active, is_trained as deep_is_trained
+    from agent.ml_model import (
+        _model_registry, _daily_model_registry,
+        _reversal_model_registry, _ensemble_registry,
+        _swing_model_registry,
+    )
+
+    def _count(registry):
+        total   = len(registry)
+        trained = sum(1 for m in registry.values() if getattr(m, 'trained', False))
+        return {"total": total, "trained": trained}
+
+    return {
+        "deep_model":       get_model_info(),
+        "deep_trained":     deep_is_trained(),
+        "is_training_now":  is_training_active(),
+        "training_history": get_training_history(),
+        "scalp_models":     _count(_model_registry),
+        "daily_models":     _count(_daily_model_registry),
+        "reversal_models":  _count(_reversal_model_registry),
+        "ensemble_models":  _count(_ensemble_registry),
+        "swing_models":     _count(_swing_model_registry),
+    }
+
+
 @app.get("/api/paper-trading/daily")
 async def paper_daily_pnl():
     """Per-day P&L summary for last 14 days."""

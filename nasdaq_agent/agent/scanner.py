@@ -110,6 +110,12 @@ class StockSignal:
     patterns:          list = field(default_factory=list)
     reasons:           list = field(default_factory=list)
 
+    # ── 15-min ML model probabilities ─────────────────────────────────────────
+    ml_swing_prob:    float = 0.5    # SwingML (15-min XGBoost, 2h ahead)
+    ml_deep_prob:     float = 0.5    # Deep BiLSTM (15-min, 1h ahead)
+    ml_swing_trained: bool  = False
+    ml_deep_trained:  bool  = False
+
     # ── Multi-timeframe analysis ───────────────────────────────────────────────
     mtf_score:      float = 0.0
     mtf_alignment:  str   = "MIXED"
@@ -746,6 +752,10 @@ def analyse_ticker(
             rr_ratio          = pred["rr_ratio"],
             patterns          = pred["patterns"],
             reasons           = pred["reasons"],
+            ml_swing_prob     = round(float(ml_swing_p), 4),
+            ml_deep_prob      = round(float(ml_deep_p),  4),
+            ml_swing_trained  = _swing_trained,
+            ml_deep_trained   = _deep_trained,
             supports          = pred["supports"],
             resistances       = pred["resistances"],
             pivots            = pred["pivots"],

@@ -317,6 +317,11 @@
     .bt-tabs { display:flex; gap:6px; margin-bottom:16px; }
     .bt-tab { background:var(--surface2); border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:5px 14px; cursor:pointer; font-family:inherit; font-size:11px; }
     .bt-tab.active { border-color:var(--accent); color:var(--text); background:#1e1f3a; }
+    /* Neural Networks panel */
+    .nn-model-card { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+    .nn-bar-track { height:6px; background:rgba(255,255,255,.08); border-radius:3px; overflow:hidden; margin-top:4px; }
+    .nn-bar-fill  { height:100%; border-radius:3px; transition:width .4s ease; }
+    .nn-epoch-row { display:flex; align-items:center; gap:6px; padding:3px 0; border-bottom:1px solid rgba(255,255,255,.04); font-size:10px; }
     .history-stat { padding:8px 14px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); }
     .hist-win   { color:var(--green); }
     .hist-loss  { color:var(--red); }
@@ -477,6 +482,7 @@
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
     <button onclick="openPnl()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">💰 P&amp;L</button>
     <button onclick="openBacktest()" id="bt-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📈 Backtest</button>
+    <button onclick="openNeural()" id="neural-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🤖 Neural</button>
     <button onclick="openLearning()" id="learn-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧠 Learning</button>
     <button onclick="openAfterHours()" id="ah-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🌙 After-Hours</button>
     <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
@@ -492,6 +498,7 @@
   <button onclick="openHistory();toggleMobileNav()">📊 Signal History</button>
   <button onclick="openPnl();toggleMobileNav()">💰 P&amp;L Dashboard</button>
   <button onclick="openBacktest();toggleMobileNav()">📈 Backtest</button>
+  <button onclick="openNeural();toggleMobileNav()">🤖 Neural Networks</button>
   <button onclick="openLearning();toggleMobileNav()">🧠 Self-Learning</button>
   <button onclick="openAfterHours();toggleMobileNav()">🌙 After-Hours</button>
   <button onclick="openPaperTrading();toggleMobileNav()">🧪 Paper Trading</button>
@@ -802,6 +809,63 @@
     <div id="pt-panel-open"   style="display:block"></div>
     <div id="pt-panel-closed" style="display:none"></div>
     <div id="pt-panel-learn"  style="display:none"></div>
+  </div>
+</div>
+
+<!-- Neural Networks Panel -->
+<div class="history-modal" id="neural-modal" style="display:none">
+  <div class="history-modal-inner" style="max-width:1000px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">🤖 Neural Networks &amp; ML Models</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Live training status across all model types</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="loadNeuralStatus()" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:5px 12px;cursor:pointer;font-family:inherit;font-size:11px">Refresh</button>
+        <button onclick="closeNeural()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+      </div>
+    </div>
+
+    <!-- Training status banner -->
+    <div id="nn-training-banner" style="display:none;background:linear-gradient(90deg,#1e1f3a,#0f172a);border:1px solid var(--accent);border-radius:8px;padding:10px 14px;margin-bottom:14px;align-items:center;gap:10px">
+      <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite"></div>
+      <span id="nn-training-msg" style="font-size:12px;color:var(--text)">Deep BiLSTM training in progress…</span>
+      <span id="nn-epoch-badge" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+
+    <!-- Model grid -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:16px" id="nn-model-grid">
+      <div style="color:var(--muted);font-size:11px;padding:20px;grid-column:1/-1;text-align:center">Loading model status…</div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="bt-tabs" style="margin-bottom:14px">
+      <button class="bt-tab active" onclick="nnTab('progress')" id="nn-tab-progress">Training Progress</button>
+      <button class="bt-tab"        onclick="nnTab('history')"  id="nn-tab-history">Epoch History</button>
+      <button class="bt-tab"        onclick="nnTab('risk')"     id="nn-tab-risk">Risk Controls</button>
+    </div>
+
+    <div id="nn-panel-progress" style="display:block">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px">Deep BiLSTM — Loss Curve</div>
+      <canvas id="nn-loss-chart" height="140" style="width:100%;border-radius:8px;background:var(--surface2);display:block"></canvas>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">Loss decreases each epoch as the model learns directional patterns across all tickers.</div>
+    </div>
+
+    <div id="nn-panel-history" style="display:none;max-height:320px;overflow-y:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr>
+          <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Epoch</th>
+          <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Loss</th>
+          <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Tickers</th>
+          <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Time</th>
+        </tr></thead>
+        <tbody id="nn-epoch-table"></tbody>
+      </table>
+    </div>
+
+    <div id="nn-panel-risk" style="display:none">
+      <div style="color:var(--muted);font-size:11px">Loading risk controls…</div>
+    </div>
   </div>
 </div>
 
@@ -1801,28 +1865,35 @@ function openDetail(ticker) {
   // Component scores
   const mlVal      = s.ml_trained ? (s.ml_prob - 0.5) * 2 : null;
   const mlDailyVal = s.ml_trained ? ((s.ml_daily_prob||0.5) - 0.5) * 2 : null;
+  const mlSwingVal = s.ml_swing_trained ? ((s.ml_swing_prob||0.5) - 0.5) * 2 : null;
+  const mlDeepVal  = s.ml_deep_trained  ? ((s.ml_deep_prob ||0.5) - 0.5) * 2 : null;
   const mtfVal     = s.mtf_score || 0;
   const comp = [
-    ['MTF Score',   mtfVal,       true],
-    ['Technical',   s.technical,  true],
-    ['Volume',      s.volume,     true],
-    ['Scalp ML',    mlVal,        s.ml_trained],
-    ['Daily ML',    mlDailyVal,   s.ml_trained],
-    ['Sentiment',   s.sentiment,  true],
+    ['MTF Score',   mtfVal,       true,                    'Multi-timeframe alignment score'],
+    ['Technical',   s.technical,  true,                    'RSI, MACD, Bollinger, Stoch, CCI'],
+    ['Volume',      s.volume,     true,                    'Relative volume & OBV signal'],
+    ['Scalp ML',    mlVal,        s.ml_trained,            'XGBoost on 5-min bars (15min ahead)'],
+    ['Daily ML',    mlDailyVal,   s.ml_trained,            'XGBoost on daily bars (next-day)'],
+    ['Swing ML',    mlSwingVal,   s.ml_swing_trained,      'XGBoost on 15-min bars (2h ahead, 9mo history)'],
+    ['Deep LSTM',   mlDeepVal,    s.ml_deep_trained,       'BiLSTM+Attention trained across all tickers'],
+    ['Sentiment',   s.sentiment,  true,                    'News & social sentiment score'],
   ];
-  document.getElementById('dp-components').innerHTML = comp.map(([label, v, trained]) => {
-    if (!trained) {
-      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <span style="font-size:10px;color:var(--muted);min-width:70px">${label}</span>
-        <span style="font-size:10px;color:var(--muted);font-style:italic">Training in background…</span>
+  document.getElementById('dp-components').innerHTML = `
+    <div style="margin-bottom:8px">` +
+    comp.map(([label, v, trained, tip]) => {
+      if (!trained) {
+        return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px" title="${tip}">
+          <span style="font-size:10px;color:var(--muted);min-width:80px">${label}</span>
+          <span style="font-size:10px;color:var(--muted);font-style:italic">Training…</span>
+        </div>`;
+      }
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px" title="${tip}">
+        <span style="font-size:10px;color:var(--muted);min-width:80px">${label}</span>
+        ${miniBar(v, 80)}
+        <span style="font-size:11px;color:${scoreColor(v)};min-width:38px">${v>=0?'+':''}${fmt(v,3)}</span>
       </div>`;
-    }
-    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-      <span style="font-size:10px;color:var(--muted);min-width:70px">${label}</span>
-      ${miniBar(v, 80)}
-      <span style="font-size:11px;color:${scoreColor(v)};min-width:38px">${v>=0?'+':''}${fmt(v,3)}</span>
-    </div>`;
-  }).join('');
+    }).join('') +
+  `</div>`;
 
   // Earnings warning
   const ewEl = document.getElementById('dp-earnings-warn');
@@ -3400,6 +3471,278 @@ function _updateLearnHeaderBtn(wr, thresh, isLearning) {
   }
   const col = wr >= 90 ? 'var(--green-s)' : wr >= 72 ? 'var(--green)' : wr >= 54 ? 'var(--yellow)' : 'var(--red)';
   btn.innerHTML = `🧠 <span style="color:${col};font-weight:700">${wr.toFixed(0)}%</span>`;
+}
+
+// ─── Neural Networks Panel ──────────────────────────────────────────────────
+let _nnData = null;
+let _nnPollTimer = null;
+
+function openNeural() {
+  document.getElementById('neural-modal').style.display = 'flex';
+  loadNeuralStatus();
+  _nnPollTimer = setInterval(() => {
+    if (_nnData && _nnData.is_training_now) loadNeuralStatus();
+  }, 3000);
+}
+
+function closeNeural() {
+  document.getElementById('neural-modal').style.display = 'none';
+  if (_nnPollTimer) { clearInterval(_nnPollTimer); _nnPollTimer = null; }
+}
+
+function nnTab(name) {
+  ['progress','history','risk'].forEach(t => {
+    document.getElementById('nn-panel-'+t).style.display = t===name ? 'block' : 'none';
+    const btn = document.getElementById('nn-tab-'+t);
+    if (btn) btn.classList.toggle('active', t===name);
+  });
+  if (name === 'risk') loadRiskStatus();
+}
+
+async function loadNeuralStatus() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/ml-status`)).json();
+    _nnData = d;
+    renderNeuralPanel(d);
+  } catch(e) {
+    console.warn('Neural status error:', e);
+  }
+}
+
+function renderNeuralPanel(d) {
+  // Training banner
+  const banner = document.getElementById('nn-training-banner');
+  if (d.is_training_now) {
+    banner.style.display = 'flex';
+    const hist = d.training_history || [];
+    const last = hist[hist.length - 1];
+    document.getElementById('nn-epoch-badge').textContent =
+      last ? `Epoch ${last.epoch}/${last.total_epochs} · loss=${last.loss.toFixed(4)}` : '';
+  } else {
+    banner.style.display = 'none';
+  }
+
+  // Model grid
+  const models = [
+    { label: 'Scalp XGBoost',   icon: '📈', desc: '5-min · 15min ahead', ...d.scalp_models },
+    { label: 'Daily XGBoost',   icon: '📅', desc: '1-day · next-day',    ...d.daily_models },
+    { label: 'Reversal XGBoost',icon: '🔄', desc: '5-min · reversal',   ...d.reversal_models },
+    { label: 'Ensemble (×10)',   icon: '🎯', desc: '5-min · consensus',  ...d.ensemble_models },
+    { label: 'Swing XGBoost',   icon: '📊', desc: '15-min · 2h ahead',  ...d.swing_models },
+    { label: 'Deep BiLSTM',     icon: '🧠', desc: '15-min · universal',
+      total: 1, trained: d.deep_trained ? 1 : 0 },
+  ];
+
+  document.getElementById('nn-model-grid').innerHTML = models.map(m => {
+    const pct = m.total > 0 ? Math.round((m.trained/m.total)*100) : 0;
+    const color = pct >= 80 ? 'var(--green)' : pct >= 40 ? '#fbbf24' : 'var(--muted)';
+    return `<div class="nn-model-card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;font-weight:700">${m.icon} ${m.label}</span>
+        <span style="font-size:12px;font-weight:700;color:${color}">${m.trained}/${m.total}</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin:3px 0">${m.desc}</div>
+      <div class="nn-bar-track">
+        <div class="nn-bar-fill" style="width:${pct}%;background:${color}"></div>
+      </div>
+      <div style="font-size:10px;color:${color};margin-top:3px">${pct}% trained</div>
+    </div>`;
+  }).join('');
+
+  // Deep model info
+  const di = d.deep_model || {};
+  if (di.model_path) {
+    document.getElementById('nn-model-grid').innerHTML +=
+      `<div class="nn-model-card" style="grid-column:1/-1;background:#0f172a;border-color:var(--accent)">
+        <div style="font-size:11px;font-weight:700;color:var(--accent);margin-bottom:6px">🧠 BiLSTM Architecture</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;font-size:10px;color:var(--muted)">
+          <span>Seq length: <b style="color:var(--text)">${di.seq_len||20} bars</b></span>
+          <span>Hidden: <b style="color:var(--text)">${di.hidden_size||64}×2 (BiLSTM)</b></span>
+          <span>Layers: <b style="color:var(--text)">${di.n_layers||2}</b></span>
+          <span>Attention heads: <b style="color:var(--text)">${di.n_heads||4}</b></span>
+          <span>Lookahead: <b style="color:var(--text)">${di.lookahead||4}×15min = ${(di.lookahead||4)*15}min</b></span>
+          <span>Features: <b style="color:var(--text)">${di.n_features||23}</b></span>
+          <span>Epochs: <b style="color:var(--text)">${di.epochs||10}</b></span>
+          <span>Status: <b style="color:${d.deep_trained?'var(--green)':'var(--muted)'}">${d.deep_trained?'Trained':'Awaiting first retrain'}</b></span>
+        </div>
+      </div>`;
+  }
+
+  // Loss chart
+  renderLossChart(d.training_history || []);
+
+  // Epoch table
+  const hist = [...(d.training_history || [])].reverse();
+  document.getElementById('nn-epoch-table').innerHTML = hist.length ? hist.map(e => {
+    const ts = new Date(e.ts * 1000).toLocaleTimeString();
+    return `<tr>
+      <td style="padding:5px 8px;color:var(--text)">Epoch ${e.epoch}/${e.total_epochs}</td>
+      <td style="padding:5px 8px;color:var(--green)">${e.loss.toFixed(6)}</td>
+      <td style="padding:5px 8px;color:var(--muted)">${e.tickers}</td>
+      <td style="padding:5px 8px;color:var(--muted)">${ts}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="4" style="padding:20px;color:var(--muted);text-align:center">No training history yet — BiLSTM trains on first retrain cycle (~6am ET).</td></tr>`;
+}
+
+function renderLossChart(history) {
+  const canvas = document.getElementById('nn-loss-chart');
+  if (!canvas || !history.length) {
+    const ctx = canvas?.getContext('2d');
+    if (ctx) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#475569';
+      ctx.font = '11px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('No training data yet', canvas.width/2, canvas.height/2);
+    }
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.offsetWidth || 600;
+  const H = 140;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const pad = { top: 14, right: 16, bottom: 26, left: 52 };
+  const cW = W - pad.left - pad.right;
+  const cH = H - pad.top  - pad.bottom;
+
+  const losses = history.map(e => e.loss);
+  const minL   = Math.min(...losses) * 0.98;
+  const maxL   = Math.max(...losses) * 1.02;
+  const xScale = i => pad.left + (i / (losses.length - 1 || 1)) * cW;
+  const yScale = v => pad.top  + (1 - (v - minL) / (maxL - minL || 1)) * cH;
+
+  // Background
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,.06)';
+  ctx.lineWidth   = 1;
+  [0, 0.25, 0.5, 0.75, 1].forEach(f => {
+    const y = pad.top + f * cH;
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + cW, y); ctx.stroke();
+    const val = maxL - f * (maxL - minL);
+    ctx.fillStyle = '#475569';
+    ctx.font      = '9px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(val.toFixed(4), pad.left - 4, y + 3);
+  });
+
+  // Gradient fill
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + cH);
+  grad.addColorStop(0, 'rgba(99,102,241,.4)');
+  grad.addColorStop(1, 'rgba(99,102,241,0)');
+  ctx.beginPath();
+  losses.forEach((l, i) => { i===0 ? ctx.moveTo(xScale(i), yScale(l)) : ctx.lineTo(xScale(i), yScale(l)); });
+  ctx.lineTo(xScale(losses.length-1), pad.top + cH);
+  ctx.lineTo(xScale(0), pad.top + cH);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Loss line
+  ctx.beginPath();
+  ctx.strokeStyle = '#818cf8';
+  ctx.lineWidth   = 2;
+  losses.forEach((l, i) => { i===0 ? ctx.moveTo(xScale(i), yScale(l)) : ctx.lineTo(xScale(i), yScale(l)); });
+  ctx.stroke();
+
+  // Dots
+  ctx.fillStyle = '#a5b4fc';
+  losses.forEach((l, i) => {
+    ctx.beginPath();
+    ctx.arc(xScale(i), yScale(l), 3, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // X labels
+  ctx.fillStyle = '#475569';
+  ctx.font      = '9px monospace';
+  ctx.textAlign = 'center';
+  history.forEach((e, i) => {
+    ctx.fillText(`E${e.epoch}`, xScale(i), H - 8);
+  });
+
+  // Y axis label
+  ctx.save();
+  ctx.rotate(-Math.PI/2);
+  ctx.fillStyle = '#475569';
+  ctx.font      = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('BCE Loss', -(H/2), 10);
+  ctx.restore();
+}
+
+async function loadRiskStatus() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/risk-status`)).json();
+    const el = document.getElementById('nn-panel-risk');
+    const cbColor = d.circuit_open ? 'var(--red)' : 'var(--green)';
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div class="nn-model-card">
+          <div style="font-size:11px;font-weight:700;margin-bottom:8px">🛑 Daily Loss Circuit Breaker</div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:10px;color:var(--muted)">Status</span>
+            <span style="font-size:11px;font-weight:700;color:${cbColor}">${d.circuit_open ? 'OPEN — Trading Blocked' : 'CLOSED — Trading OK'}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:10px;color:var(--muted)">Daily P&amp;L</span>
+            <span style="font-size:11px;color:${(d.daily_pnl_pct||0)<0?'var(--red)':'var(--green)'}">${((d.daily_pnl_pct||0)>=0?'+':'') + ((d.daily_pnl_pct||0)).toFixed(2)}%</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+            <span style="font-size:10px;color:var(--muted)">Trades today</span>
+            <span style="font-size:11px;color:var(--text)">${d.trades_today||0} / ${d.max_trades||20}</span>
+          </div>
+          <div class="nn-bar-track" style="margin-top:6px">
+            <div class="nn-bar-fill" style="width:${Math.min(((d.trades_today||0)/(d.max_trades||20))*100,100)}%;background:${(d.trades_today||0)>=(d.max_trades||20)?'var(--red)':'var(--accent)'}"></div>
+          </div>
+          ${d.circuit_reason ? `<div style="font-size:10px;color:var(--red);margin-top:6px">${d.circuit_reason}</div>` : ''}
+        </div>
+        <div class="nn-model-card">
+          <div style="font-size:11px;font-weight:700;margin-bottom:8px">🔒 Sector Concentration</div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:8px">Max 2 open positions per sector</div>
+          ${(d.sector_counts && Object.keys(d.sector_counts).length) ? `
+          <div style="max-height:120px;overflow-y:auto">
+            ${Object.entries(d.sector_counts).sort((a,b)=>b[1]-a[1]).map(([sec,cnt]) =>
+              `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:10px">
+                <span style="color:var(--muted)">${sec}</span>
+                <span style="color:${cnt>=2?'var(--red)':'var(--green)'};font-weight:700">${cnt}/2</span>
+              </div>`
+            ).join('')}
+          </div>` : `<div style="font-size:10px;color:var(--muted)">No open positions.</div>`}
+        </div>
+      </div>
+      <div class="nn-model-card">
+        <div style="font-size:11px;font-weight:700;margin-bottom:8px">📋 Signal Blending Weights</div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:8px">How ML outputs are combined into the final ml_combined score:</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px">
+          ${[
+            ['Meta-Ensemble (XGBoost×10)', '70%', 'When swing + deep trained'],
+            ['Swing XGBoost (15-min)', '15%', 'When swing + deep trained'],
+            ['Deep BiLSTM (15-min)', '15%', 'When swing + deep trained'],
+            ['Meta-Ensemble only', '100%', 'When neither 15-min model trained'],
+            ['Meta-Ensemble + one 15-min', '80% + 20%', 'Partial training state'],
+          ].map(([name, weight, note]) =>
+            `<div style="background:var(--surface);border-radius:5px;padding:6px 8px">
+              <div style="font-size:10px;font-weight:700;color:var(--text)">${name}</div>
+              <div style="font-size:12px;font-weight:700;color:var(--accent)">${weight}</div>
+              <div style="font-size:9px;color:var(--muted)">${note}</div>
+            </div>`
+          ).join('')}
+        </div>
+      </div>`;
+  } catch(e) {
+    document.getElementById('nn-panel-risk').innerHTML =
+      `<div style="color:var(--muted);font-size:11px">Error loading risk data: ${e.message}</div>`;
+  }
 }
 
 // Update backtest header button live with win rate from WebSocket
