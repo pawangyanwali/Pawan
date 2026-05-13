@@ -387,6 +387,48 @@ def get_observation_summary() -> dict:
     }
 
 
+def get_ticker_learning_scores(lookback_days: int = 30, min_count: int = 3) -> dict[str, dict]:
+    """
+    Return per-ticker accuracy stats derived from both TP/SL and short-term outcomes.
+    Used by the scanner to attach learning_rank to each signal.
+
+    Returns: { "NVDA": {"win_rate": 0.71, "count": 42}, ... }
+    """
+    with _lock:
+        with _conn() as c:
+            rows = c.execute("""
+                SELECT ticker, outcome, short_outcome
+                FROM signals
+                WHERE ts >= datetime('now', ?)
+                  AND (outcome != 'PENDING' OR short_outcome != 'PENDING')
+            """, (f"-{lookback_days} days",)).fetchall()
+
+    from collections import defaultdict
+    counts: dict = defaultdict(lambda: {"wins": 0, "total": 0})
+
+    for r in rows:
+        # TP/SL takes priority, fall back to short-term
+        if r["outcome"] in ("WIN", "LOSS"):
+            won = r["outcome"] == "WIN"
+        elif r["short_outcome"] in ("WIN", "LOSS"):
+            won = r["short_outcome"] == "WIN"
+        else:
+            continue
+        counts[r["ticker"]]["total"] += 1
+        if won:
+            counts[r["ticker"]]["wins"] += 1
+
+    result = {}
+    for ticker, c in counts.items():
+        if c["total"] < min_count:
+            continue
+        result[ticker] = {
+            "win_rate": round(c["wins"] / c["total"], 4),
+            "count":    c["total"],
+        }
+    return result
+
+
 def get_recent_signals(limit: int = 50) -> list[dict]:
     """Return last N signals as list of dicts for the UI history table."""
     with _lock:

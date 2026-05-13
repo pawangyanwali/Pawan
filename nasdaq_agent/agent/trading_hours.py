@@ -33,6 +33,11 @@ _MODERATE: frozenset[str] = frozenset({
     "WDAY", "MELI", "ARM",  "APP",  "COIN",
     "TTD",  "HOOD", "SMCI", "TEAM", "OKTA",
     "FTNT", "PYPL", "CEG",  "AXON", "SNOW",
+    # Expansion — high retail AH participation, news-driven AH spikes
+    "PLTR", "MSTR", "MARA", "RIVN", "SOUN",
+    "IONQ", "CELH", "ENPH", "NET",  "ANET",
+    "SNAP", "RBLX", "UPST", "AFRM", "CVNA",
+    "ROKU", "PINS", "LYFT", "DKNG", "MDB",
 })
 
 # Anything not listed above defaults to REGULAR

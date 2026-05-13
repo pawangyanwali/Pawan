@@ -44,20 +44,31 @@ STRONG_SELL_THRESHOLD = -0.60
 # With 377 credits/min we can afford 50 tickers:
 #   50 tickers / 20 per batch = 3 calls × 0.20s = 0.60s per scan
 NASDAQ_TICKERS = [
-    # Mega-cap tech (unchanged core)
+    # ── Mega-cap tech (Tier 1 — always HIGH AH liquidity) ──────────────────────
     "AAPL", "MSFT", "NVDA", "AMZN", "META",
     "GOOGL", "TSLA", "AVGO", "NFLX", "AMD",
-    # Large-cap tech + semi
+
+    # ── Large-cap tech + semis ────────────────────────────────────────────────
     "ADBE", "QCOM", "CSCO", "INTU", "AMAT",
     "MU",   "PANW", "CRWD", "MRVL", "KLAC",
-    # Semi / EDA / biotech
     "LRCX", "ADI",  "SNPS", "CDNS", "ISRG",
     "REGN", "BKNG", "ADP",  "SBUX", "INTC",
-    # NEW — available on Grow plan
+
+    # ── Cloud / SaaS / fintech / crypto ──────────────────────────────────────
     "COST", "AMGN", "ABNB", "DDOG", "ZS",
     "WDAY", "MELI", "ARM",  "APP",  "COIN",
     "TTD",  "HOOD", "SMCI", "TEAM", "OKTA",
     "FTNT", "PYPL", "CEG",  "AXON", "SNOW",
+
+    # ── Expansion Tier A — high-volume momentum stocks ────────────────────────
+    "PLTR", "MSTR", "MARA", "RIVN", "LCID",   # AI/crypto/EV — volatile, heavy retail
+    "SOUN", "IONQ", "CELH", "ENPH", "LULU",   # AI voice, quantum, energy, solar, retail
+    "NET",  "ANET", "MDB",  "SNAP", "RBLX",   # cloud infra, social, gaming
+
+    # ── Expansion Tier B — solid mid-cap momentum ─────────────────────────────
+    "UPST", "AFRM", "CVNA", "LYFT", "ROKU",   # AI lending, BNPL, auto, rideshare, streaming
+    "PINS", "ZM",   "DOCU", "MPWR", "BILL",   # social, video, e-sign, power semi, fintech
+    "TWLO", "CHWY", "GTLB", "HUBS", "DKNG",   # cloud comm, pet, devops, CRM, sports betting
 ]
 
 # ── Company name map (avoids API calls) ──────────────────────────────────────
@@ -86,6 +97,13 @@ TICKER_NAMES = {
     "LULU":"Lululemon","NDAQ":"Nasdaq Inc","MPWR":"Monolithic Power","ENPH":"Enphase Energy",
     "FSLR":"First Solar","CELH":"Celsius Holdings","AXON":"Axon Enterprise",
     "SNOW":"Snowflake","MSTR":"MicroStrategy",
+    # Expansion tickers
+    "PLTR":"Palantir","MARA":"Marathon Digital","RIVN":"Rivian","LCID":"Lucid Motors",
+    "SOUN":"SoundHound AI","IONQ":"IonQ","NET":"Cloudflare","ANET":"Arista Networks",
+    "MDB":"MongoDB","SNAP":"Snap","RBLX":"Roblox","UPST":"Upstart","AFRM":"Affirm",
+    "CVNA":"Carvana","LYFT":"Lyft","ROKU":"Roku","PINS":"Pinterest","ZM":"Zoom",
+    "DOCU":"DocuSign","BILL":"Bill.com","TWLO":"Twilio","CHWY":"Chewy",
+    "GTLB":"GitLab","HUBS":"HubSpot","DKNG":"DraftKings",
 }
 
 # ── Market regime / benchmark tickers ────────────────────────────────────────

@@ -44,7 +44,7 @@ from agent.earnings import earnings_blackout
 from agent.gap_analysis import analyse_gap
 from agent.relative_strength import compute_relative_strength
 from agent.trade_management import build_trade_plan
-from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term
+from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
 from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.exit_signals import analyse_exits
@@ -228,6 +228,11 @@ class StockSignal:
 
     # ── Trading hours classification ──────────────────────────────────────────
     trading_tier: str = "MODERATE"    # HIGH | MODERATE | REGULAR (see trading_hours.py)
+
+    # ── Per-ticker self-learning score ────────────────────────────────────────
+    ticker_win_rate:  float = 0.0   # historical signal accuracy for this ticker (0-1)
+    ticker_obs_count: int   = 0     # number of resolved observations used
+    learning_rank:    float = 0.0   # combined rank = abs(score) × ticker_win_rate
 
     def to_dict(self) -> dict:
         import math
@@ -808,6 +813,24 @@ class Scanner:
                 results.append(sig)
 
         results.sort(key=lambda s: abs(s.score), reverse=True)
+
+        # Attach per-ticker learning scores and compute learning_rank.
+        # Fetched once per scan cycle (single DB query for all tickers).
+        try:
+            _ticker_scores = get_ticker_learning_scores()
+            for sig in results:
+                ts = _ticker_scores.get(sig.ticker)
+                if ts:
+                    sig.ticker_win_rate  = ts["win_rate"]
+                    sig.ticker_obs_count = ts["count"]
+                    # learning_rank = signal strength × historical accuracy
+                    # 0.5 baseline so new/unlearned tickers still appear
+                    sig.learning_rank = round(abs(sig.score) * (0.5 + sig.ticker_win_rate), 4)
+                else:
+                    sig.learning_rank = round(abs(sig.score) * 0.5, 4)
+        except Exception as _lr_err:
+            logger.debug(f"learning_rank error: {_lr_err}")
+
         self.signals   = results
         self.last_scan = datetime.utcnow().isoformat()
 

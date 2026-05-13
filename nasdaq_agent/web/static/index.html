@@ -431,6 +431,7 @@
   <button class="filter-btn" data-filter="UVOL">⚡ Vol Spike</button>
   <input class="search-input" id="search" type="text" placeholder="Search ticker…" />
   <select class="sort-select" id="sort-select">
+    <option value="learning_rank">🧠 Sort: Learning Rank</option>
     <option value="confidence">Sort: Confidence</option>
     <option value="score">Sort: Score</option>
     <option value="change_pct">Sort: Change %</option>
@@ -838,7 +839,7 @@
 
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
-let allSignals = [], filter = 'ALL', sortKey = 'confidence', searchQ = '';
+let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '';
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let allBreadth = null;
 let _chart = null, _candleSeries = null, _volSeries = null;
@@ -940,6 +941,7 @@ function filteredSorted() {
   else if (filter !== 'ALL') d = d.filter(s => s.prediction === filter);
   if (searchQ) { const q = searchQ.toUpperCase(); d = d.filter(s => s.ticker.includes(q) || s.name.toUpperCase().includes(q)); }
   d.sort((a,b) => {
+    if (sortKey === 'learning_rank') return (b.learning_rank||0) - (a.learning_rank||0);
     if (sortKey === 'confidence')  return b.confidence  - a.confidence;
     if (sortKey === 'score')       return Math.abs(b.score) - Math.abs(a.score);
     if (sortKey === 'change_pct')  return b.change_pct  - a.change_pct;
@@ -1047,8 +1049,17 @@ function renderTable() {
     }[tier] || { icon:'🕐', label:'Reg', col:'#64748b', bg:'rgba(100,116,139,.12)', title:'' };
     const tierTag = `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:600;background:${tierMeta.bg};color:${tierMeta.col};border:1px solid ${tierMeta.col}33" title="${tierMeta.title}">${tierMeta.icon} ${tierMeta.label}</span>`;
 
+    // Per-ticker self-learning accuracy badge
+    const lwr = s.ticker_win_rate || 0;
+    const lobs = s.ticker_obs_count || 0;
+    const lwrC = lwr >= 0.65 ? '#22c55e' : lwr >= 0.50 ? '#f59e0b' : lwr > 0 ? '#ef4444' : '#475569';
+    const lwrBg = lwr >= 0.65 ? 'rgba(34,197,94,.1)' : lwr >= 0.50 ? 'rgba(245,158,11,.1)' : lwr > 0 ? 'rgba(239,68,68,.1)' : 'rgba(71,85,105,.1)';
+    const learnTag = lobs >= 3
+      ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:${lwrBg};color:${lwrC};border:1px solid ${lwrC}44" title="Self-learning: ${(lwr*100).toFixed(0)}% accuracy over ${lobs} observations">🧠 ${(lwr*100).toFixed(0)}%</span>`
+      : `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;color:#475569;border:1px solid #47556933" title="Not enough observations yet">🧠 new</span>`;
+
     return `<tr data-ticker="${s.ticker}" style="${rowBg}">
-      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${tierTag}</td>
+      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${tierTag}${learnTag}</td>
       <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
       <td class="chg-cell ${chgC}" style="white-space:nowrap">
         <div style="font-size:13px;font-weight:700">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%${sessionTag}</div>
