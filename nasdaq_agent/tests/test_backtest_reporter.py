@@ -37,6 +37,9 @@ def test_full_report_recent_has_outcome_color():
 
 def test_adjust_confidence_no_calibration():
     """With no calibration data, confidence should be returned unchanged."""
+    import agent.backtest_reporter as br
+    with br._cal_lock:
+        br._calibration = {}   # ensure empty — other tests may have populated it
     result = adjust_confidence(60.0, vwap_event="RECLAIM")
     assert result == 60.0
 

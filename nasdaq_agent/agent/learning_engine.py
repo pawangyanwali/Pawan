@@ -21,11 +21,13 @@ triggered) emit a single INFO line to the root logger so the console stays clean
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -35,13 +37,39 @@ LEARN_INTERVAL_SECS   = 90      # how often to run a learning cycle (1.5 min)
 RETRAIN_MIN_NEW       = 15      # new outcomes needed to trigger ML retrain
 RETRAIN_COOLDOWN_SECS = 600     # don't retrain more often than every 10 min
 
+# ── Persistent log file (JSONL — one entry per line, append-only) ─────────────
+_LOG_PATH   = Path(__file__).parent.parent / "data" / "learning_log.jsonl"
+_MAX_LOG_LINES = 5000   # keep last 5000 lines; older entries trimmed on startup
+
 # ── In-memory ring buffer for dashboard log ───────────────────────────────────
-_LOG_BUFFER: deque[dict] = deque(maxlen=200)
+_LOG_BUFFER: deque[dict] = deque(maxlen=500)
 _buf_lock   = threading.Lock()
+_log_file_lock = threading.Lock()
+
+
+def _load_log_from_disk() -> None:
+    """Pre-populate the in-memory buffer from the persisted JSONL file."""
+    try:
+        if not _LOG_PATH.exists():
+            return
+        lines = _LOG_PATH.read_text().splitlines()
+        # Trim to max on startup to prevent unbounded growth
+        if len(lines) > _MAX_LOG_LINES:
+            lines = lines[-_MAX_LOG_LINES:]
+            _LOG_PATH.write_text("\n".join(lines) + "\n")
+        with _buf_lock:
+            for line in lines[-500:]:   # fill buffer with last 500
+                try:
+                    _LOG_BUFFER.append(json.loads(line))
+                except Exception:
+                    pass
+        logger.info(f"[Learning] Restored {min(500, len(lines))} log entries from disk.")
+    except Exception as e:
+        logger.warning(f"[Learning] Could not load log from disk: {e}")
 
 
 def _log(msg: str, level: str = "INFO", significant: bool = False) -> None:
-    """Append to ring buffer; only emit to console if significant."""
+    """Append to ring buffer and persist to JSONL file."""
     entry = {
         "ts":      datetime.now(timezone.utc).isoformat(),
         "level":   level,
@@ -49,6 +77,14 @@ def _log(msg: str, level: str = "INFO", significant: bool = False) -> None:
     }
     with _buf_lock:
         _LOG_BUFFER.append(entry)
+    # Append to disk (non-blocking, fire-and-forget)
+    try:
+        with _log_file_lock:
+            _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(_LOG_PATH, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
     if significant:
         logger.info(f"[Learning] {msg}")
 
@@ -58,6 +94,10 @@ def get_learning_log(limit: int = 100) -> list[dict]:
     with _buf_lock:
         entries = list(_LOG_BUFFER)
     return entries[-limit:]
+
+
+# Load persisted log entries on module import so dashboard shows history immediately
+_load_log_from_disk()
 
 
 # ── Learning engine ───────────────────────────────────────────────────────────

@@ -4,15 +4,26 @@ higher than the current close (label=1) or lower/flat (label=0).
 
 Training uses the full historical 5-min dataset; inference runs on the
 most recent feature row fetched during each scan cycle.
+
+Models are persisted to data/models/ via joblib so training is cumulative
+across restarts.  A saved model is always loaded first; retraining replaces
+it only when fresh data is available.
 """
 
 import logging
 import time
+from pathlib import Path
+
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.calibration import CalibratedClassifierCV
+
+# ── Model persistence directory ───────────────────────────────────────────────
+_MODEL_DIR = Path(__file__).parent.parent / "data" / "models"
+_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 from xgboost import XGBClassifier
 
 from agent.data_fetcher import fetch_historical
@@ -37,6 +48,28 @@ class StockMLModel:
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._load()   # restore from disk on construction
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def _path(self) -> Path:
+        return _MODEL_DIR / f"scalp_{self.ticker}.joblib"
+
+    def _save(self) -> None:
+        try:
+            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] scalp save failed: {e}")
+
+    def _load(self) -> None:
+        try:
+            p = self._path()
+            if p.exists():
+                d = joblib.load(p)
+                self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                logger.debug(f"[{self.ticker}] scalp model loaded from disk")
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] scalp load failed (will retrain): {e}")
 
     # ── Training ──────────────────────────────────────────────────────────────
 
@@ -78,6 +111,7 @@ class StockMLModel:
         self.model = CalibratedClassifierCV(base, cv=3, method="isotonic")
         self.model.fit(X_train_s, y_train)
         self.trained = True
+        self._save()
 
         acc = self.model.score(X_test_s, y_test)
         logger.info(f"[{self.ticker}] ML model trained | acc={acc:.3f} | samples={len(X_train)}")
@@ -173,6 +207,28 @@ class DailyMLModel:
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._load()
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def _path(self) -> Path:
+        return _MODEL_DIR / f"daily_{self.ticker}.joblib"
+
+    def _save(self) -> None:
+        try:
+            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] daily save failed: {e}")
+
+    def _load(self) -> None:
+        try:
+            p = self._path()
+            if p.exists():
+                d = joblib.load(p)
+                self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                logger.debug(f"[{self.ticker}] daily model loaded from disk")
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] daily load failed (will retrain): {e}")
 
     # ── Training ──────────────────────────────────────────────────────────────
 
@@ -214,6 +270,7 @@ class DailyMLModel:
         self.model = CalibratedClassifierCV(base, cv=3, method="isotonic")
         self.model.fit(X_train_s, y_train)
         self.trained = True
+        self._save()
 
         acc = self.model.score(X_test_s, y_test)
         logger.info(
@@ -283,6 +340,28 @@ class ReversalMLModel:
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._load()
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def _path(self) -> Path:
+        return _MODEL_DIR / f"reversal_{self.ticker}.joblib"
+
+    def _save(self) -> None:
+        try:
+            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] reversal save failed: {e}")
+
+    def _load(self) -> None:
+        try:
+            p = self._path()
+            if p.exists():
+                d = joblib.load(p)
+                self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                logger.debug(f"[{self.ticker}] reversal model loaded from disk")
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] reversal load failed (will retrain): {e}")
 
     def _prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         df = compute_indicators(df.copy())
@@ -329,6 +408,7 @@ class ReversalMLModel:
         self.model = CalibratedClassifierCV(base, cv=3, method="isotonic")
         self.model.fit(X_tr, y_train)
         self.trained = True
+        self._save()
 
         acc = self.model.score(X_te, y_test)
         logger.info(

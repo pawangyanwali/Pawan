@@ -7,12 +7,17 @@ Also owns the ML feedback retraining scheduler:
     since last retrain, trigger a background retrain with the outcome labels.
 """
 from __future__ import annotations
+import json
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+# ── Calibration persistence ───────────────────────────────────────────────────
+_CAL_PATH = Path(__file__).parent.parent / "data" / "confidence_calibration.json"
 
 from agent.live_backtest import (
     get_performance_stats,
@@ -157,13 +162,43 @@ def _log_attribution(df: pd.DataFrame) -> None:
 
 # ── Confidence calibration table ──────────────────────────────────────────────
 # Stores observed win rates per context to adjust signal confidence at generation time.
+# Persisted to data/confidence_calibration.json so learning survives restarts.
 
 _calibration: dict[str, float] = {}   # key: "vwap_event:RECLAIM" → observed_win_rate
 _cal_lock = threading.Lock()
 
 
+def _cal_load() -> None:
+    """Load calibration table from disk at startup."""
+    global _calibration
+    try:
+        if _CAL_PATH.exists():
+            with open(_CAL_PATH) as f:
+                data = json.load(f)
+            with _cal_lock:
+                _calibration = {k: float(v) for k, v in data.items()}
+            logger.info(f"[BT Calibration] Loaded {len(_calibration)} context calibrations from disk.")
+    except Exception as e:
+        logger.warning(f"[BT Calibration] Could not load saved calibration: {e}")
+
+
+def _cal_save() -> None:
+    try:
+        _CAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _cal_lock:
+            snapshot = dict(_calibration)
+        with open(_CAL_PATH, "w") as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception as e:
+        logger.warning(f"[BT Calibration] Save failed: {e}")
+
+
+# Load persisted calibration on module import
+_cal_load()
+
+
 def _update_confidence_calibration(df: pd.DataFrame) -> None:
-    """Build a calibration table: context_key → observed_win_rate."""
+    """Build a calibration table: context_key → observed_win_rate, then persist."""
     global _calibration
     new_cal: dict[str, float] = {}
 
@@ -180,6 +215,7 @@ def _update_confidence_calibration(df: pd.DataFrame) -> None:
     with _cal_lock:
         _calibration = new_cal
 
+    _cal_save()
     logger.info(f"[BT Calibration] Updated {len(new_cal)} context calibrations.")
 
 
