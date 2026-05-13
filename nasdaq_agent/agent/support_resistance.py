@@ -19,7 +19,7 @@ import pandas as pd
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_CLUSTER_TOLERANCE = 0.0025   # 0.25 % — levels closer than this are merged
+_CLUSTER_TOLERANCE = 0.004    # 0.4% — tighter clustering creates too many trivial levels
 _MIN_ROWS_PIVOT    = 3        # minimum bars needed for pivot calculation
 _MIN_ROWS_SWING    = 5        # minimum bars needed for swing detection
 _POC_BUCKETS       = 50       # number of price buckets for volume profile
@@ -98,8 +98,8 @@ def _cluster_levels(levels: list[float], tolerance: float = _CLUSTER_TOLERANCE) 
 
 def find_swing_levels(
     df: pd.DataFrame,
-    window: int = 5,
-    max_levels: int = 4,
+    window: int = 10,
+    max_levels: int = 5,
 ) -> dict:
     """
     Identify swing high and swing low levels using a rolling local-extrema

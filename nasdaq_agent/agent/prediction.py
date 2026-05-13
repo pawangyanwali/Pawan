@@ -447,68 +447,109 @@ def _detect_bounce_setup(
 
 def _evaluate_rr(
     price:     float,
-    support:   float,
-    resist:    float,
+    sr:        dict,
     direction: str,
 ) -> tuple[float, float, float, str, bool]:
     """
-    Calculate and optimise stop/target to aim for ≥ 2:1 R:R.
+    Professional R:R engine — enforces minimum 1.5:1 discipline.
 
-    Strategy:
-      1. Fix the target at nearest S/R on the reward side.
-      2. Calculate what stop is needed for exactly 2:1.
-      3. If that optimal stop is outside the key S/R level (would be too
-         loose), tighten to just-below support (0.5 % buffer).
-      4. Re-evaluate actual R:R and classify quality.
-
-    Returns (stop_loss, target, rr_ratio, rr_quality, rr_qualifies)
+    A 30-year trader's logic:
+      1.  Stop = just below the nearest STRUCTURAL support (or above resistance
+          for shorts) that is at least MIN_STOP_DIST away from entry.
+          Never risk more than MAX_RISK_PCT of the stock price.
+      2.  Target = find the first resistance BEYOND the MIN_RR level.
+          • If resistance exists between entry and the MIN_RR level, price will
+            stall there → use that as target (R:R will be LOW → trader decides
+            whether to skip or size down).
+          • If the path is CLEAR to MIN_RR, project the 1.5:1 level as target.
+            Clear air = runway = higher-probability trade.
+      3.  Never pick a target that is less than MIN_TARGET_PCT from entry.
     """
-    is_bull = direction in ("BUY", "STRONG BUY", "NEUTRAL")
+    MIN_STOP_DIST = 0.004   # stop must be ≥ 0.4% from entry to avoid noise
+    MAX_RISK_PCT  = 0.020   # cap scalp risk at 2% of stock price
 
-    min_move = price * _MIN_TARGET_PCT   # absolute minimum target distance
+    supports    = sorted(
+        [float(s) for s in sr.get("supports",    []) if isinstance(s, (int, float)) and s > 0],
+        reverse=True,
+    )
+    resistances = sorted(
+        [float(r) for r in sr.get("resistances", []) if isinstance(r, (int, float)) and r > 0],
+    )
 
-    if is_bull and resist > 0 and support > 0:
-        target = resist
-        # Enforce minimum target distance — if resist is too close, project forward
-        if target - price < min_move:
-            target = price + min_move
-        reward = target - price
-        if reward <= 0:
-            raw_stop = support * 0.995
-            rr = _compute_rr(price, target, raw_stop)
+    is_bull = direction in ("BUY", "STRONG BUY")
+
+    if is_bull:
+        # ── Stop: nearest structural support ≥ MIN_STOP_DIST below entry ────────
+        structural = next(
+            (s for s in supports if (price - s) / price >= MIN_STOP_DIST),
+            None,
+        )
+        if structural is None:
+            structural = price * (1.0 - 2 * MIN_STOP_DIST)   # synthetic floor
+
+        stop_loss = round(structural * 0.995, 4)   # 0.5% buffer below support
+        risk      = price - stop_loss
+
+        # Cap: never risk more than 2% on a scalp
+        if risk > price * MAX_RISK_PCT:
+            stop_loss = round(price * (1.0 - MAX_RISK_PCT), 4)
+            risk      = price - stop_loss
+
+        risk = max(risk, price * 0.001)   # floor to prevent division by zero
+
+        # ── Target: find clear runway to MIN_RR ─────────────────────────────────
+        min_target = price + risk * _MIN_RR   # the 1.5:1 level we need to reach
+
+        # Is there overhead resistance BLOCKING the path before the 1.5:1 level?
+        blocking = [r for r in resistances if price < r < min_target]
+
+        if blocking:
+            # Nearest blocker is the realistic ceiling — R:R will likely be LOW
+            # Show the trade anyway; trader decides to skip or wait for breakout
+            target = round(min(blocking), 4)
         else:
-            ideal_stop = price - (reward / _MIN_RR)
-            tight_stop = support * 0.995
-            stop = min(ideal_stop, tight_stop)
-            rr   = _compute_rr(price, target, stop)
-        stop = stop if reward > 0 else raw_stop
+            # Clear runway — use first resistance at-or-beyond the 1.5:1 level
+            # (adds a structural anchor; if none exists, project the 1.5:1 level)
+            beyond = [r for r in resistances if r >= min_target]
+            target = round(min(beyond), 4) if beyond else round(min_target, 4)
 
-    elif not is_bull and support > 0 and resist > 0:
-        target = support
-        # Enforce minimum target distance — if support is too close, project downward
-        if price - target < min_move:
-            target = price - min_move
-        reward = price - target
-        if reward <= 0:
-            raw_stop = resist * 1.005
-            rr = _compute_rr(price, target, raw_stop)
-            stop = raw_stop
+    else:   # SELL / STRONG SELL
+        # ── Stop: nearest structural resistance ≥ MIN_STOP_DIST above entry ─────
+        structural = next(
+            (r for r in resistances if (r - price) / price >= MIN_STOP_DIST),
+            None,
+        )
+        if structural is None:
+            structural = price * (1.0 + 2 * MIN_STOP_DIST)
+
+        stop_loss = round(structural * 1.005, 4)
+        risk      = stop_loss - price
+
+        if risk > price * MAX_RISK_PCT:
+            stop_loss = round(price * (1.0 + MAX_RISK_PCT), 4)
+            risk      = stop_loss - price
+
+        risk = max(risk, price * 0.001)
+
+        # ── Target: find clear runway down to MIN_RR ─────────────────────────────
+        min_target = price - risk * _MIN_RR
+
+        blocking = [s for s in supports if min_target < s < price]
+
+        if blocking:
+            target = round(max(blocking), 4)
         else:
-            ideal_stop = price + (reward / _MIN_RR)
-            tight_stop = resist * 1.005
-            stop = max(ideal_stop, tight_stop)
-            rr   = _compute_rr(price, target, stop)
-    else:
-        # Fallback
-        stop   = (support * 0.995) if is_bull else (resist * 1.005)
-        target = resist if is_bull else support
-        if is_bull and target - price < min_move:
-            target = price + min_move
-        elif not is_bull and price - target < min_move:
-            target = price - min_move
-        rr = _compute_rr(price, target, stop)
+            below  = [s for s in supports if s <= min_target]
+            target = round(max(below), 4) if below else round(min_target, 4)
 
-    # Quality classification
+    # Enforce absolute minimum target move
+    if is_bull and target - price < price * _MIN_TARGET_PCT:
+        target = round(price + price * _MIN_TARGET_PCT, 4)
+    elif not is_bull and price - target < price * _MIN_TARGET_PCT:
+        target = round(price - price * _MIN_TARGET_PCT, 4)
+
+    rr = _compute_rr(price, target, stop_loss)
+
     if rr >= 4.0:
         quality = "EXCELLENT"
     elif rr >= 3.0:
@@ -518,7 +559,7 @@ def _evaluate_rr(
     else:
         quality = "LOW"
 
-    return round(stop, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR
+    return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR
 
 
 def _detect_exhaustion(
@@ -789,7 +830,7 @@ def generate_prediction(
 
     # ── 7. Optimised stops, targets and R:R ──────────────────────────────────
     stop_loss, target, rr_ratio, rr_quality, rr_qualifies = _evaluate_rr(
-        price, support, resistance, direction
+        price, sr, direction
     )
 
     # ── 7b. Exhaustion / retest check ─────────────────────────────────────────
@@ -801,7 +842,7 @@ def generate_prediction(
         retest_entry = exhaustion["entry_zone_high"]
         if retest_entry > 0:
             adj_stop, adj_target, adj_rr, rr_quality, rr_qualifies = _evaluate_rr(
-                retest_entry, support, resistance, direction
+                retest_entry, sr, direction
             )
             if adj_rr > 0:
                 rr_ratio  = adj_rr
