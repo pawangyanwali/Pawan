@@ -51,6 +51,7 @@ _state: dict = {
     "last_updated":        None,
     "suppressed_count":    0,      # how many signals suppressed this session
     "threshold_history":   [],     # [{threshold, win_rate, ts}] — last 10
+    "false_negative_count":  0,     # suppressed signals that would have been wins
 }
 
 
@@ -231,6 +232,25 @@ def _compute_threshold(by_confidence: dict, current_wr: float) -> float:
 
 # ── Signal suppression check ──────────────────────────────────────────────────
 
+def record_false_negative_check(
+    direction:    str,
+    price_moved:  float,   # pct move after suppression
+) -> None:
+    """
+    After suppressing a signal, check if price moved in the predicted direction.
+    If it would have been a WIN, count it as a false negative — the filter is
+    being too conservative.
+    """
+    from agent.signal_tracker import SHORT_WIN_PCT, SLIPPAGE_PCT
+    threshold = SHORT_WIN_PCT + SLIPPAGE_PCT
+    d = 1 if "BUY" in direction else -1
+    would_have_won = (price_moved * d) >= threshold
+    if would_have_won:
+        with _lock:
+            _state["false_negative_count"] = _state.get("false_negative_count", 0) + 1
+        _save()
+
+
 def should_suppress(
     vwap_event:  str = "",
     session:     str = "",
@@ -314,6 +334,7 @@ def get_status() -> dict:
             "blocked_contexts":   _state["blocked_contexts"],
             "boosted_contexts":   _state["boosted_contexts"],
             "suppressed_count":   _state["suppressed_count"],
+            "false_negative_count": _state.get("false_negative_count", 0),
             "last_updated":       _state["last_updated"],
             "threshold_history":  _state["threshold_history"],
             "is_learning":        _state["total_resolved"] >= MIN_SAMPLE,

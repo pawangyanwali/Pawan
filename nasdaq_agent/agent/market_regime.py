@@ -86,11 +86,15 @@ def detect_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
     """
     Classify market regime from SPY and QQQ intraday data.
 
+    Uses rolling 60-minute momentum (12 × 5min bars) instead of open-to-now
+    to avoid noisy regime flips early in the session.
+
     Rules (applied in order):
-      1. If vix_proxy > 2.5%  → CHOPPY
-      2. Both SPY + QQQ > +0.4% today → BULL_TREND
-      3. Both SPY + QQQ < -0.4% today → BEAR_TREND
-      4. Disagreement or small move   → NEUTRAL
+      1. VIX proxy > 2.5% → CHOPPY
+      2. VIX proxy spiking (last 5 bars significantly higher) → CHOPPY
+      3. Both SPY + QQQ 60-min momentum > +0.3% → BULL_TREND
+      4. Both SPY + QQQ 60-min momentum < -0.3% → BEAR_TREND
+      5. Disagreement or small move → NEUTRAL
     """
     info = RegimeInfo()
 
@@ -98,15 +102,18 @@ def detect_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
     qqq_ok = df_qqq is not None and len(df_qqq) >= 5
 
     if spy_ok:
-        spy_open  = float(df_spy["Open"].iloc[0])
-        spy_last  = float(df_spy["Close"].iloc[-1])
-        info.spy_change = round((spy_last - spy_open) / spy_open * 100, 3) if spy_open else 0.0
-        info.vix_proxy  = _vix_proxy(df_spy)
+        info.vix_proxy = _vix_proxy(df_spy)
+        # 60-min momentum: last close vs close 12 bars ago (or open if fewer bars)
+        n_lookback = min(12, len(df_spy) - 1)
+        spy_now   = float(df_spy["Close"].iloc[-1])
+        spy_ago   = float(df_spy["Close"].iloc[-n_lookback - 1]) if n_lookback > 0 else float(df_spy["Open"].iloc[0])
+        info.spy_change = round((spy_now - spy_ago) / spy_ago * 100, 3) if spy_ago else 0.0
 
     if qqq_ok:
-        qqq_open  = float(df_qqq["Open"].iloc[0])
-        qqq_last  = float(df_qqq["Close"].iloc[-1])
-        info.qqq_change = round((qqq_last - qqq_open) / qqq_open * 100, 3) if qqq_open else 0.0
+        n_lookback = min(12, len(df_qqq) - 1)
+        qqq_now   = float(df_qqq["Close"].iloc[-1])
+        qqq_ago   = float(df_qqq["Close"].iloc[-n_lookback - 1]) if n_lookback > 0 else float(df_qqq["Open"].iloc[0])
+        info.qqq_change = round((qqq_now - qqq_ago) / qqq_ago * 100, 3) if qqq_ago else 0.0
 
     if not (spy_ok or qqq_ok):
         info.description = "No SPY/QQQ data — regime unknown."
@@ -116,23 +123,31 @@ def detect_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
     sc = info.spy_change
     qc = info.qqq_change
 
-    if vp > 2.5:
+    # Detect VIX spike: recent volatility accelerating
+    vix_spiking = False
+    if spy_ok and len(df_spy) >= 10:
+        recent_vix = _vix_proxy(df_spy.iloc[-5:])
+        older_vix  = _vix_proxy(df_spy.iloc[-10:-5])
+        vix_spiking = recent_vix > older_vix * 1.4 and recent_vix > 1.5
+
+    if vp > 2.5 or vix_spiking:
         regime = "CHOPPY"
-        desc   = f"High volatility (VIX proxy {vp:.1f}%) — signals discounted."
-    elif sc > 0.4 and qc > 0.4:
+        spike_note = " (accelerating)" if vix_spiking else ""
+        desc = f"High volatility (VIX proxy {vp:.1f}%{spike_note}) — signals discounted."
+    elif sc > 0.3 and qc > 0.3:
         regime = "BULL_TREND"
-        desc   = f"SPY {sc:+.2f}% / QQQ {qc:+.2f}% — longs favoured."
-    elif sc < -0.4 and qc < -0.4:
+        desc = f"SPY {sc:+.2f}% / QQQ {qc:+.2f}% (60-min) — longs favoured."
+    elif sc < -0.3 and qc < -0.3:
         regime = "BEAR_TREND"
-        desc   = f"SPY {sc:+.2f}% / QQQ {qc:+.2f}% — shorts favoured."
+        desc = f"SPY {sc:+.2f}% / QQQ {qc:+.2f}% (60-min) — shorts favoured."
     else:
         regime = "NEUTRAL"
-        desc   = f"SPY {sc:+.2f}% / QQQ {qc:+.2f}% — no directional edge."
+        desc = f"SPY {sc:+.2f}% / QQQ {qc:+.2f}% (60-min) — no directional edge."
 
-    lm, sm        = _REGIME_WEIGHT[regime]
-    info.regime   = regime
-    info.label    = _REGIME_LABEL[regime]
-    info.color    = _REGIME_COLOR[regime]
+    lm, sm          = _REGIME_WEIGHT[regime]
+    info.regime     = regime
+    info.label      = _REGIME_LABEL[regime]
+    info.color      = _REGIME_COLOR[regime]
     info.long_mult  = lm
     info.short_mult = sm
     info.description = desc

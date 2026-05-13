@@ -34,7 +34,7 @@ from agent.data_fetcher import (
 )
 from agent.technical import compute_indicators, score_technical
 from agent.volume import score_volume, relative_volume, detect_unusual_volume
-from agent.ml_model import predict, predict_daily, predict_reversal, retrain_all
+from agent.ml_model import predict, predict_daily, predict_reversal, predict_ensemble, retrain_all
 from agent.sentiment import score_sentiment
 from agent.prediction import generate_prediction
 from agent.mtf_analysis import multi_timeframe_analysis
@@ -44,7 +44,7 @@ from agent.earnings import earnings_blackout
 from agent.gap_analysis import analyse_gap
 from agent.relative_strength import compute_relative_strength
 from agent.trade_management import build_trade_plan
-from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
+from agent.signal_tracker import init_db, record_signal, record_suppressed_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
 from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.exit_signals import analyse_exits
@@ -363,11 +363,18 @@ def analyse_ticker(
 
         tech            = score_technical(last)
         vol             = score_volume(df_ind)
-        ml_scalp        = predict(ticker, df_ind)
-        ml_daily_p      = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
-        ml_reversal_p   = predict_reversal(ticker, df_ind)
-        # Blend: 40% daily (swing context) + 60% intraday (scalp timing)
-        ml_combined     = round(0.4 * ml_daily_p + 0.6 * ml_scalp, 4)
+        ml_scalp                   = predict(ticker, df_ind)
+        ml_daily_p                 = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
+        ml_reversal_p              = predict_reversal(ticker, df_ind)
+        ml_ensemble_p, ml_agree    = predict_ensemble(ticker, df_ind)
+        # Meta-blend: ensemble gets most weight; daily provides swing context
+        ml_combined = round(
+            0.25 * ml_scalp +
+            0.45 * ml_ensemble_p +
+            0.20 * ml_daily_p +
+            0.10 * ml_reversal_p,
+            4,
+        )
         sent, headlines = score_sentiment(ticker)
         rvol            = relative_volume(df_ind)
         uvol            = detect_unusual_volume(df_ind)
@@ -408,6 +415,8 @@ def analyse_ticker(
             ml_reversal_prob=ml_reversal_p,
             vwap_score=vwap_sig["score"],
             sector_mult=sector_ctx.score_mult,
+            ensemble_prob=ml_ensemble_p,
+            ensemble_agreement=ml_agree,
         )
 
         # Apply regime multiplier to score
@@ -560,6 +569,22 @@ def analyse_ticker(
                 _is_suppressed     = True
                 _suppress_reason   = suppress_reason
                 increment_suppressed()
+                # Log suppressed signal so false-negative rate can be measured
+                try:
+                    record_suppressed_signal(
+                        ticker=ticker, direction=pred.get("direction", "NEUTRAL"),
+                        entry=price, confidence=pred["confidence"],
+                        suppress_reason=suppress_reason,
+                        session=sess_info.get("session", ""),
+                        regime=regime.regime,
+                        trading_tier=pred.get("trading_tier", "REGULAR"),
+                        vwap_event=vwap_sig.get("event", ""),
+                        rsi_zone=pred.get("rsi_zone", ""),
+                        rel_volume=float(rvol),
+                        trend=pred.get("trend", ""),
+                    )
+                except Exception:
+                    pass
 
         # Record signal in tracker + open paper trade (BUY/SELL only)
         if pred["direction"] in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:

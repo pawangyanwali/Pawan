@@ -42,9 +42,38 @@ FEATURE_COLS = [
     "bb_pct", "bb_width", "stoch_k", "stoch_d", "cci_20", "mfi_14",
     "ema_cross", "vol_ratio", "atr_14", "obv",
     "ret_1", "ret_3", "ret_5",
+    "ret_10", "time_sin", "time_cos", "price_range_pos", "vol_trend",
 ]
 
 LOOKAHEAD_BARS = 3   # predict direction 3×5min = 15 min ahead
+
+
+def add_live_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute extra features on top of whatever compute_indicators returns."""
+    df = df.copy()
+    # time-of-day cyclical encoding
+    if isinstance(df.index, pd.DatetimeIndex):
+        minutes = df.index.hour * 60 + df.index.minute
+        day_min = (16 * 60) - (9 * 60 + 30)  # 390 min trading day
+        norm = (minutes - (9 * 60 + 30)) / day_min
+        norm = norm.clip(0, 1)
+        df["time_sin"] = np.sin(2 * np.pi * norm)
+        df["time_cos"] = np.cos(2 * np.pi * norm)
+    else:
+        df["time_sin"] = 0.0
+        df["time_cos"] = 0.0
+    # where price sits in today's H-L range
+    day_high = df["High"].rolling(78, min_periods=1).max()
+    day_low  = df["Low"].rolling(78, min_periods=1).min()
+    rng = (day_high - day_low).replace(0, np.nan)
+    df["price_range_pos"] = ((df["Close"] - day_low) / rng).clip(0, 1).fillna(0.5)
+    # 10-bar return
+    df["ret_10"] = df["Close"].pct_change(10)
+    # volume trend: recent 5-bar avg vs 20-bar avg
+    v5  = df["Volume"].rolling(5,  min_periods=1).mean()
+    v20 = df["Volume"].rolling(20, min_periods=1).mean()
+    df["vol_trend"] = (v5 / v20.replace(0, np.nan)).fillna(1.0).clip(0, 5)
+    return df
 
 
 class StockMLModel:
@@ -88,6 +117,7 @@ class StockMLModel:
             return False
 
         df = compute_indicators(df)
+        df = add_live_features(df)
         df = df.dropna(subset=FEATURE_COLS)
 
         # Label: 1 if close N bars ahead > current close
@@ -100,11 +130,11 @@ class StockMLModel:
         if len(X) < 60:
             return False
 
-        # Require both classes to be present and neither dominating >92%.
+        # Require both classes to be present and neither dominating >85%.
         # Severely imbalanced datasets produce empty calibrated_classifiers_ lists
         # in CalibratedClassifierCV which triggers a divide-by-zero RuntimeWarning.
         class_counts = np.bincount(y)
-        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.92:
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
             return False
 
         X_train, X_test, y_train, y_test = train_test_split(
@@ -151,6 +181,7 @@ class StockMLModel:
             return 0.5
 
         df = compute_indicators(df.copy())
+        df = add_live_features(df)
         df = df.dropna(subset=FEATURE_COLS)
         if df.empty:
             return 0.5
@@ -238,6 +269,12 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         except Exception as e:
             logger.warning(f"[{t}] reversal retrain failed: {e}")
 
+        try:
+            em = get_or_create_ensemble(t)
+            em.train_from_df(df5m)
+        except Exception as e:
+            logger.warning(f"[{t}] ensemble retrain failed: {e}")
+
         if delay > 0:
             time.sleep(delay)
 
@@ -294,6 +331,7 @@ class DailyMLModel:
             return False
 
         df = compute_indicators(df_daily.copy())
+        df = add_live_features(df)
         df = df.dropna(subset=FEATURE_COLS)
 
         # Label: 1 if next-day close > today's close
@@ -307,7 +345,7 @@ class DailyMLModel:
             return False
 
         class_counts = np.bincount(y)
-        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.92:
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
             return False
 
         X_train, X_test, y_train, y_test = train_test_split(
@@ -355,6 +393,7 @@ class DailyMLModel:
             return 0.5
 
         df = compute_indicators(df_daily.copy())
+        df = add_live_features(df)
         df = df.dropna(subset=FEATURE_COLS)
         if df.empty:
             return 0.5
@@ -456,10 +495,10 @@ class ReversalMLModel:
         if len(X) < 60 or y.sum() < 10:
             return False
 
-        # Imbalance check: reversal labels are rare by design, but if >92% one class
+        # Imbalance check: reversal labels are rare by design, but if >85% one class
         # the calibration folds will fail, producing a divide-by-zero RuntimeWarning.
         class_counts = np.bincount(y)
-        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.92:
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
             return False
 
         X_train, X_test, y_train, y_test = train_test_split(
@@ -530,3 +569,127 @@ def get_or_create_reversal(ticker: str) -> ReversalMLModel:
 def predict_reversal(ticker: str, df: pd.DataFrame) -> float:
     """Return bullish-reversal probability from the ReversalMLModel. 0.5 if untrained."""
     return get_or_create_reversal(ticker).predict_proba(df)
+
+
+# ── Ensemble ML Model ─────────────────────────────────────────────────────────
+
+class EnsembleMLModel:
+    """
+    Ensemble of 10 diverse XGBoost classifiers.
+    Confidence = agreement fraction (0.0–1.0) among models.
+    Low agreement → uncertain prediction, high agreement → high-confidence.
+    """
+    N_MODELS = 10
+
+    _CONFIGS = [
+        dict(n_estimators=100, max_depth=3, learning_rate=0.10, subsample=0.7, colsample_bytree=0.7),
+        dict(n_estimators=150, max_depth=4, learning_rate=0.07, subsample=0.8, colsample_bytree=0.8),
+        dict(n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8),
+        dict(n_estimators=200, max_depth=5, learning_rate=0.05, subsample=0.7, colsample_bytree=0.9),
+        dict(n_estimators=250, max_depth=3, learning_rate=0.04, subsample=0.9, colsample_bytree=0.7),
+        dict(n_estimators=150, max_depth=6, learning_rate=0.06, subsample=0.75, colsample_bytree=0.75),
+        dict(n_estimators=300, max_depth=3, learning_rate=0.03, subsample=0.85, colsample_bytree=0.85),
+        dict(n_estimators=100, max_depth=5, learning_rate=0.08, subsample=0.6,  colsample_bytree=0.8),
+        dict(n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.9,  colsample_bytree=0.6),
+        dict(n_estimators=175, max_depth=4, learning_rate=0.06, subsample=0.8,  colsample_bytree=0.8),
+    ]
+
+    def __init__(self, ticker: str):
+        self.ticker  = ticker
+        self.models  = []
+        self.scaler  = StandardScaler()
+        self.trained = False
+        self._load()
+
+    def _path(self) -> Path:
+        return _MODEL_DIR / f"ensemble_{self.ticker}.joblib"
+
+    def _save(self) -> None:
+        try:
+            joblib.dump({"models": self.models, "scaler": self.scaler, "trained": self.trained}, self._path())
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] ensemble save failed: {e}")
+
+    def _load(self) -> None:
+        try:
+            p = self._path()
+            if p.exists():
+                d = joblib.load(p)
+                self.models, self.scaler, self.trained = d["models"], d["scaler"], d.get("trained", False)
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] ensemble load failed: {e}")
+
+    def train_from_df(self, df: pd.DataFrame | None) -> bool:
+        if df is None or len(df) < 150:
+            return False
+        df = compute_indicators(df)
+        df = add_live_features(df)
+        df = df.dropna(subset=FEATURE_COLS)
+        df["label"] = (df["Close"].shift(-LOOKAHEAD_BARS) > df["Close"]).astype(int)
+        df.dropna(inplace=True)
+        X = df[FEATURE_COLS].values
+        y = df["label"].values
+        if len(X) < 100:
+            return False
+        class_counts = np.bincount(y)
+        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
+            return False
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+        if len(np.unique(y_train)) < 2:
+            return False
+        self.scaler.fit(X_train)
+        Xtr = self.scaler.transform(X_train)
+        Xte = self.scaler.transform(X_test)
+        self.models = []
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            for i, cfg in enumerate(self._CONFIGS):
+                m = XGBClassifier(seed=42 + i, eval_metric="logloss", verbosity=0, **cfg)
+                m.fit(Xtr, y_train)
+                self.models.append(m)
+        self.trained = True
+        self._save()
+        # Report ensemble accuracy
+        preds = np.array([m.predict(Xte) for m in self.models])
+        majority = (preds.mean(axis=0) >= 0.5).astype(int)
+        acc = (majority == y_test).mean()
+        logger.info(f"[{self.ticker}] Ensemble trained | acc={acc:.3f} | models={len(self.models)} | samples={len(X_train)}")
+        return True
+
+    def predict(self, df: pd.DataFrame) -> tuple[float, float]:
+        """Returns (probability_up, agreement_0_to_1).
+        agreement=1.0 means all 10 models agree, 0.5 means split."""
+        if not self.trained or not self.models:
+            return 0.5, 0.0
+        try:
+            df = compute_indicators(df.copy())
+            df = add_live_features(df)
+            df = df.dropna(subset=FEATURE_COLS)
+            if df.empty:
+                return 0.5, 0.0
+            row = self.scaler.transform(df[FEATURE_COLS].iloc[[-1]].values)
+            probs = np.array([m.predict_proba(row)[0][1] for m in self.models])
+            avg_prob   = float(probs.mean())
+            # agreement: how consistently models agree on direction
+            majority = int(avg_prob >= 0.5)
+            agreement = float((probs >= 0.5).mean()) if majority == 1 else float((probs < 0.5).mean())
+            return round(avg_prob, 4), round(agreement, 4)
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] ensemble predict error: {e}")
+            return 0.5, 0.0
+
+
+# ── Ensemble model registry ───────────────────────────────────────────────────
+
+_ensemble_registry: dict[str, EnsembleMLModel] = {}
+
+
+def get_or_create_ensemble(ticker: str) -> EnsembleMLModel:
+    if ticker not in _ensemble_registry:
+        _ensemble_registry[ticker] = EnsembleMLModel(ticker)
+    return _ensemble_registry[ticker]
+
+
+def predict_ensemble(ticker: str, df: pd.DataFrame) -> tuple[float, float]:
+    """Returns (prob_up, agreement). agreement near 1.0 = high consensus."""
+    return get_or_create_ensemble(ticker).predict(df)

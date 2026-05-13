@@ -15,3 +15,6 @@ python-multipart>=0.0.9
 python-dotenv>=1.0.0
 pytz>=2024.1
 cryptography>=41.0.0
+# Neural network components (LSTM regime detector)
+torch>=2.0.0
+# RL entry timer uses only stdlib + numpy (no extra dep needed)

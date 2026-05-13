@@ -35,7 +35,8 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "signal_history.db"
 _lock    = threading.Lock()
 
-SHORT_WIN_PCT = 0.15   # price move % needed for a short-term win at next scan
+SHORT_WIN_PCT = 0.35   # price move % needed for a short-term win at next scan
+SLIPPAGE_PCT  = 0.05   # realistic bid-ask + fill slippage per side
 
 
 def _conn() -> sqlite3.Connection:
@@ -68,7 +69,8 @@ def init_db() -> None:
                 short_outcome TEXT    DEFAULT 'PENDING',
                 exit_price    REAL,
                 pnl_pct       REAL,
-                bars_held     INTEGER DEFAULT 0
+                bars_held     INTEGER DEFAULT 0,
+                is_suppressed INTEGER DEFAULT 0
             )
         """)
         # Add new columns to existing DBs that predate this schema
@@ -79,6 +81,7 @@ def init_db() -> None:
             ("vol_bucket",    "TEXT DEFAULT 'NORMAL'"),
             ("trend",         "TEXT DEFAULT ''"),
             ("short_outcome", "TEXT DEFAULT 'PENDING'"),
+            ("is_suppressed", "INTEGER DEFAULT 0"),
         ]:
             try:
                 c.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
@@ -116,6 +119,42 @@ def record_signal(
                 ticker, direction,
                 round(entry, 4), round(target, 4), round(stop, 4), round(confidence, 2),
                 session, regime, trading_tier, vwap_event, rsi_zone, vol_bucket, trend,
+            ))
+            c.commit()
+            return cur.lastrowid
+
+
+def record_suppressed_signal(
+    ticker:       str,
+    direction:    str,
+    entry:        float,
+    confidence:   float,
+    suppress_reason: str,
+    session:      str   = "",
+    regime:       str   = "",
+    trading_tier: str   = "REGULAR",
+    vwap_event:   str   = "",
+    rsi_zone:     str   = "",
+    rel_volume:   float = 1.0,
+    trend:        str   = "",
+) -> int:
+    """Record a signal that was suppressed by the adaptive filter.
+    These are tracked separately to measure false-negative rate."""
+    vol_bucket = "HIGH" if rel_volume >= 3.0 else "ELEVATED" if rel_volume >= 1.5 else "NORMAL"
+    with _lock:
+        with _conn() as c:
+            cur = c.execute("""
+                INSERT INTO signals
+                  (ts, ticker, direction, entry_price, target, stop, confidence,
+                   session, regime, trading_tier, vwap_event, rsi_zone, vol_bucket, trend,
+                   outcome, short_outcome, is_suppressed)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                datetime.now(timezone.utc).isoformat(),
+                ticker, direction,
+                round(entry, 4), 0.0, 0.0, round(confidence, 2),
+                session, regime, trading_tier, vwap_event, rsi_zone, vol_bucket, trend,
+                "SUPPRESSED", "SUPPRESSED", 1,
             ))
             c.commit()
             return cur.lastrowid
@@ -228,10 +267,11 @@ def resolve_short_term(signals: list) -> None:
                 pct_move = (curr_price - entry) / entry * 100
                 d        = row["direction"]
 
+                _effective_threshold = SHORT_WIN_PCT + SLIPPAGE_PCT
                 if d in ("BUY", "STRONG BUY"):
-                    short_out = "WIN" if pct_move >= SHORT_WIN_PCT else "LOSS"
+                    short_out = "WIN" if pct_move >= _effective_threshold else "LOSS"
                 elif d in ("SELL", "STRONG SELL"):
-                    short_out = "WIN" if pct_move <= -SHORT_WIN_PCT else "LOSS"
+                    short_out = "WIN" if pct_move <= -_effective_threshold else "LOSS"
                 else:
                     continue
 
@@ -337,7 +377,7 @@ def get_stats(ticker: Optional[str] = None, limit: int = 200) -> dict:
     """Return accuracy statistics for a ticker or globally."""
     with _lock:
         with _conn() as c:
-            where  = "WHERE ticker=?" if ticker else ""
+            where  = "WHERE ticker=? AND (is_suppressed IS NULL OR is_suppressed=0)" if ticker else "WHERE (is_suppressed IS NULL OR is_suppressed=0)"
             params = (ticker,) if ticker else ()
             rows   = c.execute(
                 f"SELECT outcome, pnl_pct FROM signals {where} ORDER BY id DESC LIMIT ?",
@@ -427,6 +467,24 @@ def get_ticker_learning_scores(lookback_days: int = 30, min_count: int = 3) -> d
             "count":    c["total"],
         }
     return result
+
+
+def get_suppressed_stats(lookback_days: int = 7) -> dict:
+    """Stats on suppressed signals — used to measure false-negative rate."""
+    with _lock:
+        with _conn() as c:
+            rows = c.execute("""
+                SELECT direction, session, regime, confidence
+                FROM signals
+                WHERE is_suppressed = 1
+                  AND ts >= datetime('now', ?)
+            """, (f"-{lookback_days} days",)).fetchall()
+    total = len(rows)
+    by_session: dict = {}
+    for r in rows:
+        s = r["session"] or "UNKNOWN"
+        by_session[s] = by_session.get(s, 0) + 1
+    return {"total_suppressed": total, "by_session": by_session}
 
 
 def get_recent_signals(limit: int = 50) -> list[dict]:

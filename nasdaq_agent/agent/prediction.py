@@ -231,15 +231,20 @@ def _compute_confidence(
 
     def _agree(signal: float, weight: float) -> None:
         nonlocal votes, total
+        # Skip truly neutral signals — they carry no information
+        if abs(signal) < 0.05:
+            return
+        # Map [-1,+1] → [0,1]: 1.0 = full agreement, 0.0 = full disagreement
         agreement = float(np.clip((signal * d + 1) / 2, 0.0, 1.0))
         votes += weight * agreement
         total += weight
 
-    # Trend  — strongest structural signal
-    trend_signal = 1.0 if trend == "UPTREND" else (-1.0 if trend == "DOWNTREND" else 0.0)
-    _agree(trend_signal * trend_prob, 30)
+    # Trend — strongest structural signal; only count when trend is non-neutral
+    if trend != "SIDEWAYS":
+        trend_signal = 1.0 if trend == "UPTREND" else -1.0
+        _agree(trend_signal * max(trend_prob, 0.55), 30)
 
-    # MTF alignment is the strongest standalone signal after trend
+    # MTF alignment (only when non-trivially non-zero)
     _agree(float(mtf_score), 30)
     _agree(tech_score,       20)
     _agree(vol_score,        10)
@@ -248,13 +253,13 @@ def _compute_confidence(
     _agree(sent_score,       5)
 
     if ml_trained:
-        # ml_prob in [0,1]; convert to [-1,+1]: (prob-0.5)*2
         ml_signal = float(np.clip((ml_prob - 0.5) * 2, -1.0, 1.0))
         _agree(ml_signal, 20)
-    # If untrained: ML weight is simply not included (total stays at 97)
 
-    confidence = (votes / total * 100) if total > 0 else 50.0
-    # NEUTRAL cap + absolute bounds
+    # Need at least some informative signals before reporting confidence
+    if total < 10:
+        return 50.0
+    confidence = (votes / total * 100)
     return round(float(np.clip(confidence, 25.0, 95.0)), 1)
 
 
@@ -701,17 +706,19 @@ def _compute_rr(price: float, target: float, stop: float) -> float:
 # ── Main prediction function ──────────────────────────────────────────────────
 
 def generate_prediction(
-    ticker:            str,
-    df:                pd.DataFrame,
-    tech_score:        float,
-    vol_score:         float,
-    ml_prob:           float,
-    sent_score:        float,
-    last_row:          pd.Series,
-    mtf_score:         float = 0.0,
-    ml_reversal_prob:  float = 0.5,
-    vwap_score:        float = 0.0,
-    sector_mult:       float = 1.0,
+    ticker:              str,
+    df:                  pd.DataFrame,
+    tech_score:          float,
+    vol_score:           float,
+    ml_prob:             float,
+    sent_score:          float,
+    last_row:            pd.Series,
+    mtf_score:           float = 0.0,
+    ml_reversal_prob:    float = 0.5,
+    vwap_score:          float = 0.0,
+    sector_mult:         float = 1.0,
+    ensemble_prob:       float = 0.5,
+    ensemble_agreement:  float = 0.0,
 ) -> dict:
     """
     Generate a complete, actionable scalping prediction for ``ticker``.
@@ -800,11 +807,15 @@ def generate_prediction(
     # Apply sector ETF multiplier (scales composite without flipping sign)
     composite = round(float(np.clip(composite * float(sector_mult), -1.0, 1.0)), 4)
 
-    # Enforce trend–direction consistency:
-    # Never label a clear UPTREND stock as SELL / STRONG SELL and vice-versa
-    if trend == "UPTREND"   and composite < 0.0:
+    # Trend–direction consistency: dampen (not clamp) cross-trend signals.
+    # A strong downtrend with a barely-positive composite → still NEUTRAL.
+    # A strong downtrend with a very positive composite → allow (reversal setup).
+    if trend == "UPTREND" and composite < 0.0 and trend_prob > 0.60:
+        # Attenuate bearish signal proportionally to trend strength
+        composite = composite * (1.0 - (trend_prob - 0.60) * 2.5)
         composite = max(composite, 0.0)
-    if trend == "DOWNTREND" and composite > 0.0:
+    if trend == "DOWNTREND" and composite > 0.0 and trend_prob > 0.60:
+        composite = composite * (1.0 - (trend_prob - 0.60) * 2.5)
         composite = min(composite, 0.0)
 
     # ── 6. Direction ──────────────────────────────────────────────────────────
@@ -913,6 +924,18 @@ def generate_prediction(
     except Exception:
         pass
 
+    # ── 7g. Ensemble agreement — low consensus reduces confidence ────────────────
+    # When 10 diverse models disagree, the signal is uncertain; penalise confidence.
+    # agreement=1.0 → all agree (no penalty); agreement=0.5 → 50/50 split (−10 pts)
+    if ensemble_agreement > 0.0:
+        try:
+            from agent.ensemble_model import ensemble_confidence_multiplier
+            _agree_mult = ensemble_confidence_multiplier(1.0 - ensemble_agreement)
+            if _agree_mult < 1.0:
+                confidence = round(float(np.clip(confidence * _agree_mult, 25.0, 95.0)), 1)
+        except Exception:
+            pass
+
     # ── 8. Trend reason ───────────────────────────────────────────────────────
     # Apply R:R quality adjustment to confidence.
     # R:R reflects position sizing quality, NOT signal direction quality.
@@ -977,7 +1000,35 @@ def generate_prediction(
             seen.add(r)
             deduped.append(r)
 
-    # ── 10. Return ────────────────────────────────────────────────────────────
+    # ── 10. RL entry timing recommendation ───────────────────────────────────────
+    _rl_action = "ENTER"
+    _rl_conf   = 0.5
+    try:
+        from agent.rl_entry import get_entry_recommendation
+        rsi_norm_val = float(np.clip((rsi_val or 50.0) / 100.0, 0.0, 1.0))
+        _rvol = _safe_float(last_row, "vol_ratio") or 1.0
+        _vwap_dev = 0.0
+        try:
+            _vwap_dev = float(last_row.get("vwap_dev", 0.0) or 0.0) / 100.0
+        except Exception:
+            pass
+        if price > 0 and support > 0:
+            _sup_spread = abs(price - support) / price
+        else:
+            _sup_spread = 0.005
+        _rl_action, _rl_conf = get_entry_recommendation(
+            momentum_1bar=float(np.clip(composite * 0.01, -0.01, 0.01)),
+            rsi_norm=rsi_norm_val,
+            vol_ratio=float(np.clip(_rvol, 0.0, 3.0)),
+            spread_to_support=float(np.clip(_sup_spread, 0.0, 0.02)),
+            vwap_deviation=_vwap_dev,
+            bars_since_signal=0.0,
+            time_of_day_norm=0.5,
+        )
+    except Exception:
+        pass
+
+    # ── 11. Return ────────────────────────────────────────────────────────────
     return {
         "direction":         direction,
         "confidence":        confidence,
@@ -1005,8 +1056,11 @@ def generate_prediction(
         "rsi_zone":          zone_label,
         "rsi_value":         round(float(rsi_val), 1) if rsi_val is not None else 50.0,
         "rsi_gated":         rsi_gated,
-        "reversal_score":    rev["reversal_score"],
-        "reversal_type":     rev["reversal_type"],
-        "divergence_type":   rev["divergence_type"],
-        "reversal_signals":  rev["signals"],
+        "reversal_score":      rev["reversal_score"],
+        "reversal_type":       rev["reversal_type"],
+        "divergence_type":     rev["divergence_type"],
+        "reversal_signals":    rev["signals"],
+        "ensemble_agreement":  round(float(ensemble_agreement), 4),
+        "rl_entry_action":     _rl_action,
+        "rl_entry_confidence": round(float(_rl_conf), 3),
     }
