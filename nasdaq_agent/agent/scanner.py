@@ -59,6 +59,8 @@ from agent.backtest_reporter import maybe_trigger_feedback_retrain, adjust_confi
 from agent.adaptive_filter import (
     should_suppress, get_confidence_boost, increment_suppressed,
 )
+from agent.ensemble_model import get_meta_prediction
+from agent.risk_controls import check_circuit_breaker, check_sector_concentration
 from agent.after_hours_monitor import (
     init_db as ah_init_db,
     record_snapshot as ah_record,
@@ -253,6 +255,12 @@ class StockSignal:
 _info_cache:    dict[str, dict]         = {}
 _spy_df_cache:  dict[str, pd.DataFrame] = {}   # SPY/QQQ 1M frames for RS/regime
 
+# ── Per-ticker signal cooldown ────────────────────────────────────────────────
+# Prevents the same setup from being recorded every 60s as independent signals.
+# Key: (ticker, direction) → timestamp of last recorded signal
+_SIGNAL_COOLDOWN_SECS = 15 * 60   # 15 minutes
+_last_signal_ts: dict[tuple[str, str], float] = {}
+
 
 def _get_info(ticker: str) -> dict:
     if ticker not in _info_cache:
@@ -363,17 +371,26 @@ def analyse_ticker(
 
         tech            = score_technical(last)
         vol             = score_volume(df_ind)
-        ml_scalp                   = predict(ticker, df_ind)
+        # ML models trained on 5-min bars — always infer on 5-min data so
+        # feature distributions match training (RSI-14 on 5m = 70 min of price
+        # action; on 1m it only covers 14 min, completely different signal).
+        _df_ml = df_5m if (df_5m is not None and len(df_5m) >= 20) else df_ind
+        ml_scalp                   = predict(ticker, _df_ml)
         ml_daily_p                 = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
-        ml_reversal_p              = predict_reversal(ticker, df_ind)
-        ml_ensemble_p, ml_agree    = predict_ensemble(ticker, df_ind)
-        # Meta-blend: ensemble gets most weight; daily provides swing context
-        ml_combined = round(
-            0.25 * ml_scalp +
-            0.45 * ml_ensemble_p +
-            0.20 * ml_daily_p +
-            0.10 * ml_reversal_p,
-            4,
+        ml_reversal_p              = predict_reversal(ticker, _df_ml)
+        ml_ensemble_p, ml_agree    = predict_ensemble(ticker, _df_ml)
+        # MetaEnsemble: calibrated fusion of all ML sources.
+        # When trained (≥30 outcomes), uses a meta-XGBoost to combine signals
+        # optimally; before that, falls back to a weighted average.
+        ml_combined, _meta_mult    = get_meta_prediction(
+            ticker             = ticker,
+            scalp_prob         = ml_scalp,
+            ensemble_prob      = ml_ensemble_p,
+            ensemble_agreement = ml_agree,
+            daily_prob         = ml_daily_p,
+            reversal_prob      = ml_reversal_p,
+            tech_score         = float(tech),
+            vol_score          = float(vol),
         )
         sent, headlines = score_sentiment(ticker)
         rvol            = relative_volume(df_ind)
@@ -549,6 +566,20 @@ def analyse_ticker(
         except Exception:
             pass
 
+        # Daily loss circuit breaker + sector concentration check
+        if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            _circuit_blocked, _circuit_msg = check_circuit_breaker()
+            if _circuit_blocked:
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"]   = [f"🛑 {_circuit_msg}"] + pred.get("reasons", [])
+            else:
+                _sector_blocked, _sector_msg = check_sector_concentration(
+                    ticker, "BUY" if "BUY" in pred["direction"] else "SELL"
+                )
+                if _sector_blocked:
+                    pred["direction"] = "NEUTRAL"
+                    pred["reasons"]   = [f"🔒 {_sector_msg}"] + pred.get("reasons", [])
+
         # Adaptive filter — suppress signals matching learned losing patterns
         _is_suppressed   = False
         _suppress_reason = ""
@@ -586,11 +617,30 @@ def analyse_ticker(
                 except Exception:
                     pass
 
-        # Record signal in tracker + open paper trade (BUY/SELL only)
-        if pred["direction"] in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:
+        # Normalise STRONG BUY → BUY and STRONG SELL → SELL for storage.
+        # These are the highest-conviction signals and must not be silently dropped.
+        _raw_direction = pred["direction"]
+        _norm_direction = (
+            "BUY"  if _raw_direction in ("BUY",  "STRONG BUY")  else
+            "SELL" if _raw_direction in ("SELL", "STRONG SELL") else
+            _raw_direction
+        )
+
+        # Per-ticker cooldown: only record a new signal if 15 min have passed
+        # since the same ticker+direction was last recorded. This prevents the
+        # signal tracker from counting a single setup 15 times in 15 minutes.
+        _cooldown_key = (ticker, _norm_direction)
+        _now_ts       = time.time()
+        _last_ts      = _last_signal_ts.get(_cooldown_key, 0.0)
+        _cooldown_ok  = (_now_ts - _last_ts) >= _SIGNAL_COOLDOWN_SECS
+
+        # Record signal in tracker + open paper trade (directional signals only)
+        if _norm_direction in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:
             resolve_pending(ticker, price)
+        if _norm_direction in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"] and _cooldown_ok:
+            _last_signal_ts[_cooldown_key] = _now_ts
             record_signal(
-                ticker=ticker, direction=pred["direction"], entry=price,
+                ticker=ticker, direction=_norm_direction, entry=price,
                 target=pred["target_price"], stop=pred["stop_loss"],
                 confidence=pred["confidence"],
                 session=sess_info.get("session", ""),
@@ -603,7 +653,7 @@ def analyse_ticker(
             )
             bt_record(
                 ticker       = ticker,
-                direction    = pred["direction"],
+                direction    = _norm_direction,
                 entry_price  = price,
                 target       = pred["target_price"],
                 stop         = pred["stop_loss"],
@@ -621,7 +671,7 @@ def analyse_ticker(
             )
             maybe_open_trade(
                 ticker       = ticker,
-                direction    = pred["direction"],
+                direction    = _norm_direction,
                 price        = price,
                 target       = pred["target_price"],
                 stop         = pred["stop_loss"],

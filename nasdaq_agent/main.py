@@ -319,6 +319,13 @@ async def paper_trading_endpoint():
     }
 
 
+@app.get("/api/risk-status")
+async def risk_status():
+    """Daily loss circuit breaker + sector concentration status."""
+    from agent.risk_controls import get_risk_status
+    return get_risk_status()
+
+
 @app.get("/api/paper-trading/daily")
 async def paper_daily_pnl():
     """Per-day P&L summary for last 14 days."""

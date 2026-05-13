@@ -170,9 +170,35 @@ _current_regime: RegimeInfo = RegimeInfo()
 
 def update_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
     global _current_regime
-    _current_regime = detect_regime(df_spy, df_qqq)
+    heuristic = detect_regime(df_spy, df_qqq)
+
+    # Consensus vote: blend heuristic with LSTM regime if available.
+    # LSTM uses a 20-bar sequence of price/volume features — more stable
+    # than single-bar momentum and captures non-linear regime transitions.
+    lstm_regime = "UNKNOWN"
+    try:
+        from agent.lstm_regime import get_lstm_regime
+        lstm_regime = get_lstm_regime(df_spy)   # NEUTRAL/BULL_TREND/BEAR_TREND/CHOPPY
+    except Exception:
+        pass
+
+    if lstm_regime not in ("UNKNOWN", heuristic.regime):
+        # Disagreement: downgrade to safer regime
+        if heuristic.regime in ("BULL_TREND", "BEAR_TREND") and lstm_regime == "CHOPPY":
+            heuristic.regime      = "NEUTRAL"
+            heuristic.label       = _REGIME_LABEL["NEUTRAL"]
+            heuristic.color       = _REGIME_COLOR["NEUTRAL"]
+            heuristic.long_mult, heuristic.short_mult = _REGIME_WEIGHT["NEUTRAL"]
+            heuristic.description += f" [LSTM disagrees: {lstm_regime} — downgraded to NEUTRAL]"
+        elif heuristic.regime == "NEUTRAL" and lstm_regime in ("BULL_TREND", "BEAR_TREND"):
+            # LSTM sees a trend the heuristic misses — trust it but label differently
+            heuristic.description += f" [LSTM sees {lstm_regime}]"
+    elif lstm_regime == heuristic.regime and lstm_regime != "UNKNOWN":
+        heuristic.description += f" [LSTM confirms {lstm_regime}]"
+
+    _current_regime = heuristic
     logger.info(
-        f"Regime updated: {_current_regime.regime} | "
+        f"Regime updated: {_current_regime.regime} (LSTM:{lstm_regime}) | "
         f"SPY {_current_regime.spy_change:+.2f}% / QQQ {_current_regime.qqq_change:+.2f}%"
     )
     return _current_regime

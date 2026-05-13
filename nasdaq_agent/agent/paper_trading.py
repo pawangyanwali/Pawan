@@ -28,6 +28,7 @@ _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
 _FALLBACK_MIN_CONFIDENCE = 65.0   # used before adaptive filter has enough data
+_MAX_BARS_HELD = 60               # close any trade open longer than 1 hour (60×1-min bars)
 
 
 def _conn() -> sqlite3.Connection:
@@ -173,6 +174,13 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                     bars_held=bars,
                 )
 
+                # Max hold time: close at market if trade has been open too long.
+                # A scalp that hasn't resolved in 60 minutes has failed its thesis.
+                if bars >= _MAX_BARS_HELD and ea.recommendation != "EXIT_NOW":
+                    ea = type(ea)(recommendation="EXIT_NOW",
+                                  signals=ea.signals,
+                                  summary=f"Max hold time reached ({_MAX_BARS_HELD} bars)")
+
                 if ea.recommendation == "EXIT_NOW":
                     ep    = current_price
                     entry = row["entry_price"] or 1.0
@@ -182,7 +190,11 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                         pnl_pct = (entry - ep) / entry * 100
                     pnl_dollar = pnl_pct / 100 * entry * 100   # assume 100 shares
 
-                    reason = ea.signals[0].signal if ea.signals else "UNKNOWN"
+                    reason = (
+                        f"MAX_HOLD_{_MAX_BARS_HELD}BARS"
+                        if bars >= _MAX_BARS_HELD
+                        else (ea.signals[0].signal if ea.signals else "UNKNOWN")
+                    )
                     c.execute("""
                         UPDATE paper_trades
                         SET status='CLOSED', closed_at=?, exit_price=?,
