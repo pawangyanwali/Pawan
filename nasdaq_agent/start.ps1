@@ -28,11 +28,17 @@ if (Test-Path $EnvFile) {
 }
 
 function Find-Python {
+    # Prefer the project's own venv if one exists alongside this script
+    $venvPy = Join-Path $ScriptDir "venv\Scripts\python.exe"
+    if (Test-Path $venvPy) { return $venvPy }
+    $venvPy2 = Join-Path $ScriptDir ".venv\Scripts\python.exe"
+    if (Test-Path $venvPy2) { return $venvPy2 }
+    # Fall back to whatever python is on PATH
     foreach ($name in @("python", "python3")) {
         $found = Get-Command $name -ErrorAction SilentlyContinue
         if ($found) { return $found.Source }
     }
-    Write-Host "ERROR: python not found in PATH. Install Python and retry." -ForegroundColor Red
+    Write-Host "ERROR: python not found. Install Python or create a venv." -ForegroundColor Red
     exit 1
 }
 
