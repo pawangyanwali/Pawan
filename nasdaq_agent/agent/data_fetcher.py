@@ -13,6 +13,8 @@ Core function: fetch_batch_interval(tickers, interval, outputsize, ttl)
   - Respects CALL_GAP between API calls
 """
 
+import collections
+import threading
 import time
 import requests
 import pandas as pd
@@ -37,16 +39,51 @@ _IV = {
 }
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
+# Two-layer protection:
+#   1. _throttle()         — minimum gap between consecutive API calls (CALL_GAP)
+#   2. _charge_credits(n)  — rolling 60-second credit window; blocks when near limit
+#
+# Both are fully thread-safe so the scan loop and retrain thread can't race.
 
-_last_call: float = 0.0
+_last_call:     float            = 0.0
+_throttle_lock: threading.Lock  = threading.Lock()
+
+# Rolling credit window: deque of (timestamp, credit_count) pairs
+_credit_events: collections.deque = collections.deque()
+_credit_lock:   threading.Lock    = threading.Lock()
+CREDIT_LIMIT = 355   # conservative cap — Grow-377 plan limit is 377
 
 
 def _throttle() -> None:
+    """Thread-safe minimum-gap throttle between API calls."""
     global _last_call
-    wait = CALL_GAP - (time.time() - _last_call)
-    if wait > 0:
-        time.sleep(wait)
-    _last_call = time.time()
+    with _throttle_lock:
+        wait = CALL_GAP - (time.time() - _last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.time()
+
+
+def _charge_credits(n: int) -> None:
+    """
+    Block until n credits can be consumed within the rolling 60-second window.
+    Called before each batch API request with n = number of symbols in the batch.
+    """
+    while True:
+        now = time.time()
+        cutoff = now - 60.0
+        with _credit_lock:
+            # Evict expired events
+            while _credit_events and _credit_events[0][0] < cutoff:
+                _credit_events.popleft()
+            used = sum(c for _, c in _credit_events)
+            if used + n <= CREDIT_LIMIT:
+                _credit_events.append((now, n))
+                return
+            # Find how long until the oldest event expires
+            wait = (_credit_events[0][0] + 60.01) - time.time() if _credit_events else 0.1
+        # Sleep outside the lock to avoid blocking other threads
+        time.sleep(max(0.05, min(wait, 1.0)))
 
 
 def _get(endpoint: str, params: dict, _retry: int = 3) -> dict:
@@ -191,6 +228,8 @@ def fetch_batch_interval(
         if extended_hours:
             params["extended_trading_hours"] = "true"
 
+        # Reserve credits before calling (blocks if approaching 60-second limit)
+        _charge_credits(len(batch))
         data = _get("/time_series", params)
 
         if not data:

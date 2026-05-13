@@ -74,7 +74,11 @@ class StockMLModel:
     # ── Training ──────────────────────────────────────────────────────────────
 
     def train(self) -> bool:
-        df = fetch_historical(self.ticker)
+        """Fetch historical data then train. Prefer train_from_df when data is pre-fetched."""
+        return self.train_from_df(fetch_historical(self.ticker))
+
+    def train_from_df(self, df: pd.DataFrame | None) -> bool:
+        """Train from a pre-fetched 5-min OHLCV DataFrame (no API call)."""
         if df is None or len(df) < 100:
             return False
 
@@ -150,21 +154,36 @@ def get_or_create(ticker: str) -> StockMLModel:
     return _model_registry[ticker]
 
 
-def retrain_all(tickers: list, delay: float = 1.2, daily_data: dict = None) -> None:
-    """Train/retrain models one ticker at a time with a delay to avoid rate limits.
+def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None) -> None:
+    """Train/retrain all models using a single batch historical fetch.
+
+    Instead of calling fetch_historical() once per ticker (160 single-symbol API
+    calls for 80 tickers × 2 models), this pre-fetches all 5-min data in batches
+    of 20 (4 API calls = 80 credits) and trains every model from the shared result.
 
     Parameters
     ----------
     tickers    : list of ticker symbols to retrain.
-    delay      : seconds to sleep between tickers to avoid API rate limits.
+    delay      : seconds to sleep between tickers (default 0 — no longer needed
+                 since the batch fetch already rate-limits via _charge_credits).
     daily_data : optional mapping of ticker → daily OHLCV DataFrame.  When
                  provided, each ticker's DailyMLModel is also retrained from
                  the supplied DataFrame (no extra API call required).
     """
+    from agent.data_fetcher import fetch_batch_interval
+
+    # Batch-fetch all 5-min historical data upfront — 4 API calls for 80 tickers
+    # TTL=1800 so subsequent retrain cycles within 30 min reuse cached data
+    logger.info(f"[retrain_all] Batch-fetching 5min history for {len(tickers)} tickers…")
+    hist_5m = fetch_batch_interval(tickers, "5min", 5000, ttl=1800)
+    logger.info(f"[retrain_all] Got history for {len(hist_5m)}/{len(tickers)} tickers")
+
     for t in tickers:
+        df5m = hist_5m.get(t)
+
         try:
             m = _model_registry.get(t, StockMLModel(t))
-            m.train()
+            m.train_from_df(df5m)
             _model_registry[t] = m
         except Exception as e:
             logger.warning(f"[{t}] scalp retrain failed: {e}")
@@ -176,14 +195,14 @@ def retrain_all(tickers: list, delay: float = 1.2, daily_data: dict = None) -> N
             except Exception as e:
                 logger.warning(f"[{t}] daily retrain failed: {e}")
 
-        # Reversal model — reuses same 5M historical fetch (cached)
         try:
             rm = get_or_create_reversal(t)
-            rm.train()
+            rm.train_from_df(df5m)
         except Exception as e:
             logger.warning(f"[{t}] reversal retrain failed: {e}")
 
-        time.sleep(delay)
+        if delay > 0:
+            time.sleep(delay)
 
 
 def predict(ticker: str, df: pd.DataFrame) -> float:
@@ -369,7 +388,11 @@ class ReversalMLModel:
         return df
 
     def train(self) -> bool:
-        raw = fetch_historical(self.ticker)
+        """Fetch historical data then train. Prefer train_from_df when data is pre-fetched."""
+        return self.train_from_df(fetch_historical(self.ticker))
+
+    def train_from_df(self, raw: pd.DataFrame | None) -> bool:
+        """Train from a pre-fetched 5-min OHLCV DataFrame (no API call)."""
         if raw is None or len(raw) < 150:
             return False
 
