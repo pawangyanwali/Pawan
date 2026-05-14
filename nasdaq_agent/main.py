@@ -37,7 +37,12 @@ from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from agent.adaptive_filter import get_status as af_get_status, reset_filter as af_reset_filter
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
-from agent.broker.schwab_auth import load_stored_tokens, get_token_status, start_auth_flow, get_web_auth_url, exchange_web_code
+from agent.broker.schwab_auth import (
+    load_stored_tokens, load_stored_md_tokens,
+    get_token_status, get_md_token_status,
+    build_auth_url, exchange_auth_code,
+    build_md_auth_url, exchange_md_auth_code,
+)
 from agent.broker.schwab_streamer import start_streamer, get_streamer_status
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
@@ -225,17 +230,25 @@ async def lifespan(app: FastAPI):
     scanner.register_callback(_on_signals)
     scanner.start_background()
     learning_engine.start()
-    # Try to load stored Schwab tokens (silent if not configured)
+    # Load Schwab Accounts+Trading tokens → enables streamer + trading
     try:
         if os.getenv("SCHWAB_CLIENT_ID"):
             ok = load_stored_tokens()
             if ok:
-                logging.getLogger(__name__).info("Schwab broker connected from stored tokens.")
-                # Start the WebSocket streamer for real-time data
+                logging.getLogger(__name__).info("Schwab Trader app connected from stored tokens.")
                 from config import NASDAQ_TICKERS
                 start_streamer(list(NASDAQ_TICKERS))
     except Exception as _be:
-        logging.getLogger(__name__).warning(f"Schwab token load skipped: {_be}")
+        logging.getLogger(__name__).warning(f"Schwab Trader token load skipped: {_be}")
+
+    # Load Schwab Market Data tokens → enables REST quotes/chains/movers
+    try:
+        if os.getenv("SCHWAB_MD_CLIENT_ID"):
+            ok_md = load_stored_md_tokens()
+            if ok_md:
+                logging.getLogger(__name__).info("Schwab Market Data app connected from stored tokens.")
+    except Exception as _be:
+        logging.getLogger(__name__).warning(f"Schwab MD token load skipped: {_be}")
     yield
     scanner.stop()
     learning_engine.stop()
@@ -601,15 +614,16 @@ async def after_hours_endpoint():
 # ── ThinkorSwim / Schwab Broker API ──────────────────────────────────────────
 
 @app.get("/schwab/auth")
-async def schwab_web_auth():
-    """Redirect browser to Schwab OAuth login page."""
+async def schwab_web_auth(request: Request):
+    """Redirect browser to Schwab Accounts+Trading OAuth login (for streamer + trading)."""
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url=get_web_auth_url())
+    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback"
+    return RedirectResponse(url=build_auth_url(redirect_uri))
 
 
 @app.get("/schwab/callback")
-async def schwab_web_callback(code: str = "", error: str = ""):
-    """Schwab redirects here after user logs in. Exchange code for tokens."""
+async def schwab_web_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """Schwab callback for Accounts+Trading app. Exchange code → start streamer."""
     from fastapi.responses import HTMLResponse
     if error or not code:
         html = f"""<html><body style="font-family:sans-serif;padding:40px">
@@ -618,19 +632,20 @@ async def schwab_web_callback(code: str = "", error: str = ""):
         <p><a href="/schwab/auth">Try again</a></p></body></html>"""
         return HTMLResponse(html, status_code=400)
 
-    success = exchange_web_code(code)
+    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback"
+    success = exchange_auth_code(code, state, redirect_uri)
     if success:
-        # Kick off the WebSocket streamer now that we have fresh tokens
         try:
             from config import NASDAQ_TICKERS
             start_streamer(list(NASDAQ_TICKERS))
         except Exception:
             pass
         html = """<html><body style="font-family:sans-serif;padding:40px;background:#f0fff4">
-        <h2 style="color:#276749">✓ Schwab Connected!</h2>
+        <h2 style="color:#276749">&#10003; Schwab Connected! (Accounts &amp; Trading)</h2>
         <p>Tokens saved. Real-time WebSocket streamer started.</p>
         <p>Streaming: Level 1 quotes, 1-min candles, NASDAQ screener, NQ/ES futures.</p>
-        <p><a href="/">← Back to Dashboard</a></p></body></html>"""
+        <p>Now authorise the <b>Market Data</b> app: <a href="/schwab/auth/md">/schwab/auth/md</a></p>
+        <p><a href="/">&#8592; Back to Dashboard</a></p></body></html>"""
         return HTMLResponse(html)
     else:
         html = """<html><body style="font-family:sans-serif;padding:40px">
@@ -640,12 +655,55 @@ async def schwab_web_callback(code: str = "", error: str = ""):
         return HTMLResponse(html, status_code=500)
 
 
+@app.get("/schwab/auth/md")
+async def schwab_md_web_auth(request: Request):
+    """Redirect browser to Schwab Market Data OAuth login (for REST quotes/IV/movers)."""
+    from fastapi.responses import RedirectResponse, HTMLResponse
+    from agent.broker.schwab_auth import _market_data
+    if not _market_data.is_configured():
+        return HTMLResponse(
+            "<h2>SCHWAB_MD_CLIENT_ID not set in .env</h2>"
+            "<p>Add the Market Data app credentials and restart.</p>",
+            status_code=400,
+        )
+    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback/md"
+    return RedirectResponse(url=build_md_auth_url(redirect_uri))
+
+
+@app.get("/schwab/callback/md")
+async def schwab_md_web_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """Schwab callback for Market Data app."""
+    from fastapi.responses import HTMLResponse
+    if error or not code:
+        html = f"""<html><body style="font-family:sans-serif;padding:40px">
+        <h2 style="color:#e53e3e">Schwab Market Data Auth Failed</h2>
+        <p>{error or 'No code received.'}</p>
+        <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
+        return HTMLResponse(html, status_code=400)
+
+    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback/md"
+    success = exchange_md_auth_code(code, state, redirect_uri)
+    if success:
+        html = """<html><body style="font-family:sans-serif;padding:40px;background:#f0fff4">
+        <h2 style="color:#276749">&#10003; Schwab Market Data Connected!</h2>
+        <p>Tokens saved. REST quotes, IV, movers and price history are now live.</p>
+        <p><a href="/">&#8592; Back to Dashboard</a></p></body></html>"""
+        return HTMLResponse(html)
+    else:
+        html = """<html><body style="font-family:sans-serif;padding:40px">
+        <h2 style="color:#e53e3e">Market Data Token Exchange Failed</h2>
+        <p>Check server logs for details.</p>
+        <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
+        return HTMLResponse(html, status_code=500)
+
+
 @app.get("/api/broker/status")
 async def broker_status():
-    """Connection status, token TTLs, account info."""
+    """Connection status for both Schwab apps, token TTLs, account info."""
     try:
-        ts = get_token_status()
-        acct = {}
+        ts    = get_token_status()
+        ts_md = get_md_token_status()
+        acct  = {}
         if ts.get("connected"):
             try:
                 acct = get_account_summary()
@@ -654,9 +712,10 @@ async def broker_status():
         daily = get_daily_status()
         return {
             **ts,
-            "account":    acct,
-            "daily":      daily,
-            "auto_trade": _tos_auto_trade,
+            "market_data_app": ts_md,
+            "account":         acct,
+            "daily":           daily,
+            "auto_trade":      _tos_auto_trade,
         }
     except Exception as e:
         return {"connected": False, "error": str(e)}

@@ -1,21 +1,24 @@
 """
-Schwab OAuth 2.0 authentication for ThinkorSwim paper trading.
+Schwab OAuth 2.0 authentication.
 
-Flow
-----
-1. First run: opens a browser to Schwab's login page (handles MFA automatically
-   as part of their login UI). After login, Schwab redirects to
-   https://127.0.0.1:8182?code=XXX — our local HTTPS server captures the code.
-2. We exchange the code for access_token + refresh_token and store them
-   encrypted in data/schwab_tokens.json (gitignored).
-3. The access token expires every 30 min — we auto-refresh it in the background.
-4. The refresh token expires every 7 days — user must re-auth once a week.
+Two apps, two token managers:
+  PRIMARY  (SCHWAB_CLIENT_ID / SCHWAB_CLIENT_SECRET)
+      → "NASDAQ Scalping Agent" — Accounts and Trading Production
+      → Used for: streamer userPreference, positions, orders
+      → Route: GET /schwab/auth  →  GET /schwab/callback
 
-Environment variables required (in .env):
-    SCHWAB_CLIENT_ID      — App Key from developer.schwab.com
-    SCHWAB_CLIENT_SECRET  — App Secret from developer.schwab.com
-    SCHWAB_ACCOUNT_NUMBER — Paper trading account number (from ThinkorSwim)
-    SCHWAB_PAPER_TRADING  — "true" to use paper endpoint, "false" for live
+  MARKET DATA (SCHWAB_MD_CLIENT_ID / SCHWAB_MD_CLIENT_SECRET)
+      → "nasdaq-scalping-agent" — Market Data Production
+      → Used for: /quotes, /chains, /movers, /pricehistory
+      → Route: GET /schwab/auth/md  →  GET /schwab/callback/md
+
+Environment variables (.env):
+    SCHWAB_CLIENT_ID        — Accounts+Trading app key
+    SCHWAB_CLIENT_SECRET    — Accounts+Trading app secret
+    SCHWAB_MD_CLIENT_ID     — Market Data app key
+    SCHWAB_MD_CLIENT_SECRET — Market Data app secret
+    SCHWAB_ACCOUNT_NUMBER   — Paper/live account number
+    SCHWAB_PAPER_TRADING    — "true" for paper, "false" for live
 """
 from __future__ import annotations
 
@@ -25,316 +28,285 @@ import json
 import logging
 import os
 import secrets
-import ssl
 import threading
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-AUTH_URL     = "https://api.schwabapi.com/v1/oauth/authorize"
-TOKEN_URL    = "https://api.schwabapi.com/v1/oauth/token"
-# Web callback (production) — used when running on AWS with HTTPS domain
-WEB_REDIRECT_URI  = "https://scalpingstocksai.com/schwab/callback"
-# Local callback (dev only) — kept for backwards compat
-REDIRECT_URI = WEB_REDIRECT_URI
-CALLBACK_PORT = 8182
-TOKEN_PATH   = Path(__file__).parent.parent.parent / "data" / "schwab_tokens.json"
+AUTH_URL  = "https://api.schwabapi.com/v1/oauth/authorize"
+TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 
-# ── Token state ───────────────────────────────────────────────────────────────
-_tokens: dict = {}
-_tokens_lock  = threading.Lock()
-_refresh_timer: Optional[threading.Timer] = None
+_DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 
-def _client_id() -> str:
-    v = os.getenv("SCHWAB_CLIENT_ID", "")
-    if not v:
-        raise RuntimeError("SCHWAB_CLIENT_ID not set in .env")
-    return v
+# ── Reusable token manager ────────────────────────────────────────────────────
 
-def _client_secret() -> str:
-    v = os.getenv("SCHWAB_CLIENT_SECRET", "")
-    if not v:
-        raise RuntimeError("SCHWAB_CLIENT_SECRET not set in .env")
-    return v
+class _TokenManager:
+    """Manages OAuth tokens for one Schwab app (PKCE web flow)."""
 
+    def __init__(self, name: str, client_id_env: str, client_secret_env: str,
+                 token_filename: str) -> None:
+        self.name             = name
+        self._id_env          = client_id_env
+        self._secret_env      = client_secret_env
+        self._token_path      = _DATA_DIR / token_filename
+        self._tokens: dict    = {}
+        self._lock            = threading.Lock()
+        self._refresh_timer: Optional[threading.Timer] = None
+        # Pending PKCE verifiers keyed by OAuth state param
+        self._pending: dict[str, str] = {}
+        self._pending_lock    = threading.Lock()
 
-# ── Token persistence ─────────────────────────────────────────────────────────
+    # ── Credentials ──────────────────────────────────────────────────────────
 
-def _save_tokens(data: dict) -> None:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(json.dumps(data, indent=2))
-    logger.info("Schwab tokens saved.")
+    def client_id(self) -> str:
+        v = os.getenv(self._id_env, "").strip()
+        if not v:
+            raise RuntimeError(f"{self._id_env} not set in .env")
+        return v
 
-def _load_tokens() -> dict:
-    if TOKEN_PATH.exists():
+    def client_secret(self) -> str:
+        v = os.getenv(self._secret_env, "").strip()
+        if not v:
+            raise RuntimeError(f"{self._secret_env} not set in .env")
+        return v
+
+    def is_configured(self) -> bool:
+        return bool(os.getenv(self._id_env, "").strip())
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def _save(self) -> None:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._token_path.write_text(json.dumps(self._tokens, indent=2))
+
+    def _load_from_disk(self) -> dict:
+        if self._token_path.exists():
+            try:
+                return json.loads(self._token_path.read_text())
+            except Exception:
+                pass
+        return {}
+
+    # ── HTTP helpers ──────────────────────────────────────────────────────────
+
+    def _basic_auth(self) -> str:
+        return base64.b64encode(
+            f"{self.client_id()}:{self.client_secret()}".encode()
+        ).decode()
+
+    def _post_token(self, payload: dict) -> dict:
+        data = urllib.parse.urlencode(payload).encode()
+        req  = urllib.request.Request(TOKEN_URL, data=data, method="POST")
+        req.add_header("Authorization", f"Basic {self._basic_auth()}")
+        req.add_header("Content-Type",  "application/x-www-form-urlencoded")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+
+    # ── Token storage ─────────────────────────────────────────────────────────
+
+    def _store(self, data: dict) -> None:
+        with self._lock:
+            self._tokens.clear()
+            self._tokens.update(data)
+            self._tokens["stored_at"] = time.time()
+        self._save()
+        logger.info(f"[Schwab/{self.name}] Tokens saved.")
+
+    # ── Refresh ───────────────────────────────────────────────────────────────
+
+    def refresh(self) -> bool:
+        with self._lock:
+            rt = self._tokens.get("refresh_token")
+        if not rt:
+            logger.warning(f"[Schwab/{self.name}] No refresh token — re-auth required.")
+            return False
         try:
-            return json.loads(TOKEN_PATH.read_text())
-        except Exception:
-            pass
-    return {}
+            data = self._post_token({"grant_type": "refresh_token", "refresh_token": rt})
+            self._store(data)
+            self._schedule_refresh(data.get("expires_in", 1800))
+            logger.info(f"[Schwab/{self.name}] Access token refreshed.")
+            return True
+        except Exception as e:
+            logger.error(f"[Schwab/{self.name}] Token refresh failed: {e}")
+            return False
 
+    def _schedule_refresh(self, expires_in: int) -> None:
+        if self._refresh_timer:
+            self._refresh_timer.cancel()
+        delay = max(60, expires_in - 300)
+        self._refresh_timer = threading.Timer(delay, self.refresh)
+        self._refresh_timer.daemon = True
+        self._refresh_timer.start()
 
-# ── HTTP token exchange ───────────────────────────────────────────────────────
+    # ── Load from disk (called at startup) ────────────────────────────────────
 
-def _basic_auth() -> str:
-    creds = f"{_client_id()}:{_client_secret()}"
-    return base64.b64encode(creds.encode()).decode()
-
-def _post_token(payload: dict) -> dict:
-    data = urllib.parse.urlencode(payload).encode()
-    req  = urllib.request.Request(TOKEN_URL, data=data, method="POST")
-    req.add_header("Authorization", f"Basic {_basic_auth()}")
-    req.add_header("Content-Type",  "application/x-www-form-urlencoded")
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read())
-
-
-# ── Auth code capture (local HTTPS server) ────────────────────────────────────
-
-_auth_code: Optional[str]  = None
-_auth_event = threading.Event()
-
-class _CallbackHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        global _auth_code
-        parsed = urllib.parse.urlparse(self.path)
-        params = urllib.parse.parse_qs(parsed.query)
-        code   = params.get("code", [None])[0]
-        if code:
-            _auth_code = code
-            _auth_event.set()
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"<html><body><h2>Authenticated! You can close this tab.</h2></body></html>")
-        else:
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"<html><body><h2>Error: no code received.</h2></body></html>")
-
-    def log_message(self, fmt, *args):
-        pass   # suppress default access log
-
-
-def _start_callback_server() -> HTTPServer:
-    """Start local HTTPS server to capture OAuth callback."""
-    import datetime as _dt, tempfile
-    from cryptography import x509
-    from cryptography.x509.oid import NameOID
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    # Generate self-signed cert in pure Python (no openssl binary needed)
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(_dt.datetime.now(_dt.timezone.utc))
-        .not_valid_after(_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(__import__("ipaddress").IPv4Address("127.0.0.1"))]), critical=False)
-        .sign(key, hashes.SHA256())
-    )
-
-    cert_dir  = tempfile.mkdtemp()
-    key_path  = Path(cert_dir) / "key.pem"
-    cert_path = Path(cert_dir) / "cert.pem"
-
-    key_path.write_bytes(key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption(),
-    ))
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(str(cert_path), str(key_path))
-
-    server = HTTPServer(("127.0.0.1", CALLBACK_PORT), _CallbackHandler)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    return server
-
-
-# ── Public auth flow ──────────────────────────────────────────────────────────
-
-def start_auth_flow() -> dict:
-    """
-    Launch browser-based OAuth flow.  Blocks until user completes login + MFA.
-    Returns token dict on success.
-    """
-    global _auth_code
-    _auth_code = None
-    _auth_event.clear()
-
-    # PKCE
-    code_verifier  = secrets.token_urlsafe(64)
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b"=").decode()
-
-    params = urllib.parse.urlencode({
-        "response_type":         "code",
-        "client_id":             _client_id(),
-        "redirect_uri":          REDIRECT_URI,
-        "scope":                 "readonly",
-        "code_challenge":        code_challenge,
-        "code_challenge_method": "S256",
-    })
-    login_url = f"{AUTH_URL}?{params}"
-
-    server = _start_callback_server()
-    logger.info(f"Opening browser for Schwab login (MFA will be prompted):\n{login_url}")
-
-    # Open browser
-    import webbrowser
-    webbrowser.open(login_url)
-
-    # Wait up to 5 min for user to complete login + MFA
-    if not _auth_event.wait(timeout=300):
-        server.shutdown()
-        raise TimeoutError("Auth timed out — user did not complete login in 5 minutes.")
-    server.shutdown()
-
-    if not _auth_code:
-        raise RuntimeError("No auth code received after login.")
-
-    # Exchange code for tokens
-    token_data = _post_token({
-        "grant_type":    "authorization_code",
-        "code":          _auth_code,
-        "redirect_uri":  REDIRECT_URI,
-        "code_verifier": code_verifier,
-    })
-
-    _store_tokens(token_data)
-    _schedule_refresh(token_data.get("expires_in", 1800))
-    logger.info("Schwab authentication successful.")
-    return get_token_status()
-
-
-def _store_tokens(data: dict) -> None:
-    with _tokens_lock:
-        _tokens.clear()
-        _tokens.update(data)
-        _tokens["stored_at"] = time.time()
-    _save_tokens(_tokens)
-
-
-def refresh_access_token() -> bool:
-    """Use the refresh token to get a new access token. Returns True on success."""
-    with _tokens_lock:
-        rt = _tokens.get("refresh_token")
-    if not rt:
-        logger.warning("No refresh token — re-auth required.")
-        return False
-    try:
-        data = _post_token({
-            "grant_type":    "refresh_token",
-            "refresh_token": rt,
-        })
-        _store_tokens(data)
-        _schedule_refresh(data.get("expires_in", 1800))
-        logger.info("Schwab access token refreshed.")
+    def load_stored(self) -> bool:
+        data = self._load_from_disk()
+        if not data or "access_token" not in data:
+            return False
+        with self._lock:
+            self._tokens.update(data)
+        stored_at  = data.get("stored_at", 0)
+        expires_in = data.get("expires_in", 1800)
+        remaining  = expires_in - (time.time() - stored_at)
+        if remaining < 60:
+            logger.info(f"[Schwab/{self.name}] Stored token expired — refreshing…")
+            return self.refresh()
+        self._schedule_refresh(int(remaining))
+        logger.info(f"[Schwab/{self.name}] Token loaded, valid for {int(remaining)}s.")
         return True
-    except Exception as e:
-        logger.error(f"Token refresh failed: {e}")
-        return False
+
+    # ── Web OAuth (PKCE) ──────────────────────────────────────────────────────
+
+    def build_auth_url(self, redirect_uri: str) -> str:
+        """Build the Schwab login URL. Redirect the user's browser to this URL."""
+        code_verifier  = secrets.token_urlsafe(64)
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+        state = secrets.token_urlsafe(16)
+        with self._pending_lock:
+            self._pending[state] = code_verifier
+        params = urllib.parse.urlencode({
+            "response_type":         "code",
+            "client_id":             self.client_id(),
+            "redirect_uri":          redirect_uri,
+            "scope":                 "readonly",
+            "code_challenge":        code_challenge,
+            "code_challenge_method": "S256",
+            "state":                 state,
+        })
+        return f"{AUTH_URL}?{params}"
+
+    def exchange_code(self, code: str, state: str, redirect_uri: str) -> bool:
+        """Exchange auth code for tokens. Returns True on success."""
+        with self._pending_lock:
+            code_verifier = self._pending.pop(state, None)
+        # Tolerate missing state (e.g. when Schwab doesn't echo it back)
+        try:
+            payload = {
+                "grant_type":   "authorization_code",
+                "code":         code,
+                "redirect_uri": redirect_uri,
+            }
+            if code_verifier:
+                payload["code_verifier"] = code_verifier
+            data = self._post_token(payload)
+            self._store(data)
+            self._schedule_refresh(data.get("expires_in", 1800))
+            logger.info(f"[Schwab/{self.name}] Web OAuth complete.")
+            return True
+        except Exception as e:
+            logger.error(f"[Schwab/{self.name}] Code exchange failed: {e}")
+            return False
+
+    # ── Public getters ────────────────────────────────────────────────────────
+
+    def get_access_token(self) -> Optional[str]:
+        with self._lock:
+            return self._tokens.get("access_token")
+
+    def get_status(self) -> dict:
+        with self._lock:
+            tok = dict(self._tokens)
+        stored_at    = tok.get("stored_at", 0)
+        expires_in   = tok.get("expires_in", 1800)
+        remaining    = max(0, expires_in - (time.time() - stored_at)) if stored_at else 0
+        rt_remaining = max(0, 7 * 86400 - (time.time() - stored_at)) if stored_at else 0
+        return {
+            "connected":           bool(tok.get("access_token")),
+            "app":                 self.name,
+            "access_token_ttl_s":  int(remaining),
+            "refresh_token_ttl_s": int(rt_remaining),
+            "refresh_token_expires": datetime.fromtimestamp(
+                stored_at + 7 * 86400, tz=timezone.utc
+            ).isoformat() if stored_at else None,
+        }
 
 
-def _schedule_refresh(expires_in: int) -> None:
-    """Schedule a token refresh 5 min before expiry."""
-    global _refresh_timer
-    if _refresh_timer:
-        _refresh_timer.cancel()
-    delay = max(60, expires_in - 300)
-    _refresh_timer = threading.Timer(delay, refresh_access_token)
-    _refresh_timer.daemon = True
-    _refresh_timer.start()
+# ── Two app instances ─────────────────────────────────────────────────────────
 
+# Primary: Accounts and Trading → streamer + trading
+_trader = _TokenManager(
+    name="Trader",
+    client_id_env="SCHWAB_CLIENT_ID",
+    client_secret_env="SCHWAB_CLIENT_SECRET",
+    token_filename="schwab_tokens.json",
+)
+
+# Market Data: REST quotes, chains, movers, price history
+_market_data = _TokenManager(
+    name="MarketData",
+    client_id_env="SCHWAB_MD_CLIENT_ID",
+    client_secret_env="SCHWAB_MD_CLIENT_SECRET",
+    token_filename="schwab_md_tokens.json",
+)
+
+
+# ── Public API (backwards-compatible names) ───────────────────────────────────
 
 def load_stored_tokens() -> bool:
-    """Load tokens from disk (called at startup). Returns True if valid."""
-    data = _load_tokens()
-    if not data or "access_token" not in data:
-        return False
-    with _tokens_lock:
-        _tokens.update(data)
-    stored_at  = data.get("stored_at", 0)
-    expires_in = data.get("expires_in", 1800)
-    remaining  = expires_in - (time.time() - stored_at)
-    if remaining < 60:
-        logger.info("Stored access token expired — refreshing…")
-        return refresh_access_token()
-    _schedule_refresh(int(remaining))
-    logger.info(f"Schwab tokens loaded. Access token valid for {int(remaining)}s.")
-    return True
+    """Load primary (Trader) tokens from disk. Called at startup."""
+    return _trader.load_stored()
 
+def load_stored_md_tokens() -> bool:
+    """Load Market Data tokens from disk. Called at startup."""
+    if not _market_data.is_configured():
+        return False
+    return _market_data.load_stored()
 
 def get_access_token() -> Optional[str]:
-    with _tokens_lock:
-        return _tokens.get("access_token")
+    """Primary (Accounts+Trading) access token."""
+    return _trader.get_access_token()
 
-
-# ── Web OAuth flow (production — AWS server with HTTPS domain) ────────────────
-
-def get_web_auth_url() -> str:
-    """Return the Schwab authorization URL for the web-based OAuth flow."""
-    params = urllib.parse.urlencode({
-        "response_type": "code",
-        "client_id":     _client_id(),
-        "redirect_uri":  WEB_REDIRECT_URI,
-    })
-    return f"{AUTH_URL}?{params}"
-
-
-def exchange_web_code(code: str) -> bool:
+def get_md_access_token() -> Optional[str]:
     """
-    Exchange the authorization code from /schwab/callback for tokens.
-    Called by the FastAPI callback route. Returns True on success.
+    Market Data access token.
+    Falls back to the primary token if MD app is not configured,
+    so a single-app setup still works.
     """
-    try:
-        data = _post_token({
-            "grant_type":   "authorization_code",
-            "code":         code,
-            "redirect_uri": WEB_REDIRECT_URI,
-        })
-        _store_tokens(data)
-        _schedule_refresh(data.get("expires_in", 1800))
-        logger.info("[Schwab] Web OAuth complete — tokens stored.")
-        return True
-    except Exception as e:
-        logger.error(f"[Schwab] Web code exchange failed: {e}")
-        return False
-
+    tok = _market_data.get_access_token()
+    if tok:
+        return tok
+    return _trader.get_access_token()
 
 def get_token_status() -> dict:
-    with _tokens_lock:
-        tok = dict(_tokens)
-    stored_at  = tok.get("stored_at", 0)
-    expires_in = tok.get("expires_in", 1800)
-    remaining  = max(0, expires_in - (time.time() - stored_at)) if stored_at else 0
-    rt_stored  = tok.get("stored_at", 0)
-    # Refresh token lasts 7 days
-    rt_remaining = max(0, 7 * 86400 - (time.time() - rt_stored)) if rt_stored else 0
-    return {
-        "connected":          bool(tok.get("access_token")),
-        "access_token_ttl_s": int(remaining),
-        "refresh_token_ttl_s": int(rt_remaining),
-        "refresh_token_expires": datetime.fromtimestamp(
-            rt_stored + 7 * 86400, tz=timezone.utc
-        ).isoformat() if rt_stored else None,
-        "paper_trading":      os.getenv("SCHWAB_PAPER_TRADING", "true").lower() == "true",
-        "account_number":     os.getenv("SCHWAB_ACCOUNT_NUMBER", ""),
-    }
+    status = _trader.get_status()
+    status["paper_trading"]  = os.getenv("SCHWAB_PAPER_TRADING", "true").lower() == "true"
+    status["account_number"] = os.getenv("SCHWAB_ACCOUNT_NUMBER", "")
+    return status
+
+def get_md_token_status() -> dict:
+    return _market_data.get_status()
+
+def refresh_access_token() -> bool:
+    return _trader.refresh()
+
+# Web OAuth helpers used by FastAPI routes
+def build_auth_url(redirect_uri: str) -> str:
+    return _trader.build_auth_url(redirect_uri)
+
+def exchange_auth_code(code: str, state: str, redirect_uri: str) -> bool:
+    return _trader.exchange_code(code, state, redirect_uri)
+
+def build_md_auth_url(redirect_uri: str) -> str:
+    return _market_data.build_auth_url(redirect_uri)
+
+def exchange_md_auth_code(code: str, state: str, redirect_uri: str) -> bool:
+    return _market_data.exchange_code(code, state, redirect_uri)
+
+# Legacy aliases kept for any code that still imports these names
+def get_web_auth_url() -> str:
+    return _trader.build_auth_url("https://scalpingstocksai.com/schwab/callback")
+
+def exchange_web_code(code: str) -> bool:
+    return _trader.exchange_code(code, "", "https://scalpingstocksai.com/schwab/callback")
+
+def start_auth_flow() -> dict:
+    raise RuntimeError("Local browser auth not supported on server. Use GET /schwab/auth instead.")
