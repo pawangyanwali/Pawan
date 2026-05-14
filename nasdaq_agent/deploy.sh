@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# NASDAQ Scalping Agent — AWS Lightsail / Ubuntu 22.04 deploy script
+# NASDAQ Scalping Agent — AWS / Ubuntu 22.04 deploy script
 # Run this ONCE on a fresh Ubuntu 22.04 instance as root or sudo user.
 #
 # Usage:
 #   ssh ubuntu@YOUR_SERVER_IP
 #   curl -O https://raw.githubusercontent.com/pawangyanwali/Pawan/claude/nasdaq-stock-prediction-agent-kDe60/nasdaq_agent/deploy.sh
 #   chmod +x deploy.sh && sudo bash deploy.sh
+#
+# To enable HTTPS after pointing your domain to this server:
+#   sudo bash deploy.sh --domain scalpingstocksai.com
 # =============================================================================
 
 set -euo pipefail
@@ -17,6 +20,15 @@ REPO="https://github.com/pawangyanwali/Pawan.git"
 BRANCH="claude/nasdaq-stock-prediction-agent-kDe60"
 SERVICE="nasdaq-agent"
 PYTHON_MIN="3.10"
+DOMAIN="${DOMAIN:-}"                   # set via --domain flag or env var
+
+# Parse flags
+for arg in "$@"; do
+  case $arg in
+    --domain=*) DOMAIN="${arg#*=}" ;;
+    --domain)   shift; DOMAIN="${1:-}" ;;
+  esac
+done
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
@@ -114,11 +126,12 @@ info "systemd service created and enabled."
 
 section "7 / 7 — Nginx reverse proxy"
 PUBLIC_IP=$(curl -sf http://checkip.amazonaws.com/ || echo "YOUR_SERVER_IP")
+SERVER_NAME="${DOMAIN:-${PUBLIC_IP} _}"
 
 cat > "/etc/nginx/sites-available/${SERVICE}" <<NGINXEOF
 server {
     listen 80;
-    server_name ${PUBLIC_IP} _;
+    server_name ${SERVER_NAME};
 
     # WebSocket support
     location /ws {
@@ -151,9 +164,27 @@ info "Nginx configured."
 
 section "Firewall"
 ufw allow OpenSSH
-ufw allow 'Nginx HTTP'
+ufw allow 'Nginx Full'   # opens both 80 and 443
 ufw --force enable
-info "Firewall: SSH + HTTP open, all other ports closed."
+info "Firewall: SSH + HTTP + HTTPS open."
+
+# ── HTTPS via Let's Encrypt (only when --domain is provided) ─────────────────
+if [ -n "$DOMAIN" ]; then
+  section "SSL — Let's Encrypt for ${DOMAIN}"
+  apt-get install -y --no-install-recommends certbot python3-certbot-nginx > /dev/null
+  certbot --nginx \
+    --non-interactive \
+    --agree-tos \
+    --redirect \
+    --email "admin@${DOMAIN}" \
+    -d "${DOMAIN}" \
+    -d "www.${DOMAIN}" || warn "certbot failed — check DNS is pointing to this server"
+
+  # Auto-renewal via systemd timer (installed by certbot package)
+  systemctl enable certbot.timer 2>/dev/null || true
+  info "SSL certificate installed. Auto-renewal enabled."
+  info "Schwab callback URL: https://${DOMAIN}/schwab/callback"
+fi
 
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
