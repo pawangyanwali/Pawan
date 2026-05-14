@@ -39,32 +39,48 @@ _IV = {
 }
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
-# Two-layer protection:
-#   1. _throttle()         — minimum gap between consecutive API calls (CALL_GAP)
-#   2. _charge_credits(n)  — rolling 60-second credit window; blocks when near limit
 #
-# Both are fully thread-safe so the scan loop and retrain thread can't race.
+# Grow-377 plan: 377 credits/minute.  1 credit = 1 symbol in any request.
+# Batch of 20 symbols = 20 credits.
+#
+# CORRECT pacing formula (per batch call):
+#   min_gap = n_credits / (CREDIT_LIMIT / 60.0)
+#   e.g. 20 symbols → 20 / (340/60) = 3.53 seconds between calls
+#
+# This single credit-aware _throttle() prevents ANY burst regardless of how
+# many threads are making calls.  All threads share _throttle_lock so only
+# ONE request fires every min_gap seconds across the whole process.
+#
+# _charge_credits() is kept as a rolling-window safety net (catches edge cases
+# where pacing slips), but credit-aware throttling is the primary guard.
 
-_last_call:     float            = 0.0
-_throttle_lock: threading.Lock  = threading.Lock()
+CREDIT_LIMIT = 340   # 90 % of plan limit (377) — safe ceiling with headroom
 
-# Rolling credit window: deque of (timestamp, credit_count) pairs
-# Grow-377 plan: 377 credits/minute hard limit.
-# We target 340 (90% of 377) to leave headroom for retries and clock drift.
+_last_call:     float           = 0.0
+_throttle_lock: threading.Lock = threading.Lock()
+
 _credit_events: collections.deque = collections.deque()
 _credit_lock:   threading.Lock    = threading.Lock()
-CREDIT_LIMIT = 340   # 90 % of 377 — safe ceiling across ALL endpoint types
-
-# Track credits consumed for monitoring
-_credits_this_minute: int = 0
-_credits_lock: threading.Lock = threading.Lock()
 
 
-def _throttle() -> None:
-    """Thread-safe minimum-gap throttle between consecutive API calls."""
+def _throttle(n_credits: int = 1) -> None:
+    """
+    Credit-aware inter-call gap.  Serialises ALL Twelve Data HTTP calls
+    through a single global lock so concurrent threads can't burst.
+
+    min_gap = max(CALL_GAP, n_credits / credits_per_second)
+    where credits_per_second = CREDIT_LIMIT / 60.0  ≈ 5.67 c/s
+
+    Examples (CREDIT_LIMIT=340):
+      n_credits=1  →  max(0.20, 0.18) = 0.20 s   (earnings, single-symbol)
+      n_credits=20 →  max(0.20, 3.53) = 3.53 s   (batch /time_series)
+    """
     global _last_call
+    credits_per_second = CREDIT_LIMIT / 60.0
+    min_gap = max(CALL_GAP, n_credits / credits_per_second)
     with _throttle_lock:
-        wait = CALL_GAP - (time.time() - _last_call)
+        elapsed = time.time() - _last_call
+        wait    = min_gap - elapsed
         if wait > 0:
             time.sleep(wait)
         _last_call = time.time()
@@ -72,15 +88,12 @@ def _throttle() -> None:
 
 def _charge_credits(n: int) -> None:
     """
-    Block until n credits can be consumed within the rolling 60-second window.
+    Rolling 60-second credit window — secondary safety net.
 
-    This is the SINGLE point of credit accounting for ALL Twelve Data API calls.
-    Both batch /time_series calls (n = batch size) and single-symbol endpoints
-    like /earnings (n = 1) must route through here so the rolling window is
-    accurate and we never exceed the plan limit.
+    Blocks only if the rolling window is unexpectedly full despite pacing.
+    In normal operation _throttle() keeps us well under CREDIT_LIMIT so
+    this function returns immediately without sleeping.
     """
-    t_start = time.time()
-    warned   = False
     while True:
         now    = time.time()
         cutoff = now - 60.0
@@ -91,52 +104,55 @@ def _charge_credits(n: int) -> None:
             if used + n <= CREDIT_LIMIT:
                 _credit_events.append((now, n))
                 return
-            wait = (_credit_events[0][0] + 60.01) - time.time() if _credit_events else 0.1
-        if not warned and (time.time() - t_start) > 2:
-            logger.debug(
-                f"Credit throttle: {used}/{CREDIT_LIMIT} used — "
-                f"waiting {wait:.1f}s for {n} credits to free up"
-            )
-            warned = True
-        time.sleep(max(0.05, min(wait, 1.0)))
+            wait = (_credit_events[0][0] + 60.01) - now if _credit_events else 1.0
+        logger.debug(
+            f"[rate-limit] rolling window full ({used}/{CREDIT_LIMIT}) — "
+            f"waiting {wait:.1f}s for {n} credits to free"
+        )
+        time.sleep(max(0.5, min(wait, 5.0)))
 
 
 def get_credit_usage() -> dict:
-    """Return current rolling-window credit stats (for monitoring / UI)."""
+    """Current rolling-window credit stats for monitoring."""
     now    = time.time()
     cutoff = now - 60.0
     with _credit_lock:
-        active = [(ts, c) for ts, c in _credit_events if ts >= cutoff]
-        used   = sum(c for _, c in active)
-    return {"used": used, "limit": CREDIT_LIMIT, "pct": round(used / CREDIT_LIMIT * 100, 1)}
+        used = sum(c for ts, c in _credit_events if ts >= cutoff)
+    return {
+        "used":  used,
+        "limit": CREDIT_LIMIT,
+        "pct":   round(used / CREDIT_LIMIT * 100, 1),
+    }
 
 
 def _get(endpoint: str, params: dict, n_credits: int = 1, _retry: int = 3) -> dict:
     """
     Rate-limited GET to the Twelve Data REST API.
 
-    Parameters
-    ----------
-    n_credits : Credits this call consumes (1 for single-symbol endpoints,
+    n_credits : credits consumed by this call (1 for single-symbol endpoints,
                 len(batch) for /time_series batch calls).
-                ALL calls must specify this so credit accounting is complete.
+
+    Execution order per call:
+      1. _charge_credits(n) — reserve credits in rolling window (rarely blocks)
+      2. _throttle(n)       — enforce correct inter-call gap (primary guard)
+      3. HTTP request
     """
-    _charge_credits(n_credits)   # blocks until budget is available
-    _throttle()                  # enforces minimum inter-call gap (CALL_GAP)
+    _charge_credits(n_credits)
+    _throttle(n_credits)
     params["apikey"] = TWELVE_DATA_API_KEY
     try:
         r = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=30)
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict) and data.get("code") == 429:
-            # Should rarely happen now that _charge_credits gates all requests.
-            # If it does, back off and retry without re-charging credits.
+            # 429 despite pacing — Twelve Data window misalignment or clock skew.
+            # Wait for their window to fully reset before retrying.
             if _retry > 0:
                 logger.warning(
-                    "Rate limit 429 from Twelve Data despite credit guard — "
-                    "backing off 30s and retrying…"
+                    f"Rate limit 429 from Twelve Data (n_credits={n_credits}) — "
+                    f"waiting 65s for window reset…"
                 )
-                time.sleep(30)
+                time.sleep(65)
                 return _get(endpoint, params, n_credits=0, _retry=_retry - 1)
             return {}
         return data
