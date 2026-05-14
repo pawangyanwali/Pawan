@@ -346,6 +346,7 @@
     .loading-overlay.hidden { opacity:0; pointer-events:none; }
     .spinner { width:44px; height:44px; border:3px solid var(--border); border-top-color:var(--green-s); border-radius:50%; animation:spin .8s linear infinite; }
     @keyframes spin { to { transform:rotate(360deg); } }
+    @keyframes shimmer { from{background-position:200% 0} to{background-position:-200% 0} }
     .loading-text { color:var(--muted); font-size:13px; text-align:center; }
 
     /* Scrollbar */
@@ -857,11 +858,11 @@
 
     <div id="nn-panel-progress" style="display:block">
       <!-- XGBoost queue section -->
-      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">XGBoost Training Queue</div>
+      <div id="nn-xgb-section-title" style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">XGBoost Training Queue</div>
       <div id="nn-xgb-phase" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
-      <!-- current ticker -->
+      <!-- current ticker / BiLSTM active banner -->
       <div id="nn-current-ticker" style="display:none;background:linear-gradient(90deg,rgba(99,102,241,.15),rgba(99,102,241,.05));border:1px solid rgba(99,102,241,.4);border-radius:8px;padding:10px 14px;margin-bottom:10px;align-items:center;gap:10px">
-        <div style="width:8px;height:8px;border-radius:50%;background:#818cf8;animation:pulse 1s infinite;flex-shrink:0"></div>
+        <div id="nn-ct-dot" style="width:8px;height:8px;border-radius:50%;background:#818cf8;animation:pulse 1s infinite;flex-shrink:0"></div>
         <div>
           <div style="font-size:12px;font-weight:700;color:var(--text)" id="nn-ct-ticker">—</div>
           <div style="font-size:10px;color:var(--muted)">Training <span id="nn-ct-model" style="color:#818cf8;font-weight:700"></span> model</div>
@@ -873,9 +874,27 @@
       <div id="nn-completed-list" style="display:flex;flex-wrap:wrap;gap:4px;max-height:120px;overflow-y:auto;margin-bottom:12px;padding:2px"></div>
       <div style="border-top:1px solid var(--border);margin:12px 0"></div>
 
-      <!-- BiLSTM loss curve -->
-      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px">Deep BiLSTM — Loss Curve</div>
+      <!-- BiLSTM section -->
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <div style="font-size:12px;font-weight:700;color:var(--text)">Deep BiLSTM — Loss Curve</div>
+        <div id="nn-bilstm-active-dot" style="display:none;width:7px;height:7px;border-radius:50%;background:#7c3aed;animation:pulse 1s infinite;flex-shrink:0"></div>
+        <span id="nn-bilstm-active-label" style="display:none;font-size:10px;color:#a78bfa;font-weight:700">TRAINING NOW</span>
+      </div>
       <div id="nn-bilstm-phase" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
+      <!-- Active training placeholder shown while BiLSTM trains but no epoch data yet -->
+      <div id="nn-bilstm-active-state" style="display:none;background:linear-gradient(135deg,rgba(124,58,237,.12),rgba(99,102,241,.08));border:1px solid rgba(124,58,237,.35);border-radius:8px;padding:16px 14px;margin-bottom:8px;text-align:center">
+        <div style="font-size:28px;margin-bottom:8px">🧠</div>
+        <div style="font-size:12px;font-weight:700;color:#a78bfa;margin-bottom:4px">BiLSTM Training In Progress</div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:10px">XGBoost models completed · Now training deep neural network across all clusters</div>
+        <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap" id="nn-bilstm-cluster-progress">
+          <span style="padding:3px 10px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(99,102,241,.2);color:#818cf8;border:1px solid rgba(99,102,241,.4)">Cluster A · Mega-cap</span>
+          <span style="padding:3px 10px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(245,158,11,.2);color:#fbbf24;border:1px solid rgba(245,158,11,.4)">Cluster B · Growth</span>
+          <span style="padding:3px 10px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(239,68,68,.2);color:#f87171;border:1px solid rgba(239,68,68,.4)">Cluster C · Momentum</span>
+        </div>
+        <div style="margin-top:10px;height:3px;background:var(--surface2);border-radius:2px;overflow:hidden">
+          <div style="height:100%;width:100%;background:linear-gradient(90deg,#7c3aed,#6366f1,#7c3aed);background-size:200% 100%;animation:shimmer 1.5s linear infinite;border-radius:2px"></div>
+        </div>
+      </div>
       <canvas id="nn-loss-chart" height="140" style="width:100%;border-radius:8px;background:var(--surface2);display:block"></canvas>
       <div style="font-size:10px;color:var(--muted);margin-top:6px">Loss decreases each epoch as the model learns directional patterns across all tickers.</div>
 
@@ -3643,10 +3662,18 @@ async function loadNeuralStatus() {
 }
 
 function renderNeuralPanel(d) {
-  // Training banner
+  // Training banner — phase-specific message
   const banner = document.getElementById('nn-training-banner');
-  if (d.is_training_now) {
+  const isActive = rp.is_running || d.is_training_now;
+  if (isActive) {
     banner.style.cssText += ';display:flex!important';
+    let msg = 'Training in progress…';
+    if (phase === 'fetching_5m')   msg = 'Fetching 5-min price history…';
+    else if (phase === 'fetching_15m') msg = 'Fetching 15-min price history…';
+    else if (phase === 'xgboost')  msg = `XGBoost: training ${rp.current_ticker || ''}` +
+      (rp.total ? ` · ${rp.done_count || 0}/${rp.total} tickers` : '');
+    else if (phase === 'deep')     msg = '🧠 Deep BiLSTM training — A/B/C clusters in parallel…';
+    document.getElementById('nn-training-msg').textContent = msg;
     const hist = d.training_history || [];
     const last = hist[hist.length - 1];
     document.getElementById('nn-epoch-badge').textContent =
@@ -3655,21 +3682,42 @@ function renderNeuralPanel(d) {
     banner.style.display = 'none';
   }
 
-  // XGBoost training queue
+  // ── Training phase helpers ────────────────────────────────────────────────
   const rp = d.retrain_progress || {};
+  const phase = rp.phase || '';
+  const xgbDone = ['deep', 'done'].includes(phase) ||
+                  (phase === '' && (rp.done_count || 0) === (rp.total || 0) && rp.total > 0);
+  const bilstmActive = phase === 'deep' || (d.is_training_now && xgbDone);
+
+  // Section title reflects active phase
+  const sectionTitle = document.getElementById('nn-xgb-section-title');
+  if (sectionTitle) {
+    if (phase === 'xgboost' || phase === 'fetching_5m' || phase === 'fetching_15m') {
+      sectionTitle.innerHTML = '🔄 XGBoost Training — <span style="color:#818cf8">In Progress</span>';
+    } else if (xgbDone && rp.total > 0) {
+      sectionTitle.innerHTML = '✓ XGBoost Training — <span style="color:var(--green)">Complete</span>';
+    } else if (phase === 'done') {
+      sectionTitle.innerHTML = '✓ Training Complete';
+    } else {
+      sectionTitle.textContent = 'XGBoost Training Queue';
+    }
+  }
+
+  // Phase sub-label
   const phaseEl = document.getElementById('nn-xgb-phase');
   if (phaseEl) {
     if (rp.phase_label) phaseEl.textContent = rp.phase_label;
     else if (rp.is_running) phaseEl.textContent = 'Running…';
-    else if (rp.phase === 'done') phaseEl.textContent = '✓ Complete';
+    else if (phase === 'done') phaseEl.textContent = '';
     else phaseEl.textContent = 'Idle — waiting for next cycle';
   }
 
+  // Current ticker box (XGBoost active) — reuse for BiLSTM phase too
   const ctEl = document.getElementById('nn-current-ticker');
   if (ctEl) {
-    const showCurrent = rp.is_running && rp.current_ticker && rp.phase === 'xgboost';
-    ctEl.style.display = showCurrent ? 'flex' : 'none';
-    if (showCurrent) {
+    const showXgb = rp.is_running && rp.current_ticker && phase === 'xgboost';
+    ctEl.style.display = showXgb ? 'flex' : 'none';
+    if (showXgb) {
       const ctTicker = document.getElementById('nn-ct-ticker');
       const ctModel  = document.getElementById('nn-ct-model');
       const ctProg   = document.getElementById('nn-ct-progress');
@@ -3679,13 +3727,19 @@ function renderNeuralPanel(d) {
     }
   }
 
+  // Completed ticker count label
   const doneCountEl = document.getElementById('nn-done-count');
   if (doneCountEl) {
-    doneCountEl.textContent = (rp.done_count != null && rp.total)
-      ? `${rp.done_count} / ${rp.total} tickers`
-      : '';
+    if (rp.done_count != null && rp.total) {
+      const allDone = rp.done_count >= rp.total;
+      doneCountEl.style.color = allDone ? 'var(--green)' : '#f59e0b';
+      doneCountEl.textContent = `${rp.done_count} / ${rp.total} tickers${allDone ? ' ✓' : ''}`;
+    } else {
+      doneCountEl.textContent = '';
+    }
   }
 
+  // Completed ticker chips
   const compList = document.getElementById('nn-completed-list');
   if (compList) {
     const completed = rp.completed || [];
@@ -3700,37 +3754,73 @@ function renderNeuralPanel(d) {
       : '<span style="font-size:10px;color:var(--muted)">No tickers trained yet</span>';
   }
 
+  // BiLSTM section header indicator
+  const bilstmDot = document.getElementById('nn-bilstm-active-dot');
+  const bilstmLbl = document.getElementById('nn-bilstm-active-label');
+  if (bilstmDot) bilstmDot.style.display = bilstmActive ? 'block' : 'none';
+  if (bilstmLbl) bilstmLbl.style.display = bilstmActive ? 'inline' : 'none';
+
+  // BiLSTM phase sub-label
   const bilstmPhaseEl = document.getElementById('nn-bilstm-phase');
   if (bilstmPhaseEl) {
-    if (rp.phase === 'deep') bilstmPhaseEl.textContent = '⏳ Training in progress…';
+    if (bilstmActive) bilstmPhaseEl.textContent = '⏳ Training across all clusters in parallel…';
     else if (d.deep_trained) bilstmPhaseEl.textContent = '✓ Trained — fine-tunes every 1h';
     else bilstmPhaseEl.textContent = 'Awaiting first training run — click "Train BiLSTM" above';
   }
 
+  // BiLSTM active state placeholder (shown when training but no epoch history yet)
+  const bilstmActiveState = document.getElementById('nn-bilstm-active-state');
+  const lossCanvas = document.getElementById('nn-loss-chart');
+  const hasHistory = (d.training_history || []).length > 0;
+  if (bilstmActiveState && lossCanvas) {
+    if (bilstmActive && !hasHistory) {
+      bilstmActiveState.style.display = 'block';
+      lossCanvas.style.display = 'none';
+    } else {
+      bilstmActiveState.style.display = 'none';
+      lossCanvas.style.display = 'block';
+    }
+  }
+
   // Model grid
-  const models = [
-    { label: 'Scalp XGBoost',   icon: '📈', desc: '5-min · 15min ahead', ...d.scalp_models },
-    { label: 'Daily XGBoost',   icon: '📅', desc: '1-day · next-day',    ...d.daily_models },
-    { label: 'Reversal XGBoost',icon: '🔄', desc: '5-min · reversal',   ...d.reversal_models },
-    { label: 'Ensemble (×10)',   icon: '🎯', desc: '5-min · consensus',  ...d.ensemble_models },
-    { label: 'Swing XGBoost',   icon: '📊', desc: '15-min · 2h ahead',  ...d.swing_models },
+  const modelDefs = [
+    { label: 'Scalp XGBoost',   icon: '📈', desc: '5-min · 15min ahead', ...d.scalp_models,
+      active: ['xgboost','fetching_5m'].includes(phase) },
+    { label: 'Daily XGBoost',   icon: '📅', desc: '1-day · next-day',    ...d.daily_models,
+      active: phase === 'xgboost' },
+    { label: 'Reversal XGBoost',icon: '🔄', desc: '5-min · reversal',   ...d.reversal_models,
+      active: phase === 'xgboost' },
+    { label: 'Ensemble (×10)',   icon: '🎯', desc: '5-min · consensus',  ...d.ensemble_models,
+      active: phase === 'xgboost' },
+    { label: 'Swing XGBoost',   icon: '📊', desc: '15-min · 2h ahead',  ...d.swing_models,
+      active: ['xgboost','fetching_15m'].includes(phase) },
     { label: 'Deep BiLSTM',     icon: '🧠', desc: '15-min · universal',
-      total: 1, trained: d.deep_trained ? 1 : 0 },
+      total: 1, trained: d.deep_trained ? 1 : 0, active: bilstmActive },
   ];
 
-  document.getElementById('nn-model-grid').innerHTML = models.map(m => {
-    const pct = m.total > 0 ? Math.round((m.trained/m.total)*100) : 0;
-    const color = pct >= 80 ? 'var(--green)' : pct >= 40 ? '#fbbf24' : 'var(--muted)';
-    return `<div class="nn-model-card">
-      <div style="display:flex;justify-content:space-between;align-items:center">
+  document.getElementById('nn-model-grid').innerHTML = modelDefs.map(m => {
+    const pct   = m.total > 0 ? Math.round((m.trained / m.total) * 100) : 0;
+    const color = m.active ? '#a78bfa'
+                : pct >= 80 ? 'var(--green)'
+                : pct >= 40 ? '#fbbf24'
+                : 'var(--muted)';
+    const border = m.active ? 'border:1px solid rgba(124,58,237,.5);' : '';
+    const activeDot = m.active
+      ? `<div style="width:7px;height:7px;border-radius:50%;background:#a78bfa;animation:pulse 1s infinite;flex-shrink:0"></div>`
+      : '';
+    const statusText = m.active
+      ? `<span style="font-size:10px;color:#a78bfa;font-weight:700;animation:pulse 1.5s infinite">Training…</span>`
+      : `<span style="font-size:10px;color:${color};margin-top:3px">${pct}% trained</span>`;
+    return `<div class="nn-model-card" style="${border}">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:4px">
         <span style="font-size:11px;font-weight:700">${m.icon} ${m.label}</span>
-        <span style="font-size:12px;font-weight:700;color:${color}">${m.trained}/${m.total}</span>
+        <div style="display:flex;align-items:center;gap:5px">${activeDot}<span style="font-size:12px;font-weight:700;color:${color}">${m.trained}/${m.total}</span></div>
       </div>
       <div style="font-size:10px;color:var(--muted);margin:3px 0">${m.desc}</div>
       <div class="nn-bar-track">
-        <div class="nn-bar-fill" style="width:${pct}%;background:${color}"></div>
+        <div class="nn-bar-fill" style="width:${m.active ? 100 : pct}%;background:${color};${m.active ? 'animation:shimmer 1.5s linear infinite;background:linear-gradient(90deg,#7c3aed,#818cf8,#7c3aed);background-size:200% 100%' : ''}"></div>
       </div>
-      <div style="font-size:10px;color:${color};margin-top:3px">${pct}% trained</div>
+      ${statusText}
     </div>`;
   }).join('');
 
