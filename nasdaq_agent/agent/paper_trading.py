@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
-_FALLBACK_MIN_CONFIDENCE = 65.0   # used before adaptive filter has enough data
+_FALLBACK_MIN_CONFIDENCE = 60.0   # used before adaptive filter has enough data
 _MAX_BARS_HELD = 60               # close any trade open longer than 1 hour (60×1-min bars)
+_MAX_CONCURRENT_TRADES = 8        # max simultaneous open positions (capital discipline)
 
 
 def _conn() -> sqlite3.Connection:
@@ -59,6 +60,7 @@ def init_db() -> None:
                 exit_reason  TEXT,
                 pnl_pct      REAL,
                 pnl_dollar   REAL,
+                shares       INTEGER DEFAULT 100,
                 session      TEXT    DEFAULT '',
                 regime       TEXT    DEFAULT '',
                 vwap_event   TEXT    DEFAULT '',
@@ -75,6 +77,7 @@ def init_db() -> None:
             ("vwap_event",  "TEXT DEFAULT ''"),
             ("rsi_zone",    "TEXT DEFAULT ''"),
             ("entry_type",  "TEXT DEFAULT ''"),
+            ("shares",      "INTEGER DEFAULT 100"),
         ]:
             try:
                 c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
@@ -121,6 +124,19 @@ def maybe_open_trade(
     if not rr_qualifies:
         return None
 
+    # Risk-based position sizing — how many shares to risk exactly 1.5% of account
+    from agent.position_sizing import calculate as _calc_pos
+    from config import DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT
+    _ps = _calc_pos(
+        account_size     = DEFAULT_ACCOUNT_SIZE,
+        entry            = price,
+        stop             = stop,
+        risk_pct         = DEFAULT_RISK_PCT,
+        max_position_pct = MAX_POSITION_PCT,
+        confidence       = confidence,
+    )
+    shares = max(1, _ps.shares)
+
     with _lock:
         with _conn() as c:
             existing = c.execute(
@@ -129,17 +145,24 @@ def maybe_open_trade(
             if existing:
                 return None
 
+            # Enforce max concurrent open positions (capital discipline)
+            open_count = c.execute(
+                "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
+            ).fetchone()[0]
+            if open_count >= _MAX_CONCURRENT_TRADES:
+                return None
+
             cur = c.execute("""
                 INSERT INTO paper_trades
                   (opened_at, ticker, direction, entry_price, target, stop,
-                   confidence, rr_ratio, rr_qualifies,
+                   confidence, rr_ratio, rr_qualifies, shares,
                    session, regime, vwap_event, rsi_zone, entry_type)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
                 round(price, 4), round(target, 4), round(stop, 4),
-                round(confidence, 2), round(rr_ratio, 2), int(rr_qualifies),
+                round(confidence, 2), round(rr_ratio, 2), int(rr_qualifies), shares,
                 session, regime, vwap_event, rsi_zone, entry_type,
             ))
             c.commit()
@@ -157,13 +180,15 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
     with _lock:
         with _conn() as c:
             rows = c.execute("""
-                SELECT id, direction, entry_price, target, stop, bars_held
+                SELECT id, direction, entry_price, target, stop, bars_held,
+                       COALESCE(shares, 100) as shares
                 FROM paper_trades WHERE ticker=? AND status='OPEN'
             """, (ticker,)).fetchall()
 
             for row in rows:
                 bars = (row["bars_held"] or 0) + 1
                 c.execute("UPDATE paper_trades SET bars_held=? WHERE id=?", (bars, row["id"]))
+
 
                 ea: ExitAnalysis = analyse_exits(
                     df=df,
@@ -188,7 +213,7 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                         pnl_pct = (ep - entry) / entry * 100
                     else:
                         pnl_pct = (entry - ep) / entry * 100
-                    pnl_dollar = pnl_pct / 100 * entry * 100   # assume 100 shares
+                    pnl_dollar = (ep - entry if row["direction"] == "BUY" else entry - ep) * row["shares"]
 
                     reason = (
                         f"MAX_HOLD_{_MAX_BARS_HELD}BARS"

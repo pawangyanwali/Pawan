@@ -75,6 +75,30 @@ from agent.trading_hours import get_trading_tier, is_signal_recommended
 logger = logging.getLogger(__name__)
 
 
+def _scan_interval() -> int:
+    """
+    Adaptive scan cadence based on market session.
+    Power hours get 30s scans — more signals when price action is richest.
+    Off-peak gets the default 60s to conserve API credits.
+      09:30–11:00 ET  (opening range + momentum)  → 30s
+      14:30–16:00 ET  (closing power hour)         → 30s
+      everything else                              → 60s
+    """
+    from datetime import datetime, timezone, timedelta
+    now_et = datetime.now(timezone.utc) - timedelta(hours=4)  # UTC-4 for EDT
+    h, m = now_et.hour, now_et.minute
+    minutes = h * 60 + m
+    OPEN_RANGE_END  = 9 * 60 + 30 + 90   # 11:00 ET
+    OPEN_RANGE_START = 9 * 60 + 30       # 09:30 ET
+    CLOSE_START = 14 * 60 + 30           # 14:30 ET (2:30pm)
+    CLOSE_END   = 16 * 60                # 16:00 ET
+    if OPEN_RANGE_START <= minutes < OPEN_RANGE_END:
+        return 30   # opening power hour
+    if CLOSE_START <= minutes < CLOSE_END:
+        return 30   # closing power hour
+    return SCAN_INTERVAL_SECONDS
+
+
 # ── StockSignal dataclass ─────────────────────────────────────────────────────
 
 @dataclass
@@ -1060,7 +1084,7 @@ class Scanner:
                 self.run_once()
             except Exception as e:
                 logger.error(f"Scanner loop error: {e}", exc_info=True)
-            time.sleep(SCAN_INTERVAL_SECONDS)
+            time.sleep(_scan_interval())
 
     def start_background(self) -> None:
         init_db()      # signal_history.db

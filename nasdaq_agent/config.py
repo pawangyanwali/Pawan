@@ -179,9 +179,9 @@ PRE_EARNINGS_BLACKOUT_DAYS  = 3   # suppress signals N days before earnings
 POST_EARNINGS_COOLDOWN_DAYS = 1   # suppress 1 day after earnings
 
 # ── Position sizing defaults ──────────────────────────────────────────────────
-DEFAULT_ACCOUNT_SIZE = 10_000   # default $ account size shown in UI calculator
-DEFAULT_RISK_PCT     = 1.0      # % of account risked per trade
-MAX_POSITION_PCT     = 5.0      # never allocate more than this % to one trade
+DEFAULT_ACCOUNT_SIZE = 50_000   # trading account size — set to your actual capital
+DEFAULT_RISK_PCT     = 1.5      # % of account risked per trade ($750 on $50k)
+MAX_POSITION_PCT     = 10.0     # max single position as % of account ($5k on $50k)
 
 # Legacy aliases (kept for any code that still references them)
 INTRADAY_INTERVAL = "5m"
