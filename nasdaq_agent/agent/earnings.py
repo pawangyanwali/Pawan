@@ -3,63 +3,49 @@ Earnings / event blackout — suppress trading signals within N days of an
 earnings announcement.
 
 Strategy:
-  - Earnings dates are fetched once per session via yfinance (no API key needed).
+  - Earnings dates are fetched via Twelve Data /earnings endpoint (same API key).
   - A 3-day pre-earnings blackout protects against gap risk.
   - A 1-day post-earnings cooldown protects against gap-fill traps.
-  - Results are cached for 6 hours so we don't hammer yfinance.
+  - Results are cached for 6 hours to stay within credit budget.
 """
 from __future__ import annotations
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# days before next earnings where we suppress signals
 _PRE_EARNINGS_DAYS  = 3
 _POST_EARNINGS_DAYS = 1
 _CACHE_TTL          = 6 * 3600   # 6 hours
-# Tickers that consistently 404 on Yahoo Finance — skip earnings check entirely
-_KNOWN_MISSING: set[str] = set()
 
 _cache: dict[str, tuple[Optional[datetime], float]] = {}  # ticker → (next_date, fetched_at)
 
 
 def _fetch_next_earnings(ticker: str) -> Optional[datetime]:
-    """Try to get next earnings date via yfinance. Returns None on failure."""
-    if ticker in _KNOWN_MISSING:
-        return None
+    """Fetch next earnings date from Twelve Data /earnings. Returns None on failure."""
     try:
-        import yfinance as yf
-        # Silence yfinance's own ERROR/WARNING logs — 404s are expected for some tickers
-        yf_logger = logging.getLogger("yfinance")
-        old_level = yf_logger.level
-        yf_logger.setLevel(logging.CRITICAL)
-        try:
-            t   = yf.Ticker(ticker)
-            cal = t.calendar          # dict with 'Earnings Date' key (may be list or Timestamp)
-        finally:
-            yf_logger.setLevel(old_level)
-
-        if cal is None:
+        from agent.data_fetcher import _get
+        data = _get("/earnings", {"symbol": ticker, "outputsize": 5})
+        earnings = data.get("earnings") or data.get("data") or []
+        if not earnings:
             return None
-        dates = cal.get("Earnings Date") or cal.get("Earnings Dates")
-        if dates is None:
-            return None
-        if hasattr(dates, "__iter__") and not isinstance(dates, str):
-            dates = list(dates)
-            future = [d for d in dates if hasattr(d, "timestamp") and d > datetime.now(timezone.utc)]
-            return min(future) if future else None
-        if hasattr(dates, "timestamp"):
-            return dates
+        now = datetime.now(timezone.utc)
+        future: list[datetime] = []
+        for entry in earnings:
+            date_str = entry.get("date") or entry.get("report_date") or ""
+            if not date_str:
+                continue
+            try:
+                dt = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+                if dt > now:
+                    future.append(dt)
+            except ValueError:
+                continue
+        return min(future) if future else None
     except Exception as e:
-        msg = str(e)
-        if "404" in msg or "Not Found" in msg or "Quote not found" in msg:
-            _KNOWN_MISSING.add(ticker)
-            logger.debug(f"[{ticker}] yfinance 404 — ticker unknown to Yahoo Finance, skipping earnings check")
-        else:
-            logger.debug(f"[{ticker}] earnings fetch failed: {e}")
+        logger.debug(f"[{ticker}] earnings fetch failed: {e}")
     return None
 
 
@@ -91,12 +77,11 @@ def earnings_blackout(ticker: str) -> dict:
         if next_dt is None:
             return result
 
-        # Normalise to UTC-aware
         if next_dt.tzinfo is None:
             next_dt = next_dt.replace(tzinfo=timezone.utc)
 
-        now      = datetime.now(timezone.utc)
-        delta    = (next_dt - now).days
+        now   = datetime.now(timezone.utc)
+        delta = (next_dt - now).days
         result["next_date"] = next_dt.strftime("%b %d, %Y")
         result["days_away"] = delta
 
