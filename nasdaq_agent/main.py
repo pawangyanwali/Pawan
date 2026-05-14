@@ -12,7 +12,7 @@ import numpy as np
 from contextlib import asynccontextmanager
 from typing import Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -359,6 +359,54 @@ async def ml_status():
         "ensemble_models":  _count(_ensemble_registry),
         "swing_models":     _count(_swing_model_registry),
     }
+
+
+@app.post("/api/ml-retrain")
+async def trigger_retrain(background_tasks: BackgroundTasks):
+    """
+    Manually trigger a full ML retrain cycle (XGBoost + SwingML + Deep BiLSTM).
+    Runs in background — check /api/ml-status for progress.
+    """
+    from agent.ml_model import retrain_all, _is_retraining
+    from config import NASDAQ_TICKERS
+
+    if _is_retraining:
+        return {"status": "already_running", "message": "Retrain already in progress."}
+
+    def _run():
+        try:
+            retrain_all(NASDAQ_TICKERS)
+        except Exception as e:
+            logger.warning(f"[manual retrain] failed: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "Retrain started in background. Watch /api/ml-status for progress."}
+
+
+@app.post("/api/deep-model/train")
+async def trigger_deep_train(background_tasks: BackgroundTasks):
+    """
+    Manually trigger Deep BiLSTM training only (faster than full retrain).
+    Uses cached 15-min data when available.
+    """
+    from agent.deep_model import is_training_active, retrain_deep_all
+    from agent.data_fetcher import fetch_batch_interval
+    from config import NASDAQ_TICKERS
+
+    if is_training_active():
+        return {"status": "already_running", "message": "Deep model training already in progress."}
+
+    def _run():
+        try:
+            logger.info("[manual deep train] Fetching 15-min data…")
+            hist_15m = fetch_batch_interval(NASDAQ_TICKERS, "15min", 5000, ttl=3600)
+            logger.info(f"[manual deep train] Got {len(hist_15m)} tickers — starting training…")
+            retrain_deep_all(hist_15m)
+        except Exception as e:
+            logger.warning(f"[manual deep train] failed: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "Deep BiLSTM training started. Check /api/ml-status for epoch progress."}
 
 
 @app.get("/api/paper-trading/daily")
