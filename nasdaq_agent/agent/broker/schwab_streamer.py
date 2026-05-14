@@ -383,8 +383,15 @@ def start_streamer(tickers: list[str]) -> None:
         logger.debug("[Streamer] Already running.")
         return
 
-    if not get_token_status().get("connected"):
-        logger.info("[Streamer] Schwab not connected — streamer not started.")
+    ts = get_token_status()
+    if not ts.get("connected"):
+        ttl = ts.get("refresh_token_ttl_s", 0)
+        logger.warning(
+            f"[Streamer] Schwab not connected (refresh_token_ttl={ttl}s) — "
+            f"visit /schwab/auth to re-authenticate."
+        )
+        global _ws_error
+        _ws_error = "Schwab not authenticated — visit /schwab/auth"
         return
 
     _subscribed_tickers = list(tickers)

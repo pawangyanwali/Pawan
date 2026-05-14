@@ -722,9 +722,31 @@ async def broker_manual_order(body: dict):
 async def streamer_status_endpoint():
     """WebSocket streamer health: connected, live quote count, futures bias."""
     try:
-        return get_streamer_status()
+        status = get_streamer_status()
+        # Include Schwab auth state so we can diagnose why streamer isn't running
+        ts = get_token_status()
+        status["schwab_connected"]       = ts.get("connected", False)
+        status["access_token_ttl_s"]     = ts.get("access_token_ttl_s", 0)
+        status["refresh_token_ttl_s"]    = ts.get("refresh_token_ttl_s", 0)
+        return status
     except Exception as e:
         return {"connected": False, "error": str(e)}
+
+
+@app.post("/api/market/streamer/start")
+async def streamer_start_endpoint():
+    """Manually (re)start the Schwab WebSocket streamer."""
+    import asyncio
+    ts = get_token_status()
+    if not ts.get("connected"):
+        return {"started": False, "reason": "Schwab not authenticated — visit /schwab/auth first"}
+    try:
+        loop = asyncio.get_running_loop()
+        from config import NASDAQ_TICKERS
+        await loop.run_in_executor(None, lambda: start_streamer(list(NASDAQ_TICKERS)))
+        return {"started": True, "tickers": len(NASDAQ_TICKERS)}
+    except Exception as e:
+        return {"started": False, "reason": str(e)}
 
 
 @app.get("/api/market/movers")
