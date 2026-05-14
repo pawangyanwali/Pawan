@@ -708,6 +708,37 @@ async def broker_manual_order(body: dict):
     return result
 
 
+@app.get("/api/market/movers")
+async def market_movers(index: str = "$COMPX", sort: str = "PERCENT_CHANGE_UP", freq: int = 0):
+    """Top movers for an index via Schwab. index: $COMPX | $SPX | $DJI"""
+    try:
+        from agent.broker.schwab_market_data import fetch_movers
+        return {"movers": fetch_movers(index, sort, freq), "index": index, "sort": sort}
+    except Exception as e:
+        return {"movers": [], "error": str(e)}
+
+
+@app.get("/api/market/hours")
+async def market_hours_endpoint(market: str = "equity"):
+    """Current market session status via Schwab."""
+    try:
+        from agent.broker.schwab_market_data import fetch_market_hours
+        return fetch_market_hours(market)
+    except Exception as e:
+        return {"is_open": None, "error": str(e)}
+
+
+@app.get("/api/market/iv/{ticker}")
+async def ticker_iv(ticker: str):
+    """Implied volatility for a single ticker via Schwab option chains."""
+    try:
+        from agent.broker.schwab_market_data import fetch_iv
+        iv = fetch_iv(ticker.upper())
+        return {"ticker": ticker.upper(), "iv": iv}
+    except Exception as e:
+        return {"ticker": ticker, "iv": None, "error": str(e)}
+
+
 # ── SSE signal stream ────────────────────────────────────────────────────────
 
 if _SSE_AVAILABLE:
