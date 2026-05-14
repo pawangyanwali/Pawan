@@ -54,13 +54,33 @@ _IV = {
 # _charge_credits() is kept as a rolling-window safety net (catches edge cases
 # where pacing slips), but credit-aware throttling is the primary guard.
 
-CREDIT_LIMIT = 340   # 90 % of plan limit (377) — safe ceiling with headroom
+CREDIT_LIMIT = 300   # ~80 % of plan limit (377) — conservative ceiling
 
 _last_call:     float           = 0.0
 _throttle_lock: threading.Lock = threading.Lock()
 
 _credit_events: collections.deque = collections.deque()
 _credit_lock:   threading.Lock    = threading.Lock()
+
+# Global 429 backoff — when any thread gets a 429, ALL threads pause here
+# until the Twelve Data window resets, preventing thundering-herd retries.
+_backoff_until: float           = 0.0
+_backoff_lock:  threading.Lock  = threading.Lock()
+
+
+def _wait_backoff() -> None:
+    """Block until any active global 429 backoff period expires."""
+    global _backoff_until
+    remaining = _backoff_until - time.time()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def _set_backoff(seconds: float = 65.0) -> None:
+    """Set a global backoff; extends an existing one but never shortens it."""
+    global _backoff_until
+    with _backoff_lock:
+        _backoff_until = max(_backoff_until, time.time() + seconds)
 
 
 def _throttle(n_credits: int = 1) -> None:
@@ -69,11 +89,11 @@ def _throttle(n_credits: int = 1) -> None:
     through a single global lock so concurrent threads can't burst.
 
     min_gap = max(CALL_GAP, n_credits / credits_per_second)
-    where credits_per_second = CREDIT_LIMIT / 60.0  ≈ 5.67 c/s
+    where credits_per_second = CREDIT_LIMIT / 60.0  ≈ 5.0 c/s
 
-    Examples (CREDIT_LIMIT=340):
-      n_credits=1  →  max(0.20, 0.18) = 0.20 s   (earnings, single-symbol)
-      n_credits=20 →  max(0.20, 3.53) = 3.53 s   (batch /time_series)
+    Examples (CREDIT_LIMIT=300):
+      n_credits=1  →  max(0.20, 0.20) = 0.20 s   (earnings, single-symbol)
+      n_credits=20 →  max(0.20, 4.00) = 4.00 s   (batch /time_series)
     """
     global _last_call
     credits_per_second = CREDIT_LIMIT / 60.0
@@ -133,10 +153,12 @@ def _get(endpoint: str, params: dict, n_credits: int = 1, _retry: int = 3) -> di
                 len(batch) for /time_series batch calls).
 
     Execution order per call:
-      1. _charge_credits(n) — reserve credits in rolling window (rarely blocks)
-      2. _throttle(n)       — enforce correct inter-call gap (primary guard)
-      3. HTTP request
+      1. _wait_backoff()    — respect any active global 429 backoff
+      2. _charge_credits(n) — reserve credits in rolling window (rarely blocks)
+      3. _throttle(n)       — enforce correct inter-call gap (primary guard)
+      4. HTTP request
     """
+    _wait_backoff()
     _charge_credits(n_credits)
     _throttle(n_credits)
     params["apikey"] = TWELVE_DATA_API_KEY
@@ -145,14 +167,15 @@ def _get(endpoint: str, params: dict, n_credits: int = 1, _retry: int = 3) -> di
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict) and data.get("code") == 429:
-            # 429 despite pacing — Twelve Data window misalignment or clock skew.
-            # Wait for their window to fully reset before retrying.
+            # 429 despite pacing — set a GLOBAL backoff so ALL queued threads
+            # pause, preventing the thundering-herd retry wave.
             if _retry > 0:
                 logger.warning(
                     f"Rate limit 429 from Twelve Data (n_credits={n_credits}) — "
-                    f"waiting 65s for window reset…"
+                    f"setting global 65s backoff…"
                 )
-                time.sleep(65)
+                _set_backoff(65.0)
+                _wait_backoff()
                 return _get(endpoint, params, n_credits=0, _retry=_retry - 1)
             return {}
         return data

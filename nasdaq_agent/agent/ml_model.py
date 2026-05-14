@@ -23,6 +23,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
 from sklearn.preprocessing import StandardScaler
 
 # ── Model persistence directory ───────────────────────────────────────────────
@@ -157,7 +158,9 @@ def _fast_xgb_fit(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore")
         base.fit(X_tr, y_tr, eval_set=[(X_cal, y_cal)], verbose=False)
-    cal = CalibratedClassifierCV(base, cv="prefit", method="sigmoid")
+    # sklearn ≥1.6 removed cv='prefit'; FrozenEstimator is the replacement —
+    # it prevents re-fitting inside CalibratedClassifierCV, same behaviour.
+    cal = CalibratedClassifierCV(FrozenEstimator(base), method="sigmoid")
     cal.fit(X_cal, y_cal)
     return cal
 

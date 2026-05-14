@@ -6,7 +6,7 @@ Strategy:
   - Earnings dates are fetched via Twelve Data /earnings endpoint (same API key).
   - A 3-day pre-earnings blackout protects against gap risk.
   - A 1-day post-earnings cooldown protects against gap-fill traps.
-  - Results are cached for 6 hours to stay within credit budget.
+  - Results are cached for 24 hours to minimise API credit consumption.
 """
 from __future__ import annotations
 import logging
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 _PRE_EARNINGS_DAYS  = 3
 _POST_EARNINGS_DAYS = 1
-_CACHE_TTL          = 6 * 3600   # 6 hours
+_CACHE_TTL          = 24 * 3600  # 24 hours — reduces API burst on cold start
 
 _cache: dict[str, tuple[Optional[datetime], float]] = {}  # ticker → (next_date, fetched_at)
 
