@@ -1441,8 +1441,26 @@ setInterval(() => {
   const el = document.getElementById('loading-timer');
   if (el) el.textContent = `Elapsed: ${Math.floor((Date.now()-_t0)/1000)}s`;
 }, 1000);
+// Safety net: dismiss loading screen after 90 s even if signals are empty.
+// First scan may take longer on cold start; the dashboard shows the empty
+// state and updates via WebSocket once the scan completes.
+setTimeout(() => {
+  const ld = document.getElementById('loading');
+  if (ld && !ld.classList.contains('hidden')) {
+    document.getElementById('loading-main').textContent = 'Loading dashboard…';
+    renderAll();
+    hideLoading();
+  }
+}, 90000);
 async function checkHealth() {
-  try { const d = await (await fetch(`${BACKEND_HTTP}/api/health`)).json(); document.getElementById('loading-health').textContent = `Server: ${d.status} | Tickers so far: ${d.tickers_tracked}`; } catch {}
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/health`)).json();
+    const ht = d.tickers_tracked || 0;
+    document.getElementById('loading-health').textContent =
+      `Server: ${d.status} | Tickers so far: ${ht}`;
+    // Dismiss loading as soon as first scan data arrives (even if partial)
+    if (ht > 0) { renderAll(); hideLoading(); }
+  } catch {}
 }
 setInterval(checkHealth, 5000);
 async function pollPipelineMetrics() {

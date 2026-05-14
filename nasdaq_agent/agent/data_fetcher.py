@@ -57,6 +57,7 @@ _IV = {
 CREDIT_LIMIT = 300   # ~80 % of plan limit (377) — conservative ceiling
 
 _last_call:     float           = 0.0
+_last_credits:  int             = 1     # credits of the PREVIOUS call (governs next gap)
 _throttle_lock: threading.Lock = threading.Lock()
 
 _credit_events: collections.deque = collections.deque()
@@ -88,22 +89,27 @@ def _throttle(n_credits: int = 1) -> None:
     Credit-aware inter-call gap.  Serialises ALL Twelve Data HTTP calls
     through a single global lock so concurrent threads can't burst.
 
-    min_gap = max(CALL_GAP, n_credits / credits_per_second)
-    where credits_per_second = CREDIT_LIMIT / 60.0  ≈ 5.0 c/s
+    The gap is determined by the PREVIOUS call's credit cost, not the
+    current call's.  This prevents cheap 1-credit calls from slipping
+    through immediately after an expensive 20-credit batch:
 
-    Examples (CREDIT_LIMIT=300):
-      n_credits=1  →  max(0.20, 0.20) = 0.20 s   (earnings, single-symbol)
-      n_credits=20 →  max(0.20, 4.00) = 4.00 s   (batch /time_series)
+      After 20-credit batch  →  next call waits  20/5.0 = 4.0 s
+      After  1-credit call   →  next call waits   1/5.0 = 0.2 s
+
+    This keeps the rolling credit rate at or below CREDIT_LIMIT regardless
+    of how call types are interleaved across threads.
     """
-    global _last_call
+    global _last_call, _last_credits
     credits_per_second = CREDIT_LIMIT / 60.0
-    min_gap = max(CALL_GAP, n_credits / credits_per_second)
     with _throttle_lock:
+        # Gap is governed by the PREVIOUS call's cost
+        min_gap = max(CALL_GAP, _last_credits / credits_per_second)
         elapsed = time.time() - _last_call
         wait    = min_gap - elapsed
         if wait > 0:
             time.sleep(wait)
-        _last_call = time.time()
+        _last_call    = time.time()
+        _last_credits = max(n_credits, 1)   # store for the next caller
 
 
 def _charge_credits(n: int) -> None:
