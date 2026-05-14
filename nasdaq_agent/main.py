@@ -38,6 +38,7 @@ from agent.adaptive_filter import get_status as af_get_status, reset_filter as a
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
 from agent.broker.schwab_auth import load_stored_tokens, get_token_status, start_auth_flow, get_web_auth_url, exchange_web_code
+from agent.broker.schwab_streamer import start_streamer, get_streamer_status
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
 from config import (
@@ -230,6 +231,9 @@ async def lifespan(app: FastAPI):
             ok = load_stored_tokens()
             if ok:
                 logging.getLogger(__name__).info("Schwab broker connected from stored tokens.")
+                # Start the WebSocket streamer for real-time data
+                from config import NASDAQ_TICKERS
+                start_streamer(list(NASDAQ_TICKERS))
     except Exception as _be:
         logging.getLogger(__name__).warning(f"Schwab token load skipped: {_be}")
     yield
@@ -616,10 +620,16 @@ async def schwab_web_callback(code: str = "", error: str = ""):
 
     success = exchange_web_code(code)
     if success:
+        # Kick off the WebSocket streamer now that we have fresh tokens
+        try:
+            from config import NASDAQ_TICKERS
+            start_streamer(list(NASDAQ_TICKERS))
+        except Exception:
+            pass
         html = """<html><body style="font-family:sans-serif;padding:40px;background:#f0fff4">
         <h2 style="color:#276749">✓ Schwab Connected!</h2>
-        <p>Tokens saved. The agent will now use Schwab as a market data fallback.</p>
-        <p>Access token refreshes automatically every 30 minutes.</p>
+        <p>Tokens saved. Real-time WebSocket streamer started.</p>
+        <p>Streaming: Level 1 quotes, 1-min candles, NASDAQ screener, NQ/ES futures.</p>
         <p><a href="/">← Back to Dashboard</a></p></body></html>"""
         return HTMLResponse(html)
     else:
@@ -706,6 +716,15 @@ async def broker_manual_order(body: dict):
         return {"placed": False, "reason": f"{ticker} not in current scan"}
     result = maybe_place_tos_order(sig)
     return result
+
+
+@app.get("/api/market/streamer")
+async def streamer_status_endpoint():
+    """WebSocket streamer health: connected, live quote count, futures bias."""
+    try:
+        return get_streamer_status()
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
 
 
 @app.get("/api/market/movers")

@@ -442,9 +442,18 @@ def analyse_ticker(
         # Multi-timeframe analysis (6 TFs: 5M, 15M, 30M, 1H, 4H, 1D)
         mtf = multi_timeframe_analysis(df_1m, df_5m, df_1h, df_1d)
 
-        # Market session
+        # Market session — use Schwab as authoritative source when available
+        # (detects unexpected early closes / circuit breakers that our local
+        # time-based check would miss)
         sess_info = get_session_info()
         sess_mult = confidence_multiplier()
+        try:
+            from agent.broker.schwab_market_data import is_market_open
+            schwab_open = is_market_open()
+            if schwab_open is False and sess_info.get("session") == "REGULAR":
+                sess_info = {**sess_info, "session": "CLOSED", "label": "Market Closed (Schwab)"}
+        except Exception:
+            pass
 
         # Earnings blackout
         eb = earnings_blackout(ticker)
@@ -927,6 +936,21 @@ class Scanner:
     def run_once(self) -> list[StockSignal]:
         t0 = time.time()
         active_tickers = get_active_tickers()
+
+        # ── Re-order: screener movers first, rest follow ───────────────────────
+        # A 40-year trader watches what's MOVING, not a static alphabetical list.
+        # Tickers currently on NASDAQ's top-movers screener get scanned first so
+        # any signal they generate is acted on while the move is still in progress.
+        try:
+            from agent.broker.schwab_streamer import get_screener_priority
+            mover_symbols = get_screener_priority(tickers=set(active_tickers))
+            if mover_symbols:
+                rest = [t for t in active_tickers if t not in set(mover_symbols)]
+                active_tickers = mover_symbols + rest
+                logger.debug(f"[Scanner] Screener priority: {mover_symbols[:5]}…")
+        except Exception:
+            pass
+
         logger.info(f"Scan starting — {len(active_tickers)} tickers…")
 
         # Detect session once so the data fetch uses the right mode
