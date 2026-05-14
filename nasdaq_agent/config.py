@@ -61,7 +61,7 @@ CLUSTER_B_TICKERS = [
     "COIN","HOOD","PLTR","LULU","ENPH","CELH","SOUN","IONQ","GTLB","HUBS",
     "DKNG","BILL","DOCU","MPWR","TWLO","CHWY","MSTR","MDB","SNAP","RBLX",
     # NASDAQ-100 mid-cap
-    "ODFL","PAYX","FAST","IDXX","VRSK","ANSS","EA","DLTR","ALGN","ILMN",
+    "ODFL","PAYX","FAST","IDXX","VRSK","EA","DLTR","ALGN","ILMN",
     "TTWO","EXPE","CTSH","NTAP","SWKS","VRSN","CHKP","GEHC","ON","ROP",
     # More established
     "BIIB","GILD","MNST","PCAR","CPRT","ROST","MCHP","NXPI","CMCSA","PEP",
@@ -74,7 +74,7 @@ CLUSTER_C_TICKERS = [
     "MARA","RIVN","LCID","RGTI","QUBT","RKLB","ASTS","WOLF","FSLR","RUN",
     "ARRY","LI","BIDU","NTES","JD","PDD","BILI","NVAX","MRNA","BNTX",
     # Biotech
-    "VRTX","SGEN","ALNY","BMRN","FATE","ACAD","CRSP","BEAM","EDIT","RXRX",
+    "VRTX","ALNY","BMRN","FATE","ACAD","CRSP","BEAM","EDIT","RXRX",
     "ABCL",
     # High-vol fintech / consumer / other
     "UPST","AFRM","CVNA","LYFT","ROKU","PINS","ZM","PTON","OPEN","CART",
@@ -110,7 +110,7 @@ TICKER_NAMES = {
     "MCHP":"Microchip Tech","SBUX":"Starbucks","AEP":"AEP","NXPI":"NXP Semi",
     "PCAR":"PACCAR","CPRT":"Copart","EXC":"Exelon","ROST":"Ross Stores","ODFL":"Old Dominion",
     "PAYX":"Paychex","WDAY":"Workday","FAST":"Fastenal","IDXX":"IDEXX Labs","ZS":"Zscaler",
-    "ANSS":"ANSYS","TEAM":"Atlassian","DDOG":"Datadog","CEG":"Constellation Energy",
+    "TEAM":"Atlassian","DDOG":"Datadog","CEG":"Constellation Energy",
     "TTD":"Trade Desk","EA":"Electronic Arts","MRNA":"Moderna","ALGN":"Align Tech",
     "DLTR":"Dollar Tree","VRSK":"Verisk","GEHC":"GE HealthCare","ON":"ON Semi","ROP":"Roper",
     "ILMN":"Illumina","TTWO":"Take-Two","OKTA":"Okta","EXPE":"Expedia","SWKS":"Skyworks",
@@ -135,7 +135,7 @@ TICKER_NAMES = {
     "ASTS":"AST SpaceMobile","WOLF":"Wolfspeed","RUN":"Sunrun","ARRY":"Array Technologies",
     "LI":"Li Auto","BIDU":"Baidu","NTES":"NetEase","JD":"JD.com","PDD":"PDD Holdings",
     "BILI":"Bilibili","NVAX":"Novavax","BNTX":"BioNTech",
-    "VRTX":"Vertex Pharmaceuticals","SGEN":"Seagen","ALNY":"Alnylam Pharmaceuticals",
+    "VRTX":"Vertex Pharmaceuticals","ALNY":"Alnylam Pharmaceuticals",
     "BMRN":"BioMarin Pharmaceutical","FATE":"Fate Therapeutics","ACAD":"ACADIA Pharmaceuticals",
     "CRSP":"CRISPR Therapeutics","BEAM":"Beam Therapeutics","EDIT":"Editas Medicine",
     "RXRX":"Recursion Pharmaceuticals","ABCL":"AbCellera Biologics",
