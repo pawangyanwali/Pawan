@@ -71,7 +71,7 @@ def _get_streamer_info() -> dict:
     if not token:
         raise RuntimeError("No access token — run Schwab OAuth first")
     r = requests.get(
-        f"{TRADER_BASE}/userpreference",
+        f"{TRADER_BASE}/userPreference",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
         timeout=15,
     )
