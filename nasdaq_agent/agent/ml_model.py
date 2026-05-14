@@ -37,6 +37,39 @@ import threading as _threading
 _retrain_lock   = _threading.Lock()
 _is_retraining  = False   # quick non-blocking check before acquiring lock
 
+# ── Per-ticker training progress tracker ──────────────────────────────────────
+# Updated live during _retrain_all_locked so the UI can show a real-time queue.
+
+import time as _time_module
+
+_retrain_progress: dict = {
+    "is_running":      False,
+    "phase":           "",        # "fetching_5m" | "xgboost" | "fetching_15m" | "swing" | "deep" | "done"
+    "phase_label":     "",        # human-readable phase name
+    "current_ticker":  "",
+    "current_model":   "",        # "scalp" | "daily" | "reversal" | "ensemble" | "swing"
+    "completed":       [],        # [{"ticker","models":[],"elapsed_s"}]
+    "failed":          [],        # [{"ticker","model","error"}]
+    "total":           0,
+    "done_count":      0,
+    "started_at":      0.0,
+    "elapsed_s":       0.0,
+}
+
+
+def get_retrain_progress() -> dict:
+    """Return a snapshot of the current retrain progress (safe to call any time)."""
+    p = dict(_retrain_progress)
+    p["elapsed_s"] = round(_time_module.time() - p["started_at"], 1) if p["started_at"] else 0.0
+    p["completed"] = list(p["completed"])
+    p["failed"]    = list(p["failed"])
+    return p
+
+
+def _rp_set(**kwargs):
+    """Update _retrain_progress fields atomically."""
+    _retrain_progress.update(kwargs)
+
 FEATURE_COLS = [
     "rsi_14", "rsi_7", "macd", "macd_signal", "macd_hist",
     "bb_pct", "bb_width", "stoch_k", "stoch_d", "cci_20", "mfi_14",
@@ -243,68 +276,98 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None) -> N
 
 def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = None) -> None:
     """Internal retrain — only called while _retrain_lock is held."""
+    import time as _t
     from agent.data_fetcher import fetch_batch_interval
 
+    _rp_set(is_running=True, phase="fetching_5m",
+            phase_label="Fetching 5-min data…",
+            started_at=_t.time(), total=len(tickers),
+            done_count=0, completed=[], failed=[],
+            current_ticker="", current_model="")
+
     # ── 5-min data: ~64 trading days (XGBoost scalp/ensemble models) ─────────
-    # Batch-fetch all 5-min historical data upfront — 4 API calls for 80 tickers
-    # TTL=1800 so subsequent retrain cycles within 30 min reuse cached data
     logger.info(f"[retrain_all] Batch-fetching 5min history for {len(tickers)} tickers…")
     hist_5m = fetch_batch_interval(tickers, "5min", 5000, ttl=1800)
     logger.info(f"[retrain_all] Got history for {len(hist_5m)}/{len(tickers)} tickers")
 
-    # ── 15-min data: ~6 months (deep BiLSTM model) ───────────────────────────
-    # 5000 × 15min = 75,000 min ÷ (6.5h/day × 60) = ~192 trading days ≈ 9 months
-    # TTL=3600 — refreshed once per hour, always covers the full lookback window
-    logger.info(f"[retrain_all] Batch-fetching 15min history for deep model ({len(tickers)} tickers)…")
+    # ── 15-min data: ~6 months (deep BiLSTM + swing models) ─────────────────
+    _rp_set(phase="fetching_15m", phase_label="Fetching 15-min data (6 months)…")
+    logger.info(f"[retrain_all] Batch-fetching 15min history ({len(tickers)} tickers)…")
     hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600)
     logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
 
+    _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")
+
     for t in tickers:
         df5m = hist_5m.get(t)
+        ticker_models_ok = []
+        ticker_t0 = _t.time()
 
+        _rp_set(current_ticker=t, current_model="scalp")
         try:
             m = _model_registry.get(t, StockMLModel(t))
-            m.train_from_df(df5m)
+            if m.train_from_df(df5m):
+                ticker_models_ok.append("scalp")
             _model_registry[t] = m
         except Exception as e:
             logger.warning(f"[{t}] scalp retrain failed: {e}")
+            _retrain_progress["failed"].append({"ticker": t, "model": "scalp", "error": str(e)})
 
         if daily_data and t in daily_data:
+            _rp_set(current_model="daily")
             try:
                 dm = get_or_create_daily(t)
-                dm.train_from_df(daily_data[t])
+                if dm.train_from_df(daily_data[t]):
+                    ticker_models_ok.append("daily")
             except Exception as e:
                 logger.warning(f"[{t}] daily retrain failed: {e}")
 
+        _rp_set(current_model="reversal")
         try:
             rm = get_or_create_reversal(t)
-            rm.train_from_df(df5m)
+            if rm.train_from_df(df5m):
+                ticker_models_ok.append("reversal")
         except Exception as e:
             logger.warning(f"[{t}] reversal retrain failed: {e}")
 
+        _rp_set(current_model="ensemble")
         try:
             em = get_or_create_ensemble(t)
-            em.train_from_df(df5m)
+            if em.train_from_df(df5m):
+                ticker_models_ok.append("ensemble")
         except Exception as e:
             logger.warning(f"[{t}] ensemble retrain failed: {e}")
 
+        _rp_set(current_model="swing")
         try:
             sm = get_or_create_swing(t)
-            sm.train_from_df(hist_15m.get(t))
+            if sm.train_from_df(hist_15m.get(t)):
+                ticker_models_ok.append("swing")
         except Exception as e:
             logger.warning(f"[{t}] swing retrain failed: {e}")
+
+        _retrain_progress["completed"].append({
+            "ticker":    t,
+            "models":    ticker_models_ok,
+            "elapsed_s": round(_t.time() - ticker_t0, 1),
+        })
+        _retrain_progress["done_count"] = len(_retrain_progress["completed"])
 
         if delay > 0:
             time.sleep(delay)
 
     # ── Deep BiLSTM model: universal, trained across all tickers ─────────────
-    # Runs after per-ticker XGBoost so it can also incorporate backtest outcomes.
+    _rp_set(phase="deep", phase_label="Training Deep BiLSTM…",
+            current_ticker="all tickers", current_model="bilstm")
     try:
         from agent.deep_model import retrain_deep_all
-        logger.info(f"[retrain_all] Training deep BiLSTM model on {len(hist_15m)} tickers (6-month 15min data)…")
+        logger.info(f"[retrain_all] Training deep BiLSTM on {len(hist_15m)} tickers…")
         retrain_deep_all(hist_15m)
     except Exception as e:
         logger.warning(f"[retrain_all] Deep model training failed: {e}")
+
+    _rp_set(phase="done", phase_label="Complete", is_running=False,
+            current_ticker="", current_model="")
 
 
 def predict(ticker: str, df: pd.DataFrame) -> float:
