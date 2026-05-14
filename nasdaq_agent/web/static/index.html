@@ -813,7 +813,7 @@
 </div>
 
 <!-- Neural Networks Panel -->
-<div class="history-modal" id="neural-modal" style="display:none">
+<div class="history-modal" id="neural-modal">
   <div class="history-modal-inner" style="max-width:1000px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div>
@@ -827,7 +827,7 @@
     </div>
 
     <!-- Training status banner -->
-    <div id="nn-training-banner" style="display:none;background:linear-gradient(90deg,#1e1f3a,#0f172a);border:1px solid var(--accent);border-radius:8px;padding:10px 14px;margin-bottom:14px;align-items:center;gap:10px">
+    <div id="nn-training-banner" style="display:none;background:linear-gradient(90deg,#1e1f3a,#0f172a);border:1px solid var(--accent);border-radius:8px;padding:10px 14px;margin-bottom:14px;gap:10px">
       <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite"></div>
       <span id="nn-training-msg" style="font-size:12px;color:var(--text)">Deep BiLSTM training in progress…</span>
       <span id="nn-epoch-badge" style="font-size:11px;color:var(--muted)"></span>
@@ -856,6 +856,7 @@
         <thead><tr>
           <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Epoch</th>
           <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Loss</th>
+          <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Mode</th>
           <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Tickers</th>
           <th style="text-align:left;padding:5px 8px;color:var(--muted);font-size:10px;text-transform:uppercase;border-bottom:1px solid var(--border)">Time</th>
         </tr></thead>
@@ -1582,8 +1583,19 @@ function renderTable() {
       <td style="font-size:12px;font-weight:700;color:${(s.score||0)>=0.3?'var(--green)':(s.score||0)<=-0.3?'var(--red)':'var(--muted)'}">
         ${fmt((s.score||0)*100,0)}
       </td>
-      <td style="font-size:11px;color:${s.ml_trained?(s.ml_prob>=.55?'var(--green)':s.ml_prob<=.45?'var(--red)':'var(--muted)'):'var(--muted)'}">
-        ${s.ml_trained ? fmt(s.ml_prob*100,0)+'%' : '<span title="ML model training in background…" style="font-size:10px">Training…</span>'}
+      <td style="font-size:11px">
+        ${(() => {
+          const pScalp = s.ml_trained    ? s.ml_prob       : null;
+          const pSwing = s.ml_swing_trained ? s.ml_swing_prob : null;
+          const pDeep  = s.ml_deep_trained  ? s.ml_deep_prob  : null;
+          const dot = (p, title) => {
+            if (p === null) return `<span title="${title}: training…" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#334155;margin:0 1px;vertical-align:middle"></span>`;
+            const c = p>=.58?'#22c55e':p<=.42?'#ef4444':'#94a3b8';
+            return `<span title="${title}: ${Math.round(p*100)}%" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${c};margin:0 1px;vertical-align:middle"></span>`;
+          };
+          const mainPct = pScalp !== null ? `<span style="color:${pScalp>=.58?'var(--green)':pScalp<=.42?'var(--red)':'var(--muted)'};font-weight:600">${Math.round(pScalp*100)}%</span>` : `<span style="color:var(--muted);font-size:10px">…</span>`;
+          return `${mainPct}<div style="margin-top:3px">${dot(pScalp,'Scalp 5m')}${dot(pSwing,'Swing 15m')}${dot(pDeep,'Deep BiLSTM')}</div>`;
+        })()}
       </td>
       <td>
         <span class="rs-badge rs-${s.rs_label||'IN_LINE'}">${s.rs_label||'IN_LINE'}</span>
@@ -3478,7 +3490,7 @@ let _nnData = null;
 let _nnPollTimer = null;
 
 function openNeural() {
-  document.getElementById('neural-modal').style.display = 'flex';
+  document.getElementById('neural-modal').classList.add('open');
   loadNeuralStatus();
   _nnPollTimer = setInterval(() => {
     if (_nnData && _nnData.is_training_now) loadNeuralStatus();
@@ -3486,7 +3498,7 @@ function openNeural() {
 }
 
 function closeNeural() {
-  document.getElementById('neural-modal').style.display = 'none';
+  document.getElementById('neural-modal').classList.remove('open');
   if (_nnPollTimer) { clearInterval(_nnPollTimer); _nnPollTimer = null; }
 }
 
@@ -3513,7 +3525,7 @@ function renderNeuralPanel(d) {
   // Training banner
   const banner = document.getElementById('nn-training-banner');
   if (d.is_training_now) {
-    banner.style.display = 'flex';
+    banner.style.cssText += ';display:flex!important';
     const hist = d.training_history || [];
     const last = hist[hist.length - 1];
     document.getElementById('nn-epoch-badge').textContent =
@@ -3575,9 +3587,12 @@ function renderNeuralPanel(d) {
   const hist = [...(d.training_history || [])].reverse();
   document.getElementById('nn-epoch-table').innerHTML = hist.length ? hist.map(e => {
     const ts = new Date(e.ts * 1000).toLocaleTimeString();
+    const modeColor = e.mode === 'full' ? 'var(--accent)' : '#f59e0b';
+    const modeLabel = e.mode === 'full' ? 'Full train' : 'Fine-tune';
     return `<tr>
       <td style="padding:5px 8px;color:var(--text)">Epoch ${e.epoch}/${e.total_epochs}</td>
       <td style="padding:5px 8px;color:var(--green)">${e.loss.toFixed(6)}</td>
+      <td style="padding:5px 8px"><span style="color:${modeColor};font-size:10px;font-weight:700">${modeLabel}</span></td>
       <td style="padding:5px 8px;color:var(--muted)">${e.tickers}</td>
       <td style="padding:5px 8px;color:var(--muted)">${ts}</td>
     </tr>`;

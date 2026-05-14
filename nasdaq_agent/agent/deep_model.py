@@ -61,11 +61,13 @@ HIDDEN_SIZE    = 64      # BiLSTM hidden units per direction (128 total)
 N_LAYERS       = 2       # LSTM stacking depth
 N_HEADS        = 4       # attention heads
 DROPOUT        = 0.3
-EPOCHS         = 10
-BATCH_SIZE     = 256
-LR             = 1e-3
-WEIGHT_DECAY   = 1e-4
-MIN_TRAIN_SAMPLES = 500  # skip training if fewer sequences available
+EPOCHS            = 10   # full-train epochs (first time only)
+FINE_TUNE_EPOCHS  = 3    # subsequent runs: only fine-tune on new data
+BATCH_SIZE        = 256
+LR                = 1e-3
+FINE_TUNE_LR      = 2e-4  # lower LR for fine-tuning to avoid forgetting
+WEIGHT_DECAY      = 1e-4
+MIN_TRAIN_SAMPLES = 500   # skip training if fewer sequences available
 
 _MODEL_DIR  = Path(__file__).parent.parent / "data" / "models"
 _MODEL_PATH = _MODEL_DIR / "deep_direction.pt"
@@ -327,25 +329,35 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
         dataset = TensorDataset(X_t, y_t, w_t)
         loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
 
-        # ── 4. Build or reset model ───────────────────────────────────────────────
-        model = _build_model()
+        # ── 4. Load existing model for fine-tuning, or build fresh ───────────────
+        # First call: full training on 6-month history (EPOCHS epochs).
+        # Subsequent calls: fine-tune on recent data only (FINE_TUNE_EPOCHS epochs,
+        # lower LR) — preserves everything the model already learned.
+        is_first_train = not _MODEL_PATH.exists()
+        model = _get_model()   # loads from disk if available, else builds fresh
+        if model is None:
+            model = _build_model()
         if model is None:
             return False
+
+        n_epochs = EPOCHS if is_first_train else FINE_TUNE_EPOCHS
+        lr_now   = LR     if is_first_train else FINE_TUNE_LR
+        mode_label = "full training" if is_first_train else f"fine-tuning ({n_epochs} epochs)"
+        logger.info(f"[DeepModel] Starting {mode_label} on {len(X_all):,} sequences…")
 
         # ── 5. Class imbalance: pos_weight ────────────────────────────────────────
         n_pos = float(y_all.sum())
         n_neg = float(len(y_all) - n_pos)
-        pos_weight = torch.tensor([n_neg / max(n_pos, 1.0)])
 
         criterion = nn.BCELoss(reduction="none")
-        optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+        optimizer = optim.AdamW(model.parameters(), lr=lr_now, weight_decay=WEIGHT_DECAY)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
         model.train()
         best_loss = float("inf")
         best_state = None
 
-        for epoch in range(EPOCHS):
+        for epoch in range(n_epochs):
             epoch_loss = 0.0
             n_batches  = 0
             for xb, yb, wb in loader:
@@ -363,14 +375,15 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
             if avg_loss < best_loss:
                 best_loss  = avg_loss
                 best_state = {k: v.clone() for k, v in model.state_dict().items()}
-            logger.info(f"[DeepModel] Epoch {epoch+1}/{EPOCHS} — loss={avg_loss:.4f}")
+            logger.info(f"[DeepModel] Epoch {epoch+1}/{n_epochs} — loss={avg_loss:.4f}")
             import time as _time
             _training_history.append({
                 "epoch":        epoch + 1,
-                "total_epochs": EPOCHS,
+                "total_epochs": n_epochs,
                 "loss":         round(avg_loss, 6),
                 "ts":           _time.time(),
                 "tickers":      len(ticker_dfs_15m),
+                "mode":         "full" if is_first_train else "finetune",
             })
             if len(_training_history) > _MAX_HISTORY:
                 _training_history = _training_history[-_MAX_HISTORY:]
