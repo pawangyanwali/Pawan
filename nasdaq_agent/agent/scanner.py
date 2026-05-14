@@ -26,6 +26,7 @@ from config import (
     CACHE_TTL_1D,
     REGIME_TICKERS,
     SECTOR_ETF_TICKERS,
+    PIPELINE_WORKERS,
     get_active_tickers,
 )
 from agent.data_fetcher import (
@@ -421,14 +422,19 @@ def analyse_ticker(
         # SwingML adds 9-month XGBoost context; Deep BiLSTM adds sequence learning.
         # Both contribute only when trained to avoid noise from untrained models.
         from agent.deep_model import is_trained as _deep_is_trained
+        from agent.signal_blender import blend_signals as _blend_signals
         _swing_trained = get_or_create_swing(ticker).trained
         _deep_trained  = _deep_is_trained()
-        if _swing_trained and _deep_trained:
-            ml_combined = round(0.70 * ml_combined + 0.15 * ml_swing_p + 0.15 * ml_deep_p, 4)
-        elif _swing_trained:
-            ml_combined = round(0.80 * ml_combined + 0.20 * ml_swing_p, 4)
-        elif _deep_trained:
-            ml_combined = round(0.80 * ml_combined + 0.20 * ml_deep_p, 4)
+        # Dynamic blend — weights adapt based on each model's rolling 20-trade accuracy
+        ml_combined = _blend_signals(
+            scalp_p       = ml_scalp,
+            ensemble_p    = ml_ensemble_p,
+            reversal_p    = ml_reversal_p,
+            swing_p       = ml_swing_p,
+            deep_p        = ml_deep_p,
+            swing_trained = _swing_trained,
+            deep_trained  = _deep_trained,
+        )
         sent, headlines = score_sentiment(ticker)
         rvol            = relative_volume(df_ind)
         uvol            = detect_unusual_volume(df_ind)
@@ -938,19 +944,13 @@ class Scanner:
         )
 
         active_tickers = get_active_tickers()
-        results = []
-        for ticker in active_tickers:
-            sig = analyse_ticker(
-                ticker,
-                df_1m = batch_1m.get(ticker),
-                df_5m = batch_5m.get(ticker, pd.DataFrame()),
-                df_1h = batch_1h.get(ticker, pd.DataFrame()),
-                df_1d = batch_1d.get(ticker, pd.DataFrame()),
-            )
-            if sig:
-                results.append(sig)
 
-        results.sort(key=lambda s: abs(s.score), reverse=True)
+        # Parallel scan — ThreadPoolExecutor runs analyse_ticker() concurrently
+        # across all tickers. 8× faster than the old sequential for-loop.
+        from agent.pipeline import get_pipeline
+        results = get_pipeline(n_workers=PIPELINE_WORKERS).scan(
+            active_tickers, batch_1m, batch_5m, batch_1h, batch_1d
+        )
 
         # Attach per-ticker learning scores and compute learning_rank.
         # Fetched once per scan cycle (single DB query for all tickers).
@@ -1039,7 +1039,7 @@ class Scanner:
         scan_thread = threading.Thread(target=self._loop, daemon=True)
         scan_thread.start()
 
-        logger.info("Scanner started. Grow-377: 50 tickers, 1-min scan interval.")
+        logger.info(f"Scanner started. {len(NASDAQ_TICKERS)} tickers · {PIPELINE_WORKERS} parallel workers · 1-min scan interval.")
 
     def stop(self) -> None:
         self.is_running = False

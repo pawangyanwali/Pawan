@@ -12,10 +12,18 @@ import numpy as np
 from contextlib import asynccontextmanager
 from typing import Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+# SSE support — gracefully degraded if sse-starlette is not installed
+try:
+    from sse_starlette.sse import EventSourceResponse as _EventSourceResponse
+    _SSE_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _EventSourceResponse = None
+    _SSE_AVAILABLE = False
 
 from agent.scanner import scanner, StockSignal
 from agent.market_hours import get_session_info
@@ -35,6 +43,7 @@ from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
 from config import (
     DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT,
     load_watchlist, save_watchlist, NASDAQ_TICKERS,
+    CLUSTER_A_TICKERS, CLUSTER_B_TICKERS, CLUSTER_C_TICKERS, TICKER_CLUSTER,
 )
 
 
@@ -335,7 +344,7 @@ async def risk_status():
 
 @app.get("/api/ml-status")
 async def ml_status():
-    """Aggregate status for all ML model types."""
+    """Aggregate status for all ML model types (includes blend weights and pipeline metrics)."""
     from agent.deep_model import get_model_info, get_training_history, is_training_active, is_trained as deep_is_trained
     from agent.ml_model import (
         _model_registry, _daily_model_registry,
@@ -348,6 +357,22 @@ async def ml_status():
         trained = sum(1 for m in registry.values() if getattr(m, 'trained', False))
         return {"total": total, "trained": trained}
 
+    # Inline blend weights
+    blend_stats = None
+    try:
+        from agent.signal_blender import get_blender
+        blend_stats = get_blender().get_stats()
+    except Exception:
+        pass
+
+    # Inline pipeline metrics
+    pipeline_stats = None
+    try:
+        from agent.pipeline import get_pipeline
+        pipeline_stats = get_pipeline().get_metrics()
+    except Exception:
+        pass
+
     return {
         "deep_model":        get_model_info(),
         "deep_trained":      deep_is_trained(),
@@ -359,6 +384,8 @@ async def ml_status():
         "ensemble_models":   _count(_ensemble_registry),
         "swing_models":      _count(_swing_model_registry),
         "retrain_progress":  get_retrain_progress(),
+        "blend_weights":     blend_stats,
+        "pipeline_metrics":  pipeline_stats,
     }
 
 
@@ -613,6 +640,101 @@ async def broker_manual_order(body: dict):
         return {"placed": False, "reason": f"{ticker} not in current scan"}
     result = maybe_place_tos_order(sig)
     return result
+
+
+# ── SSE signal stream ────────────────────────────────────────────────────────
+
+if _SSE_AVAILABLE:
+    @app.get("/stream/signals")
+    async def stream_signals(request: Request):
+        """Server-Sent Events stream — pushes signal updates every 5s."""
+        async def event_generator():
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    signals = scanner.get_last_signals()  # existing method
+                    data = json.dumps([s.to_dict() for s in signals[:50]])  # top 50
+                    yield {"event": "signals", "data": data}
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+        return _EventSourceResponse(event_generator())
+else:
+    @app.get("/stream/signals")
+    async def stream_signals_fallback(request: Request):
+        """
+        Fallback polling endpoint (sse-starlette not installed).
+        Returns the latest 50 signals as JSON.  Poll every 5 s from the client.
+        """
+        try:
+            signals = scanner.get_last_signals()
+            return JSONResponse({"signals": [s.to_dict() for s in signals[:50]]})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Pipeline metrics ─────────────────────────────────────────────────────────
+
+@app.get("/api/pipeline-metrics")
+async def pipeline_metrics():
+    """Return current pipeline throughput and worker metrics."""
+    try:
+        from agent.pipeline import get_pipeline
+        return get_pipeline().get_metrics()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Signal blend weights ─────────────────────────────────────────────────────
+
+@app.get("/api/blend-weights")
+async def blend_weights():
+    """Return current signal blender weight stats."""
+    try:
+        from agent.signal_blender import get_blender
+        return get_blender().get_stats()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Backtester ───────────────────────────────────────────────────────────────
+
+@app.get("/api/backtest/results")
+async def backtest_results():
+    """Return the latest backtester report and run status."""
+    try:
+        from agent.backtester import get_backtester
+        bt = get_backtester()
+        report = bt.get_report()
+        status = bt.get_status()
+        return {"status": status, "report": report.__dict__ if report else None}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/backtest/run")
+async def run_backtest(background_tasks: BackgroundTasks):
+    """Trigger a fresh backtester run in the background."""
+    try:
+        from agent.backtester import get_backtester
+        background_tasks.add_task(get_backtester().run_sync)
+        return {"status": "started"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Ticker clusters ──────────────────────────────────────────────────────────
+
+@app.get("/api/clusters")
+async def ticker_clusters():
+    """Return the ML cluster membership lists and per-ticker assignment map."""
+    return {
+        "A": CLUSTER_A_TICKERS,
+        "B": CLUSTER_B_TICKERS,
+        "C": CLUSTER_C_TICKERS,
+        "assignments": TICKER_CLUSTER,
+    }
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
