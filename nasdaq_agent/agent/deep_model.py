@@ -65,7 +65,7 @@ DROPOUT        = 0.3
 EMB_DIM        = 16      # ticker embedding dimension
 EPOCHS            = 10   # full-train epochs (first time only)
 FINE_TUNE_EPOCHS  = 3    # subsequent runs: only fine-tune on new data
-BATCH_SIZE        = 64   # reduced from 256 — cuts peak training memory ~4×
+BATCH_SIZE        = 256  # larger batches = fewer Python steps = faster CPU training
 LR                = 1e-3
 FINE_TUNE_LR      = 2e-4  # lower LR for fine-tuning to avoid forgetting
 WEIGHT_DECAY      = 1e-4
@@ -429,7 +429,11 @@ def _train_one_cluster(
     id_t = torch.from_numpy(id_all)
 
     dataset = TensorDataset(X_t, y_t, w_t, id_t)
-    loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+    loader  = DataLoader(
+        dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False,
+        num_workers=0,    # 0 = use calling thread — safe inside ThreadPoolExecutor
+        pin_memory=False, # no GPU pinning on CPU-only setup
+    )
 
     # ── Load or build model ───────────────────────────────────────────────────
     is_first_train = not cfg["path"].exists()
@@ -562,16 +566,29 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
             cluster = TICKER_CLUSTER.get(ticker, "A")   # default A for unknowns
             cluster_dfs[cluster][ticker] = df_raw
 
-        # ── Train each cluster sequentially (memory safety) ───────────────────
-        any_success = False
-        for cluster_name in ("A", "B", "C"):
-            dfs = cluster_dfs[cluster_name]
+        # ── Train clusters A / B / C in parallel threads ──────────────────────
+        # Each cluster model is independent — no shared mutable state during
+        # training. Threads share the GIL but torch releases it during compute,
+        # so wall-clock time drops to ~max(A, B, C) instead of A+B+C.
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+        def _train_cluster(name: str) -> bool:
+            dfs = cluster_dfs[name]
             if not dfs:
-                logger.info(f"[DeepModel] Cluster {cluster_name}: no tickers — skipping")
-                continue
-            ok = _train_one_cluster(cluster_name, dfs, bt_weights)
-            if ok:
-                any_success = True
+                logger.info(f"[DeepModel] Cluster {name}: no tickers — skipping")
+                return False
+            return _train_one_cluster(name, dfs, bt_weights)
+
+        any_success = False
+        with _TPE(max_workers=3) as ex:
+            fs = {ex.submit(_train_cluster, c): c for c in ("A", "B", "C")}
+            for fut in _ac(fs):
+                c = fs[fut]
+                try:
+                    if fut.result():
+                        any_success = True
+                except Exception as exc:
+                    logger.warning(f"[DeepModel] Cluster {c} training raised: {exc}")
 
         if any_success:
             with _lock:
