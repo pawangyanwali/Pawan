@@ -10,17 +10,20 @@ across restarts.  A saved model is always loaded first; retraining replaces
 it only when fresh data is available.
 """
 
+import gc
 import logging
+import os
+import tempfile
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.preprocessing import StandardScaler
 
 # ── Model persistence directory ───────────────────────────────────────────────
 _MODEL_DIR = Path(__file__).parent.parent / "data" / "models"
@@ -28,14 +31,21 @@ _MODEL_DIR.mkdir(parents=True, exist_ok=True)
 from xgboost import XGBClassifier
 
 from agent.data_fetcher import fetch_historical
+from agent.feature_engine import (
+    FEATURE_COLS_V2,
+    compute_live_row,
+    prepare_training_data,
+)
+from agent.reversal import REVERSAL_FEATURE_COLS, compute_reversal_features
 from agent.technical import compute_indicators
-from agent.reversal import compute_reversal_features, REVERSAL_FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
 import threading as _threading
-_retrain_lock   = _threading.Lock()
-_is_retraining  = False   # quick non-blocking check before acquiring lock
+
+_retrain_lock  = _threading.Lock()
+_progress_lock = _threading.Lock()   # guards concurrent updates from worker threads
+_is_retraining = False               # quick non-blocking check before acquiring lock
 
 # ── Per-ticker training progress tracker ──────────────────────────────────────
 # Updated live during _retrain_all_locked so the UI can show a real-time queue.
@@ -67,19 +77,43 @@ def get_retrain_progress() -> dict:
 
 
 def _rp_set(**kwargs):
-    """Update _retrain_progress fields atomically."""
+    """Update _retrain_progress fields atomically (main-thread safe)."""
     _retrain_progress.update(kwargs)
 
-FEATURE_COLS = [
-    "rsi_14", "rsi_7", "macd", "macd_signal", "macd_hist",
-    "bb_pct", "bb_width", "stoch_k", "stoch_d", "cci_20", "mfi_14",
-    "ema_cross", "vol_ratio", "atr_14", "obv",
-    "ret_1", "ret_3", "ret_5",
-    "ret_10", "time_sin", "time_cos", "price_range_pos", "vol_trend",
-]
+
+def _rp_append_completed(entry: dict) -> None:
+    """Thread-safe append to _retrain_progress['completed'] and bump done_count."""
+    with _progress_lock:
+        _retrain_progress["completed"].append(entry)
+        _retrain_progress["done_count"] = len(_retrain_progress["completed"])
+
+
+def _rp_append_failed(entry: dict) -> None:
+    """Thread-safe append to _retrain_progress['failed']."""
+    with _progress_lock:
+        _retrain_progress["failed"].append(entry)
+
 
 LOOKAHEAD_BARS = 3   # predict direction 3×5min = 15 min ahead
 
+
+# ── Atomic model save helper ──────────────────────────────────────────────────
+
+def _atomic_save(obj, path: Path) -> None:
+    """Write to temp file then rename — atomic on Linux, never corrupts existing file."""
+    tmp = path.with_suffix(".tmp")
+    try:
+        joblib.dump(obj, tmp)
+        os.replace(tmp, path)  # atomic on Linux (POSIX rename)
+    except Exception as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+# ── Legacy feature helpers (kept for DailyMLModel / backward compat) ──────────
 
 def add_live_features(df: pd.DataFrame) -> pd.DataFrame:
     """Compute extra features on top of whatever compute_indicators returns."""
@@ -109,6 +143,16 @@ def add_live_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Kept for DailyMLModel which uses the legacy V1 feature set (no time/vwap meaning at daily res)
+_DAILY_FEATURE_COLS = [
+    "rsi_14", "rsi_7", "macd", "macd_signal", "macd_hist",
+    "bb_pct", "bb_width", "stoch_k", "stoch_d", "cci_20", "mfi_14",
+    "ema_cross", "vol_ratio", "atr_14", "obv",
+    "ret_1", "ret_3", "ret_5",
+    "ret_10", "time_sin", "time_cos", "price_range_pos", "vol_trend",
+]
+
+
 class StockMLModel:
     def __init__(self, ticker: str):
         self.ticker  = ticker
@@ -124,7 +168,10 @@ class StockMLModel:
 
     def _save(self) -> None:
         try:
-            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+            _atomic_save(
+                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                self._path(),
+            )
         except Exception as e:
             logger.debug(f"[{self.ticker}] scalp save failed: {e}")
 
@@ -145,39 +192,22 @@ class StockMLModel:
         return self.train_from_df(fetch_historical(self.ticker))
 
     def train_from_df(self, df: pd.DataFrame | None) -> bool:
-        """Train from a pre-fetched 5-min OHLCV DataFrame (no API call)."""
-        if df is None or len(df) < 100:
+        """Train from a pre-fetched 5-min OHLCV DataFrame (no API call).
+
+        Uses prepare_training_data() from feature_engine for leakage-free split
+        and ATR-adaptive label construction (Fix 1 + Fix 2).
+        """
+        result = prepare_training_data(df, ticker=self.ticker, lookahead_bars=LOOKAHEAD_BARS)
+        if result is None:
+            return False
+        X_train, y_train, X_test, y_test = result
+
+        # Imbalance guard (prepare_training_data already filters noise but not ratio)
+        class_counts = np.bincount(y_train)
+        if len(class_counts) < 2 or (class_counts.max() / len(y_train)) > 0.85:
             return False
 
-        df = compute_indicators(df)
-        df = add_live_features(df)
-        df = df.dropna(subset=FEATURE_COLS)
-
-        # Label: 1 if close N bars ahead > current close
-        df["label"] = (df["Close"].shift(-LOOKAHEAD_BARS) > df["Close"]).astype(int)
-        df.dropna(inplace=True)
-
-        X = df[FEATURE_COLS].values
-        y = df["label"].values
-
-        if len(X) < 60:
-            return False
-
-        # Require both classes to be present and neither dominating >85%.
-        # Severely imbalanced datasets produce empty calibrated_classifiers_ lists
-        # in CalibratedClassifierCV which triggers a divide-by-zero RuntimeWarning.
-        class_counts = np.bincount(y)
-        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
-            return False
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False
-        )
-
-        # Require both classes in the training split as well
-        if len(np.unique(y_train)) < 2:
-            return False
-
+        self.scaler = StandardScaler()
         self.scaler.fit(X_train)
         X_train_s = self.scaler.transform(X_train)
         X_test_s  = self.scaler.transform(X_test)
@@ -213,21 +243,19 @@ class StockMLModel:
         if not self.trained or self.model is None:
             return 0.5
 
-        df = compute_indicators(df.copy())
-        df = add_live_features(df)
-        df = df.dropna(subset=FEATURE_COLS)
-        if df.empty:
+        row = compute_live_row(df, ticker=self.ticker)
+        if row is None:
             return 0.5
-
-        row = df[FEATURE_COLS].iloc[[-1]].values
         expected = getattr(self.scaler, "n_features_in_", None)
         if expected is not None and row.shape[1] != expected:
-            logger.debug(f"[{self.ticker}] scalp scaler expects {expected} features, got {row.shape[1]} — resetting model")
+            logger.debug(
+                f"[{self.ticker}] scalp scaler expects {expected} features, "
+                f"got {row.shape[1]} — resetting model"
+            )
             self.trained = False
             return 0.5
         row_s = self.scaler.transform(row)
-        prob  = float(self.model.predict_proba(row_s)[0][1])
-        return round(prob, 4)
+        return round(float(self.model.predict_proba(row_s)[0][1]), 4)
 
 
 # ── Global registry: one model per ticker ─────────────────────────────────────
@@ -274,6 +302,71 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None) -> N
         _retrain_lock.release()
 
 
+def _train_one_ticker(
+    t: str,
+    df5m: pd.DataFrame | None,
+    df15m: pd.DataFrame | None,
+    daily_data: dict | None,
+) -> tuple[str, list[str], float]:
+    """Train all models for one ticker. Returns (ticker, models_ok, elapsed_s).
+
+    Designed to run inside a ThreadPoolExecutor worker.  All registry mutations
+    are local to each ticker so there are no shared data races.
+    """
+    ticker_models_ok: list[str] = []
+    t0 = time.time()
+
+    # ── Scalp model ───────────────────────────────────────────────────────
+    try:
+        m = _model_registry.get(t, StockMLModel(t))
+        if m.train_from_df(df5m):
+            ticker_models_ok.append("scalp")
+        _model_registry[t] = m
+    except Exception as e:
+        logger.warning(f"[{t}] scalp retrain failed: {e}")
+        _rp_append_failed({"ticker": t, "model": "scalp", "error": str(e)})
+
+    # ── Daily model ───────────────────────────────────────────────────────
+    if daily_data and t in daily_data:
+        try:
+            dm = get_or_create_daily(t)
+            if dm.train_from_df(daily_data[t]):
+                ticker_models_ok.append("daily")
+        except Exception as e:
+            logger.warning(f"[{t}] daily retrain failed: {e}")
+            _rp_append_failed({"ticker": t, "model": "daily", "error": str(e)})
+
+    # ── Reversal model ────────────────────────────────────────────────────
+    try:
+        rm = get_or_create_reversal(t)
+        if rm.train_from_df(df5m):
+            ticker_models_ok.append("reversal")
+    except Exception as e:
+        logger.warning(f"[{t}] reversal retrain failed: {e}")
+        _rp_append_failed({"ticker": t, "model": "reversal", "error": str(e)})
+
+    # ── Ensemble model ────────────────────────────────────────────────────
+    try:
+        em = get_or_create_ensemble(t)
+        if em.train_from_df(df5m):
+            ticker_models_ok.append("ensemble")
+    except Exception as e:
+        logger.warning(f"[{t}] ensemble retrain failed: {e}")
+        _rp_append_failed({"ticker": t, "model": "ensemble", "error": str(e)})
+
+    # ── Swing model ───────────────────────────────────────────────────────
+    try:
+        sm = get_or_create_swing(t)
+        if sm.train_from_df(df15m):
+            ticker_models_ok.append("swing")
+    except Exception as e:
+        logger.warning(f"[{t}] swing retrain failed: {e}")
+        _rp_append_failed({"ticker": t, "model": "swing", "error": str(e)})
+
+    gc.collect()
+    return t, ticker_models_ok, round(time.time() - t0, 1)
+
+
 def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = None) -> None:
     """Internal retrain — only called while _retrain_lock is held."""
     import time as _t
@@ -298,66 +391,32 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
 
     _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")
 
-    for t in tickers:
-        df5m = hist_5m.get(t)
-        ticker_models_ok = []
-        ticker_t0 = _t.time()
-
-        _rp_set(current_ticker=t, current_model="scalp")
-        try:
-            m = _model_registry.get(t, StockMLModel(t))
-            if m.train_from_df(df5m):
-                ticker_models_ok.append("scalp")
-            _model_registry[t] = m
-        except Exception as e:
-            logger.warning(f"[{t}] scalp retrain failed: {e}")
-            _retrain_progress["failed"].append({"ticker": t, "model": "scalp", "error": str(e)})
-
-        if daily_data and t in daily_data:
-            _rp_set(current_model="daily")
+    # ── Parallel ticker training (Fix 4) ──────────────────────────────────────
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(
+                _train_one_ticker,
+                t,
+                hist_5m.get(t),
+                hist_15m.get(t),
+                daily_data,
+            ): t
+            for t in tickers
+        }
+        for future in as_completed(futures):
             try:
-                dm = get_or_create_daily(t)
-                if dm.train_from_df(daily_data[t]):
-                    ticker_models_ok.append("daily")
-            except Exception as e:
-                logger.warning(f"[{t}] daily retrain failed: {e}")
-
-        _rp_set(current_model="reversal")
-        try:
-            rm = get_or_create_reversal(t)
-            if rm.train_from_df(df5m):
-                ticker_models_ok.append("reversal")
-        except Exception as e:
-            logger.warning(f"[{t}] reversal retrain failed: {e}")
-
-        _rp_set(current_model="ensemble")
-        try:
-            em = get_or_create_ensemble(t)
-            if em.train_from_df(df5m):
-                ticker_models_ok.append("ensemble")
-        except Exception as e:
-            logger.warning(f"[{t}] ensemble retrain failed: {e}")
-
-        _rp_set(current_model="swing")
-        try:
-            sm = get_or_create_swing(t)
-            if sm.train_from_df(hist_15m.get(t)):
-                ticker_models_ok.append("swing")
-        except Exception as e:
-            logger.warning(f"[{t}] swing retrain failed: {e}")
-
-        _retrain_progress["completed"].append({
-            "ticker":    t,
-            "models":    ticker_models_ok,
-            "elapsed_s": round(_t.time() - ticker_t0, 1),
-        })
-        _retrain_progress["done_count"] = len(_retrain_progress["completed"])
-
-        import gc as _gc
-        _gc.collect()
-
-        if delay > 0:
-            time.sleep(delay)
+                t, models_ok, elapsed = future.result()
+            except Exception as exc:
+                t = futures[future]
+                logger.warning(f"[{t}] _train_one_ticker raised: {exc}")
+                _rp_append_failed({"ticker": t, "model": "unknown", "error": str(exc)})
+                elapsed = 0.0
+                models_ok = []
+            _rp_append_completed({
+                "ticker":    t,
+                "models":    models_ok,
+                "elapsed_s": elapsed,
+            })
 
     # ── Deep BiLSTM model: universal, trained across all tickers ─────────────
     _rp_set(phase="deep", phase_label="Training Deep BiLSTM…",
@@ -387,6 +446,10 @@ class DailyMLModel:
 
     Predicts whether the NEXT DAY's close will be higher than today's close.
     Training data is supplied directly (no API call) via train_from_df().
+
+    Uses the legacy V1 feature set via compute_indicators + add_live_features
+    because daily bars lack intraday time-of-day meaning; time_sin / time_cos
+    are zeroed out but kept for model-schema compatibility.
     """
 
     def __init__(self, ticker: str):
@@ -403,7 +466,10 @@ class DailyMLModel:
 
     def _save(self) -> None:
         try:
-            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+            _atomic_save(
+                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                self._path(),
+            )
         except Exception as e:
             logger.debug(f"[{self.ticker}] daily save failed: {e}")
 
@@ -426,13 +492,13 @@ class DailyMLModel:
 
         df = compute_indicators(df_daily.copy())
         df = add_live_features(df)
-        df = df.dropna(subset=FEATURE_COLS)
+        df = df.dropna(subset=_DAILY_FEATURE_COLS)
 
         # Label: 1 if next-day close > today's close
         df["label"] = (df["Close"].shift(-1) > df["Close"]).astype(int)
         df.dropna(inplace=True)
 
-        X = df[FEATURE_COLS].values
+        X = df[_DAILY_FEATURE_COLS].values
         y = df["label"].values
 
         if len(X) < 60:
@@ -442,13 +508,14 @@ class DailyMLModel:
         if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
             return False
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False
-        )
+        split = int(len(X) * 0.8)
+        X_train, X_test = X[:split], X[split:]
+        y_train, y_test = y[:split], y[split:]
 
         if len(np.unique(y_train)) < 2:
             return False
 
+        self.scaler = StandardScaler()
         self.scaler.fit(X_train)
         X_train_s = self.scaler.transform(X_train)
         X_test_s  = self.scaler.transform(X_test)
@@ -488,19 +555,21 @@ class DailyMLModel:
 
         df = compute_indicators(df_daily.copy())
         df = add_live_features(df)
-        df = df.dropna(subset=FEATURE_COLS)
+        df = df.dropna(subset=_DAILY_FEATURE_COLS)
         if df.empty:
             return 0.5
 
-        row = df[FEATURE_COLS].iloc[[-1]].values
+        row = df[_DAILY_FEATURE_COLS].iloc[[-1]].values
         expected = getattr(self.scaler, "n_features_in_", None)
         if expected is not None and row.shape[1] != expected:
-            logger.debug(f"[{self.ticker}] daily scaler expects {expected} features, got {row.shape[1]} — resetting model")
+            logger.debug(
+                f"[{self.ticker}] daily scaler expects {expected} features, "
+                f"got {row.shape[1]} — resetting model"
+            )
             self.trained = False
             return 0.5
         row_s = self.scaler.transform(row)
-        prob  = float(self.model.predict_proba(row_s)[0][1])
-        return round(prob, 4)
+        return round(float(self.model.predict_proba(row_s)[0][1]), 4)
 
 
 # ── Daily model registry ──────────────────────────────────────────────────────
@@ -533,6 +602,9 @@ class ReversalMLModel:
 
     Separate from ScalpMLModel so it can be trained with reversal-specific
     features (RSI divergence score, wick ratios, oscillator extremes).
+
+    NOTE: deliberately does NOT use feature_engine / FEATURE_COLS_V2.
+    REVERSAL_FEATURE_COLS is its own set from agent.reversal.
     """
 
     # Lookahead and threshold for labelling reversals in training data
@@ -553,7 +625,10 @@ class ReversalMLModel:
 
     def _save(self) -> None:
         try:
-            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+            _atomic_save(
+                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                self._path(),
+            )
         except Exception as e:
             logger.debug(f"[{self.ticker}] reversal save failed: {e}")
 
@@ -600,13 +675,17 @@ class ReversalMLModel:
         if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
             return False
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False
+        X_train, X_test, y_train, y_test = (
+            X[:int(len(X) * 0.8)],
+            X[int(len(X) * 0.8):],
+            y[:int(len(y) * 0.8)],
+            y[int(len(y) * 0.8):],
         )
 
         if len(np.unique(y_train)) < 2:
             return False
 
+        self.scaler = StandardScaler()
         self.scaler.fit(X_train)
         X_tr = self.scaler.transform(X_train)
         X_te = self.scaler.transform(X_test)
@@ -682,6 +761,9 @@ class SwingMLModel:
 
     Train and infer on the same 15-min timeframe — no mismatch with the scalp
     model; only the output probability (P(up)) is blended at inference time.
+
+    Uses prepare_training_data() from feature_engine for leakage-free split
+    and ATR-adaptive label construction.
     """
 
     LOOKAHEAD = 8   # 8 × 15min = 2 hours ahead
@@ -698,7 +780,10 @@ class SwingMLModel:
 
     def _save(self) -> None:
         try:
-            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+            _atomic_save(
+                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                self._path(),
+            )
         except Exception as e:
             logger.debug(f"[{self.ticker}] swing save failed: {e}")
 
@@ -713,34 +798,22 @@ class SwingMLModel:
             logger.debug(f"[{self.ticker}] swing load failed (will retrain): {e}")
 
     def train_from_df(self, df_15m: pd.DataFrame | None) -> bool:
-        """Train from a pre-fetched 15-min OHLCV DataFrame (no API call)."""
-        if df_15m is None or len(df_15m) < 150:
-            return False
+        """Train from a pre-fetched 15-min OHLCV DataFrame (no API call).
 
-        df = compute_indicators(df_15m.copy())
-        df = add_live_features(df)
-        df = df.dropna(subset=FEATURE_COLS)
-
-        df["label"] = (df["Close"].shift(-self.LOOKAHEAD) > df["Close"]).astype(int)
-        df.dropna(inplace=True)
-
-        X = df[FEATURE_COLS].values
-        y = df["label"].values
-
-        if len(X) < 60:
-            return False
-
-        class_counts = np.bincount(y)
-        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
-            return False
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False
+        Uses prepare_training_data() for leakage-free split and ATR-adaptive labels.
+        """
+        result = prepare_training_data(
+            df_15m, ticker=self.ticker, lookahead_bars=self.LOOKAHEAD
         )
+        if result is None:
+            return False
+        X_train, y_train, X_test, y_test = result
 
-        if len(np.unique(y_train)) < 2:
+        class_counts = np.bincount(y_train)
+        if len(class_counts) < 2 or (class_counts.max() / len(y_train)) > 0.85:
             return False
 
+        self.scaler = StandardScaler()
         self.scaler.fit(X_train)
         X_train_s = self.scaler.transform(X_train)
         X_test_s  = self.scaler.transform(X_test)
@@ -778,21 +851,19 @@ class SwingMLModel:
         if not self.trained or self.model is None:
             return 0.5
 
-        df = compute_indicators(df_15m.copy())
-        df = add_live_features(df)
-        df = df.dropna(subset=FEATURE_COLS)
-        if df.empty:
+        row = compute_live_row(df_15m, ticker=self.ticker)
+        if row is None:
             return 0.5
-
-        row = df[FEATURE_COLS].iloc[[-1]].values
         expected = getattr(self.scaler, "n_features_in_", None)
         if expected is not None and row.shape[1] != expected:
-            logger.debug(f"[{self.ticker}] swing scaler expects {expected} features, got {row.shape[1]} — resetting model")
+            logger.debug(
+                f"[{self.ticker}] swing scaler expects {expected} features, "
+                f"got {row.shape[1]} — resetting model"
+            )
             self.trained = False
             return 0.5
         row_s = self.scaler.transform(row)
-        prob  = float(self.model.predict_proba(row_s)[0][1])
-        return round(prob, 4)
+        return round(float(self.model.predict_proba(row_s)[0][1]), 4)
 
 
 # ── Swing model registry ──────────────────────────────────────────────────────
@@ -818,6 +889,9 @@ class EnsembleMLModel:
     Ensemble of 3 diverse XGBoost classifiers (reduced from 10 for memory).
     Confidence = agreement fraction (0.0–1.0) among models.
     Low agreement → uncertain prediction, high agreement → high-confidence.
+
+    Uses prepare_training_data() from feature_engine for leakage-free split
+    and ATR-adaptive label construction.
     """
     N_MODELS = 3
 
@@ -839,7 +913,10 @@ class EnsembleMLModel:
 
     def _save(self) -> None:
         try:
-            joblib.dump({"models": self.models, "scaler": self.scaler, "trained": self.trained}, self._path())
+            _atomic_save(
+                {"models": self.models, "scaler": self.scaler, "trained": self.trained},
+                self._path(),
+            )
         except Exception as e:
             logger.debug(f"[{self.ticker}] ensemble save failed: {e}")
 
@@ -853,26 +930,26 @@ class EnsembleMLModel:
             logger.debug(f"[{self.ticker}] ensemble load failed: {e}")
 
     def train_from_df(self, df: pd.DataFrame | None) -> bool:
-        if df is None or len(df) < 150:
+        """Train from a pre-fetched 5-min OHLCV DataFrame.
+
+        Uses prepare_training_data() for leakage-free split and ATR-adaptive labels.
+        """
+        result = prepare_training_data(df, ticker=self.ticker, lookahead_bars=LOOKAHEAD_BARS)
+        if result is None:
             return False
-        df = compute_indicators(df)
-        df = add_live_features(df)
-        df = df.dropna(subset=FEATURE_COLS)
-        df["label"] = (df["Close"].shift(-LOOKAHEAD_BARS) > df["Close"]).astype(int)
-        df.dropna(inplace=True)
-        X = df[FEATURE_COLS].values
-        y = df["label"].values
-        if len(X) < 100:
+        X_train, y_train, X_test, y_test = result
+
+        if len(X_train) < 100:
             return False
-        class_counts = np.bincount(y)
-        if len(class_counts) < 2 or (class_counts.max() / len(y)) > 0.85:
+        class_counts = np.bincount(y_train)
+        if len(class_counts) < 2 or (class_counts.max() / len(y_train)) > 0.85:
             return False
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-        if len(np.unique(y_train)) < 2:
-            return False
+
+        self.scaler = StandardScaler()
         self.scaler.fit(X_train)
         Xtr = self.scaler.transform(X_train)
         Xte = self.scaler.transform(X_test)
+
         self.models = []
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore")
@@ -882,35 +959,39 @@ class EnsembleMLModel:
                 self.models.append(m)
         self.trained = True
         self._save()
+
         # Report ensemble accuracy
         preds = np.array([m.predict(Xte) for m in self.models])
         majority = (preds.mean(axis=0) >= 0.5).astype(int)
         acc = (majority == y_test).mean()
-        logger.info(f"[{self.ticker}] Ensemble trained | acc={acc:.3f} | models={len(self.models)} | samples={len(X_train)}")
+        logger.info(
+            f"[{self.ticker}] Ensemble trained | acc={acc:.3f} | "
+            f"models={len(self.models)} | samples={len(X_train)}"
+        )
         return True
 
     def predict(self, df: pd.DataFrame) -> tuple[float, float]:
         """Returns (probability_up, agreement_0_to_1).
-        agreement=1.0 means all 10 models agree, 0.5 means split."""
+        agreement=1.0 means all models agree, 0.5 means split."""
         if not self.trained or not self.models:
             return 0.5, 0.0
         try:
-            df = compute_indicators(df.copy())
-            df = add_live_features(df)
-            df = df.dropna(subset=FEATURE_COLS)
-            if df.empty:
+            row = compute_live_row(df, ticker=self.ticker)
+            if row is None:
                 return 0.5, 0.0
-            raw = df[FEATURE_COLS].iloc[[-1]].values
             expected = getattr(self.scaler, "n_features_in_", None)
-            if expected is not None and raw.shape[1] != expected:
-                logger.debug(f"[{self.ticker}] ensemble scaler expects {expected} features, got {raw.shape[1]} — resetting model")
+            if expected is not None and row.shape[1] != expected:
+                logger.debug(
+                    f"[{self.ticker}] ensemble scaler expects {expected} features, "
+                    f"got {row.shape[1]} — resetting model"
+                )
                 self.trained = False
                 return 0.5, 0.0
-            row = self.scaler.transform(raw)
-            probs = np.array([m.predict_proba(row)[0][1] for m in self.models])
-            avg_prob   = float(probs.mean())
+            row_s = self.scaler.transform(row)
+            probs = np.array([m.predict_proba(row_s)[0][1] for m in self.models])
+            avg_prob  = float(probs.mean())
             # agreement: how consistently models agree on direction
-            majority = int(avg_prob >= 0.5)
+            majority  = int(avg_prob >= 0.5)
             agreement = float((probs >= 0.5).mean()) if majority == 1 else float((probs < 0.5).mean())
             return round(avg_prob, 4), round(agreement, 4)
         except Exception as e:
