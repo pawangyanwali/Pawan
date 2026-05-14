@@ -353,6 +353,9 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         })
         _retrain_progress["done_count"] = len(_retrain_progress["completed"])
 
+        import gc as _gc
+        _gc.collect()
+
         if delay > 0:
             time.sleep(delay)
 
@@ -609,9 +612,9 @@ class ReversalMLModel:
         X_te = self.scaler.transform(X_test)
 
         base = XGBClassifier(
-            n_estimators=300,
-            max_depth=5,
-            learning_rate=0.04,
+            n_estimators=150,
+            max_depth=4,
+            learning_rate=0.05,
             subsample=0.8,
             colsample_bytree=0.7,
             min_child_weight=3,
@@ -743,9 +746,9 @@ class SwingMLModel:
         X_test_s  = self.scaler.transform(X_test)
 
         base = XGBClassifier(
-            n_estimators=300,
-            max_depth=5,
-            learning_rate=0.04,
+            n_estimators=150,
+            max_depth=4,
+            learning_rate=0.05,
             subsample=0.8,
             colsample_bytree=0.8,
             min_child_weight=3,
@@ -812,23 +815,16 @@ def predict_swing(ticker: str, df_15m: pd.DataFrame) -> float:
 
 class EnsembleMLModel:
     """
-    Ensemble of 10 diverse XGBoost classifiers.
+    Ensemble of 3 diverse XGBoost classifiers (reduced from 10 for memory).
     Confidence = agreement fraction (0.0–1.0) among models.
     Low agreement → uncertain prediction, high agreement → high-confidence.
     """
-    N_MODELS = 10
+    N_MODELS = 3
 
     _CONFIGS = [
         dict(n_estimators=100, max_depth=3, learning_rate=0.10, subsample=0.7, colsample_bytree=0.7),
-        dict(n_estimators=150, max_depth=4, learning_rate=0.07, subsample=0.8, colsample_bytree=0.8),
-        dict(n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8),
-        dict(n_estimators=200, max_depth=5, learning_rate=0.05, subsample=0.7, colsample_bytree=0.9),
-        dict(n_estimators=250, max_depth=3, learning_rate=0.04, subsample=0.9, colsample_bytree=0.7),
-        dict(n_estimators=150, max_depth=6, learning_rate=0.06, subsample=0.75, colsample_bytree=0.75),
-        dict(n_estimators=300, max_depth=3, learning_rate=0.03, subsample=0.85, colsample_bytree=0.85),
-        dict(n_estimators=100, max_depth=5, learning_rate=0.08, subsample=0.6,  colsample_bytree=0.8),
-        dict(n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.9,  colsample_bytree=0.6),
-        dict(n_estimators=175, max_depth=4, learning_rate=0.06, subsample=0.8,  colsample_bytree=0.8),
+        dict(n_estimators=150, max_depth=4, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8),
+        dict(n_estimators=100, max_depth=5, learning_rate=0.08, subsample=0.6, colsample_bytree=0.8),
     ]
 
     def __init__(self, ticker: str):

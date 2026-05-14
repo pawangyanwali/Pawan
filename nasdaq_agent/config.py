@@ -27,7 +27,7 @@ DEEP_FINETUNE_INTERVAL  = 3600    # Deep BiLSTM fine-tune every 1 hour (uses cac
 
 # ── Historical data windows ───────────────────────────────────────────────────
 DATA_PERIOD_DAYS    = 180    # 6 months of 5-min data for intraday ML (~14,040 bars; cap 5000)
-REALTIME_OUTPUTSIZE = 500   # 1-min bars per scan (≈8h, gives 5M/15M/30M/1H resampling coverage)
+REALTIME_OUTPUTSIZE = 300   # 1-min bars per scan (≈5h coverage, reduced for memory)
 
 # ── Per-interval cache TTLs (seconds) ────────────────────────────────────────
 CACHE_TTL_5M  =   300   # 5 minutes
@@ -66,11 +66,8 @@ NASDAQ_TICKERS = [
     "SOUN", "IONQ", "CELH", "ENPH", "LULU",   # AI voice, quantum, energy, solar, retail
     "NET",  "ANET", "MDB",  "SNAP", "RBLX",   # cloud infra, social, gaming
 
-    # ── Expansion Tier B — solid mid-cap momentum ─────────────────────────────
-    "UPST", "AFRM", "CVNA", "LYFT", "ROKU",   # AI lending, BNPL, auto, rideshare, streaming
-    "PINS", "ZM",   "DOCU", "MPWR", "BILL",   # social, video, e-sign, power semi, fintech
-    "TWLO", "CHWY", "GTLB", "HUBS", "DKNG",   # cloud comm, pet, devops, CRM, sports betting
 ]
+# Expansion Tier B removed — 65 tickers keeps memory under ~800 MB on small instances.
 
 # ── Company name map (avoids API calls) ──────────────────────────────────────
 TICKER_NAMES = {
