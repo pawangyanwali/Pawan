@@ -3576,7 +3576,8 @@ function renderNeuralPanel(d) {
           <span>Attention heads: <b style="color:var(--text)">${di.n_heads||4}</b></span>
           <span>Lookahead: <b style="color:var(--text)">${di.lookahead||4}×15min = ${(di.lookahead||4)*15}min</b></span>
           <span>Features: <b style="color:var(--text)">${di.n_features||23}</b></span>
-          <span>Epochs: <b style="color:var(--text)">${di.epochs||10}</b></span>
+          <span>Epochs: <b style="color:var(--text)">${di.epochs||10} full / 3 fine-tune</b></span>
+          <span>Fine-tune: <b style="color:var(--accent)">every 1h</b></span>
           <span>Status: <b style="color:${d.deep_trained?'var(--green)':'#f59e0b'}">${d.deep_trained?'✓ Trained':'⏳ Click "Train BiLSTM" above to start'}</b></span>
         </div>
       </div>`;

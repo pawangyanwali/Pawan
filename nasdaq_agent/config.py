@@ -21,8 +21,9 @@ CALL_GAP    = 0.20   # seconds between API calls  (60 / 377 ≈ 0.16s, use 0.20s
 BATCH_SIZE  = 20     # symbols per request (each symbol = 1 credit; Twelve Data supports up to 55)
 
 # ── Scan / retrain cadence ────────────────────────────────────────────────────
-SCAN_INTERVAL_SECONDS  = 60       # 1 min — 50 tickers / 20 per batch = 3 calls ≈ 0.6s scan
-ML_RETRAIN_INTERVAL    = 21600    # Retrain ML every 6 hours (was 24h on free tier)
+SCAN_INTERVAL_SECONDS   = 60      # 1 min — 50 tickers / 20 per batch = 3 calls ≈ 0.6s scan
+ML_RETRAIN_INTERVAL     = 21600   # Full XGBoost retrain every 6 hours
+DEEP_FINETUNE_INTERVAL  = 3600    # Deep BiLSTM fine-tune every 1 hour (uses cached data, no API cost)
 
 # ── Historical data windows ───────────────────────────────────────────────────
 DATA_PERIOD_DAYS    = 180    # 6 months of 5-min data for intraday ML (~14,040 bars; cap 5000)

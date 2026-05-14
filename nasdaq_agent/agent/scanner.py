@@ -20,6 +20,7 @@ from config import (
     NASDAQ_TICKERS,
     SCAN_INTERVAL_SECONDS,
     ML_RETRAIN_INTERVAL,
+    DEEP_FINETUNE_INTERVAL,
     CACHE_TTL_5M,
     CACHE_TTL_1H,
     CACHE_TTL_1D,
@@ -859,11 +860,12 @@ def analyse_ticker(
 
 class Scanner:
     def __init__(self):
-        self.signals:       list[StockSignal] = []
-        self.last_scan:     Optional[str]     = None
-        self.is_running:    bool              = False
-        self._callbacks:    list[Callable]    = []
-        self._last_retrain: float             = 0.0
+        self.signals:             list[StockSignal] = []
+        self.last_scan:           Optional[str]     = None
+        self.is_running:          bool              = False
+        self._callbacks:          list[Callable]    = []
+        self._last_retrain:       float             = 0.0
+        self._last_deep_finetune: float             = 0.0   # hourly BiLSTM fine-tune
 
     def register_callback(self, fn: Callable) -> None:
         self._callbacks.append(fn)
@@ -880,6 +882,12 @@ class Scanner:
             return False  # startup training running in background
         return (time.time() - self._last_retrain) > ML_RETRAIN_INTERVAL
 
+    def _should_finetune_deep(self) -> bool:
+        """True when 1 hour has passed since last Deep BiLSTM fine-tune."""
+        if self._last_deep_finetune == 0.0:
+            return False  # avoid racing with startup full train
+        return (time.time() - self._last_deep_finetune) > DEEP_FINETUNE_INTERVAL
+
     # ── ML training ───────────────────────────────────────────────────────────
 
     def _train_ml_background(self) -> None:
@@ -894,7 +902,8 @@ class Scanner:
         logger.info("ML training starting (intraday + daily models)…")
         daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
         retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
-        self._last_retrain = time.time()
+        self._last_retrain       = time.time()
+        self._last_deep_finetune = time.time()   # startup full train counts as fine-tune
         logger.info("ML training complete.")
 
     # ── Scan loop ─────────────────────────────────────────────────────────────
@@ -982,8 +991,28 @@ class Scanner:
             logger.info("Scheduled ML retrain starting…")
             daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
             retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
-            self._last_retrain = time.time()
+            self._last_retrain       = time.time()
+            self._last_deep_finetune = time.time()   # full retrain counts as fine-tune too
             logger.info("Scheduled ML retrain complete.")
+
+        elif self._should_finetune_deep():
+            # Hourly Deep BiLSTM fine-tune — uses cached 15-min data, no API calls.
+            # Runs in a daemon thread so it doesn't block the next scan cycle.
+            def _finetune():
+                try:
+                    from agent.deep_model import retrain_deep_all, is_training_active
+                    if is_training_active():
+                        return
+                    logger.info("Hourly Deep BiLSTM fine-tune starting…")
+                    hist_15m = fetch_batch_interval(NASDAQ_TICKERS, "15min", 5000, ttl=3600)
+                    retrain_deep_all(hist_15m)
+                    logger.info("Hourly Deep BiLSTM fine-tune complete.")
+                except Exception as _ft_e:
+                    logger.warning(f"Deep BiLSTM fine-tune failed: {_ft_e}")
+
+            import threading as _ft_threading
+            _ft_threading.Thread(target=_finetune, daemon=True, name="deep-finetune").start()
+            self._last_deep_finetune = time.time()
 
         return results
 
