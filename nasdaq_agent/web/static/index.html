@@ -569,6 +569,11 @@
   <button class="filter-btn" data-filter="SELL">Sell</button>
   <button class="filter-btn" data-filter="STRONG SELL">Strong Sell</button>
   <button class="filter-btn" data-filter="UVOL">⚡ Vol Spike</button>
+  <span style="width:1px;height:20px;background:var(--border);margin:0 4px;display:inline-block;vertical-align:middle"></span>
+  <button class="filter-btn cluster-btn active" data-cluster="ALL" title="All clusters">All Clusters</button>
+  <button class="filter-btn cluster-btn" data-cluster="A" title="Mega-cap liquid (AAPL, MSFT, NVDA…)" style="border-color:#6366f1;color:#6366f1">A · Mega</button>
+  <button class="filter-btn cluster-btn" data-cluster="B" title="Growth / SaaS / Fintech (PLTR, COIN…)" style="border-color:#f59e0b;color:#f59e0b">B · Growth</button>
+  <button class="filter-btn cluster-btn" data-cluster="C" title="High-vol / Momentum (MARA, RIVN…)" style="border-color:#ef4444;color:#ef4444">C · Momo</button>
   <input class="search-input" id="search" type="text" placeholder="Search ticker…" />
   <select class="sort-select" id="sort-select">
     <option value="learning_rank">🧠 Sort: Learning Rank</option>
@@ -580,6 +585,7 @@
     <option value="ml_prob">Sort: ML Prob</option>
   </select>
   <span style="color:var(--muted);font-size:11px;margin-left:auto" id="scan-count"></span>
+  <span style="color:var(--muted);font-size:10px;margin-left:8px" id="pipeline-speed" title="Scan cycle speed" style="display:none"></span>
 </div>
 
 <div class="table-wrapper">
@@ -587,6 +593,7 @@
     <thead>
       <tr>
         <th>Ticker</th>
+        <th title="5-bar mini sparkline">Spark</th>
         <th>Name</th>
         <th>Chg %</th>
         <th>Prediction</th>
@@ -870,6 +877,34 @@
       <div id="nn-bilstm-phase" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
       <canvas id="nn-loss-chart" height="140" style="width:100%;border-radius:8px;background:var(--surface2);display:block"></canvas>
       <div style="font-size:10px;color:var(--muted);margin-top:6px">Loss decreases each epoch as the model learns directional patterns across all tickers.</div>
+
+      <!-- Cluster model status -->
+      <div style="border-top:1px solid var(--border);margin:14px 0 10px"></div>
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">Cluster BiLSTM Models</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px" id="nn-cluster-grid">
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <div style="font-size:11px;font-weight:700;color:#6366f1;margin-bottom:4px">Cluster A · Mega-cap</div>
+          <div style="font-size:10px;color:var(--muted)" id="nn-cluster-a-status">Loading…</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:4px" id="nn-cluster-a-tickers">50 tickers</div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <div style="font-size:11px;font-weight:700;color:#f59e0b;margin-bottom:4px">Cluster B · Growth</div>
+          <div style="font-size:10px;color:var(--muted)" id="nn-cluster-b-status">Loading…</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:4px" id="nn-cluster-b-tickers">60 tickers</div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px">
+          <div style="font-size:11px;font-weight:700;color:#ef4444;margin-bottom:4px">Cluster C · Momentum</div>
+          <div style="font-size:10px;color:var(--muted)" id="nn-cluster-c-status">Loading…</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:4px" id="nn-cluster-c-tickers">44 tickers</div>
+        </div>
+      </div>
+
+      <!-- Dynamic blend weights -->
+      <div style="border-top:1px solid var(--border);margin:14px 0 10px"></div>
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">Dynamic Signal Blend Weights</div>
+      <div id="nn-blend-weights" style="display:flex;flex-direction:column;gap:6px">
+        <div style="color:var(--muted);font-size:11px">Loading blend weights…</div>
+      </div>
     </div>
 
     <div id="nn-panel-history" style="display:none;max-height:320px;overflow-y:auto">
@@ -1336,7 +1371,8 @@ SCHWAB_MAX_DAILY_LOSS=500</pre>
 
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
-let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '';
+let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL';
+const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let allBreadth = null;
 let _chart = null, _candleSeries = null, _volSeries = null;
@@ -1389,6 +1425,18 @@ async function checkHealth() {
   try { const d = await (await fetch(`${BACKEND_HTTP}/api/health`)).json(); document.getElementById('loading-health').textContent = `Server: ${d.status} | Tickers so far: ${d.tickers_tracked}`; } catch {}
 }
 setInterval(checkHealth, 5000);
+async function pollPipelineMetrics() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/pipeline-metrics`)).json();
+    const el = document.getElementById('pipeline-speed');
+    if (el && d.last_cycle_ms != null) {
+      const tps = d.tickers_per_second ? `${d.tickers_per_second.toFixed(0)}/s` : '';
+      el.textContent = `⚡ ${d.last_cycle_ms}ms cycle${tps ? ' · ' + tps : ''}`;
+      el.style.display = 'inline';
+    }
+  } catch {}
+}
+setInterval(pollPipelineMetrics, 15000);
 async function pollFallback() {
   try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); } } catch {}
 }
@@ -1402,6 +1450,19 @@ function scoreColor(v) {
   if (v <= -.6) return 'var(--red-s)';
   if (v <= -.25)return 'var(--red)';
   return 'var(--neutral)';
+}
+function sparkline(closes, w=52, h=24) {
+  if (!closes || closes.length < 2) return `<svg width="${w}" height="${h}"></svg>`;
+  const min = Math.min(...closes), max = Math.max(...closes);
+  const range = max - min || 1;
+  const pts = closes.map((v,i) => {
+    const x = (i / (closes.length-1)) * w;
+    const y = h - ((v - min) / range) * (h-2) - 1;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const isUp = closes[closes.length-1] >= closes[0];
+  const col = isUp ? '#22c55e' : '#ef4444';
+  return `<svg width="${w}" height="${h}" style="display:block"><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
 }
 function miniBar(v, w=50) {
   const pct = Math.abs(v)*50, col = scoreColor(v), left = v>=0?50:(50-pct);
@@ -1436,6 +1497,7 @@ function filteredSorted() {
   let d = [...allSignals];
   if (filter === 'UVOL') d = d.filter(s => s.unusual_vol);
   else if (filter !== 'ALL') d = d.filter(s => s.prediction === filter);
+  if (clusterFilter !== 'ALL') d = d.filter(s => (CLUSTER_MAP[s.ticker] || s.cluster) === clusterFilter);
   if (searchQ) { const q = searchQ.toUpperCase(); d = d.filter(s => s.ticker.includes(q) || s.name.toUpperCase().includes(q)); }
   d.sort((a,b) => {
     if (sortKey === 'learning_rank') return (b.learning_rank||0) - (a.learning_rank||0);
@@ -1555,8 +1617,19 @@ function renderTable() {
       ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:${lwrBg};color:${lwrC};border:1px solid ${lwrC}44" title="Self-learning: ${(lwr*100).toFixed(0)}% accuracy over ${lobs} observations">🧠 ${(lwr*100).toFixed(0)}%</span>`
       : `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;color:#475569;border:1px solid #47556933" title="Not enough observations yet">🧠 new</span>`;
 
+    const _cluster = CLUSTER_MAP[s.ticker] || s.cluster || '';
+    const _clusterColors = {A:['#6366f1','rgba(99,102,241,.12)'],B:['#f59e0b','rgba(245,158,11,.12)'],C:['#ef4444','rgba(239,68,68,.12)']};
+    const [_cc, _cbg] = _clusterColors[_cluster] || ['#475569','rgba(71,85,105,.1)'];
+    const _clusterLabel = {A:'A·Mega',B:'B·Growth',C:'C·Momo'}[_cluster] || '';
+    const clusterTag = _clusterLabel
+      ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:${_cbg};color:${_cc};border:1px solid ${_cc}44" title="Cluster ${_cluster}">${_clusterLabel}</span>`
+      : '';
+
+    const _spark = sparkline(s.closes || s.price_history || []);
+
     return `<tr data-ticker="${s.ticker}" style="${rowBg}">
-      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${tierTag}${learnTag}</td>
+      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${clusterTag}${tierTag}${learnTag}</td>
+      <td style="padding:4px 6px;vertical-align:middle">${_spark}</td>
       <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
       <td class="chg-cell ${chgC}" style="white-space:nowrap">
         <div style="font-size:13px;font-weight:700">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%${sessionTag}</div>
@@ -2165,12 +2238,26 @@ document.getElementById('detail-close').addEventListener('click', () => {
 });
 
 // ─── Controls ──────────────────────────────────────────────────────────────────
-document.querySelectorAll('.filter-btn').forEach(b => b.addEventListener('click', () => {
-  document.querySelectorAll('.filter-btn').forEach(x => x.classList.remove('active'));
+document.querySelectorAll('.filter-btn:not(.cluster-btn)').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.filter-btn:not(.cluster-btn)').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   filter = b.dataset.filter;
   renderTable();
 }));
+document.querySelectorAll('.cluster-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.cluster-btn').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  clusterFilter = b.dataset.cluster;
+  renderTable();
+}));
+
+// Load cluster assignments from backend
+(async () => {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/clusters`)).json();
+    if (d.assignments) Object.assign(CLUSTER_MAP, d.assignments);
+  } catch {}
+})();
 document.getElementById('search').addEventListener('input', e => { searchQ = e.target.value.trim(); renderTable(); });
 document.getElementById('sort-select').addEventListener('change', e => { sortKey = e.target.value; renderTable(); });
 
@@ -3656,6 +3743,52 @@ function renderNeuralPanel(d) {
 
   // Loss chart
   renderLossChart(d.training_history || []);
+
+  // Cluster model status
+  const cStatus = d.cluster_status || {};
+  const clusterDefs = [
+    {id:'a', label:'A', col:'#6366f1', desc:'Mega-cap'},
+    {id:'b', label:'B', col:'#f59e0b', desc:'Growth'},
+    {id:'c', label:'C', col:'#ef4444', desc:'Momentum'},
+  ];
+  clusterDefs.forEach(({id, label, col, desc}) => {
+    const st = cStatus[id] || cStatus[label] || {};
+    const statusEl = document.getElementById(`nn-cluster-${id}-status`);
+    if (statusEl) {
+      const isTrained = st.trained ?? false;
+      const lastTs = st.last_trained ? new Date(st.last_trained * 1000).toLocaleTimeString() : null;
+      statusEl.style.color = isTrained ? 'var(--green)' : 'var(--muted)';
+      statusEl.textContent = isTrained
+        ? `✓ Trained${lastTs ? ' · ' + lastTs : ''}`
+        : '⏳ Not yet trained';
+    }
+    const tickEl = document.getElementById(`nn-cluster-${id}-tickers`);
+    if (tickEl && st.n_tickers) tickEl.textContent = `${st.n_tickers} tickers`;
+  });
+
+  // Dynamic blend weights
+  const bw = d.blend_weights || {};
+  const blendEl = document.getElementById('nn-blend-weights');
+  if (blendEl) {
+    const models = ['scalp','ensemble','reversal','swing','deep'];
+    const labels = {scalp:'Scalp XGBoost',ensemble:'Ensemble ×10',reversal:'Reversal XGBoost',swing:'Swing XGBoost',deep:'Deep BiLSTM'};
+    const bwWeights = bw.weights || bw;
+    const bwAcc = bw.accuracy || {};
+    const weights = models.map(k => ({ key: k, w: bwWeights[k] ?? 0.2, acc: bwAcc[k] ?? null }));
+    const maxW = Math.max(...weights.map(x => x.w), 0.01);
+    blendEl.innerHTML = weights.map(({key, w, acc}) => {
+      const pct = Math.round((w / maxW) * 100);
+      const col = w > 0.25 ? 'var(--green)' : w > 0.18 ? '#f59e0b' : 'var(--muted)';
+      const accStr = acc !== null ? ` · acc ${(acc*100).toFixed(0)}%` : '';
+      return `<div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:10px;color:var(--muted);width:110px;flex-shrink:0">${labels[key]}</span>
+        <div style="flex:1;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:${col};border-radius:3px;transition:width .4s"></div>
+        </div>
+        <span style="font-size:10px;color:${col};width:70px;text-align:right">${(w*100).toFixed(0)}%${accStr}</span>
+      </div>`;
+    }).join('');
+  }
 
   // Epoch table
   const hist = [...(d.training_history || [])].reverse();

@@ -373,6 +373,27 @@ async def ml_status():
     except Exception:
         pass
 
+    # Cluster model status (A/B/C BiLSTM)
+    cluster_status = {}
+    try:
+        from agent.deep_model import _cluster_trained, _CLUSTER_CONFIGS
+        from config import CLUSTER_A_TICKERS, CLUSTER_B_TICKERS, CLUSTER_C_TICKERS
+        cluster_tickers = {"a": CLUSTER_A_TICKERS, "b": CLUSTER_B_TICKERS, "c": CLUSTER_C_TICKERS}
+        import os
+        for cname in ("a", "b", "c"):
+            cfg = _CLUSTER_CONFIGS.get(cname.upper(), {})
+            model_path = cfg.get("path", "")
+            mtime = None
+            if model_path and os.path.exists(str(model_path)):
+                mtime = os.path.getmtime(str(model_path))
+            cluster_status[cname] = {
+                "trained": bool(_cluster_trained.get(cname.upper(), False)),
+                "last_trained": mtime,
+                "n_tickers": len(cluster_tickers.get(cname, [])),
+            }
+    except Exception:
+        pass
+
     return {
         "deep_model":        get_model_info(),
         "deep_trained":      deep_is_trained(),
@@ -386,6 +407,7 @@ async def ml_status():
         "retrain_progress":  get_retrain_progress(),
         "blend_weights":     blend_stats,
         "pipeline_metrics":  pipeline_stats,
+        "cluster_status":    cluster_status,
     }
 
 
