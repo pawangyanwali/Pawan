@@ -37,7 +37,7 @@ from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from agent.adaptive_filter import get_status as af_get_status, reset_filter as af_reset_filter
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
-from agent.broker.schwab_auth import load_stored_tokens, get_token_status, start_auth_flow
+from agent.broker.schwab_auth import load_stored_tokens, get_token_status, start_auth_flow, get_web_auth_url, exchange_web_code
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
 from config import (
@@ -595,6 +595,40 @@ async def after_hours_endpoint():
 
 
 # ── ThinkorSwim / Schwab Broker API ──────────────────────────────────────────
+
+@app.get("/schwab/auth")
+async def schwab_web_auth():
+    """Redirect browser to Schwab OAuth login page."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=get_web_auth_url())
+
+
+@app.get("/schwab/callback")
+async def schwab_web_callback(code: str = "", error: str = ""):
+    """Schwab redirects here after user logs in. Exchange code for tokens."""
+    from fastapi.responses import HTMLResponse
+    if error or not code:
+        html = f"""<html><body style="font-family:sans-serif;padding:40px">
+        <h2 style="color:#e53e3e">Schwab Auth Failed</h2>
+        <p>{error or 'No code received.'}</p>
+        <p><a href="/schwab/auth">Try again</a></p></body></html>"""
+        return HTMLResponse(html, status_code=400)
+
+    success = exchange_web_code(code)
+    if success:
+        html = """<html><body style="font-family:sans-serif;padding:40px;background:#f0fff4">
+        <h2 style="color:#276749">✓ Schwab Connected!</h2>
+        <p>Tokens saved. The agent will now use Schwab as a market data fallback.</p>
+        <p>Access token refreshes automatically every 30 minutes.</p>
+        <p><a href="/">← Back to Dashboard</a></p></body></html>"""
+        return HTMLResponse(html)
+    else:
+        html = """<html><body style="font-family:sans-serif;padding:40px">
+        <h2 style="color:#e53e3e">Token Exchange Failed</h2>
+        <p>Check server logs for details.</p>
+        <p><a href="/schwab/auth">Try again</a></p></body></html>"""
+        return HTMLResponse(html, status_code=500)
+
 
 @app.get("/api/broker/status")
 async def broker_status():

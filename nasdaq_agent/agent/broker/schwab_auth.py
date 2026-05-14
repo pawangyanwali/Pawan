@@ -40,7 +40,10 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 AUTH_URL     = "https://api.schwabapi.com/v1/oauth/authorize"
 TOKEN_URL    = "https://api.schwabapi.com/v1/oauth/token"
-REDIRECT_URI = "https://127.0.0.1:8182"
+# Web callback (production) — used when running on AWS with HTTPS domain
+WEB_REDIRECT_URI  = "https://scalpingstocksai.com/schwab/callback"
+# Local callback (dev only) — kept for backwards compat
+REDIRECT_URI = WEB_REDIRECT_URI
 CALLBACK_PORT = 8182
 TOKEN_PATH   = Path(__file__).parent.parent.parent / "data" / "schwab_tokens.json"
 
@@ -282,6 +285,38 @@ def load_stored_tokens() -> bool:
 def get_access_token() -> Optional[str]:
     with _tokens_lock:
         return _tokens.get("access_token")
+
+
+# ── Web OAuth flow (production — AWS server with HTTPS domain) ────────────────
+
+def get_web_auth_url() -> str:
+    """Return the Schwab authorization URL for the web-based OAuth flow."""
+    params = urllib.parse.urlencode({
+        "response_type": "code",
+        "client_id":     _client_id(),
+        "redirect_uri":  WEB_REDIRECT_URI,
+    })
+    return f"{AUTH_URL}?{params}"
+
+
+def exchange_web_code(code: str) -> bool:
+    """
+    Exchange the authorization code from /schwab/callback for tokens.
+    Called by the FastAPI callback route. Returns True on success.
+    """
+    try:
+        data = _post_token({
+            "grant_type":   "authorization_code",
+            "code":         code,
+            "redirect_uri": WEB_REDIRECT_URI,
+        })
+        _store_tokens(data)
+        _schedule_refresh(data.get("expires_in", 1800))
+        logger.info("[Schwab] Web OAuth complete — tokens stored.")
+        return True
+    except Exception as e:
+        logger.error(f"[Schwab] Web code exchange failed: {e}")
+        return False
 
 
 def get_token_status() -> dict:

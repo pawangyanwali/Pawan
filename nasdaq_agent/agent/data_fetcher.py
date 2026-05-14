@@ -138,6 +138,31 @@ def _charge_credits(n: int) -> None:
         time.sleep(max(0.5, min(wait, 5.0)))
 
 
+def _schwab_fallback(
+    tickers:      list,
+    interval:     str,
+    outputsize:   int,
+    interval_key: str,
+    ttl:          float,
+    result:       dict,
+) -> None:
+    """
+    Try Schwab Market Data API for tickers that Twelve Data failed to return.
+    Mutates *result* in-place.  No-op if Schwab is not authorised.
+    """
+    try:
+        from agent.broker.schwab_market_data import fetch_price_history as _sfetch
+        for ticker in tickers:
+            df = _sfetch(ticker, interval, outputsize)
+            if not df.empty:
+                result[ticker] = df
+                if ttl > 0:
+                    _cache_set(ticker, interval_key, df)
+                logger.debug(f"[Schwab fallback] {ticker}/{interval}: {len(df)} bars")
+    except Exception as e:
+        logger.debug(f"[Schwab fallback] import/fetch error: {e}")
+
+
 def get_credit_usage() -> dict:
     """Current rolling-window credit stats for monitoring."""
     now    = time.time()
@@ -316,15 +341,20 @@ def fetch_batch_interval(
         # goes through the single _charge_credits gate.
         data = _get("/time_series", params, n_credits=len(batch))
 
+        parsed: dict[str, pd.DataFrame] = {}
         if not data:
             logger.warning(f"[{interval_key}] batch {batch_num} returned empty response")
-            continue
+        else:
+            parsed = _parse_batch_response(data, batch)
+            for ticker, df in parsed.items():
+                result[ticker] = df
+                if ttl > 0:
+                    _cache_set(ticker, interval_key, df)
 
-        parsed = _parse_batch_response(data, batch)
-        for ticker, df in parsed.items():
-            result[ticker] = df
-            if ttl > 0:
-                _cache_set(ticker, interval_key, df)
+        # Schwab fallback for any tickers that Twelve Data didn't return
+        failed = [t for t in batch if t not in parsed]
+        if failed:
+            _schwab_fallback(failed, interval, outputsize, interval_key, ttl, result)
 
     fetched = len([t for t in to_fetch if t in result])
     logger.info(f"[{interval_key}] fetched {fetched}/{len(to_fetch)} new + {len(tickers)-len(to_fetch)} cached")
