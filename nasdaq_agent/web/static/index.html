@@ -488,7 +488,7 @@
     <button onclick="openLearning()" id="learn-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧠 Learning</button>
     <button onclick="openAfterHours()" id="ah-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🌙 After-Hours</button>
     <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
-    <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="ThinkorSwim paper trading connection">🏦 TOS</button>
+    <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Schwab connections &amp; data sources">🏦 Schwab</button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="openAlertModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Alert settings">🔔 Alerts</button>
     <button class="hamburger" onclick="toggleMobileNav()" title="Menu">☰</button>
@@ -1047,13 +1047,13 @@
   </div>
 </div>
 
-<!-- ThinkorSwim Broker Modal -->
+<!-- Schwab & Data Sources Modal -->
 <div id="broker-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(680px,100vw);max-height:88vh;overflow-y:auto;padding:24px;position:relative">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
       <div>
-        <div style="font-size:16px;font-weight:700;color:var(--text)">🏦 ThinkorSwim Paper Trading</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px">Powered by Schwab Developer API — paper account only</div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">🏦 Schwab &amp; Data Sources</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Two Schwab apps + Twelve Data — all three must be active for full functionality</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <button onclick="loadBrokerStatus()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:4px 10px;cursor:pointer;font-family:inherit;font-size:10px">Refresh</button>
@@ -1061,13 +1061,16 @@
       </div>
     </div>
 
-    <!-- Connection status -->
-    <div id="broker-status-card" style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-        <span style="font-size:12px;font-weight:700">Connection Status</span>
+    <!-- ① Accounts & Trading app -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div>
+          <span style="font-size:12px;font-weight:700;color:var(--text)">① Accounts &amp; Trading</span>
+          <span style="font-size:10px;color:var(--muted);margin-left:8px">NASDAQ Scalping Agent app · streamer + orders</span>
+        </div>
         <span id="broker-conn-badge" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(100,116,139,.2);color:var(--muted)">CHECKING…</span>
       </div>
-      <div id="broker-status-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:11px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;margin-bottom:10px">
         <div><span style="color:var(--muted)">Account:</span> <span id="broker-acct-num" style="color:var(--text)">—</span></div>
         <div><span style="color:var(--muted)">Mode:</span> <span id="broker-mode" style="color:var(--yellow)">—</span></div>
         <div><span style="color:var(--muted)">Equity:</span> <span id="broker-equity" style="color:var(--text)">—</span></div>
@@ -1075,56 +1078,86 @@
         <div><span style="color:var(--muted)">Access Token:</span> <span id="broker-tok-ttl" style="color:var(--text)">—</span></div>
         <div><span style="color:var(--muted)">Refresh Token:</span> <span id="broker-rt-ttl" style="color:var(--text)">—</span></div>
       </div>
-      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
-        <button onclick="brokerAuth()" id="broker-auth-btn" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:6px 14px;cursor:pointer;font-family:inherit;font-size:11px;font-weight:700">🔐 Connect (Login + MFA)</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <a href="/schwab/auth" target="_blank" id="broker-auth-btn" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:6px 14px;cursor:pointer;font-family:inherit;font-size:11px;font-weight:700;text-decoration:none;display:inline-block">🔐 Authorise (opens Schwab login)</a>
         <button onclick="brokerToggleAuto()" id="broker-auto-btn" style="background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:6px 14px;cursor:pointer;font-family:inherit;font-size:11px">Auto-Trade: OFF</button>
       </div>
-      <div id="broker-auth-msg" style="font-size:10px;color:var(--muted);margin-top:8px"></div>
     </div>
 
-    <!-- Risk settings info -->
-    <div style="background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.2);border-radius:8px;padding:12px;margin-bottom:16px;font-size:10px;color:var(--muted)">
-      <strong style="color:var(--blue)">Risk Controls (set in .env):</strong>
-      SCHWAB_MIN_CONFIDENCE (default 68%) · SCHWAB_RISK_PCT (default 1% per trade) ·
-      SCHWAB_MAX_POSITIONS (default 5) · SCHWAB_MAX_DAILY_LOSS (default $500)
+    <!-- ② Market Data app -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div>
+          <span style="font-size:12px;font-weight:700;color:var(--text)">② Market Data</span>
+          <span style="font-size:10px;color:var(--muted);margin-left:8px">nasdaq-scalping-agent app · quotes, IV, movers</span>
+        </div>
+        <span id="broker-md-badge" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(100,116,139,.2);color:var(--muted)">CHECKING…</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;margin-bottom:10px">
+        <div><span style="color:var(--muted)">Access Token:</span> <span id="broker-md-tok" style="color:var(--text)">—</span></div>
+        <div><span style="color:var(--muted)">Refresh Token:</span> <span id="broker-md-rt" style="color:var(--text)">—</span></div>
+      </div>
+      <a href="/schwab/auth/md" target="_blank" style="background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:6px 14px;cursor:pointer;font-family:inherit;font-size:11px;text-decoration:none;display:inline-block">🔐 Authorise Market Data app</a>
+    </div>
+
+    <!-- ③ Twelve Data -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div>
+          <span style="font-size:12px;font-weight:700;color:var(--text)">③ Twelve Data</span>
+          <span style="font-size:10px;color:var(--muted);margin-left:8px">Primary OHLCV source · 377 credits/min</span>
+        </div>
+        <span id="broker-td-badge" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(34,197,94,.15);color:var(--green-s)">● ACTIVE</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:11px">
+        <div><span style="color:var(--muted)">Credits used (60s):</span> <span id="broker-td-credits" style="color:var(--text)">—</span></div>
+        <div><span style="color:var(--muted)">Limit:</span> <span style="color:var(--text)">377 / min</span></div>
+        <div><span style="color:var(--muted)">Batch size:</span> <span style="color:var(--text)">20 symbols</span></div>
+      </div>
+    </div>
+
+    <!-- Risk controls -->
+    <div style="background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.2);border-radius:8px;padding:12px;margin-bottom:12px;font-size:10px;color:var(--muted)">
+      <strong style="color:var(--blue)">Risk Controls (.env):</strong>
+      &nbsp;TRADING_ACCOUNT_SIZE (default $50,000) · TRADING_RISK_PCT (default 1.5%) · TRADING_MAX_POSITION_PCT (default 10%)
     </div>
 
     <!-- Daily P&L -->
-    <div style="margin-bottom:16px">
+    <div style="margin-bottom:12px">
       <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">📅 Today's Activity</div>
       <div id="broker-daily" style="font-size:11px;color:var(--muted)">—</div>
     </div>
 
     <!-- Open positions -->
-    <div style="margin-bottom:16px">
+    <div style="margin-bottom:12px">
       <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">📊 Open Positions</div>
       <div id="broker-positions" style="font-size:11px;color:var(--muted)">Loading…</div>
     </div>
 
     <!-- Setup guide -->
     <details style="border:1px solid var(--border);border-radius:8px;padding:12px">
-      <summary style="cursor:pointer;font-size:11px;font-weight:700;color:var(--text);list-style:none">📋 First-time Setup Guide</summary>
-      <ol style="margin-top:12px;padding-left:18px;font-size:11px;color:var(--muted);line-height:2">
-        <li>Go to <strong style="color:var(--text)">developer.schwab.com</strong> → Sign in with your Schwab/ThinkorSwim account</li>
-        <li>Click <strong style="color:var(--text)">Apps → Create App</strong></li>
-        <li>Set callback URL to: <code style="color:var(--green-s)">https://127.0.0.1:8182</code></li>
-        <li>Copy <strong>App Key</strong> and <strong>App Secret</strong></li>
-        <li>Get your <strong>paper account number</strong> from ThinkorSwim → Settings → Account Info</li>
-        <li>Add to your <code>.env</code> file:<br>
-          <pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;margin-top:4px;color:var(--green-s);font-size:10px">SCHWAB_CLIENT_ID=your_app_key
-SCHWAB_CLIENT_SECRET=your_app_secret
+      <summary style="cursor:pointer;font-size:11px;font-weight:700;color:var(--text);list-style:none">📋 .env Setup Reference</summary>
+      <pre style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:12px;margin-top:10px;color:var(--green-s);font-size:10px;overflow-x:auto"># ── Schwab: Accounts & Trading app (NASDAQ Scalping Agent) ──
+SCHWAB_CLIENT_ID=your_accounts_trading_app_key
+SCHWAB_CLIENT_SECRET=your_accounts_trading_app_secret
 SCHWAB_ACCOUNT_NUMBER=your_paper_account_number
 SCHWAB_PAPER_TRADING=true
-SCHWAB_AUTO_TRADE=false
-SCHWAB_MIN_CONFIDENCE=68
-SCHWAB_RISK_PCT=1.0
-SCHWAB_MAX_POSITIONS=5
-SCHWAB_MAX_DAILY_LOSS=500</pre>
-        </li>
-        <li>Restart the agent, click <strong>Connect (Login + MFA)</strong> above</li>
-        <li>Your browser will open Schwab login — complete username + MFA</li>
-        <li>Tokens are saved locally and auto-refresh every 30 minutes</li>
-      </ol>
+
+# ── Schwab: Market Data app (nasdaq-scalping-agent) ──
+SCHWAB_MD_CLIENT_ID=your_market_data_app_key
+SCHWAB_MD_CLIENT_SECRET=your_market_data_app_secret
+
+# ── Twelve Data ──
+TWELVE_DATA_API_KEY=your_twelve_data_key
+
+# ── Position sizing ──
+TRADING_ACCOUNT_SIZE=50000
+TRADING_RISK_PCT=1.5
+TRADING_MAX_POSITION_PCT=10
+
+# ── Authorise each app in your browser ──
+# https://scalpingstocksai.com/schwab/auth      ← Accounts & Trading
+# https://scalpingstocksai.com/schwab/auth/md   ← Market Data</pre>
     </details>
   </div>
 </div>
@@ -4190,7 +4223,7 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/static/sw.js').catch(()=>{});
 }
 
-// ─── ThinkorSwim Broker Panel ─────────────────────────────────────────────────
+// ─── Schwab & Data Sources Panel ──────────────────────────────────────────────
 let _brokerAutoTrade = false;
 let _brokerPollTimer = null;
 
@@ -4206,58 +4239,79 @@ function closeBroker() {
   if (_brokerPollTimer) { clearInterval(_brokerPollTimer); _brokerPollTimer = null; }
 }
 
+function _setBadge(id, connected, label) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent  = connected ? `● ${label || 'CONNECTED'}` : `○ ${label || 'DISCONNECTED'}`;
+  el.style.background = connected ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.15)';
+  el.style.color      = connected ? 'var(--green-s)'      : 'var(--red)';
+}
+
 async function loadBrokerStatus() {
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
   try {
     const d = await (await fetch(`${BACKEND_HTTP}/api/broker/status`)).json();
 
-    // Connection badge
-    const badge = document.getElementById('broker-conn-badge');
-    const connected = d.connected;
-    badge.textContent = connected ? '● CONNECTED' : '○ DISCONNECTED';
-    badge.style.background = connected ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.15)';
-    badge.style.color = connected ? 'var(--green-s)' : 'var(--red)';
-
-    // Update header button
+    // ① Accounts & Trading
+    const connected = !!d.connected;
+    _setBadge('broker-conn-badge', connected);
     const hBtn = document.getElementById('broker-header-btn');
-    if (hBtn) { hBtn.style.color = connected ? 'var(--green-s)' : 'var(--muted)'; }
-
-    // Fields
+    if (hBtn) hBtn.style.color = connected ? 'var(--green-s)' : 'var(--muted)';
     const acct = d.account || {};
-    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
     set('broker-acct-num', d.account_number || '—');
     set('broker-mode',     d.paper_trading ? '📄 PAPER' : '🔴 LIVE');
-    set('broker-equity',   acct.equity ? '$' + acct.equity.toLocaleString() : '—');
-    set('broker-bp',       acct.buying_power ? '$' + acct.buying_power.toLocaleString() : '—');
-    set('broker-tok-ttl',  connected ? Math.round((d.access_token_ttl_s||0)/60) + ' min' : 'expired');
-    set('broker-rt-ttl',   d.refresh_token_expires ? new Date(d.refresh_token_expires).toLocaleDateString() : '—');
+    set('broker-equity',   acct.equity       ? '$' + Number(acct.equity).toLocaleString()       : '—');
+    set('broker-bp',       acct.buying_power ? '$' + Number(acct.buying_power).toLocaleString() : '—');
+    const tokMin = Math.round((d.access_token_ttl_s || 0) / 60);
+    set('broker-tok-ttl', connected ? (tokMin > 0 ? tokMin + ' min' : '< 1 min') : '⚠ expired — re-authorise');
+    set('broker-rt-ttl',  d.refresh_token_expires ? new Date(d.refresh_token_expires).toLocaleDateString() : '—');
 
     // Auto-trade button
     _brokerAutoTrade = d.auto_trade || false;
     const aBtn = document.getElementById('broker-auto-btn');
     if (aBtn) {
-      aBtn.textContent = `Auto-Trade: ${_brokerAutoTrade ? 'ON ✓' : 'OFF'}`;
-      aBtn.style.color = _brokerAutoTrade ? 'var(--green-s)' : 'var(--muted)';
-      aBtn.style.borderColor = _brokerAutoTrade ? 'var(--green-s)' : 'var(--border)';
+      aBtn.textContent   = `Auto-Trade: ${_brokerAutoTrade ? 'ON ✓' : 'OFF'}`;
+      aBtn.style.color        = _brokerAutoTrade ? 'var(--green-s)' : 'var(--muted)';
+      aBtn.style.borderColor  = _brokerAutoTrade ? 'var(--green-s)' : 'var(--border)';
     }
+
+    // ② Market Data app
+    const md = d.market_data_app || {};
+    const mdConn = !!md.connected;
+    _setBadge('broker-md-badge', mdConn);
+    const mdTokMin = Math.round((md.access_token_ttl_s || 0) / 60);
+    set('broker-md-tok', mdConn ? (mdTokMin > 0 ? mdTokMin + ' min' : '< 1 min') : '⚠ expired — re-authorise');
+    set('broker-md-rt',  md.refresh_token_expires ? new Date(md.refresh_token_expires).toLocaleDateString() : '—');
 
     // Daily status
     const daily = d.daily || {};
     const dailyEl = document.getElementById('broker-daily');
     if (dailyEl) {
       const pnl = daily.pnl || 0;
-      const pnlCol = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      const col = pnl >= 0 ? 'var(--green)' : 'var(--red)';
       dailyEl.innerHTML = daily.halted
-        ? `<span style="color:var(--red);font-weight:700">⛔ Daily loss limit hit — auto-trading halted for today</span>`
-        : `P&L today: <strong style="color:${pnlCol}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</strong>`;
+        ? `<span style="color:var(--red);font-weight:700">⛔ Daily loss limit reached — auto-trading paused</span>`
+        : `P&L today: <strong style="color:${col}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</strong>`;
     }
 
-    // Positions
     await loadBrokerPositions();
-
   } catch(e) {
-    const badge = document.getElementById('broker-conn-badge');
-    if (badge) { badge.textContent = '○ ERROR'; badge.style.color = 'var(--red)'; }
+    _setBadge('broker-conn-badge', false, 'ERROR');
   }
+
+  // ③ Twelve Data credits
+  try {
+    const cr = await (await fetch(`${BACKEND_HTTP}/api/credit-usage`)).json();
+    const used = cr.credits_used_60s ?? cr.used ?? '—';
+    const el = document.getElementById('broker-td-credits');
+    if (el) el.textContent = used + ' / 377';
+    const tdBadge = document.getElementById('broker-td-badge');
+    if (tdBadge && cr.api_key_set === false) {
+      tdBadge.textContent = '○ NO API KEY';
+      tdBadge.style.background = 'rgba(239,68,68,.15)';
+      tdBadge.style.color = 'var(--red)';
+    }
+  } catch(_) {}
 }
 
 async function loadBrokerPositions() {
