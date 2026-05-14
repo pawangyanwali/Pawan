@@ -872,6 +872,8 @@ class Scanner:
         self._callbacks:          list[Callable]    = []
         self._last_retrain:       float             = 0.0
         self._last_deep_finetune: float             = 0.0   # hourly BiLSTM fine-tune
+        self._first_scan_done:    threading.Event   = threading.Event()
+        self._scan_count:         int               = 0
 
     def register_callback(self, fn: Callable) -> None:
         self._callbacks.append(fn)
@@ -900,10 +902,18 @@ class Scanner:
         """
         Train both intraday (5M) and daily ML models at startup.
         Daily data served from fetch_batch_interval cache (fetched during first scan).
-        We wait briefly to allow the first scan's data fetches to warm the cache.
+
+        Wait for the first scan AND its cache-fill to fully complete before
+        training touches the API.  First scan populates 1min, 5min, 1h, 1day,
+        and sector ETF caches — that costs ~600-700 credits and takes 2-3 min
+        under the CREDIT_LIMIT=340 gate.  Starting training during that window
+        used to spike to 541 credits/minute and trigger 429s.
         """
-        logger.info("ML training: waiting for first scan to warm data cache…")
-        time.sleep(30)   # let the first scan + cache-fill complete first
+        logger.info("ML training: waiting for first two scan cycles to warm data cache…")
+        # Wait for the first scan event (set at the end of run_once)
+        self._first_scan_done.wait(timeout=600)
+        # Extra buffer: let the second cycle finish so 5min cache is also warm
+        time.sleep(90)
 
         logger.info("ML training starting (intraday + daily models)…")
         daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
@@ -982,6 +992,9 @@ class Scanner:
 
         self._notify(results)
         elapsed = round(time.time() - t0, 1)
+        self._scan_count += 1
+        if self._scan_count == 1:
+            self._first_scan_done.set()   # unblock _train_ml_background
         logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(NASDAQ_TICKERS)} tickers analysed")
 
         # ML feedback: retrain if enough new backtest outcomes have accumulated

@@ -479,6 +479,7 @@
   <div class="header-right">
     <span id="ws-status" class="ws-status-text">Connecting…</span>
     <span style="white-space:nowrap">Last scan: <span id="last-scan">—</span></span>
+    <span id="api-credit-chip" title="Twelve Data API credits used in rolling 60s window" style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;display:none">API —/377</span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
     <button onclick="openPnl()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">💰 P&amp;L</button>
     <button onclick="openBacktest()" id="bt-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📈 Backtest</button>
@@ -1433,6 +1434,18 @@ async function pollPipelineMetrics() {
       const tps = d.tickers_per_second ? `${d.tickers_per_second.toFixed(0)}/s` : '';
       el.textContent = `⚡ ${d.last_cycle_ms}ms cycle${tps ? ' · ' + tps : ''}`;
       el.style.display = 'inline';
+    }
+  } catch {}
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/credit-usage`)).json();
+    const chip = document.getElementById('api-credit-chip');
+    if (chip && d.used != null) {
+      const pct = d.pct ?? Math.round(d.used / 377 * 100);
+      const col = pct > 85 ? '#ef4444' : pct > 65 ? '#f59e0b' : 'var(--green)';
+      chip.textContent = `API ${d.used}/${d.plan_limit ?? 377}`;
+      chip.style.color = col;
+      chip.style.borderColor = col + '44';
+      chip.style.display = 'inline';
     }
   } catch {}
 }

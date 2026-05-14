@@ -271,13 +271,23 @@ async def get_signals():
 
 @app.get("/api/health")
 async def health():
+    from agent.data_fetcher import get_credit_usage
     return {
         "status": "ok",
         "is_running": scanner.is_running,
         "last_scan": scanner.last_scan,
         "tickers_tracked": len(scanner.signals),
         "ws_clients": len(manager.active),
+        "api_credits": get_credit_usage(),
     }
+
+
+@app.get("/api/credit-usage")
+async def credit_usage():
+    """Rolling 60-second Twelve Data credit consumption."""
+    from agent.data_fetcher import get_credit_usage, CREDIT_LIMIT
+    usage = get_credit_usage()
+    return {**usage, "plan_limit": 377, "safe_limit": CREDIT_LIMIT}
 
 
 @app.get("/api/regime")

@@ -27,7 +27,7 @@ def _fetch_next_earnings(ticker: str) -> Optional[datetime]:
     """Fetch next earnings date from Twelve Data /earnings. Returns None on failure."""
     try:
         from agent.data_fetcher import _get
-        data = _get("/earnings", {"symbol": ticker, "outputsize": 5})
+        data = _get("/earnings", {"symbol": ticker, "outputsize": 5}, n_credits=1)
         earnings = data.get("earnings") or data.get("data") or []
         if not earnings:
             return None

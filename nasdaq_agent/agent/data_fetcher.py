@@ -49,13 +49,19 @@ _last_call:     float            = 0.0
 _throttle_lock: threading.Lock  = threading.Lock()
 
 # Rolling credit window: deque of (timestamp, credit_count) pairs
+# Grow-377 plan: 377 credits/minute hard limit.
+# We target 340 (90% of 377) to leave headroom for retries and clock drift.
 _credit_events: collections.deque = collections.deque()
 _credit_lock:   threading.Lock    = threading.Lock()
-CREDIT_LIMIT = 355   # conservative cap — Grow-377 plan limit is 377
+CREDIT_LIMIT = 340   # 90 % of 377 — safe ceiling across ALL endpoint types
+
+# Track credits consumed for monitoring
+_credits_this_minute: int = 0
+_credits_lock: threading.Lock = threading.Lock()
 
 
 def _throttle() -> None:
-    """Thread-safe minimum-gap throttle between API calls."""
+    """Thread-safe minimum-gap throttle between consecutive API calls."""
     global _last_call
     with _throttle_lock:
         wait = CALL_GAP - (time.time() - _last_call)
@@ -67,38 +73,71 @@ def _throttle() -> None:
 def _charge_credits(n: int) -> None:
     """
     Block until n credits can be consumed within the rolling 60-second window.
-    Called before each batch API request with n = number of symbols in the batch.
+
+    This is the SINGLE point of credit accounting for ALL Twelve Data API calls.
+    Both batch /time_series calls (n = batch size) and single-symbol endpoints
+    like /earnings (n = 1) must route through here so the rolling window is
+    accurate and we never exceed the plan limit.
     """
+    t_start = time.time()
+    warned   = False
     while True:
-        now = time.time()
+        now    = time.time()
         cutoff = now - 60.0
         with _credit_lock:
-            # Evict expired events
             while _credit_events and _credit_events[0][0] < cutoff:
                 _credit_events.popleft()
             used = sum(c for _, c in _credit_events)
             if used + n <= CREDIT_LIMIT:
                 _credit_events.append((now, n))
                 return
-            # Find how long until the oldest event expires
             wait = (_credit_events[0][0] + 60.01) - time.time() if _credit_events else 0.1
-        # Sleep outside the lock to avoid blocking other threads
+        if not warned and (time.time() - t_start) > 2:
+            logger.debug(
+                f"Credit throttle: {used}/{CREDIT_LIMIT} used — "
+                f"waiting {wait:.1f}s for {n} credits to free up"
+            )
+            warned = True
         time.sleep(max(0.05, min(wait, 1.0)))
 
 
-def _get(endpoint: str, params: dict, _retry: int = 3) -> dict:
-    """Throttled GET with rate-limit retry."""
-    _throttle()
+def get_credit_usage() -> dict:
+    """Return current rolling-window credit stats (for monitoring / UI)."""
+    now    = time.time()
+    cutoff = now - 60.0
+    with _credit_lock:
+        active = [(ts, c) for ts, c in _credit_events if ts >= cutoff]
+        used   = sum(c for _, c in active)
+    return {"used": used, "limit": CREDIT_LIMIT, "pct": round(used / CREDIT_LIMIT * 100, 1)}
+
+
+def _get(endpoint: str, params: dict, n_credits: int = 1, _retry: int = 3) -> dict:
+    """
+    Rate-limited GET to the Twelve Data REST API.
+
+    Parameters
+    ----------
+    n_credits : Credits this call consumes (1 for single-symbol endpoints,
+                len(batch) for /time_series batch calls).
+                ALL calls must specify this so credit accounting is complete.
+    """
+    _charge_credits(n_credits)   # blocks until budget is available
+    _throttle()                  # enforces minimum inter-call gap (CALL_GAP)
     params["apikey"] = TWELVE_DATA_API_KEY
     try:
         r = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=30)
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict) and data.get("code") == 429:
+            # Should rarely happen now that _charge_credits gates all requests.
+            # If it does, back off and retry without re-charging credits.
             if _retry > 0:
-                logger.warning("Rate limit hit — waiting 62s before retry…")
-                time.sleep(62)
-                return _get(endpoint, params, _retry=_retry - 1)
+                logger.warning(
+                    "Rate limit 429 from Twelve Data despite credit guard — "
+                    "backing off 30s and retrying…"
+                )
+                time.sleep(30)
+                return _get(endpoint, params, n_credits=0, _retry=_retry - 1)
             return {}
         return data
     except Exception as e:
@@ -228,9 +267,9 @@ def fetch_batch_interval(
         if extended_hours:
             params["extended_trading_hours"] = "true"
 
-        # Reserve credits before calling (blocks if approaching 60-second limit)
-        _charge_credits(len(batch))
-        data = _get("/time_series", params)
+        # _get() handles credit reservation — pass n_credits so all accounting
+        # goes through the single _charge_credits gate.
+        data = _get("/time_series", params, n_credits=len(batch))
 
         if not data:
             logger.warning(f"[{interval_key}] batch {batch_num} returned empty response")
