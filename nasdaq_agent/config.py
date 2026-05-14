@@ -178,10 +178,14 @@ def get_active_tickers() -> list:
 PRE_EARNINGS_BLACKOUT_DAYS  = 3   # suppress signals N days before earnings
 POST_EARNINGS_COOLDOWN_DAYS = 1   # suppress 1 day after earnings
 
-# ── Position sizing defaults ──────────────────────────────────────────────────
-DEFAULT_ACCOUNT_SIZE = 50_000   # trading account size — set to your actual capital
-DEFAULT_RISK_PCT     = 1.5      # % of account risked per trade ($750 on $50k)
-MAX_POSITION_PCT     = 10.0     # max single position as % of account ($5k on $50k)
+# ── Position sizing — driven by .env so no code change needed ────────────────
+# Set these in /opt/nasdaq-agent/.env:
+#   TRADING_ACCOUNT_SIZE=50000   (your actual capital)
+#   TRADING_RISK_PCT=1.5         (% of account risked per trade)
+#   TRADING_MAX_POSITION_PCT=10  (max single position as % of account)
+DEFAULT_ACCOUNT_SIZE = float(os.getenv("TRADING_ACCOUNT_SIZE",  "50000"))
+DEFAULT_RISK_PCT     = float(os.getenv("TRADING_RISK_PCT",      "1.5"))
+MAX_POSITION_PCT     = float(os.getenv("TRADING_MAX_POSITION_PCT", "10.0"))
 
 # Legacy aliases (kept for any code that still references them)
 INTRADAY_INTERVAL = "5m"
