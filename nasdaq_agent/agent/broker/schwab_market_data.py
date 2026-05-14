@@ -24,7 +24,7 @@ from datetime import date
 import pandas as pd
 import requests
 
-from agent.broker.schwab_auth import get_md_access_token, get_md_token_status, get_token_status
+from agent.broker.schwab_auth import get_md_token_status
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +43,23 @@ _IV_MAP = {
 
 
 def _is_authorised() -> bool:
-    """True if either the MD app or the primary app has a valid token."""
+    """True only when the dedicated Market Data app has its own valid token.
+    Never falls back to the Accounts+Trading token — that app lacks
+    Market Data Production access and will 401."""
     try:
-        return bool(get_md_access_token())
+        from agent.broker.schwab_auth import _market_data
+        return bool(_market_data.get_access_token())
     except Exception:
         return False
 
 
 def _auth_headers() -> dict | None:
-    """Use MD app token preferentially; fall back to primary token."""
-    token = get_md_access_token()
+    """Return headers using only the MD app token. Returns None if not authorised."""
+    try:
+        from agent.broker.schwab_auth import _market_data
+        token = _market_data.get_access_token()
+    except Exception:
+        token = None
     if not token:
         return None
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
