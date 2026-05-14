@@ -848,7 +848,26 @@
     </div>
 
     <div id="nn-panel-progress" style="display:block">
-      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px">Deep BiLSTM — Loss Curve</div>
+      <!-- XGBoost queue section -->
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">XGBoost Training Queue</div>
+      <div id="nn-xgb-phase" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+      <!-- current ticker -->
+      <div id="nn-current-ticker" style="display:none;background:linear-gradient(90deg,rgba(99,102,241,.15),rgba(99,102,241,.05));border:1px solid rgba(99,102,241,.4);border-radius:8px;padding:10px 14px;margin-bottom:10px;align-items:center;gap:10px">
+        <div style="width:8px;height:8px;border-radius:50%;background:#818cf8;animation:pulse 1s infinite;flex-shrink:0"></div>
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--text)" id="nn-ct-ticker">—</div>
+          <div style="font-size:10px;color:var(--muted)">Training <span id="nn-ct-model" style="color:#818cf8;font-weight:700"></span> model</div>
+        </div>
+        <div style="margin-left:auto;font-size:11px;color:var(--muted)"><span id="nn-ct-progress"></span></div>
+      </div>
+      <!-- completed list -->
+      <div style="font-size:10px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Completed <span id="nn-done-count" style="color:var(--green);font-weight:700"></span></div>
+      <div id="nn-completed-list" style="display:flex;flex-wrap:wrap;gap:4px;max-height:120px;overflow-y:auto;margin-bottom:12px;padding:2px"></div>
+      <div style="border-top:1px solid var(--border);margin:12px 0"></div>
+
+      <!-- BiLSTM loss curve -->
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px">Deep BiLSTM — Loss Curve</div>
+      <div id="nn-bilstm-phase" style="font-size:11px;color:var(--muted);margin-bottom:6px"></div>
       <canvas id="nn-loss-chart" height="140" style="width:100%;border-radius:8px;background:var(--surface2);display:block"></canvas>
       <div style="font-size:10px;color:var(--muted);margin-top:6px">Loss decreases each epoch as the model learns directional patterns across all tickers.</div>
     </div>
@@ -3534,6 +3553,58 @@ function renderNeuralPanel(d) {
       last ? `Epoch ${last.epoch}/${last.total_epochs} · loss=${last.loss.toFixed(4)}` : '';
   } else {
     banner.style.display = 'none';
+  }
+
+  // XGBoost training queue
+  const rp = d.retrain_progress || {};
+  const phaseEl = document.getElementById('nn-xgb-phase');
+  if (phaseEl) {
+    if (rp.phase_label) phaseEl.textContent = rp.phase_label;
+    else if (rp.is_running) phaseEl.textContent = 'Running…';
+    else if (rp.phase === 'done') phaseEl.textContent = '✓ Complete';
+    else phaseEl.textContent = 'Idle — waiting for next cycle';
+  }
+
+  const ctEl = document.getElementById('nn-current-ticker');
+  if (ctEl) {
+    const showCurrent = rp.is_running && rp.current_ticker && rp.phase === 'xgboost';
+    ctEl.style.display = showCurrent ? 'flex' : 'none';
+    if (showCurrent) {
+      const ctTicker = document.getElementById('nn-ct-ticker');
+      const ctModel  = document.getElementById('nn-ct-model');
+      const ctProg   = document.getElementById('nn-ct-progress');
+      if (ctTicker) ctTicker.textContent = rp.current_ticker;
+      if (ctModel)  ctModel.textContent  = rp.current_model || '';
+      if (ctProg)   ctProg.textContent   = `${rp.done_count || 0} / ${rp.total || '?'} done`;
+    }
+  }
+
+  const doneCountEl = document.getElementById('nn-done-count');
+  if (doneCountEl) {
+    doneCountEl.textContent = (rp.done_count != null && rp.total)
+      ? `${rp.done_count} / ${rp.total} tickers`
+      : '';
+  }
+
+  const compList = document.getElementById('nn-completed-list');
+  if (compList) {
+    const completed = rp.completed || [];
+    compList.innerHTML = completed.length
+      ? completed.map(c => {
+          const allOk = (c.models || []).length >= 4;
+          const col   = allOk ? 'var(--green)' : '#f59e0b';
+          const bg    = allOk ? 'rgba(34,197,94,.12)' : 'rgba(245,158,11,.12)';
+          const tip   = `${(c.models||[]).join(', ')} · ${(c.elapsed_s||0).toFixed(1)}s`;
+          return `<span title="${tip}" style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;background:${bg};color:${col};border:1px solid ${col}44">${c.ticker}</span>`;
+        }).join('')
+      : '<span style="font-size:10px;color:var(--muted)">No tickers trained yet</span>';
+  }
+
+  const bilstmPhaseEl = document.getElementById('nn-bilstm-phase');
+  if (bilstmPhaseEl) {
+    if (rp.phase === 'deep') bilstmPhaseEl.textContent = '⏳ Training in progress…';
+    else if (d.deep_trained) bilstmPhaseEl.textContent = '✓ Trained — fine-tunes every 1h';
+    else bilstmPhaseEl.textContent = 'Awaiting first training run — click "Train BiLSTM" above';
   }
 
   // Model grid
