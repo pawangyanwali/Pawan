@@ -125,7 +125,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
 def _start_callback_server() -> HTTPServer:
     """Start local HTTPS server to capture OAuth callback."""
-    import datetime, tempfile
+    import datetime as _dt, tempfile
     from cryptography import x509
     from cryptography.x509.oid import NameOID
     from cryptography.hazmat.primitives import hashes, serialization
@@ -140,8 +140,8 @@ def _start_callback_server() -> HTTPServer:
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.utcnow())
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=1))
+        .not_valid_before(_dt.datetime.now(_dt.timezone.utc))
+        .not_valid_after(_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=1))
         .add_extension(x509.SubjectAlternativeName([x509.IPAddress(__import__("ipaddress").IPv4Address("127.0.0.1"))]), critical=False)
         .sign(key, hashes.SHA256())
     )

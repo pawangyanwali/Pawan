@@ -10,7 +10,7 @@ import logging
 import time
 import threading
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Callable
 
 import numpy as np
@@ -222,7 +222,7 @@ class StockSignal:
 
     # ── News ──────────────────────────────────────────────────────────────────
     headlines:  list = field(default_factory=list)
-    scanned_at: str  = field(default_factory=lambda: datetime.utcnow().isoformat())
+    scanned_at: str  = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # ── Adaptive filter ───────────────────────────────────────────────────────
     is_suppressed:   bool = False   # True when adaptive filter blocked this signal
@@ -980,7 +980,7 @@ class Scanner:
             logger.debug(f"learning_rank error: {_lr_err}")
 
         self.signals   = results
-        self.last_scan = datetime.utcnow().isoformat()
+        self.last_scan = datetime.now(timezone.utc).isoformat()
 
         # Market-observation learning: record all signals with full context,
         # then check short-term price accuracy against previous scan's signals.
