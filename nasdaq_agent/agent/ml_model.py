@@ -48,6 +48,31 @@ _retrain_lock  = _threading.Lock()
 _progress_lock = _threading.Lock()   # guards concurrent updates from worker threads
 _is_retraining = False               # quick non-blocking check before acquiring lock
 
+
+def _safe_transform(scaler, row: np.ndarray) -> np.ndarray | None:
+    """
+    Wrap StandardScaler.transform() with dtype coercion and error recovery.
+
+    sklearn >= 1.4 uses array_api_compat which calls mean_.astype(dtype) on
+    the input's dtype.  If a scaler was joblib-loaded across numpy versions,
+    mean_ can deserialise as a plain Python float (no .astype()).  Converting
+    the input row to float64 routes through sklearn's stable code path and
+    avoids the compatibility layer entirely.
+
+    Returns the scaled array, or None if the scaler state is unrecoverable.
+    """
+    try:
+        row64 = np.asarray(row, dtype=np.float64)
+        if row64.ndim == 1:
+            row64 = row64.reshape(1, -1)
+        return scaler.transform(row64)
+    except AttributeError:
+        # Scaler mean_/scale_ are plain Python floats — joblib version skew.
+        # Caller must reset model.trained = False and retrain next cycle.
+        return None
+    except Exception:
+        return None
+
 # ── Per-ticker training progress tracker ──────────────────────────────────────
 # Updated live during _retrain_all_locked so the UI can show a real-time queue.
 
@@ -313,7 +338,11 @@ class StockMLModel:
             )
             self.trained = False
             return 0.5
-        row_s = self.scaler.transform(row)
+        row_s = _safe_transform(self.scaler, row)
+        if row_s is None:
+            logger.warning(f"[{self.ticker}] scalp scaler corrupted — resetting for retrain")
+            self.trained = False
+            return 0.5
         return round(float(self.model.predict_proba(row_s)[0][1]), 4)
 
 
@@ -633,7 +662,11 @@ class DailyMLModel:
             )
             self.trained = False
             return 0.5
-        row_s = self.scaler.transform(row)
+        row_s = _safe_transform(self.scaler, row)
+        if row_s is None:
+            logger.warning(f"[{self.ticker}] daily scaler corrupted — resetting for retrain")
+            self.trained = False
+            return 0.5
         return round(float(self.model.predict_proba(row_s)[0][1]), 4)
 
 
@@ -782,7 +815,10 @@ class ReversalMLModel:
             if df_feat.empty:
                 return 0.5
             row   = df_feat[REVERSAL_FEATURE_COLS].iloc[[-1]].values
-            row_s = self.scaler.transform(row)
+            row_s = _safe_transform(self.scaler, row)
+            if row_s is None:
+                self.trained = False
+                return 0.5
             return round(float(self.model.predict_proba(row_s)[0][1]), 4)
         except Exception as e:
             logger.debug(f"[{self.ticker}] ReversalML predict error: {e}")
@@ -916,7 +952,11 @@ class SwingMLModel:
             )
             self.trained = False
             return 0.5
-        row_s = self.scaler.transform(row)
+        row_s = _safe_transform(self.scaler, row)
+        if row_s is None:
+            logger.warning(f"[{self.ticker}] swing scaler corrupted — resetting for retrain")
+            self.trained = False
+            return 0.5
         return round(float(self.model.predict_proba(row_s)[0][1]), 4)
 
 
@@ -1052,7 +1092,10 @@ class EnsembleMLModel:
                 )
                 self.trained = False
                 return 0.5, 0.0
-            row_s = self.scaler.transform(row)
+            row_s = _safe_transform(self.scaler, row)
+            if row_s is None:
+                self.trained = False
+                return 0.5, 0.0
             probs = np.array([m.predict_proba(row_s)[0][1] for m in self.models])
             avg_prob  = float(probs.mean())
             # agreement: how consistently models agree on direction
