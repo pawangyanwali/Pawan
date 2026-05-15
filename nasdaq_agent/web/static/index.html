@@ -616,6 +616,7 @@
     <thead>
       <tr>
         <th>Ticker</th>
+        <th title="After-hours trading tier — HIGH: mega-caps with real AH liquidity (trades at 50% size AH); MODERATE: decent AH volume (monitored, reduced confidence boost); REGULAR: thin AH spreads (regular session only)">AH Tier</th>
         <th title="5-bar mini sparkline">Spark</th>
         <th>Name</th>
         <th>Chg %</th>
@@ -638,7 +639,7 @@
       </tr>
     </thead>
     <tbody id="table-body">
-      <tr><td colspan="20" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
+      <tr><td colspan="21" style="text-align:center;color:var(--muted);padding:40px">Waiting for first scan…</td></tr>
     </tbody>
   </table>
 </div>
@@ -1763,8 +1764,23 @@ function renderTable() {
 
     const _spark = sparkline(s.closes || s.price_history || []);
 
+    // Dedicated AH Tier cell — more visible than the stacked badge in ticker cell
+    const tierCell = (() => {
+      const t = s.trading_tier || 'REGULAR';
+      const cfg = {
+        HIGH:     { label:'T1 · HIGH',    sub:'Trades AH',    c:'#22c55e', bg:'rgba(34,197,94,.12)',   border:'rgba(34,197,94,.35)',   icon:'🌙' },
+        MODERATE: { label:'T2 · MOD',     sub:'Monitor AH',   c:'#f59e0b', bg:'rgba(245,158,11,.12)',  border:'rgba(245,158,11,.35)',  icon:'🌙' },
+        REGULAR:  { label:'T3 · REG',     sub:'Reg only',     c:'#64748b', bg:'rgba(100,116,139,.10)', border:'rgba(100,116,139,.25)', icon:'🕐' },
+      }[t] || { label:'T3 · REG', sub:'Reg only', c:'#64748b', bg:'rgba(100,116,139,.10)', border:'rgba(100,116,139,.25)', icon:'🕐' };
+      return `<td style="text-align:center;white-space:nowrap;padding:4px 6px" title="${tierMeta.title}">
+        <span style="display:inline-block;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;background:${cfg.bg};color:${cfg.c};border:1px solid ${cfg.border};line-height:1.4">${cfg.icon} ${cfg.label}</span>
+        <div style="font-size:8px;color:var(--muted);margin-top:1px">${cfg.sub}</div>
+      </td>`;
+    })();
+
     return `<tr data-ticker="${s.ticker}" style="${rowBg}">
-      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${clusterTag}${tierTag}${learnTag}</td>
+      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${clusterTag}${learnTag}</td>
+      ${tierCell}
       <td style="padding:4px 6px;vertical-align:middle">${_spark}</td>
       <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
       <td class="chg-cell ${chgC}" style="white-space:nowrap">
