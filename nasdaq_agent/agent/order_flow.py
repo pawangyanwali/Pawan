@@ -527,9 +527,9 @@ def get_signal_strength(
                     AND regime in (TRENDING_UP, TRENDING)
     STANDARD BUY  : price_conf > 72 AND of_score > +0.20
                     AND regime not RANGE_BOUND
-    WEAK BUY      : price_conf > 72 AND of_score in [-0.20, +0.20]
+    WEAK BUY      : price_conf > 72 AND of_score in [-0.40, +0.20]
                     AND regime == TRENDING_UP
-    CONFLICTED    : price_conf > 72 AND of_score < -0.20  → block trade
+    CONFLICTED    : price_conf > 72 AND of_score < -0.40  → block trade
     NO SIGNAL     : price_conf <= 72
     BLOCKED_REGIME: price_conf > 72 AND regime == RANGE_BOUND
 
@@ -573,15 +573,17 @@ def get_signal_strength(
         }
 
     # ------------------------------------------------------------------ #
-    # Rule 3 — CONFLICTED: price model bullish but order flow bearish
+    # Rule 3 — CONFLICTED: price model bullish but order flow strongly bearish
+    # Threshold relaxed from -0.20 to -0.40 to avoid blocking on mild/noisy
+    # negative OF readings that starve the adaptive filter of outcomes.
     # ------------------------------------------------------------------ #
-    if order_flow_score < -0.20:
+    if order_flow_score < -0.40:
         return {
             "strength": "CONFLICTED",
             "execute": False,
             "size_mult": 0.0,
             "reason": (
-                f"Order-flow score {order_flow_score:+.3f} signals selling pressure "
+                f"Order-flow score {order_flow_score:+.3f} signals strong selling pressure "
                 f"while price model confidence is {price_confidence:.1f} — "
                 "conflicted signals; trade blocked."
             ),
@@ -626,7 +628,7 @@ def get_signal_strength(
     # ------------------------------------------------------------------ #
     if (
         price_confidence > 72
-        and -0.20 <= order_flow_score <= 0.20
+        and -0.40 <= order_flow_score <= 0.20
         and regime_upper == "TRENDING_UP"
     ):
         return {
@@ -636,7 +638,7 @@ def get_signal_strength(
             "reason": (
                 f"Weak signal: price confidence {price_confidence:.1f} > 72 and "
                 f"regime is {regime}, but order-flow score {order_flow_score:+.3f} "
-                "is neutral — half position size."
+                "is mildly negative/neutral — half position size."
             ),
         }
 

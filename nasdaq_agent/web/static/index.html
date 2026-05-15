@@ -1565,7 +1565,13 @@ function updateSummary() {
   document.getElementById('s-ssell').textContent   = c['STRONG SELL'];
   document.getElementById('s-uvol').textContent    = c['UVOL'];
   document.getElementById('scan-count').textContent = `${allSignals.length} stocks scanned`;
-  if (allSignals[0]?.scanned_at) document.getElementById('last-scan').textContent = new Date(allSignals[0].scanned_at+'Z').toLocaleTimeString();
+  if (allSignals[0]?.scanned_at) {
+    const rawTs = allSignals[0].scanned_at;
+    // isoformat() from Python already includes +00:00 — don't append Z again
+    const tsStr = /[Z+]/.test(rawTs.slice(-6)) ? rawTs : rawTs + 'Z';
+    const d = new Date(tsStr);
+    document.getElementById('last-scan').textContent = isNaN(d) ? rawTs : d.toLocaleTimeString();
+  }
   // breadth is passed via allBreadth global
   if (allBreadth) {
     const bEl = document.getElementById('breadth-bias');

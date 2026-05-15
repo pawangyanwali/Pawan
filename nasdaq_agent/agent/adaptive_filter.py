@@ -29,14 +29,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
-TARGET_WIN_RATE   = 0.62   # goal win rate — system tightens until reached
+TARGET_WIN_RATE   = 0.55   # goal win rate — system tightens until reached
 SUPPRESS_BELOW    = 0.35   # suppress context if win_rate < this
 BOOST_ABOVE       = 0.72   # boost confidence if win_rate >= this
 MIN_SAMPLE        = 8      # minimum resolved trades before suppressing a context
-RELAX_ABOVE       = 0.92   # if win rate exceeds this, slightly relax threshold
+RELAX_ABOVE       = 0.85   # if win rate exceeds this, slightly relax threshold
 DEFAULT_THRESHOLD = 60.0   # starting dynamic confidence gate
 MIN_THRESHOLD     = 50.0   # never go below this (avoids suppressing all signals)
-MAX_THRESHOLD     = 85.0   # never require more than this
+MAX_THRESHOLD     = 72.0   # never require more than this (was 85 — caused deadlock)
 
 _FILTER_PATH = Path(__file__).parent.parent / "data" / "adaptive_filter.json"
 _lock = threading.Lock()
@@ -65,6 +65,12 @@ def _load():
                 saved = json.load(f)
             with _lock:
                 _state.update(saved)
+                # Cap persisted threshold to current MAX — prevents deadlock after config change
+                if _state["dynamic_threshold"] > MAX_THRESHOLD:
+                    _state["dynamic_threshold"] = MAX_THRESHOLD
+                    logger.info(
+                        f"[AdaptiveFilter] Capped persisted threshold to MAX {MAX_THRESHOLD}%"
+                    )
             logger.info(
                 f"[AdaptiveFilter] Loaded — threshold={_state['dynamic_threshold']:.1f}%  "
                 f"blocked={len(_state['blocked_contexts'])}  "
