@@ -4303,6 +4303,21 @@ try {
 } catch(e) {}
 connectWS();
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
+
+// Load paper trading stats immediately on page load and refresh every 30s
+async function fetchPtStats() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/paper-trading`)).json();
+    if (d.summary) {
+      // Build open_trades map for the open count
+      const openMap = {};
+      (d.open_trades || []).forEach(t => { openMap[t.ticker] = t; });
+      updatePtPills(d.summary, openMap);
+    }
+  } catch(e) {}
+}
+fetchPtStats();
+setInterval(fetchPtStats, 30000);
 // Load session/regime on startup
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/regime`)).json(); if(d.session) updateSessionBanner(d.session); if(d.regime) updateRegimeBanner(d.regime); } catch {} })();
 // Pre-populate Self-Learning pill immediately on page load (don't wait for WS scan)
