@@ -182,10 +182,12 @@ def _on_signals(signals: list[StockSignal]) -> None:
         learn_compact = {}
 
     try:
-        from agent.paper_trading import get_open_trades as _pt_open
+        from agent.paper_trading import get_today_pnl as _today_pnl, get_open_trades as _pt_open
         open_trades = {t["ticker"]: t for t in _pt_open()}
+        today_pnl   = _today_pnl()
     except Exception:
         open_trades = {}
+        today_pnl   = {}
 
     # ThinkorSwim auto-trade: attempt bracket orders for qualifying signals
     if _tos_auto_trade:
@@ -213,6 +215,7 @@ def _on_signals(signals: list[StockSignal]) -> None:
         "backtest":    bt_summary,
         "learning":    learn_compact,
         "open_trades": open_trades,
+        "today_pnl":   today_pnl,
         "breadth":     breadth,
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)

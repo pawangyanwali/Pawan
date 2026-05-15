@@ -542,6 +542,27 @@
   <div class="pill"><div class="pill-label">Sell</div><div class="pill-value" style="color:var(--red);font-size:16px" id="s-sell">—</div></div>
   <div class="pill"><div class="pill-label">Strong Sell</div><div class="pill-value" style="color:var(--red-s)" id="s-ssell">—</div></div>
   <div class="pill"><div class="pill-label">Vol Spike ⚡</div><div class="pill-value" style="color:var(--yellow)" id="s-uvol">—</div></div>
+  <!-- Paper trading summary pills -->
+  <div class="pill" id="pt-trades-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:130px" title="Click to open Paper Trading">
+    <div class="pill-label">📊 Trades Today</div>
+    <div style="display:flex;align-items:baseline;gap:5px;margin-top:2px">
+      <span id="pt-open-count" style="font-size:16px;font-weight:700;color:var(--blue)">—</span>
+      <span style="font-size:10px;color:var(--muted)">open</span>
+      <span style="font-size:10px;color:var(--muted)">·</span>
+      <span id="pt-closed-count" style="font-size:13px;font-weight:700;color:var(--text)">—</span>
+      <span style="font-size:10px;color:var(--muted)">closed</span>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:2px;font-size:9px">
+      <span>W: <strong id="pt-wins" style="color:var(--green)">—</strong></span>
+      <span>L: <strong id="pt-losses" style="color:var(--red)">—</strong></span>
+      <span id="pt-wr-badge" style="color:var(--muted)"></span>
+    </div>
+  </div>
+  <div class="pill" id="pt-pnl-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:110px" title="Click to open Paper Trading">
+    <div class="pill-label">💰 P&amp;L Today</div>
+    <div id="pt-pnl-val" style="font-size:16px;font-weight:700;margin-top:2px;color:var(--muted)">—</div>
+    <div id="pt-pnl-pct" style="font-size:10px;color:var(--muted);margin-top:1px">—</div>
+  </div>
   <div class="pill" id="breadth-pill" style="min-width:120px">
     <div class="pill-label">Breadth</div>
     <div class="pill-value" id="breadth-bias" style="font-size:13px">—</div>
@@ -1484,6 +1505,7 @@ function connectWS() {
       }
       if (m.alerts?.length) handleAlerts(m.alerts);
       if (m.breadth) { allBreadth = m.breadth; }
+      if (m.today_pnl !== undefined) updatePtPills(m.today_pnl, m.open_trades);
       renderAll();
       hideLoading();
     }
@@ -4194,6 +4216,43 @@ async function triggerFullRetrain(btn) {
 }
 
 // Update backtest header button live with win rate from WebSocket
+function updatePtPills(pnl, openTradesMap) {
+  const closed   = pnl?.total     ?? 0;
+  const wins     = pnl?.wins      ?? 0;
+  const losses   = closed - wins;
+  const pnlDollar = pnl?.total_pnl_dollar ?? null;
+  const pnlPct    = pnl?.total_pnl_pct    ?? null;
+  const openCount = openTradesMap ? Object.keys(openTradesMap).length : 0;
+  const wr        = closed > 0 ? Math.round(wins / closed * 100) : null;
+
+  const elOpen   = document.getElementById('pt-open-count');
+  const elClosed = document.getElementById('pt-closed-count');
+  const elWins   = document.getElementById('pt-wins');
+  const elLoss   = document.getElementById('pt-losses');
+  const elWrBadge = document.getElementById('pt-wr-badge');
+  const elPnlVal = document.getElementById('pt-pnl-val');
+  const elPnlPct = document.getElementById('pt-pnl-pct');
+
+  if (elOpen)   { elOpen.textContent = openCount; }
+  if (elClosed) { elClosed.textContent = closed; }
+  if (elWins)   { elWins.textContent = wins; }
+  if (elLoss)   { elLoss.textContent = losses; }
+  if (elWrBadge && wr !== null) {
+    elWrBadge.textContent = wr + '% WR';
+    elWrBadge.style.color = wr >= 62 ? 'var(--green)' : wr >= 50 ? 'var(--yellow)' : 'var(--red)';
+  }
+  if (elPnlVal && pnlDollar !== null) {
+    const pos = pnlDollar >= 0;
+    elPnlVal.textContent = (pos ? '+' : '') + '$' + Math.abs(pnlDollar).toFixed(0);
+    elPnlVal.style.color = pos ? 'var(--green)' : 'var(--red)';
+  }
+  if (elPnlPct && pnlPct !== null) {
+    const pos = pnlPct >= 0;
+    elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '%';
+    elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
+  }
+}
+
 function updateLearnPill(l) {
   if (!l) return;
   // API returns current_win_rate; WS broadcast wraps it as win_rate — accept both
