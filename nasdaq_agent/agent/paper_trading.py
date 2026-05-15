@@ -500,10 +500,11 @@ def _record_close(
     )
 
 
-def close_all_positions_eod() -> int:
+def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
     """
     Force-close ALL open paper trades at current price.
-    Called at 3:45 PM ET hard close. Returns number of positions closed.
+    Called at 3:45 PM ET hard close, after-hours, or on startup when market is closed.
+    Returns number of positions closed.
     """
     from agent.data_fetcher import fetch_batch_realtime
     closed = 0
@@ -512,7 +513,8 @@ def close_all_positions_eod() -> int:
             rows = c.execute("""
                 SELECT id, ticker, direction, entry_price,
                        COALESCE(shares_remaining, shares, 1) as shares_rem,
-                       COALESCE(partial_pnl_dollar, 0) as partial_pnl
+                       COALESCE(partial_pnl_dollar, 0) as partial_pnl,
+                       COALESCE(shares, 1) as shares_total
                 FROM paper_trades WHERE status='OPEN'
             """).fetchall()
 
@@ -530,18 +532,44 @@ def close_all_positions_eod() -> int:
                 df = prices.get(ticker)
                 ep = float(df.iloc[-1]["Close"]) if (df is not None and not df.empty) else float(row["entry_price"])
                 _record_close(
-                    c, row["id"], ep, "EOD_HARD_CLOSE_3:45PM",
+                    c, row["id"], ep, reason,
                     float(row["entry_price"]), row["direction"],
                     int(row["shares_rem"]), float(row["partial_pnl"]),
-                    int(row.get("shares", row["shares_rem"])),
+                    int(row["shares_total"]),
                 )
                 closed += 1
             c.commit()
 
     if closed:
-        logger.info(f"[PAPER] EOD hard close: {closed} positions closed at 3:45 PM ET")
+        logger.info(f"[PAPER] Force-close ({reason}): {closed} positions closed")
         _trigger_paper_feedback()
     return closed
+
+
+def close_stale_positions() -> int:
+    """
+    Called at startup and after-hours to sweep any positions that were left
+    open when the market closed (scanner may not have been running at 3:45 PM).
+    Uses entry price as exit price when live prices are unavailable.
+    Returns number of positions closed.
+    """
+    from agent.market_hours import is_after_hours, no_new_entries
+    if not no_new_entries():
+        return 0  # Market is open — don't sweep
+
+    with _lock:
+        with _conn() as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
+            ).fetchone()[0]
+
+    if count == 0:
+        return 0
+
+    logger.warning(
+        f"[PAPER] Found {count} stale open position(s) while market is closed — force-closing"
+    )
+    return close_all_positions_eod(reason="STALE_MARKET_CLOSED")
 
 
 def _eod_momentum_favors(df, direction: str, n_bars: int = 4) -> bool:

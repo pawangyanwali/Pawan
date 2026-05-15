@@ -262,6 +262,16 @@ async def lifespan(app: FastAPI):
     scanner.register_per_ticker_callback(_on_ticker)
     scanner.start_background()
     learning_engine.start()
+    # Sweep any trades that were left open from a previous session
+    try:
+        from agent.paper_trading import close_stale_positions
+        _stale = close_stale_positions()
+        if _stale:
+            logging.getLogger(__name__).warning(
+                f"Startup: closed {_stale} stale open position(s) from prior session"
+            )
+    except Exception as _sp_e:
+        logging.getLogger(__name__).warning(f"Startup stale-trade sweep failed: {_sp_e}")
     # Schwab integration — only active when SCHWAB_ENABLED=true in .env
     from config import SCHWAB_ENABLED
     if SCHWAB_ENABLED:

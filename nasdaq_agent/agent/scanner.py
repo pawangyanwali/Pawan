@@ -977,7 +977,7 @@ class Scanner:
         active_tickers = get_active_tickers()
 
         # ── EOD Hard Close (PRD 6.4): close all positions at 3:45 PM ET ──────
-        from agent.market_hours import is_hard_close_window, is_closing_caution
+        from agent.market_hours import is_hard_close_window, is_closing_caution, no_new_entries
         if is_hard_close_window():
             try:
                 from agent.paper_trading import close_all_positions_eod
@@ -986,6 +986,16 @@ class Scanner:
                     logger.info(f"[Scanner] EOD hard close triggered — {closed_n} positions closed")
             except Exception as _eod_e:
                 logger.warning(f"[Scanner] EOD hard close failed: {_eod_e}")
+
+        # ── After-hours stale-trade sweep — catches anything missed at 3:45 ──
+        elif no_new_entries():
+            try:
+                from agent.paper_trading import close_stale_positions
+                swept_n = close_stale_positions()
+                if swept_n:
+                    logger.info(f"[Scanner] After-hours sweep closed {swept_n} stale positions")
+            except Exception as _sw_e:
+                logger.warning(f"[Scanner] After-hours sweep failed: {_sw_e}")
 
         # ── Smart EOD pre-close (3:30–3:44 PM ET) ────────────────────────────
         elif is_closing_caution():
