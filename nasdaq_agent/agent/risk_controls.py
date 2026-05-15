@@ -286,6 +286,8 @@ def get_portfolio_heat() -> dict:
         return {"heat_pct": 0.0, "blocked": False, "open_count": 0}
 
 
+_PAPER_MAX_CONCURRENT = 20   # paper trading cap — high so all signals get outcomes
+
 def check_portfolio_heat() -> tuple[bool, str]:
     """Returns (blocked, reason). Blocks when combined open risk >= 1.5%."""
     heat = get_portfolio_heat()
@@ -296,9 +298,9 @@ def check_portfolio_heat() -> tuple[bool, str]:
         )
         return True, reason
     open_count = heat.get("open_count", 0)
-    if open_count >= MAX_CONCURRENT_TRADES:
+    if open_count >= _PAPER_MAX_CONCURRENT:
         reason = (
-            f"Max concurrent trades reached ({open_count}/{MAX_CONCURRENT_TRADES}). "
+            f"Max concurrent trades reached ({open_count}/{_PAPER_MAX_CONCURRENT}). "
             "Wait for an existing trade to close."
         )
         return True, reason

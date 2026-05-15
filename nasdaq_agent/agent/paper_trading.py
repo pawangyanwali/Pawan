@@ -28,7 +28,7 @@ _lock    = threading.Lock()
 _FALLBACK_MIN_CONFIDENCE = 55.0
 _MAX_BARS_HELD_SCALP     = 20   # 20-min hard close for scalps (PRD 6.3)
 _MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
-_MAX_CONCURRENT_TRADES   = 3    # PRD Section 6.3: max 3 simultaneous positions
+_MAX_CONCURRENT_TRADES   = 20   # Paper sim: high cap so every signal gets a trade and generates learning data
 
 
 def _conn() -> sqlite3.Connection:

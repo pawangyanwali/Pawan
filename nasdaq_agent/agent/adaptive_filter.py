@@ -36,7 +36,7 @@ MIN_SAMPLE        = 8      # minimum resolved trades before suppressing a contex
 RELAX_ABOVE       = 0.85   # if win rate exceeds this, slightly relax threshold
 DEFAULT_THRESHOLD = 55.0   # starting dynamic confidence gate (was 60)
 MIN_THRESHOLD     = 50.0   # never go below this (avoids suppressing all signals)
-MAX_THRESHOLD     = 72.0   # never require more than this (was 85 — caused deadlock)
+MAX_THRESHOLD     = 63.0   # never require more than this — high gates kill signal flow and learning
 BOOTSTRAP_OUTCOMES = 30    # outcomes needed before threshold raises above DEFAULT
 
 _FILTER_PATH = Path(__file__).parent.parent / "data" / "adaptive_filter.json"
@@ -68,9 +68,9 @@ def _load():
                 _state.update(saved)
                 # Cap persisted threshold to current MAX — prevents deadlock after config change
                 if _state["dynamic_threshold"] > MAX_THRESHOLD:
-                    _state["dynamic_threshold"] = MAX_THRESHOLD
+                    _state["dynamic_threshold"] = DEFAULT_THRESHOLD  # reset to default, not just cap
                     logger.info(
-                        f"[AdaptiveFilter] Capped persisted threshold to MAX {MAX_THRESHOLD}%"
+                        f"[AdaptiveFilter] Reset persisted threshold to DEFAULT {DEFAULT_THRESHOLD}% (was above MAX {MAX_THRESHOLD}%)"
                     )
             logger.info(
                 f"[AdaptiveFilter] Loaded — threshold={_state['dynamic_threshold']:.1f}%  "
@@ -235,13 +235,14 @@ def _compute_threshold(
     if total_resolved < BOOTSTRAP_OUTCOMES:
         return round(float(max(MIN_THRESHOLD, min(MAX_THRESHOLD, best_threshold))), 1)
 
-    # Post-bootstrap: raise threshold proportionally, but scale by data volume
-    # so a handful of bad early trades don't immediately block everything.
+    # Post-bootstrap: raise threshold gently — the system needs signal volume to
+    # improve, so a large raise defeats the purpose. Max raise is +8 points even
+    # at worst win rate. (gap * 25 * scale: 0.20 gap * 25 * 1.0 = +5 points)
     if current_wr < TARGET_WIN_RATE:
         gap   = TARGET_WIN_RATE - current_wr
-        # Scale: 0.0 at BOOTSTRAP_OUTCOMES outcomes → 1.0 at BOOTSTRAP_OUTCOMES+70
-        scale = min(1.0, (total_resolved - BOOTSTRAP_OUTCOMES) / 70.0)
-        raised = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + gap * 50 * scale)
+        # Scale: 0.0 at BOOTSTRAP_OUTCOMES outcomes → 1.0 at BOOTSTRAP_OUTCOMES+150
+        scale = min(1.0, (total_resolved - BOOTSTRAP_OUTCOMES) / 150.0)
+        raised = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + gap * 25 * scale)
         best_threshold = max(best_threshold, raised)
 
     return round(float(max(MIN_THRESHOLD, min(MAX_THRESHOLD, best_threshold))), 1)
