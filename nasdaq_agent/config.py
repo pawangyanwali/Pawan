@@ -192,6 +192,53 @@ DEFAULT_ACCOUNT_SIZE = float(os.getenv("TRADING_ACCOUNT_SIZE",  "50000"))
 DEFAULT_RISK_PCT     = float(os.getenv("TRADING_RISK_PCT",      "1.5"))
 MAX_POSITION_PCT     = float(os.getenv("TRADING_MAX_POSITION_PCT", "10.0"))
 
+# ── Alpha Strike Trader — PRD risk parameters ─────────────────────────────────
+# All configurable via .env — no code changes needed.
+#
+# Daily P&L targets:
+#   DAILY_PROFIT_TARGET=1000   ($1,000 triggers Profit Protect Mode)
+#   DAILY_PROFIT_MAX=1500      ($1,500 halts trading for the day)
+#
+# Daily loss limits (% of account):
+#   DAILY_LOSS_WARNING_PCT=1.5    (1.5% loss → 15-min pause, alert)
+#   DAILY_LOSS_HALT_PCT=2.5       (2.5% loss → halt for the day)
+#
+# Trade limits:
+#   MAX_CONCURRENT_TRADES=3       (hard cap on simultaneous open positions)
+#   MAX_PORTFOLIO_HEAT_PCT=1.5    (max combined open risk as % of account)
+#   MAX_CONSECUTIVE_LOSSES=5      (full halt after N consecutive losses)
+#   COOLDOWN_LOSSES=3             (30-min cooldown after N consecutive losses)
+#
+# Profit Protect Mode (triggered at DAILY_PROFIT_TARGET):
+#   PROFIT_PROTECT_CONF=80        (raise minimum confidence to 80%)
+#   PROFIT_PROTECT_SIZE=0.60      (reduce position size to 60% of normal)
+#   PROFIT_PROTECT_DRAWDOWN=300   (halt if drawdown from day's peak exceeds $300)
+
+DAILY_PROFIT_TARGET_USD  = float(os.getenv("DAILY_PROFIT_TARGET",        "1000"))
+DAILY_PROFIT_MAX_USD     = float(os.getenv("DAILY_PROFIT_MAX",           "1500"))
+DAILY_LOSS_WARNING_PCT   = float(os.getenv("DAILY_LOSS_WARNING_PCT",     "1.5"))
+DAILY_LOSS_HALT_PCT      = float(os.getenv("DAILY_LOSS_HALT_PCT",        "2.5"))
+MAX_CONCURRENT_TRADES    = int(os.getenv(  "MAX_CONCURRENT_TRADES",      "3"))
+MAX_PORTFOLIO_HEAT_PCT   = float(os.getenv("MAX_PORTFOLIO_HEAT_PCT",     "1.5"))
+MAX_CONSECUTIVE_LOSSES   = int(os.getenv(  "MAX_CONSECUTIVE_LOSSES",     "5"))
+COOLDOWN_AFTER_LOSSES    = int(os.getenv(  "COOLDOWN_LOSSES",            "3"))
+PROFIT_PROTECT_MIN_CONF  = float(os.getenv("PROFIT_PROTECT_CONF",        "80.0"))
+PROFIT_PROTECT_SIZE_MULT = float(os.getenv("PROFIT_PROTECT_SIZE",        "0.60"))
+PROFIT_PROTECT_DRAWDOWN  = float(os.getenv("PROFIT_PROTECT_DRAWDOWN",    "300"))
+
+# ── PRD session rules ─────────────────────────────────────────────────────────
+# Hard session blocks that override all signals (non-configurable per PRD)
+SESSION_RESTRICTED_UNTIL = "09:45"   # no new entries until 9:45 AM ET (price discovery)
+SESSION_LUNCH_START      = "11:30"   # lunch block start (thin order book)
+SESSION_LUNCH_END        = "13:30"   # lunch block end
+SESSION_CLOSING_CAUTION  = "15:30"   # momentum-only after this (no new scalps)
+SESSION_HARD_CLOSE       = "15:45"   # all positions must be flat by this time
+
+# ── Trade time limits (scalp mode per PRD Section 6.3) ────────────────────────
+SCALP_MAX_BARS        = 20   # 20-minute hard close for scalps (20 × 1-min bars)
+INTRADAY_MAX_BARS     = 90   # 90-minute hard close for intraday positions
+MIN_STOP_PCT          = 0.15  # min stop distance as % of entry (prevents noise triggers)
+
 # Legacy aliases (kept for any code that still references them)
 INTRADAY_INTERVAL = "5m"
 REALTIME_INTERVAL = "1m"

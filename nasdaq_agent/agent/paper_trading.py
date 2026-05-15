@@ -1,16 +1,14 @@
 """
-Paper trading simulation — auto-enters and exits paper trades based on
-live signal data, stored in SQLite.
+Paper trading simulation — PRD-compliant position management.
 
-How it works
-------------
-1. When a BUY/SELL signal fires with confidence ≥ adaptive threshold AND R:R qualifies,
-   a paper trade is opened with full context (session, regime, vwap_event, etc.).
-2. Each scan cycle, open paper trades are updated: exit signals are checked,
-   P&L is computed, and trades are closed when conditions are met.
-3. When a trade closes, its outcome is immediately fed back to the adaptive filter
-   so the system learns in real-time — not just from backtest outcomes.
-4. A summary of all paper trades is available via get_summary().
+PRD Section 6.3 rules implemented here:
+  - Max 3 concurrent positions (MAX_CONCURRENT_TRADES)
+  - T1 partial exit: close 50% at 1R profit, move stop to breakeven
+  - T2 target: close remaining 50% at 2R profit
+  - Time stop: 20 bars (scalp) or 90 bars (intraday) hard close
+  - Hard close at 3:45 PM ET — all positions flat regardless of P&L
+  - Breakeven rule: when T1 hit, stop moves to entry ± $0.02 (auto, non-overridable)
+  - Portfolio heat and session blocks enforced via risk_controls.can_open_trade()
 """
 from __future__ import annotations
 import logging
@@ -27,9 +25,10 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
-_FALLBACK_MIN_CONFIDENCE = 60.0   # used before adaptive filter has enough data
-_MAX_BARS_HELD = 60               # close any trade open longer than 1 hour (60×1-min bars)
-_MAX_CONCURRENT_TRADES = 8        # max simultaneous open positions (capital discipline)
+_FALLBACK_MIN_CONFIDENCE = 60.0
+_MAX_BARS_HELD_SCALP     = 20   # 20-min hard close for scalps (PRD 6.3)
+_MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
+_MAX_CONCURRENT_TRADES   = 3    # PRD Section 6.3: max 3 simultaneous positions
 
 
 def _conn() -> sqlite3.Connection:
@@ -43,76 +42,100 @@ def init_db() -> None:
     with _conn() as c:
         c.execute("""
             CREATE TABLE IF NOT EXISTS paper_trades (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                opened_at    TEXT    NOT NULL,
-                closed_at    TEXT,
-                ticker       TEXT    NOT NULL,
-                direction    TEXT    NOT NULL,
-                entry_price  REAL    NOT NULL,
-                target       REAL    NOT NULL,
-                stop         REAL    NOT NULL,
-                confidence   REAL    NOT NULL,
-                rr_ratio     REAL    DEFAULT 0,
-                rr_qualifies INTEGER DEFAULT 0,
-                bars_held    INTEGER DEFAULT 0,
-                status       TEXT    DEFAULT 'OPEN',
-                exit_price   REAL,
-                exit_reason  TEXT,
-                pnl_pct      REAL,
-                pnl_dollar   REAL,
-                shares       INTEGER DEFAULT 100,
-                session      TEXT    DEFAULT '',
-                regime       TEXT    DEFAULT '',
-                vwap_event   TEXT    DEFAULT '',
-                rsi_zone     TEXT    DEFAULT '',
-                entry_type   TEXT    DEFAULT ''
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_at           TEXT    NOT NULL,
+                closed_at           TEXT,
+                ticker              TEXT    NOT NULL,
+                direction           TEXT    NOT NULL,
+                entry_price         REAL    NOT NULL,
+                target              REAL    NOT NULL,
+                stop                REAL    NOT NULL,
+                confidence          REAL    NOT NULL,
+                rr_ratio            REAL    DEFAULT 0,
+                rr_qualifies        INTEGER DEFAULT 0,
+                bars_held           INTEGER DEFAULT 0,
+                status              TEXT    DEFAULT 'OPEN',
+                exit_price          REAL,
+                exit_reason         TEXT,
+                pnl_pct             REAL,
+                pnl_dollar          REAL,
+                shares              INTEGER DEFAULT 1,
+                session             TEXT    DEFAULT '',
+                regime              TEXT    DEFAULT '',
+                vwap_event          TEXT    DEFAULT '',
+                rsi_zone            TEXT    DEFAULT '',
+                entry_type          TEXT    DEFAULT '',
+                -- T1/T2 partial exit tracking (PRD 6.3)
+                t1_hit              INTEGER DEFAULT 0,
+                t1_price            REAL    DEFAULT 0,
+                t2_price            REAL    DEFAULT 0,
+                breakeven_set       INTEGER DEFAULT 0,
+                partial_pnl_dollar  REAL    DEFAULT 0,
+                shares_remaining    INTEGER DEFAULT 0,
+                order_flow_score    REAL    DEFAULT 0,
+                size_mult           REAL    DEFAULT 1.0
             )
         """)
         # Safe migration: add any missing columns to existing DBs
-        for col, definition in [
-            ("rr_ratio",    "REAL DEFAULT 0"),
-            ("rr_qualifies","INTEGER DEFAULT 0"),
-            ("session",     "TEXT DEFAULT ''"),
-            ("regime",      "TEXT DEFAULT ''"),
-            ("vwap_event",  "TEXT DEFAULT ''"),
-            ("rsi_zone",    "TEXT DEFAULT ''"),
-            ("entry_type",  "TEXT DEFAULT ''"),
-            ("shares",      "INTEGER DEFAULT 100"),
-        ]:
+        _migrate_columns(c)
+        c.commit()
+
+
+def _migrate_columns(c: sqlite3.Connection) -> None:
+    existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
+    additions = [
+        ("rr_ratio",           "REAL DEFAULT 0"),
+        ("rr_qualifies",       "INTEGER DEFAULT 0"),
+        ("session",            "TEXT DEFAULT ''"),
+        ("regime",             "TEXT DEFAULT ''"),
+        ("vwap_event",         "TEXT DEFAULT ''"),
+        ("rsi_zone",           "TEXT DEFAULT ''"),
+        ("entry_type",         "TEXT DEFAULT ''"),
+        ("shares",             "INTEGER DEFAULT 1"),
+        ("t1_hit",             "INTEGER DEFAULT 0"),
+        ("t1_price",           "REAL DEFAULT 0"),
+        ("t2_price",           "REAL DEFAULT 0"),
+        ("breakeven_set",      "INTEGER DEFAULT 0"),
+        ("partial_pnl_dollar", "REAL DEFAULT 0"),
+        ("shares_remaining",   "INTEGER DEFAULT 0"),
+        ("order_flow_score",   "REAL DEFAULT 0"),
+        ("size_mult",          "REAL DEFAULT 1.0"),
+    ]
+    for col, definition in additions:
+        if col not in existing:
             try:
                 c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
             except Exception:
                 pass
-        c.commit()
 
 
 def _get_min_confidence() -> float:
-    """Return the dynamic confidence gate from the adaptive filter."""
     try:
-        from agent.adaptive_filter import get_status as _af_status
-        return float(_af_status().get("dynamic_threshold", _FALLBACK_MIN_CONFIDENCE))
+        from agent.adaptive_filter import get_status as _af
+        return float(_af().get("dynamic_threshold", _FALLBACK_MIN_CONFIDENCE))
     except Exception:
         return _FALLBACK_MIN_CONFIDENCE
 
 
 def maybe_open_trade(
-    ticker:       str,
-    direction:    str,
-    price:        float,
-    target:       float,
-    stop:         float,
-    confidence:   float,
-    rr_qualifies: bool  = False,
-    rr_ratio:     float = 0.0,
-    session:      str   = "",
-    regime:       str   = "",
-    vwap_event:   str   = "",
-    rsi_zone:     str   = "",
-    entry_type:   str   = "",
+    ticker:           str,
+    direction:        str,
+    price:            float,
+    target:           float,
+    stop:             float,
+    confidence:       float,
+    rr_qualifies:     bool  = False,
+    rr_ratio:         float = 0.0,
+    session:          str   = "",
+    regime:           str   = "",
+    vwap_event:       str   = "",
+    rsi_zone:         str   = "",
+    entry_type:       str   = "",
+    order_flow_score: float = 0.0,
+    size_mult:        float = 1.0,
 ) -> Optional[int]:
     """
-    Open a paper trade when signal passes the adaptive confidence gate AND R:R qualifies.
-    Full context (session, regime, etc.) is stored so losses can be attributed and learned from.
+    Open a paper trade when all PRD entry gates pass.
     Returns trade id or None.
     """
     if direction not in ("BUY", "SELL"):
@@ -124,7 +147,19 @@ def maybe_open_trade(
     if not rr_qualifies:
         return None
 
-    # Risk-based position sizing — how many shares to risk exactly 1.5% of account
+    # ── PRD master entry gate (session / circuit breaker / heat / sector) ──
+    from agent.risk_controls import can_open_trade
+    allowed, block_reason, gate_size_mult = can_open_trade(ticker, direction, confidence)
+    if not allowed:
+        logger.debug(f"[PAPER] {ticker} blocked: {block_reason}")
+        return None
+
+    # Combine gate size multiplier with signal-level size multiplier
+    effective_size_mult = round(gate_size_mult * size_mult, 2)
+    if effective_size_mult <= 0:
+        return None
+
+    # ── Risk-based position sizing ─────────────────────────────────────────
     from agent.position_sizing import calculate as _calc_pos
     from config import DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT
     _ps = _calc_pos(
@@ -135,7 +170,16 @@ def maybe_open_trade(
         max_position_pct = MAX_POSITION_PCT,
         confidence       = confidence,
     )
-    shares = max(1, _ps.shares)
+    shares = max(1, int(_ps.shares * effective_size_mult))
+
+    # ── T1 and T2 price levels ─────────────────────────────────────────────
+    risk_dist = abs(price - stop)
+    if direction == "BUY":
+        t1_price = round(price + risk_dist, 4)       # 1R
+        t2_price = round(price + 2 * risk_dist, 4)  # 2R
+    else:
+        t1_price = round(price - risk_dist, 4)
+        t2_price = round(price - 2 * risk_dist, 4)
 
     with _lock:
         with _conn() as c:
@@ -145,7 +189,6 @@ def maybe_open_trade(
             if existing:
                 return None
 
-            # Enforce max concurrent open positions (capital discipline)
             open_count = c.execute(
                 "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
             ).fetchone()[0]
@@ -155,33 +198,57 @@ def maybe_open_trade(
             cur = c.execute("""
                 INSERT INTO paper_trades
                   (opened_at, ticker, direction, entry_price, target, stop,
-                   confidence, rr_ratio, rr_qualifies, shares,
-                   session, regime, vwap_event, rsi_zone, entry_type)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   confidence, rr_ratio, rr_qualifies, shares, shares_remaining,
+                   session, regime, vwap_event, rsi_zone, entry_type,
+                   t1_price, t2_price, order_flow_score, size_mult)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
                 round(price, 4), round(target, 4), round(stop, 4),
-                round(confidence, 2), round(rr_ratio, 2), int(rr_qualifies), shares,
+                round(confidence, 2), round(rr_ratio, 2), int(rr_qualifies),
+                shares, shares,  # shares_remaining starts = shares
                 session, regime, vwap_event, rsi_zone, entry_type,
+                t1_price, t2_price,
+                round(order_flow_score, 4), round(effective_size_mult, 2),
             ))
             c.commit()
             logger.info(
                 f"[PAPER] Opened {direction} {ticker} @ ${price:.2f} "
-                f"T:${target:.2f}  S:${stop:.2f}  conf:{confidence:.0f}%  "
-                f"sess:{session}  regime:{regime}  vwap:{vwap_event}"
+                f"T1:${t1_price:.2f}  T2:${t2_price:.2f}  S:${stop:.2f}  "
+                f"conf:{confidence:.0f}%  shares:{shares}  OF:{order_flow_score:+.2f}  "
+                f"sess:{session}  regime:{regime}"
             )
             return cur.lastrowid
 
 
 def update_open_trades(ticker: str, df, current_price: float) -> None:
-    """Check open trades for ticker and close if exit conditions met."""
+    """
+    PRD-compliant position management:
+      1. Hard close at 3:45 PM ET (EOD rule)
+      2. T1 partial exit at 1R → lock in 50%, move stop to breakeven
+      3. T2 full exit at 2R → close remaining position
+      4. Stop hit → close remaining shares
+      5. Time stop: 20-bar scalp or 90-bar intraday
+      6. Exit signal analysis (MACD, RSI reversal, etc.)
+    """
+    from agent.market_hours import is_hard_close_window
+
     closed_any = False
+    won_any    = None   # last closed outcome for consecutive loss tracking
+
     with _lock:
         with _conn() as c:
             rows = c.execute("""
                 SELECT id, direction, entry_price, target, stop, bars_held,
-                       COALESCE(shares, 100) as shares
+                       COALESCE(shares, 1) as shares,
+                       COALESCE(shares_remaining, shares, 1) as shares_remaining,
+                       COALESCE(t1_hit, 0) as t1_hit,
+                       COALESCE(breakeven_set, 0) as breakeven_set,
+                       COALESCE(partial_pnl_dollar, 0) as partial_pnl_dollar,
+                       COALESCE(t1_price, 0) as t1_price,
+                       COALESCE(t2_price, 0) as t2_price,
+                       COALESCE(entry_type, '') as entry_type
                 FROM paper_trades WHERE ticker=? AND status='OPEN'
             """, (ticker,)).fetchall()
 
@@ -189,67 +256,222 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 bars = (row["bars_held"] or 0) + 1
                 c.execute("UPDATE paper_trades SET bars_held=? WHERE id=?", (bars, row["id"]))
 
+                entry           = float(row["entry_price"] or price)
+                stop_current    = float(row["stop"])
+                t1_price        = float(row["t1_price"] or 0)
+                t2_price        = float(row["t2_price"] or 0)
+                shares_total    = int(row["shares"] or 1)
+                shares_rem      = int(row["shares_remaining"] or shares_total)
+                t1_hit          = bool(row["t1_hit"])
+                partial_pnl     = float(row["partial_pnl_dollar"] or 0)
+                direction       = row["direction"]
+                entry_type      = row["entry_type"] or "IMMEDIATE"
 
-                ea: ExitAnalysis = analyse_exits(
-                    df=df,
-                    direction=row["direction"],
-                    entry_price=row["entry_price"],
-                    target=row["target"],
-                    stop=row["stop"],
-                    bars_held=bars,
-                )
+                # Determine time stop based on trade type (PRD 6.3)
+                is_scalp = entry_type in ("IMMEDIATE", "SCALP") or bars <= 20
+                max_bars = _MAX_BARS_HELD_SCALP if is_scalp else _MAX_BARS_HELD_INTRADAY
 
-                # Max hold time: close at market if trade has been open too long.
-                # A scalp that hasn't resolved in 60 minutes has failed its thesis.
-                if bars >= _MAX_BARS_HELD and ea.recommendation != "EXIT_NOW":
-                    ea = type(ea)(recommendation="EXIT_NOW",
-                                  signals=ea.signals,
-                                  summary=f"Max hold time reached ({_MAX_BARS_HELD} bars)")
+                ep           = current_price
+                exit_reason  = None
+                close_shares = 0
+                is_partial   = False
 
-                if ea.recommendation == "EXIT_NOW":
-                    ep    = current_price
-                    entry = row["entry_price"] or 1.0
-                    if row["direction"] == "BUY":
-                        pnl_pct = (ep - entry) / entry * 100
-                    else:
-                        pnl_pct = (entry - ep) / entry * 100
-                    pnl_dollar = (ep - entry if row["direction"] == "BUY" else entry - ep) * row["shares"]
+                # ── 1. Hard close at 3:45 PM ET (PRD — non-overridable) ────────
+                if is_hard_close_window():
+                    exit_reason  = "EOD_HARD_CLOSE_3:45PM"
+                    close_shares = shares_rem
 
-                    reason = (
-                        f"MAX_HOLD_{_MAX_BARS_HELD}BARS"
-                        if bars >= _MAX_BARS_HELD
-                        else (ea.signals[0].signal if ea.signals else "UNKNOWN")
+                # ── 2. T1 partial exit (1R profit) — if not already hit ────────
+                elif not t1_hit and t1_price > 0:
+                    t1_hit_now = (
+                        (direction == "BUY"  and ep >= t1_price) or
+                        (direction == "SELL" and ep <= t1_price)
                     )
-                    c.execute("""
-                        UPDATE paper_trades
-                        SET status='CLOSED', closed_at=?, exit_price=?,
-                            exit_reason=?, pnl_pct=?, pnl_dollar=?
-                        WHERE id=?
-                    """, (
-                        datetime.now(timezone.utc).isoformat(),
-                        round(ep, 4), reason,
-                        round(pnl_pct, 3), round(pnl_dollar, 2),
-                        row["id"]
-                    ))
-                    outcome = "WIN" if pnl_pct > 0 else "LOSS"
-                    logger.info(
-                        f"[PAPER] Closed {row['direction']} {ticker} @ ${ep:.2f} | "
-                        f"{outcome} {pnl_pct:+.2f}% | Reason: {reason}"
+                    if t1_hit_now:
+                        # Exit 50% at T1, move stop to breakeven
+                        partial_shares = max(1, shares_rem // 2)
+                        t1_pnl = (
+                            (t1_price - entry) * partial_shares if direction == "BUY"
+                            else (entry - t1_price) * partial_shares
+                        )
+                        new_partial_pnl = partial_pnl + t1_pnl
+                        new_shares_rem  = shares_rem - partial_shares
+                        # Breakeven stop: entry ± $0.02 (PRD 6.3 — always auto)
+                        be_stop = round(entry - 0.02, 4) if direction == "BUY" else round(entry + 0.02, 4)
+                        c.execute("""
+                            UPDATE paper_trades
+                            SET t1_hit=1, breakeven_set=1, stop=?,
+                                partial_pnl_dollar=?, shares_remaining=?
+                            WHERE id=?
+                        """, (be_stop, round(new_partial_pnl, 2), new_shares_rem, row["id"]))
+                        c.commit()
+                        logger.info(
+                            f"[PAPER] T1 HIT {direction} {ticker} @ ${ep:.2f} | "
+                            f"Partial exit {partial_shares} shares, locked ${t1_pnl:+.2f} | "
+                            f"Stop → breakeven ${be_stop:.2f} | {new_shares_rem} shares remaining"
+                        )
+                        # Reload updated row values
+                        stop_current = be_stop
+                        t1_hit       = True
+                        partial_pnl  = new_partial_pnl
+                        shares_rem   = new_shares_rem
+                        if shares_rem <= 0:
+                            exit_reason  = "T1_FULL_EXIT"
+                            close_shares = 0   # all shares already accounted for
+                            # Record closed trade
+                            _record_close(c, row["id"], ep, exit_reason, entry, direction,
+                                          shares_total, partial_pnl)
+                            closed_any = True
+                            won_any    = partial_pnl > 0
+                            continue
+
+                # ── 3. T2 full exit (2R profit) — only if T1 already hit ──────
+                if not exit_reason and t1_hit and t2_price > 0:
+                    t2_hit_now = (
+                        (direction == "BUY"  and ep >= t2_price) or
+                        (direction == "SELL" and ep <= t2_price)
                     )
+                    if t2_hit_now:
+                        exit_reason  = "TARGET_T2"
+                        close_shares = shares_rem
+                        ep           = t2_price  # fill at T2
+
+                # ── 4. Stop hit ────────────────────────────────────────────────
+                if not exit_reason:
+                    stop_hit = (
+                        (direction == "BUY"  and ep <= stop_current) or
+                        (direction == "SELL" and ep >= stop_current)
+                    )
+                    if stop_hit:
+                        exit_reason  = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"
+                        close_shares = shares_rem
+
+                # ── 5. Time stop ───────────────────────────────────────────────
+                if not exit_reason and bars >= max_bars:
+                    exit_reason  = f"TIME_STOP_{max_bars}BARS"
+                    close_shares = shares_rem
+
+                # ── 6. Exit signal analysis (technical exits) ─────────────────
+                if not exit_reason:
+                    ea: ExitAnalysis = analyse_exits(
+                        df=df, direction=direction,
+                        entry_price=entry, target=row["target"],
+                        stop=stop_current, bars_held=bars,
+                    )
+                    if ea.recommendation == "EXIT_NOW":
+                        exit_reason  = ea.signals[0].signal if ea.signals else "SIGNAL_EXIT"
+                        close_shares = shares_rem
+
+                # ── Close trade ────────────────────────────────────────────────
+                if exit_reason and close_shares > 0:
+                    _record_close(c, row["id"], ep, exit_reason, entry, direction,
+                                  close_shares, partial_pnl)
                     closed_any = True
+                    # Calculate net P&L for consecutive loss tracking
+                    final_pnl = (
+                        ((ep - entry) * close_shares if direction == "BUY"
+                         else (entry - ep) * close_shares)
+                        + partial_pnl
+                    )
+                    won_any = final_pnl > 0
+
             c.commit()
 
     if closed_any:
-        # Feed outcomes back to adaptive filter immediately after any close
+        if won_any is not None:
+            try:
+                from agent.risk_controls import record_trade_outcome
+                record_trade_outcome(won_any)
+            except Exception:
+                pass
         _trigger_paper_feedback()
 
 
+def _record_close(
+    c: sqlite3.Connection,
+    trade_id:     int,
+    exit_price:   float,
+    exit_reason:  str,
+    entry:        float,
+    direction:    str,
+    close_shares: int,
+    partial_pnl:  float = 0.0,
+) -> None:
+    """Write the final closed state for a trade record."""
+    ep = exit_price
+    if direction == "BUY":
+        pnl_pct    = (ep - entry) / entry * 100
+        pnl_dollar = (ep - entry) * close_shares + partial_pnl
+    else:
+        pnl_pct    = (entry - ep) / entry * 100
+        pnl_dollar = (entry - ep) * close_shares + partial_pnl
+
+    # pnl_pct should account for partial exit locked P&L directionally
+    if partial_pnl > 0:
+        pnl_pct = pnl_dollar / (entry * close_shares + 0.01) * 100
+
+    outcome = "WIN" if pnl_dollar > 0 else "LOSS"
+    c.execute("""
+        UPDATE paper_trades
+        SET status='CLOSED', closed_at=?, exit_price=?,
+            exit_reason=?, pnl_pct=?, pnl_dollar=?
+        WHERE id=?
+    """, (
+        datetime.now(timezone.utc).isoformat(),
+        round(ep, 4), exit_reason,
+        round(pnl_pct, 3), round(pnl_dollar, 2),
+        trade_id,
+    ))
+    logger.info(
+        f"[PAPER] Closed {direction} @ ${ep:.2f} | "
+        f"{outcome} ${pnl_dollar:+.2f} ({pnl_pct:+.2f}%) | Reason: {exit_reason}"
+    )
+
+
+def close_all_positions_eod() -> int:
+    """
+    Force-close ALL open paper trades at current price.
+    Called at 3:45 PM ET hard close. Returns number of positions closed.
+    """
+    from agent.data_fetcher import fetch_batch_realtime
+    closed = 0
+    with _lock:
+        with _conn() as c:
+            rows = c.execute("""
+                SELECT id, ticker, direction, entry_price,
+                       COALESCE(shares_remaining, shares, 1) as shares_rem,
+                       COALESCE(partial_pnl_dollar, 0) as partial_pnl
+                FROM paper_trades WHERE status='OPEN'
+            """).fetchall()
+
+            if not rows:
+                return 0
+
+            tickers = list({r["ticker"] for r in rows})
+            try:
+                prices = fetch_batch_realtime(tickers)
+            except Exception:
+                prices = {}
+
+            for row in rows:
+                ticker = row["ticker"]
+                df = prices.get(ticker)
+                ep = float(df.iloc[-1]["Close"]) if (df is not None and not df.empty) else float(row["entry_price"])
+                _record_close(
+                    c, row["id"], ep, "EOD_HARD_CLOSE_3:45PM",
+                    float(row["entry_price"]), row["direction"],
+                    int(row["shares_rem"]), float(row["partial_pnl"]),
+                )
+                closed += 1
+            c.commit()
+
+    if closed:
+        logger.info(f"[PAPER] EOD hard close: {closed} positions closed at 3:45 PM ET")
+        _trigger_paper_feedback()
+    return closed
+
+
 def _trigger_paper_feedback() -> None:
-    """
-    Build context-breakdown stats from all closed paper trades and push them
-    into the adaptive filter so it learns from real paper trading outcomes,
-    not just backtest simulations.
-    """
     try:
         from agent.adaptive_filter import update_from_paper_trades
         stats = _build_paper_stats()
@@ -260,10 +482,6 @@ def _trigger_paper_feedback() -> None:
 
 
 def _build_paper_stats() -> dict:
-    """
-    Aggregate closed paper trades into the same stats format that
-    live_backtest produces, so adaptive_filter.update_filter() can consume it.
-    """
     with _lock:
         with _conn() as c:
             rows = c.execute("""
@@ -292,19 +510,17 @@ def _build_paper_stats() -> dict:
         return {k: _stats(v) for k, v in buckets.items()}
 
     def _conf_band(conf):
-        if conf is None:
-            return "unknown"
-        if conf < 50:   return "<50"
-        if conf < 60:   return "50-60"
-        if conf < 70:   return "60-70"
-        if conf < 80:   return "70-80"
+        if conf is None: return "unknown"
+        if conf < 50:    return "<50"
+        if conf < 60:    return "50-60"
+        if conf < 70:    return "60-70"
+        if conf < 80:    return "70-80"
         return "80+"
 
     conf_buckets: dict = {}
     for t in trades:
         band = _conf_band(t.get("confidence"))
         conf_buckets.setdefault(band, []).append(t)
-    by_conf = {k: _stats(v) for k, v in conf_buckets.items()}
 
     return {
         "overall":       _stats(trades),
@@ -314,14 +530,14 @@ def _build_paper_stats() -> dict:
         "by_vwap_event": _breakdown("vwap_event"),
         "by_rsi_zone":   _breakdown("rsi_zone"),
         "by_entry_type": _breakdown("entry_type"),
-        "by_confidence": by_conf,
-        # not available at paper trade level, but expected by update_filter
+        "by_confidence": {k: _stats(v) for k, v in conf_buckets.items()},
         "by_sector_trend": {},
     }
 
 
+# ── Query functions ───────────────────────────────────────────────────────────
+
 def get_daily_pnl(days: int = 14) -> list[dict]:
-    """Return per-day P&L summary for the last N calendar days."""
     conn = _conn()
     try:
         rows = conn.execute("""
@@ -346,7 +562,6 @@ def get_daily_pnl(days: int = 14) -> list[dict]:
 
 
 def get_today_pnl() -> dict:
-    """Return today's running P&L stats."""
     conn = _conn()
     try:
         row = conn.execute("""
@@ -368,28 +583,28 @@ def get_today_pnl() -> dict:
 def get_open_trades() -> list[dict]:
     with _lock:
         with _conn() as c:
-            rows = c.execute("""
-                SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY id DESC
-            """).fetchall()
+            rows = c.execute(
+                "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY id DESC"
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_closed_trades(limit: int = 50) -> list[dict]:
     with _lock:
         with _conn() as c:
-            rows = c.execute("""
-                SELECT * FROM paper_trades WHERE status='CLOSED'
-                ORDER BY id DESC LIMIT ?
-            """, (limit,)).fetchall()
+            rows = c.execute(
+                "SELECT * FROM paper_trades WHERE status='CLOSED' ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_summary() -> dict:
     with _lock:
         with _conn() as c:
-            closed = c.execute("""
-                SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'
-            """).fetchall()
+            closed = c.execute(
+                "SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'"
+            ).fetchall()
             open_count = c.execute(
                 "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
             ).fetchone()[0]
@@ -412,11 +627,11 @@ def get_summary() -> dict:
         "avg_pnl":          avg_pnl,
         "total_pnl":        total_pnl,
         "total_dollar_pnl": total_dollar_pnl,
+        "max_concurrent":   _MAX_CONCURRENT_TRADES,
     }
 
 
 def get_equity_curve(days: int = 30) -> list[dict]:
-    """Return cumulative P&L curve (daily close values) for the last N days."""
     conn = _conn()
     try:
         rows = conn.execute("""
@@ -439,7 +654,6 @@ def get_equity_curve(days: int = 30) -> list[dict]:
 
 
 def get_weekly_pnl() -> list[dict]:
-    """Return per-week P&L for the last 12 weeks."""
     conn = _conn()
     try:
         rows = conn.execute("""
@@ -460,7 +674,6 @@ def get_weekly_pnl() -> list[dict]:
 
 
 def get_ticker_pnl() -> list[dict]:
-    """Return per-ticker P&L breakdown (top 20 by trade count)."""
     conn = _conn()
     try:
         rows = conn.execute("""

@@ -64,6 +64,7 @@ from agent.adaptive_filter import (
 from agent.ensemble_model import get_meta_prediction
 from agent.deep_model import predict_deep
 from agent.risk_controls import check_circuit_breaker, check_sector_concentration
+from agent.order_flow import compute_order_flow, get_signal_strength
 from agent.after_hours_monitor import (
     init_db as ah_init_db,
     record_snapshot as ah_record,
@@ -265,9 +266,15 @@ class StockSignal:
     trading_tier: str = "MODERATE"    # HIGH | MODERATE | REGULAR (see trading_hours.py)
 
     # ── Per-ticker self-learning score ────────────────────────────────────────
-    ticker_win_rate:  float = 0.0   # historical signal accuracy for this ticker (0-1)
-    ticker_obs_count: int   = 0     # number of resolved observations used
-    learning_rank:    float = 0.0   # combined rank = abs(score) × ticker_win_rate
+    ticker_win_rate:  float = 0.0
+    ticker_obs_count: int   = 0
+    learning_rank:    float = 0.0
+
+    # ── Order flow (PRD Section 3.2) ──────────────────────────────────────────
+    order_flow_score:    float = 0.0   # -1.0 (sell pressure) to +1.0 (buy pressure)
+    order_flow_label:    str   = "NEUTRAL"
+    signal_strength:     str   = "STANDARD"   # STRONG|STANDARD|WEAK|CONFLICTED|BLOCKED|NO_SIGNAL
+    signal_size_mult:    float = 1.0   # position size multiplier from arbitration
 
     def to_dict(self) -> dict:
         import math
@@ -636,7 +643,32 @@ def analyse_ticker(
         except Exception:
             pass
 
-        # Daily loss circuit breaker + sector concentration check
+        # ── Order flow analysis (PRD Section 3.2) ────────────────────────────
+        _of = compute_order_flow(df_ind)
+        _of_score = float(_of.get("score", 0.0))
+        _of_label = _of.get("label", "NEUTRAL")
+
+        # PRD Signal Arbitration (Section 3.4): order flow gates the price signal
+        _arb = get_signal_strength(pred["confidence"], _of_score, regime.regime)
+        _sig_strength  = _arb["strength"]
+        _sig_size_mult = float(_arb.get("size_mult", 1.0))
+
+        if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            if _sig_strength in ("CONFLICTED", "BLOCKED", "NO_SIGNAL"):
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"]   = [f"⚡ Order flow: {_arb['reason']}"] + pred.get("reasons", [])
+            elif _sig_strength == "WEAK":
+                pred["reasons"] = [f"↘ Weak signal (50% size): {_arb['reason']}"] + pred.get("reasons", [])
+        else:
+            _sig_size_mult = 0.0
+
+        # ── PRD Session hard blocks (non-overridable per PRD Section 6.4) ────
+        from agent.market_hours import no_new_entries, get_block_reason
+        if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL") and no_new_entries():
+            pred["direction"] = "NEUTRAL"
+            pred["reasons"]   = [f"⏰ {get_block_reason()}"] + pred.get("reasons", [])
+
+        # ── Daily loss circuit breaker + sector concentration ─────────────────
         if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
             _circuit_blocked, _circuit_msg = check_circuit_breaker()
             if _circuit_blocked:
@@ -740,19 +772,21 @@ def analyse_ticker(
                 mtf_alignment = mtf["alignment"],
             )
             maybe_open_trade(
-                ticker       = ticker,
-                direction    = _norm_direction,
-                price        = price,
-                target       = pred["target_price"],
-                stop         = pred["stop_loss"],
-                confidence   = pred["confidence"],
-                rr_qualifies = bool(pred.get("rr_qualifies", False)),
-                rr_ratio     = float(pred.get("rr_ratio", 0.0)),
-                session      = sess_info.get("session", ""),
-                regime       = regime.regime,
-                vwap_event   = vwap_sig["event"],
-                rsi_zone     = pred.get("rsi_zone", ""),
-                entry_type   = pred.get("entry_type", "IMMEDIATE"),
+                ticker            = ticker,
+                direction         = _norm_direction,
+                price             = price,
+                target            = pred["target_price"],
+                stop              = pred["stop_loss"],
+                confidence        = pred["confidence"],
+                rr_qualifies      = bool(pred.get("rr_qualifies", False)),
+                rr_ratio          = float(pred.get("rr_ratio", 0.0)),
+                session           = sess_info.get("session", ""),
+                regime            = regime.regime,
+                vwap_event        = vwap_sig["event"],
+                rsi_zone          = pred.get("rsi_zone", ""),
+                entry_type        = pred.get("entry_type", "IMMEDIATE"),
+                order_flow_score  = _of_score,
+                size_mult         = _sig_size_mult,
             )
 
         # Update open paper trades + live backtest tracking
@@ -883,6 +917,10 @@ def analyse_ticker(
                 ticker,
                 float(_ah_bias.get("ah_volume_ratio", 0.0)) if _ah_bias else 0.0,
             ),
+            order_flow_score    = _of_score,
+            order_flow_label    = _of_label,
+            signal_strength     = _sig_strength,
+            signal_size_mult    = _sig_size_mult,
         )
     except Exception as e:
         logger.warning(f"[{ticker}] analysis error: {e}", exc_info=True)
@@ -955,6 +993,26 @@ class Scanner:
         t0 = time.time()
         active_tickers = get_active_tickers()
 
+        # ── EOD Hard Close (PRD 6.4): close all positions at 3:45 PM ET ──────
+        from agent.market_hours import is_hard_close_window
+        if is_hard_close_window():
+            try:
+                from agent.paper_trading import close_all_positions_eod
+                closed_n = close_all_positions_eod()
+                if closed_n:
+                    logger.info(f"[Scanner] EOD hard close triggered — {closed_n} positions closed")
+            except Exception as _eod_e:
+                logger.warning(f"[Scanner] EOD hard close failed: {_eod_e}")
+
+        # ── Pre-market gapper scanner ─────────────────────────────────────────
+        try:
+            from agent.premarket_scanner import should_run_scan, run_premarket_scan_background
+            if should_run_scan():
+                run_premarket_scan_background()
+                logger.info("[Scanner] Pre-market gapper scan launched in background")
+        except Exception as _pm_e:
+            logger.debug(f"[Scanner] Pre-market scan check failed: {_pm_e}")
+
         from config import SCHWAB_ENABLED
 
         # ── Schwab screener priority (only when Schwab is enabled) ────────────
@@ -968,6 +1026,17 @@ class Scanner:
                     logger.debug(f"[Scanner] Screener priority: {mover_symbols[:5]}…")
             except Exception:
                 pass
+
+        # ── Prioritise today's pre-market gapper watchlist ────────────────────
+        try:
+            from agent.premarket_scanner import get_focus_watchlist
+            _focus = get_focus_watchlist()
+            if _focus:
+                _rest = [t for t in active_tickers if t not in set(_focus)]
+                active_tickers = _focus + _rest
+                logger.debug(f"[Scanner] PM focus tickers: {_focus[:8]}")
+        except Exception:
+            pass
 
         logger.info(f"Scan starting — {len(active_tickers)} tickers…")
 

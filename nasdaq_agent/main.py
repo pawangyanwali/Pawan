@@ -366,9 +366,31 @@ async def deep_model_status():
 
 @app.get("/api/risk-status")
 async def risk_status():
-    """Daily loss circuit breaker + sector concentration status."""
+    """Full PRD risk engine status: circuit breaker, profit protect, portfolio heat, session."""
     from agent.risk_controls import get_risk_status
     return get_risk_status()
+
+
+@app.get("/api/premarket-scan")
+async def premarket_scan_endpoint():
+    """Pre-market gapper scan results and today's focus watchlist."""
+    try:
+        from agent.premarket_scanner import get_scan_status, get_focus_watchlist
+        status = get_scan_status()
+        return {**status, "focus_watchlist": get_focus_watchlist()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/premarket-scan/run")
+async def trigger_premarket_scan(background_tasks: BackgroundTasks):
+    """Manually trigger a pre-market gapper scan."""
+    try:
+        from agent.premarket_scanner import run_premarket_scan_background
+        run_premarket_scan_background()
+        return {"status": "started"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/ml-status")
