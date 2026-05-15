@@ -1505,7 +1505,7 @@ function connectWS() {
       }
       if (m.alerts?.length) handleAlerts(m.alerts);
       if (m.breadth) { allBreadth = m.breadth; }
-      if (m.today_pnl !== undefined) updatePtPills(m.today_pnl, m.open_trades);
+      if (m.pt_stats !== undefined) updatePtPills(m.pt_stats, m.open_trades);
       renderAll();
       hideLoading();
     }
@@ -4216,39 +4216,42 @@ async function triggerFullRetrain(btn) {
 }
 
 // Update backtest header button live with win rate from WebSocket
-function updatePtPills(pnl, openTradesMap) {
-  const closed   = pnl?.total     ?? 0;
-  const wins     = pnl?.wins      ?? 0;
-  const losses   = closed - wins;
-  const pnlDollar = pnl?.total_pnl_dollar ?? null;
-  const pnlPct    = pnl?.total_pnl_pct    ?? null;
-  const openCount = openTradesMap ? Object.keys(openTradesMap).length : 0;
-  const wr        = closed > 0 ? Math.round(wins / closed * 100) : null;
+function updatePtPills(s, openTradesMap) {
+  // s = get_summary() shape: {open, closed, wins, losses, win_rate, avg_pnl, total_pnl, total_dollar_pnl}
+  if (!s) return;
+  const closed    = s.closed            ?? 0;
+  const wins      = s.wins              ?? 0;
+  const losses    = s.losses            ?? (closed - wins);
+  const wr        = s.win_rate          ?? (closed > 0 ? Math.round(wins / closed * 100) : null);
+  const pnlDollar = s.total_dollar_pnl  ?? null;
+  const pnlPct    = s.total_pnl         ?? null;
+  // open count: prefer live open_trades map, fall back to summary field
+  const openCount = openTradesMap ? Object.keys(openTradesMap).length : (s.open ?? 0);
 
-  const elOpen   = document.getElementById('pt-open-count');
-  const elClosed = document.getElementById('pt-closed-count');
-  const elWins   = document.getElementById('pt-wins');
-  const elLoss   = document.getElementById('pt-losses');
+  const elOpen    = document.getElementById('pt-open-count');
+  const elClosed  = document.getElementById('pt-closed-count');
+  const elWins    = document.getElementById('pt-wins');
+  const elLoss    = document.getElementById('pt-losses');
   const elWrBadge = document.getElementById('pt-wr-badge');
-  const elPnlVal = document.getElementById('pt-pnl-val');
-  const elPnlPct = document.getElementById('pt-pnl-pct');
+  const elPnlVal  = document.getElementById('pt-pnl-val');
+  const elPnlPct  = document.getElementById('pt-pnl-pct');
 
-  if (elOpen)   { elOpen.textContent = openCount; }
-  if (elClosed) { elClosed.textContent = closed; }
-  if (elWins)   { elWins.textContent = wins; }
-  if (elLoss)   { elLoss.textContent = losses; }
+  if (elOpen)   elOpen.textContent   = openCount;
+  if (elClosed) elClosed.textContent = closed;
+  if (elWins)   elWins.textContent   = wins;
+  if (elLoss)   elLoss.textContent   = losses;
   if (elWrBadge && wr !== null) {
-    elWrBadge.textContent = wr + '% WR';
+    elWrBadge.textContent = wr.toFixed(1) + '% WR';
     elWrBadge.style.color = wr >= 62 ? 'var(--green)' : wr >= 50 ? 'var(--yellow)' : 'var(--red)';
   }
   if (elPnlVal && pnlDollar !== null) {
     const pos = pnlDollar >= 0;
-    elPnlVal.textContent = (pos ? '+' : '') + '$' + Math.abs(pnlDollar).toFixed(0);
+    elPnlVal.textContent = (pos ? '+$' : '-$') + Math.abs(pnlDollar).toFixed(0);
     elPnlVal.style.color = pos ? 'var(--green)' : 'var(--red)';
   }
   if (elPnlPct && pnlPct !== null) {
     const pos = pnlPct >= 0;
-    elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '%';
+    elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% total';
     elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
   }
 }
