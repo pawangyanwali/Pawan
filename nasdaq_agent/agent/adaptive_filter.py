@@ -34,9 +34,10 @@ SUPPRESS_BELOW    = 0.35   # suppress context if win_rate < this
 BOOST_ABOVE       = 0.72   # boost confidence if win_rate >= this
 MIN_SAMPLE        = 8      # minimum resolved trades before suppressing a context
 RELAX_ABOVE       = 0.85   # if win rate exceeds this, slightly relax threshold
-DEFAULT_THRESHOLD = 60.0   # starting dynamic confidence gate
+DEFAULT_THRESHOLD = 55.0   # starting dynamic confidence gate (was 60)
 MIN_THRESHOLD     = 50.0   # never go below this (avoids suppressing all signals)
 MAX_THRESHOLD     = 72.0   # never require more than this (was 85 — caused deadlock)
+BOOTSTRAP_OUTCOMES = 30    # outcomes needed before threshold raises above DEFAULT
 
 _FILTER_PATH = Path(__file__).parent.parent / "data" / "adaptive_filter.json"
 _lock = threading.Lock()
@@ -162,7 +163,7 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
                 new_boosted[key] = {"win_rate": round(wr, 3), "count": count}
 
     # Dynamic threshold: find confidence band achieving TARGET_WIN_RATE
-    new_threshold = _compute_threshold(stats.get("by_confidence", {}), current_wr)
+    new_threshold = _compute_threshold(stats.get("by_confidence", {}), current_wr, total)
 
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
@@ -192,19 +193,24 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
             logger.debug(f"  [SUPPRESS] {v['reason']}")
 
 
-def _compute_threshold(by_confidence: dict, current_wr: float) -> float:
+def _compute_threshold(
+    by_confidence:  dict,
+    current_wr:     float,
+    total_resolved: int = 0,
+) -> float:
     """
     Find the minimum confidence level where historical win rate >= TARGET_WIN_RATE.
 
-    Bands (from backtest stats): '<50', '50-60', '60-70', '70-80', '80+'
+    Bands: '<50', '50-60', '60-70', '70-80', '80+'
     We want the lowest band's lower-bound where cumulative above that band
     achieves the target.
+
+    Bootstrap protection: don't raise above DEFAULT_THRESHOLD until
+    BOOTSTRAP_OUTCOMES resolved signals exist.  Early outcomes are too noisy
+    to justify blocking the entire signal stream.
     """
     band_order = [("<50", 0), ("50-60", 50), ("60-70", 60), ("70-80", 70), ("80+", 80)]
 
-    # Start at the default gate. Only raise if win rate is below target;
-    # only lower if confidence-band data shows we can achieve the target
-    # at a less restrictive threshold.
     best_threshold   = DEFAULT_THRESHOLD
     cumulative_wins  = 0
     cumulative_total = 0
@@ -219,18 +225,23 @@ def _compute_threshold(by_confidence: dict, current_wr: float) -> float:
             continue
         cum_wr = cumulative_wins / cumulative_total
         if cum_wr >= TARGET_WIN_RATE:
-            # This band and above achieves the target — we can lower the gate here
             best_threshold = float(lower_bound) if lower_bound > 0 else DEFAULT_THRESHOLD
 
-    # If overall win rate exceeds the relax ceiling, ease the gate slightly
     if current_wr >= RELAX_ABOVE:
         best_threshold = max(MIN_THRESHOLD, best_threshold - 5.0)
 
-    # Win rate below target and no confidence band hit TARGET_WIN_RATE →
-    # raise gate proportionally (10 pp below target raises gate by 10 points)
+    # Bootstrap guard: hold threshold at DEFAULT during the learning warm-up
+    # period so signals can flow and generate the outcomes the system needs.
+    if total_resolved < BOOTSTRAP_OUTCOMES:
+        return round(float(max(MIN_THRESHOLD, min(MAX_THRESHOLD, best_threshold))), 1)
+
+    # Post-bootstrap: raise threshold proportionally, but scale by data volume
+    # so a handful of bad early trades don't immediately block everything.
     if current_wr < TARGET_WIN_RATE:
-        gap    = TARGET_WIN_RATE - current_wr
-        raised = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + gap * 100)
+        gap   = TARGET_WIN_RATE - current_wr
+        # Scale: 0.0 at BOOTSTRAP_OUTCOMES outcomes → 1.0 at BOOTSTRAP_OUTCOMES+70
+        scale = min(1.0, (total_resolved - BOOTSTRAP_OUTCOMES) / 70.0)
+        raised = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + gap * 50 * scale)
         best_threshold = max(best_threshold, raised)
 
     return round(float(max(MIN_THRESHOLD, min(MAX_THRESHOLD, best_threshold))), 1)

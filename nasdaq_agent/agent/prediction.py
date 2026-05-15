@@ -256,8 +256,9 @@ def _compute_confidence(
         ml_signal = float(np.clip((ml_prob - 0.5) * 2, -1.0, 1.0))
         _agree(ml_signal, 20)
 
-    # Need at least some informative signals before reporting confidence
-    if total < 10:
+    # Need at least one meaningful sub-signal before reporting confidence.
+    # Was 10 — too strict for choppy markets where only 1-2 signals vote.
+    if total < 5:
         return 50.0
     confidence = (votes / total * 100)
     return round(float(np.clip(confidence, 25.0, 95.0)), 1)

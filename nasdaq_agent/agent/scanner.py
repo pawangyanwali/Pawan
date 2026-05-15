@@ -686,6 +686,7 @@ def analyse_ticker(
         _is_suppressed   = False
         _suppress_reason = ""
         if pred["direction"] in ("BUY", "SELL"):
+            _original_direction = pred["direction"]  # capture BEFORE possible suppression
             suppress, suppress_reason = should_suppress(
                 vwap_event   = vwap_sig["event"],
                 session      = sess_info.get("session", ""),
@@ -702,10 +703,10 @@ def analyse_ticker(
                 _is_suppressed     = True
                 _suppress_reason   = suppress_reason
                 increment_suppressed()
-                # Log suppressed signal so false-negative rate can be measured
+                # Log suppressed signal with ORIGINAL direction (not the overwritten NEUTRAL)
                 try:
                     record_suppressed_signal(
-                        ticker=ticker, direction=pred.get("direction", "NEUTRAL"),
+                        ticker=ticker, direction=_original_direction,
                         entry=price, confidence=pred["confidence"],
                         suppress_reason=suppress_reason,
                         session=sess_info.get("session", ""),
@@ -1116,6 +1117,21 @@ class Scanner:
             record_signals_batch(results)
         except Exception as _st_err:
             logger.debug(f"signal_tracker batch error: {_st_err}")
+
+        # Feed short-term signal accuracy directly into the adaptive filter.
+        # This is the key learning loop that does NOT depend on paper trades:
+        # every 90 s we measure if prices moved in the predicted direction and
+        # use that to update the confidence gate.  Without this, the filter can
+        # only learn from paper trade closures — which can't happen if the gate
+        # is too high and no trades open (deadlock).
+        try:
+            from agent.signal_tracker import get_market_breakdown_stats as _st_stats
+            from agent.adaptive_filter import update_filter as _af_live
+            _live_stats = _st_stats()
+            if _live_stats.get("overall", {}).get("total", 0) >= 5:
+                _af_live(_live_stats)
+        except Exception as _af_live_err:
+            logger.debug(f"live adaptive filter update error: {_af_live_err}")
 
         self._notify(results)
         elapsed = round(time.time() - t0, 1)
