@@ -359,7 +359,7 @@ def can_open_trade(
     Returns (allowed, reason, size_multiplier).
 
     Check order:
-      1. Session block (hardest block — PRD non-negotiable)
+      1. Session block (market closed / hard-close window only)
       2. Circuit breaker (daily loss / profit ceiling)
       3. Profit Protect Mode (adjusts confidence threshold and size)
       4. Portfolio heat / concurrent count

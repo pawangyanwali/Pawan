@@ -1,14 +1,14 @@
 """
-Market session awareness — PRD-compliant session windows (Alpha Strike Trader).
+Market session awareness — session windows for Alpha Strike Trader.
 
 Session schedule (all times ET):
   PRE_MARKET      04:00 – 09:29   Data collection only, no live trades
-  RESTRICTED      09:30 – 09:44   First 15 min — price discovery, no new entries
+  RESTRICTED      09:30 – 09:44   First 15 min — price discovery, reduced size (60%)
   PRIME           09:45 – 11:29   Best setups, full position sizing
-  LUNCH_BLOCK     11:30 – 13:29   No new entries (thin order book, false breakouts)
+  LUNCH_BLOCK     11:30 – 13:29   Typically lower volume, reduced size (70%)
   STANDARD        13:30 – 15:29   Good setups, 80% position sizing
-  CLOSING_CAUTION 15:30 – 15:44   Momentum trades only, no new scalp entries
-  HARD_CLOSE      15:45 – 16:00   Close ALL open positions at market
+  CLOSING_CAUTION 15:30 – 15:44   Momentum trades only, 70% position sizing
+  HARD_CLOSE      15:45 – 16:00   Close ALL open positions at market, no new entries
   AFTER_HOURS     16:00 – 20:00   No new trades, data collection only
   CLOSED          20:00 – 04:00   Market closed
 """
@@ -26,9 +26,9 @@ _SESSIONS: dict[str, dict] = {
         "advice": "Pre-market — data collection only. Morning scan running.",
     },
     "RESTRICTED": {
-        "label": "⚠ Avoid Zone (09:30–09:44)", "color": "#f59e0b", "tradeable": False,
-        "mult": 0.50, "size_mult": 0.0,
-        "advice": "First 15 min — price discovery chop. No new entries until 9:45 ET.",
+        "label": "⚠ Price Discovery (09:30–09:44)", "color": "#f59e0b", "tradeable": True,
+        "mult": 0.60, "size_mult": 0.60,
+        "advice": "First 15 min — price discovery in progress. Trades active at 60% size.",
     },
     "PRIME": {
         "label": "⚡ Prime Hours", "color": "#22c55e", "tradeable": True,
@@ -36,9 +36,9 @@ _SESSIONS: dict[str, dict] = {
         "advice": "Prime hours (9:45–11:30 ET) — highest quality setups. Full position sizing.",
     },
     "LUNCH_BLOCK": {
-        "label": "🍽 Lunch Block", "color": "#94a3b8", "tradeable": False,
-        "mult": 0.20, "size_mult": 0.0,
-        "advice": "Lunch block (11:30–1:30 ET) — thin order book, false breakouts. No new entries.",
+        "label": "Midday Session (11:30–13:30)", "color": "#94a3b8", "tradeable": True,
+        "mult": 0.70, "size_mult": 0.70,
+        "advice": "Midday session (11:30–1:30 ET) — typically lower volume. Trades at 70% size.",
     },
     "STANDARD": {
         "label": "Standard Hours", "color": "#3b82f6", "tradeable": True,
@@ -105,7 +105,7 @@ def position_size_multiplier() -> float:
 
 
 def is_tradeable() -> bool:
-    """True only during PRIME, STANDARD, and CLOSING_CAUTION sessions."""
+    """True during all market-open sessions except HARD_CLOSE, AFTER_HOURS, CLOSED, PRE_MARKET."""
     return _SESSIONS[get_session()]["tradeable"]
 
 
@@ -116,12 +116,12 @@ def is_trading_day() -> bool:
 # ── Granular session checks (used by risk_controls and paper_trading) ──────────
 
 def is_restricted() -> bool:
-    """True during first 15 min (9:30–9:44 ET) — no new entries per PRD."""
+    """True during first 15 min (9:30–9:44 ET) — price discovery, reduced position size."""
     return get_session() == "RESTRICTED"
 
 
 def is_lunch_block() -> bool:
-    """True during 11:30–1:30 PM ET — no new entries per PRD."""
+    """True during 11:30–1:30 PM ET — midday session, reduced position size."""
     return get_session() == "LUNCH_BLOCK"
 
 
@@ -144,21 +144,18 @@ def is_after_hours() -> bool:
 
 
 def no_new_entries() -> bool:
-    """True whenever PRD rules prohibit opening new positions."""
-    return get_session() in ("RESTRICTED", "LUNCH_BLOCK", "HARD_CLOSE",
-                              "AFTER_HOURS", "CLOSED", "PRE_MARKET")
+    """True only when the market is literally closed or in hard-close wind-down."""
+    return get_session() in ("HARD_CLOSE", "AFTER_HOURS", "CLOSED", "PRE_MARKET")
 
 
 def get_block_reason() -> str:
     """Human-readable reason why new entries are blocked (or '' if not blocked)."""
     s = get_session()
     reasons = {
-        "RESTRICTED":      "⚠ First 15 min — price discovery in progress. Wait until 9:45 ET.",
-        "LUNCH_BLOCK":     "🍽 Lunch block (11:30–1:30 ET) — thin order book, no new entries.",
-        "HARD_CLOSE":      "🔴 Hard close window — all positions closing. No new entries.",
-        "AFTER_HOURS":     "After-hours — market closed for trading.",
-        "CLOSED":          "Market closed.",
-        "PRE_MARKET":      "Pre-market — no live trading, data collection only.",
+        "HARD_CLOSE":  "🔴 Hard close window — all positions closing. No new entries.",
+        "AFTER_HOURS": "After-hours — market closed for trading.",
+        "CLOSED":      "Market closed.",
+        "PRE_MARKET":  "Pre-market — no live trading, data collection only.",
     }
     return reasons.get(s, "")
 
