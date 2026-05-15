@@ -46,7 +46,7 @@ from agent.earnings import earnings_blackout
 from agent.gap_analysis import analyse_gap
 from agent.relative_strength import compute_relative_strength
 from agent.trade_management import build_trade_plan
-from agent.signal_tracker import init_db, record_signal, record_suppressed_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
+from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
 from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.exit_signals import analyse_exits
@@ -59,7 +59,7 @@ from agent.live_backtest import (
 )
 from agent.backtest_reporter import maybe_trigger_feedback_retrain, adjust_confidence
 from agent.adaptive_filter import (
-    should_suppress, get_confidence_boost, increment_suppressed,
+    get_confidence_boost,
 )
 from agent.ensemble_model import get_meta_prediction
 from agent.deep_model import predict_deep
@@ -648,77 +648,40 @@ def analyse_ticker(
         _of_score = float(_of.get("score", 0.0))
         _of_label = _of.get("label", "NEUTRAL")
 
-        # PRD Signal Arbitration (Section 3.4): order flow gates the price signal
+        # Order flow informs SIZE but never suppresses the signal.
+        # A professional trader looks at order flow context to size the position,
+        # not to decide whether to show the signal.
         _arb = get_signal_strength(pred["confidence"], _of_score, regime.regime)
         _sig_strength  = _arb["strength"]
         _sig_size_mult = float(_arb.get("size_mult", 1.0))
-
-        if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
-            if _sig_strength in ("CONFLICTED", "BLOCKED", "NO_SIGNAL"):
-                pred["direction"] = "NEUTRAL"
-                pred["reasons"]   = [f"⚡ Order flow: {_arb['reason']}"] + pred.get("reasons", [])
-            elif _sig_strength == "WEAK":
-                pred["reasons"] = [f"↘ Weak signal (50% size): {_arb['reason']}"] + pred.get("reasons", [])
-        else:
+        if pred["direction"] not in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
             _sig_size_mult = 0.0
 
-        # ── PRD Session hard blocks (non-overridable per PRD Section 6.4) ────
+        # ── Collect execution-level notes (shown on dashboard; do NOT force NEUTRAL)
+        # Session, risk, and order-flow constraints are execution rules, not signal
+        # filters.  The signal reflects what the market is doing.  Paper trading's
+        # can_open_trade() decides whether to act on it.
         from agent.market_hours import no_new_entries, get_block_reason
-        if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL") and no_new_entries():
-            pred["direction"] = "NEUTRAL"
-            pred["reasons"]   = [f"⏰ {get_block_reason()}"] + pred.get("reasons", [])
-
-        # ── Daily loss circuit breaker + sector concentration ─────────────────
-        if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
-            _circuit_blocked, _circuit_msg = check_circuit_breaker()
-            if _circuit_blocked:
-                pred["direction"] = "NEUTRAL"
-                pred["reasons"]   = [f"🛑 {_circuit_msg}"] + pred.get("reasons", [])
+        _trade_blocked_reason = ""
+        if no_new_entries():
+            _trade_blocked_reason = get_block_reason()
+        elif pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            _cb_blocked, _cb_msg = check_circuit_breaker()
+            if _cb_blocked:
+                _trade_blocked_reason = _cb_msg
             else:
-                _sector_blocked, _sector_msg = check_sector_concentration(
+                _sec_blocked, _sec_msg = check_sector_concentration(
                     ticker, "BUY" if "BUY" in pred["direction"] else "SELL"
                 )
-                if _sector_blocked:
-                    pred["direction"] = "NEUTRAL"
-                    pred["reasons"]   = [f"🔒 {_sector_msg}"] + pred.get("reasons", [])
+                if _sec_blocked:
+                    _trade_blocked_reason = _sec_msg
 
-        # Adaptive filter — suppress signals matching learned losing patterns
+        # Adaptive filter = calibration only.
+        # get_confidence_boost() already applied earlier (line ~595).
+        # Signal direction is NEVER modified here — the models learn from
+        # all trade outcomes and improve over time.
         _is_suppressed   = False
         _suppress_reason = ""
-        if pred["direction"] in ("BUY", "SELL"):
-            _original_direction = pred["direction"]  # capture BEFORE possible suppression
-            suppress, suppress_reason = should_suppress(
-                vwap_event   = vwap_sig["event"],
-                session      = sess_info.get("session", ""),
-                regime       = regime.regime,
-                rsi_zone     = pred.get("rsi_zone", ""),
-                entry_type   = pred.get("entry_type", ""),
-                direction    = pred["direction"],
-                sector_trend = sector_ctx.sector_trend,
-                confidence   = pred["confidence"],
-            )
-            if suppress:
-                pred["direction"]  = "NEUTRAL"
-                pred["reasons"]    = [f"⚡ {suppress_reason}"] + pred.get("reasons", [])
-                _is_suppressed     = True
-                _suppress_reason   = suppress_reason
-                increment_suppressed()
-                # Log suppressed signal with ORIGINAL direction (not the overwritten NEUTRAL)
-                try:
-                    record_suppressed_signal(
-                        ticker=ticker, direction=_original_direction,
-                        entry=price, confidence=pred["confidence"],
-                        suppress_reason=suppress_reason,
-                        session=sess_info.get("session", ""),
-                        regime=regime.regime,
-                        trading_tier=pred.get("trading_tier", "REGULAR"),
-                        vwap_event=vwap_sig.get("event", ""),
-                        rsi_zone=pred.get("rsi_zone", ""),
-                        rel_volume=float(rvol),
-                        trend=pred.get("trend", ""),
-                    )
-                except Exception:
-                    pass
 
         # Normalise STRONG BUY → BUY and STRONG SELL → SELL for storage.
         # These are the highest-conviction signals and must not be silently dropped.
@@ -737,7 +700,10 @@ def analyse_ticker(
         _last_ts      = _last_signal_ts.get(_cooldown_key, 0.0)
         _cooldown_ok  = (_now_ts - _last_ts) >= _SIGNAL_COOLDOWN_SECS
 
-        # Record signal in tracker + open paper trade (directional signals only)
+        # Record ALL directional signals for learning — regardless of session,
+        # circuit breaker, or order flow state.  Every prediction the model makes
+        # needs a resolved outcome so the ML can learn from it.
+        # Earnings/macro blackouts are the only exception (no valid prediction).
         if _norm_direction in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:
             resolve_pending(ticker, price)
         if _norm_direction in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"] and _cooldown_ok:
@@ -772,6 +738,8 @@ def analyse_ticker(
                 entry_type   = pred.get("entry_type", "IMMEDIATE"),
                 mtf_alignment = mtf["alignment"],
             )
+            # Paper trade execution — can_open_trade() inside applies all
+            # session / risk / circuit-breaker rules at the execution layer.
             maybe_open_trade(
                 ticker            = ticker,
                 direction         = _norm_direction,
@@ -905,8 +873,8 @@ def analyse_ticker(
             trade_plan          = tp.to_dict(),
             candles             = candles,
             headlines           = headlines[:5],
-            is_suppressed       = _is_suppressed,
-            suppress_reason     = _suppress_reason,
+            is_suppressed       = bool(_trade_blocked_reason),
+            suppress_reason     = _trade_blocked_reason,
             has_open_position   = _has_open_position,
             ah_change_pct       = _ah_change,
             ah_direction        = _ah_dir,
