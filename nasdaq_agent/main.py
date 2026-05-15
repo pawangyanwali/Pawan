@@ -368,10 +368,31 @@ async def position_size_endpoint(
 @app.get("/api/paper-trading")
 async def paper_trading_endpoint():
     """Return paper trading summary, open and recent closed trades."""
+    closed = get_closed_trades(limit=200)   # get all
+    # Recompute summary directly from returned trades so UI and header always agree
+    total   = len(closed)
+    wins    = sum(1 for t in closed if (t.get("pnl_dollar") or 0) > 0)
+    dollars = [t["pnl_dollar"] for t in closed if t.get("pnl_dollar") is not None]
+    pcts    = [t["pnl_pct"]    for t in closed if t.get("pnl_pct")    is not None]
+    total_dollar = round(sum(dollars), 2) if dollars else 0.0
+    avg_pct      = round(sum(pcts) / len(pcts), 3) if pcts else 0.0
+    summary = pt_summary()
+    # Override the summary dollar total with the freshly-computed value
+    summary["total_dollar_pnl"] = total_dollar
+    summary["total_pnl"]        = avg_pct
+    summary["avg_pnl"]          = avg_pct
+    summary["wins"]             = wins
+    summary["losses"]           = total - wins
+    summary["win_rate"]         = round(wins / total * 100, 1) if total > 0 else 0.0
     return {
-        "summary":       pt_summary(),
+        "summary":       summary,
         "open_trades":   get_open_trades(),
-        "closed_trades": get_closed_trades(limit=30),
+        "closed_trades": closed[:30],    # show last 30 in table
+        "_debug_pnl":    {               # visible in browser network tab for diagnosis
+            "n_trades":   total,
+            "total_dollar": total_dollar,
+            "per_trade":  [(t["ticker"], round(t.get("pnl_dollar") or 0, 2)) for t in closed],
+        },
     }
 
 
