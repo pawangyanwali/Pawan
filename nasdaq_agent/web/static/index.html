@@ -2849,8 +2849,8 @@ async function openPaperTrading() {
       ['Wins',      s.wins,                              'var(--green)'],
       ['Losses',    s.losses,                            'var(--red)'],
       ['Win Rate',  s.win_rate+'%',                      s.win_rate>=62?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
-      ['Avg P&L',   (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
-      ['Total P&L', (s.total_pnl>=0?'+':'')+s.total_pnl+'%', s.total_pnl>=0?'var(--green-s)':'var(--red-s)'],
+      ['Avg P&L',    (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
+      ['Total P&L',  (totalDollar>=0?'+$':'-$')+Math.abs(totalDollar).toFixed(0), totalDollar>=0?'var(--green-s)':'var(--red-s)'],
       ['Target',    '62% WR',                            'var(--muted)'],
     ].map(([l,v,c])=>`<div class="paper-stat">
       <div style="font-size:9px;color:var(--muted);margin-bottom:2px">${l}</div>
@@ -4251,7 +4251,7 @@ function updatePtPills(s, openTradesMap) {
   }
   if (elPnlPct && pnlPct !== null) {
     const pos = pnlPct >= 0;
-    elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% total';
+    elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% avg/trade';
     elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
   }
 }

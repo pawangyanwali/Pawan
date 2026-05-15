@@ -323,7 +323,7 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                             close_shares = 0   # all shares already accounted for
                             # Record closed trade
                             _record_close(c, row["id"], ep, exit_reason, entry, direction,
-                                          shares_total, partial_pnl)
+                                          shares_total, partial_pnl, shares_total)
                             closed_any = True
                             won_any    = partial_pnl > 0
                             continue
@@ -368,7 +368,7 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 # ── Close trade ────────────────────────────────────────────────
                 if exit_reason and close_shares > 0:
                     _record_close(c, row["id"], ep, exit_reason, entry, direction,
-                                  close_shares, partial_pnl)
+                                  close_shares, partial_pnl, shares_total)
                     closed_any = True
                     # Calculate net P&L for consecutive loss tracking
                     final_pnl = (
@@ -399,19 +399,19 @@ def _record_close(
     direction:    str,
     close_shares: int,
     partial_pnl:  float = 0.0,
+    total_shares: int   = 0,      # original position size for correct pnl_pct
 ) -> None:
     """Write the final closed state for a trade record."""
     ep = exit_price
     if direction == "BUY":
-        pnl_pct    = (ep - entry) / entry * 100
         pnl_dollar = (ep - entry) * close_shares + partial_pnl
     else:
-        pnl_pct    = (entry - ep) / entry * 100
         pnl_dollar = (entry - ep) * close_shares + partial_pnl
 
-    # pnl_pct should account for partial exit locked P&L directionally
-    if partial_pnl > 0:
-        pnl_pct = pnl_dollar / (entry * close_shares + 0.01) * 100
+    # pnl_pct = actual return on the FULL initial position (not just remaining shares).
+    # Using total_shares avoids inflating the % when a partial T1 exit has occurred.
+    denom_shares = total_shares if total_shares > 0 else close_shares
+    pnl_pct = pnl_dollar / (entry * denom_shares + 0.01) * 100
 
     outcome = "WIN" if pnl_dollar > 0 else "LOSS"
     c.execute("""
@@ -464,6 +464,7 @@ def close_all_positions_eod() -> int:
                     c, row["id"], ep, "EOD_HARD_CLOSE_3:45PM",
                     float(row["entry_price"]), row["direction"],
                     int(row["shares_rem"]), float(row["partial_pnl"]),
+                    int(row.get("shares", row["shares_rem"])),
                 )
                 closed += 1
             c.commit()
@@ -612,14 +613,14 @@ def get_summary() -> dict:
                 "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
             ).fetchone()[0]
 
-    total     = len(closed)
-    wins      = sum(1 for r in closed if (r["pnl_pct"] or 0) > 0)
-    losses    = sum(1 for r in closed if (r["pnl_pct"] or 0) <= 0)
-    pnls      = [r["pnl_pct"] for r in closed if r["pnl_pct"] is not None]
-    dollars   = [r["pnl_dollar"] for r in closed if r["pnl_dollar"] is not None]
-    avg_pnl   = round(sum(pnls) / len(pnls), 3) if pnls else 0.0
-    total_pnl = round(sum(pnls), 2)
+    total    = len(closed)
+    # Win = positive dollar P&L (source of truth — not pnl_pct which can be inflated)
+    wins     = sum(1 for r in closed if (r["pnl_dollar"] or 0) > 0)
+    losses   = total - wins
+    dollars  = [r["pnl_dollar"] for r in closed if r["pnl_dollar"] is not None]
+    pnls     = [r["pnl_pct"]    for r in closed if r["pnl_pct"]    is not None]
     total_dollar_pnl = round(sum(dollars), 2) if dollars else 0.0
+    avg_pnl_pct      = round(sum(pnls) / len(pnls), 3) if pnls else 0.0
 
     return {
         "open":             open_count,
@@ -627,9 +628,9 @@ def get_summary() -> dict:
         "wins":             wins,
         "losses":           losses,
         "win_rate":         round(wins / total * 100, 1) if total > 0 else 0.0,
-        "avg_pnl":          avg_pnl,
-        "total_pnl":        total_pnl,
-        "total_dollar_pnl": total_dollar_pnl,
+        "avg_pnl":          avg_pnl_pct,       # avg % per trade (display metric)
+        "total_pnl":        avg_pnl_pct,       # keep key for compat — now equals avg, not sum
+        "total_dollar_pnl": total_dollar_pnl,  # actual net dollar P&L
         "max_concurrent":   _MAX_CONCURRENT_TRADES,
     }
 
