@@ -368,30 +368,53 @@ async def position_size_endpoint(
 @app.get("/api/paper-trading")
 async def paper_trading_endpoint():
     """Return paper trading summary, open and recent closed trades."""
-    closed = get_closed_trades(limit=200)   # get all
-    # Recompute summary directly from returned trades so UI and header always agree
-    total   = len(closed)
-    wins    = sum(1 for t in closed if (t.get("pnl_dollar") or 0) > 0)
-    dollars = [t["pnl_dollar"] for t in closed if t.get("pnl_dollar") is not None]
-    pcts    = [t["pnl_pct"]    for t in closed if t.get("pnl_pct")    is not None]
-    total_dollar = round(sum(dollars), 2) if dollars else 0.0
-    avg_pct      = round(sum(pcts) / len(pcts), 3) if pcts else 0.0
+    from datetime import date
+    closed = get_closed_trades(limit=200)
+    today_str = date.today().isoformat()   # "2026-05-15"
+
+    # Separate today vs all-time so the two eras (100-share vs risk-based) don't mix
+    today_trades   = [t for t in closed if (t.get("closed_at") or "")[:10] == today_str]
+    all_trades     = closed
+
+    def _stats(trades):
+        total   = len(trades)
+        wins    = sum(1 for t in trades if (t.get("pnl_dollar") or 0) > 0)
+        dollars = [t["pnl_dollar"] for t in trades if t.get("pnl_dollar") is not None]
+        pcts    = [t["pnl_pct"]    for t in trades if t.get("pnl_pct")    is not None]
+        return {
+            "closed":           total,
+            "wins":             wins,
+            "losses":           total - wins,
+            "win_rate":         round(wins / total * 100, 1) if total else 0.0,
+            "avg_pnl":          round(sum(pcts) / len(pcts), 3) if pcts else 0.0,
+            "total_dollar_pnl": round(sum(dollars), 2) if dollars else 0.0,
+        }
+
+    today_stats = _stats(today_trades)
+    all_stats   = _stats(all_trades)
+
     summary = pt_summary()
-    # Override the summary dollar total with the freshly-computed value
-    summary["total_dollar_pnl"] = total_dollar
-    summary["total_pnl"]        = avg_pct
-    summary["avg_pnl"]          = avg_pct
-    summary["wins"]             = wins
-    summary["losses"]           = total - wins
-    summary["win_rate"]         = round(wins / total * 100, 1) if total > 0 else 0.0
+    # Use TODAY stats for the primary display (consistent system, no legacy 100-share noise)
+    summary.update({
+        "closed":           today_stats["closed"],
+        "wins":             today_stats["wins"],
+        "losses":           today_stats["losses"],
+        "win_rate":         today_stats["win_rate"],
+        "avg_pnl":          today_stats["avg_pnl"],
+        "total_pnl":        today_stats["avg_pnl"],
+        "total_dollar_pnl": today_stats["total_dollar_pnl"],
+        "all_time_dollar":  all_stats["total_dollar_pnl"],
+        "all_time_closed":  all_stats["closed"],
+    })
     return {
         "summary":       summary,
         "open_trades":   get_open_trades(),
-        "closed_trades": closed[:30],    # show last 30 in table
-        "_debug_pnl":    {               # visible in browser network tab for diagnosis
-            "n_trades":   total,
-            "total_dollar": total_dollar,
-            "per_trade":  [(t["ticker"], round(t.get("pnl_dollar") or 0, 2)) for t in closed],
+        "closed_trades": closed[:30],
+        "_debug_pnl":    {
+            "n_trades":      len(all_trades),
+            "total_dollar":  all_stats["total_dollar_pnl"],
+            "today_dollar":  today_stats["total_dollar_pnl"],
+            "per_trade":     [(t["ticker"], t.get("pnl_dollar") or 0, (t.get("closed_at") or "")[:10]) for t in all_trades],
         },
     }
 
