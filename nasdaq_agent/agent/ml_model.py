@@ -611,9 +611,15 @@ class DailyMLModel:
         """
         if not self.trained or self.model is None:
             return 0.5
+        if df_daily is None or len(df_daily) < 30:
+            return 0.5
 
         df = compute_indicators(df_daily.copy())
         df = add_live_features(df, ticker=self.ticker)
+        # compute_indicators silently skips when len(df) < 30 — guard here too
+        missing = [c for c in _DAILY_FEATURE_COLS if c not in df.columns]
+        if missing:
+            return 0.5
         df = df.dropna(subset=_DAILY_FEATURE_COLS)
         if df.empty:
             return 0.5
