@@ -2867,19 +2867,29 @@ async function openPaperTrading() {
       document.getElementById('pt-panel-open').innerHTML = `
         <table class="pt-table">
           <thead><tr>
-            <th>Ticker</th><th>Side</th><th>Entry</th><th>Target</th><th>Stop</th>
+            <th>Ticker</th><th>Side</th><th>Entry</th><th>Unreal. P&L</th>
+            <th>Target</th><th>Stop</th>
             <th>R:R Setup</th><th>Conf</th><th>Context</th><th>Bars</th>
           </tr></thead>
           <tbody>${d.open_trades.map(t => {
             const rr = t.rr_ratio || 0;
-            const risk = Math.abs((t.entry_price||0) - (t.stop||0));
+            const risk   = Math.abs((t.entry_price||0) - (t.stop||0));
             const reward = Math.abs((t.target||0) - (t.entry_price||0));
+            const upnlD  = t.unrealized_pnl_dollar;
+            const upnlP  = t.unrealized_pnl_pct;
+            const hasUpnl = upnlD !== undefined && upnlD !== null;
+            const upnlColor = hasUpnl ? (upnlD >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--muted)';
+            const upnlHtml = hasUpnl
+              ? `<div style="font-weight:700;color:${upnlColor}">${upnlD>=0?'+':''}$${Math.abs(upnlD).toFixed(2)}</div>
+                 <div style="font-size:9px;color:${upnlColor}">${upnlP>=0?'+':''}${upnlP.toFixed(2)}%</div>`
+              : `<div style="color:var(--muted)">—</div>`;
             return `<tr>
               <td style="font-weight:700">${t.ticker}</td>
               <td><span class="signal-badge badge-${t.direction}" style="font-size:9px">${t.direction}</span></td>
               <td>$${(t.entry_price||0).toFixed(2)}</td>
-              <td style="color:var(--green)">$${(t.target||0).toFixed(2)}<div style="font-size:9px;color:var(--muted)">+$${(reward*100).toFixed(0)}</div></td>
-              <td style="color:var(--red)">$${(t.stop||0).toFixed(2)}<div style="font-size:9px;color:var(--muted)">-$${(risk*100).toFixed(0)}</div></td>
+              <td>${upnlHtml}</td>
+              <td style="color:var(--green)">$${(t.target||0).toFixed(2)}<div style="font-size:9px;color:var(--muted)">+$${(reward*(t.shares_remaining||t.shares||1)).toFixed(0)}</div></td>
+              <td style="color:var(--red)">$${(t.stop||0).toFixed(2)}<div style="font-size:9px;color:var(--muted)">-$${(risk*(t.shares_remaining||t.shares||1)).toFixed(0)}</div></td>
               <td>${_ptRRBar(rr)}</td>
               <td style="color:${t.confidence>=68?'var(--green)':'var(--muted)'}">${(t.confidence||0).toFixed(0)}%</td>
               <td>${_ptContextTags(t)}</td>

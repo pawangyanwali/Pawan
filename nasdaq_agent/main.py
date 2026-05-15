@@ -183,7 +183,21 @@ def _on_signals(signals: list[StockSignal]) -> None:
 
     try:
         from agent.paper_trading import get_summary as _pt_summary, get_open_trades as _pt_open
-        open_trades = {t["ticker"]: t for t in _pt_open()}
+        _raw_open   = _pt_open()
+        # Enrich open trades with unrealized P&L using current scan prices
+        _last_prices = {s.ticker: s.price for s in signals}
+        for t in _raw_open:
+            ep = _last_prices.get(t["ticker"])
+            if ep:
+                entry  = t.get("entry_price") or 0
+                shares = t.get("shares_remaining") or t.get("shares") or 1
+                d      = t.get("direction", "BUY")
+                pnl_d  = ((ep - entry) * shares if d == "BUY" else (entry - ep) * shares)
+                pnl_p  = (pnl_d / (entry * shares) * 100) if entry > 0 else 0.0
+                t["current_price"]          = round(ep, 4)
+                t["unrealized_pnl_dollar"]  = round(pnl_d, 2)
+                t["unrealized_pnl_pct"]     = round(pnl_p, 3)
+        open_trades = {t["ticker"]: t for t in _raw_open}
         pt_stats    = _pt_summary()
     except Exception:
         open_trades = {}

@@ -292,49 +292,69 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
 
                 # ── 1.5. Smart EOD pre-close during CLOSING_CAUTION (3:30–3:44) ─
                 elif is_closing_caution():
+                    momentum_ok = _eod_momentum_favors(df, direction)
                     if pnl_pct_now >= 0.5:
-                        # Strong winner: tighten stop to trail 0.3% below current
-                        # so it can still hit T2 but profit is mostly locked
-                        tight_stop = (
-                            round(ep * (1 - 0.003), 4) if direction == "BUY"
-                            else round(ep * (1 + 0.003), 4)
-                        )
-                        improves = (
-                            (direction == "BUY"  and tight_stop > stop_current) or
-                            (direction == "SELL" and tight_stop < stop_current)
-                        )
-                        if improves:
-                            c.execute("UPDATE paper_trades SET stop=? WHERE id=?",
-                                      (tight_stop, row["id"]))
-                            stop_current = tight_stop
-                            logger.info(
-                                f"[PAPER] EOD_TRAIL {direction} {ticker} "
-                                f"@ ${ep:.2f} gain={pnl_pct_now:+.2f}% "
-                                f"→ stop tightened to ${tight_stop:.2f}"
+                        if momentum_ok:
+                            # Strong winner, momentum still in our favor — trail stop
+                            tight_stop = (
+                                round(ep * (1 - 0.003), 4) if direction == "BUY"
+                                else round(ep * (1 + 0.003), 4)
                             )
-                        # Don't force-close — let T2 or the tightened stop fire
+                            improves = (
+                                (direction == "BUY"  and tight_stop > stop_current) or
+                                (direction == "SELL" and tight_stop < stop_current)
+                            )
+                            if improves:
+                                c.execute("UPDATE paper_trades SET stop=? WHERE id=?",
+                                          (tight_stop, row["id"]))
+                                stop_current = tight_stop
+                                logger.info(
+                                    f"[PAPER] EOD_TRAIL {direction} {ticker} @ ${ep:.2f} "
+                                    f"gain={pnl_pct_now:+.2f}% mom=✓ → stop ${tight_stop:.2f}"
+                                )
+                            # Fall through — T1/T2/stop checks still run with the new stop
+                        else:
+                            # Momentum reversing — lock the gain now
+                            exit_reason  = "EOD_LOCK_PROFIT_REVERSAL"
+                            close_shares = shares_rem
                     elif pnl_pct_now >= 0.1:
-                        # Small winner: take the profit now, don't risk giving it back
+                        # Small winner — take it, not worth the risk so close to EOD
                         exit_reason  = "EOD_LOCK_PROFIT"
                         close_shares = shares_rem
-                        logger.info(
-                            f"[PAPER] EOD_LOCK_PROFIT {direction} {ticker} "
-                            f"@ ${ep:.2f} gain={pnl_pct_now:+.2f}%"
-                        )
-                    else:
-                        # Breakeven, small loser, or deep loser — exit to minimise damage
-                        exit_reason  = (
-                            "EOD_CUT_LOSS" if pnl_pct_now < -0.3
-                            else "EOD_BREAKEVEN_EXIT"
-                        )
+                    elif pnl_pct_now >= -0.3:
+                        # Breakeven zone — exit
+                        exit_reason  = "EOD_BREAKEVEN_EXIT"
                         close_shares = shares_rem
-                        logger.info(
-                            f"[PAPER] {exit_reason} {direction} {ticker} "
-                            f"@ ${ep:.2f} pnl={pnl_pct_now:+.2f}%"
-                        )
+                    else:
+                        # Meaningful loss
+                        if momentum_ok:
+                            # Still moving in our direction — tighten stop, hope for recovery
+                            tight_stop = (
+                                round(ep * (1 - 0.002), 4) if direction == "BUY"
+                                else round(ep * (1 + 0.002), 4)
+                            )
+                            improves = (
+                                (direction == "BUY"  and tight_stop > stop_current) or
+                                (direction == "SELL" and tight_stop < stop_current)
+                            )
+                            if improves:
+                                c.execute("UPDATE paper_trades SET stop=? WHERE id=?",
+                                          (tight_stop, row["id"]))
+                                stop_current = tight_stop
+                                logger.info(
+                                    f"[PAPER] EOD_TIGHT_RECOVERY {direction} {ticker} "
+                                    f"@ ${ep:.2f} pnl={pnl_pct_now:+.2f}% mom=✓ → stop ${tight_stop:.2f}"
+                                )
+                            else:
+                                exit_reason  = "EOD_CUT_LOSS"
+                                close_shares = shares_rem
+                        else:
+                            # Momentum against us — cut the loss
+                            exit_reason  = "EOD_CUT_LOSS"
+                            close_shares = shares_rem
 
                 # ── 2. T1 partial exit (1R profit) — if not already hit ────────
-                elif not t1_hit and t1_price > 0:
+                if not exit_reason and not t1_hit and t1_price > 0:
                     t1_hit_now = (
                         (direction == "BUY"  and ep >= t1_price) or
                         (direction == "SELL" and ep <= t1_price)
@@ -524,17 +544,147 @@ def close_all_positions_eod() -> int:
     return closed
 
 
+def _eod_momentum_favors(df, direction: str, n_bars: int = 4) -> bool:
+    """
+    Returns True if the last n_bars of price action favor the trade direction.
+    Uses simple slope: if closing prices are trending up → favors BUY; down → favors SELL.
+    Also checks that the most recent bar is continuing in that direction.
+    """
+    try:
+        if df is None or len(df) < n_bars:
+            return False
+        closes = [float(df.iloc[-i]["Close"]) for i in range(n_bars, 0, -1)]
+        # Overall slope across the window
+        slope = closes[-1] - closes[0]
+        # Last bar direction (most recent confirmation)
+        last_bar_up = closes[-1] >= closes[-2]
+        if direction == "BUY":
+            return slope > 0 and last_bar_up
+        else:  # SELL
+            return slope < 0 and not last_bar_up
+    except Exception:
+        return False
+
+
+def _apply_eod_action(
+    c,
+    row_id:     int,
+    ep:         float,
+    entry:      float,
+    direction:  str,
+    stop_curr:  float,
+    shares_rem: int,
+    shares_tot: int,
+    partial:    float,
+    pnl_pct:    float,
+    momentum_ok: bool,
+    ticker:     str,
+) -> bool:
+    """
+    Core EOD decision logic shared by update_open_trades() and smart_eod_review().
+    Returns True if position was closed or stop was tightened (i.e., acted on).
+
+    Decision matrix:
+      pnl >= 0.5% + momentum OK  → tighten trailing stop (let winner run, profit protected)
+      pnl >= 0.5% + momentum BAD → exit now (lock the gain before reversal)
+      pnl  0.1–0.5%              → exit (small win; not worth overnight or reversal risk)
+      pnl -0.3–0.1%              → exit (breakeven zone; no edge left today)
+      pnl < -0.3% + momentum OK  → tighten stop very close (recovery attempt)
+      pnl < -0.3% + momentum BAD → exit immediately (cut the loss)
+    """
+    acted = False
+
+    if pnl_pct >= 0.5:
+        if momentum_ok:
+            # Strong winner with momentum — trail stop to lock in most of the gain
+            tight_stop = (
+                round(ep * (1 - 0.003), 4) if direction == "BUY"
+                else round(ep * (1 + 0.003), 4)
+            )
+            improves = (
+                (direction == "BUY"  and tight_stop > stop_curr) or
+                (direction == "SELL" and tight_stop < stop_curr)
+            )
+            if improves:
+                c.execute("UPDATE paper_trades SET stop=? WHERE id=?", (tight_stop, row_id))
+                logger.info(
+                    f"[PAPER] EOD_TRAIL {direction} {ticker} @ ${ep:.2f} "
+                    f"gain={pnl_pct:+.2f}% mom=✓ → stop ${tight_stop:.2f}"
+                )
+                acted = True
+        else:
+            # Momentum reversing — take the profit before it evaporates
+            _record_close(c, row_id, ep, "EOD_LOCK_PROFIT_REVERSAL",
+                          entry, direction, shares_rem, partial, shares_tot)
+            logger.info(
+                f"[PAPER] EOD_LOCK_PROFIT_REVERSAL {direction} {ticker} @ ${ep:.2f} "
+                f"gain={pnl_pct:+.2f}% mom=✗ — taking profit on reversal"
+            )
+            acted = True
+
+    elif pnl_pct >= 0.1:
+        # Small winner — lock it in regardless of momentum (not worth overnight risk)
+        _record_close(c, row_id, ep, "EOD_LOCK_PROFIT",
+                      entry, direction, shares_rem, partial, shares_tot)
+        logger.info(
+            f"[PAPER] EOD_LOCK_PROFIT {direction} {ticker} @ ${ep:.2f} gain={pnl_pct:+.2f}%"
+        )
+        acted = True
+
+    elif pnl_pct >= -0.3:
+        # Breakeven zone — exit, no edge left this close to market end
+        _record_close(c, row_id, ep, "EOD_BREAKEVEN_EXIT",
+                      entry, direction, shares_rem, partial, shares_tot)
+        logger.info(
+            f"[PAPER] EOD_BREAKEVEN_EXIT {direction} {ticker} @ ${ep:.2f} pnl={pnl_pct:+.2f}%"
+        )
+        acted = True
+
+    else:
+        # Meaningful loss
+        if momentum_ok:
+            # Price still moving in our favor — tighten stop very close and hope for recovery
+            tight_stop = (
+                round(ep * (1 - 0.002), 4) if direction == "BUY"
+                else round(ep * (1 + 0.002), 4)
+            )
+            improves = (
+                (direction == "BUY"  and tight_stop > stop_curr) or
+                (direction == "SELL" and tight_stop < stop_curr)
+            )
+            if improves:
+                c.execute("UPDATE paper_trades SET stop=? WHERE id=?", (tight_stop, row_id))
+                logger.info(
+                    f"[PAPER] EOD_TIGHT_RECOVERY {direction} {ticker} @ ${ep:.2f} "
+                    f"pnl={pnl_pct:+.2f}% mom=✓ → stop ${tight_stop:.2f}"
+                )
+                acted = True
+            else:
+                # Stop already tight enough — force close to limit further damage
+                _record_close(c, row_id, ep, "EOD_CUT_LOSS",
+                              entry, direction, shares_rem, partial, shares_tot)
+                logger.info(
+                    f"[PAPER] EOD_CUT_LOSS {direction} {ticker} @ ${ep:.2f} pnl={pnl_pct:+.2f}%"
+                )
+                acted = True
+        else:
+            # Momentum against us — cut the loss immediately
+            _record_close(c, row_id, ep, "EOD_CUT_LOSS",
+                          entry, direction, shares_rem, partial, shares_tot)
+            logger.info(
+                f"[PAPER] EOD_CUT_LOSS {direction} {ticker} @ ${ep:.2f} "
+                f"pnl={pnl_pct:+.2f}% mom=✗"
+            )
+            acted = True
+
+    return acted
+
+
 def smart_eod_review() -> int:
     """
     Called every scan during CLOSING_CAUTION (3:30–3:44 PM ET).
-    Fetches current prices for ALL open positions and applies smart
-    pre-close rules so no position carries into the next day.
-
-    Rules (applied per trade):
-      gain >= 0.5%  → tighten trailing stop 0.3% from current price
-      gain  0.1–0.5% → exit immediately (lock in profit)
-      gain -0.3–0.1% → exit (breakeven, not worth overnight risk)
-      gain < -0.3%  → exit immediately (cut loss)
+    Fetches current prices + recent bars for ALL open positions and applies
+    momentum-aware pre-close rules so no position carries into the next day.
 
     Returns number of positions acted on (tightened or closed).
     """
@@ -581,36 +731,13 @@ def smart_eod_review() -> int:
                     (ep - entry) / entry * 100 if direction == "BUY"
                     else (entry - ep) / entry * 100
                 )
+                momentum_ok = _eod_momentum_favors(df, direction)
 
-                if pnl_pct >= 0.5:
-                    tight_stop = (
-                        round(ep * (1 - 0.003), 4) if direction == "BUY"
-                        else round(ep * (1 + 0.003), 4)
-                    )
-                    improves = (
-                        (direction == "BUY"  and tight_stop > stop_curr) or
-                        (direction == "SELL" and tight_stop < stop_curr)
-                    )
-                    if improves:
-                        c.execute("UPDATE paper_trades SET stop=? WHERE id=?",
-                                  (tight_stop, row["id"]))
-                        logger.info(
-                            f"[PAPER] EOD_TRAIL {direction} {ticker} @ ${ep:.2f} "
-                            f"gain={pnl_pct:+.2f}% → stop ${tight_stop:.2f}"
-                        )
-                        acted += 1
-                else:
-                    reason = (
-                        "EOD_LOCK_PROFIT"    if pnl_pct >= 0.1 else
-                        "EOD_CUT_LOSS"       if pnl_pct < -0.3 else
-                        "EOD_BREAKEVEN_EXIT"
-                    )
-                    _record_close(c, row["id"], ep, reason, entry, direction,
-                                  shares_rem, partial, shares_tot)
-                    logger.info(
-                        f"[PAPER] {reason} {direction} {ticker} @ ${ep:.2f} "
-                        f"pnl={pnl_pct:+.2f}%"
-                    )
+                if _apply_eod_action(
+                    c, row["id"], ep, entry, direction,
+                    stop_curr, shares_rem, shares_tot, partial,
+                    pnl_pct, momentum_ok, ticker,
+                ):
                     acted += 1
 
             c.commit()
