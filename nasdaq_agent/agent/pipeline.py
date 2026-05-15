@@ -105,6 +105,7 @@ class ScanPipeline:
         data_5m: dict[str, pd.DataFrame],
         data_1h: dict[str, pd.DataFrame],
         data_1d: dict[str, pd.DataFrame],
+        on_ticker_done=None,
     ) -> list:
         """
         Parallel scan of all tickers.
@@ -135,6 +136,8 @@ class ScanPipeline:
         t0 = time.perf_counter()
         errors = 0
         results: list = []
+        n_total = len(tickers)
+        n_done = 0
 
         def _run(ticker: str):
             return analyse_ticker(
@@ -153,10 +156,16 @@ class ScanPipeline:
 
             for future in as_completed(future_to_ticker):
                 ticker = future_to_ticker[future]
+                n_done += 1
                 try:
                     sig = future.result()
                     if sig is not None:
                         results.append(sig)
+                        if on_ticker_done is not None:
+                            try:
+                                on_ticker_done(sig, n_done, n_total)
+                            except Exception:
+                                pass
                 except Exception as exc:
                     errors += 1
                     logger.debug("[%s] scan task raised: %s", ticker, exc)

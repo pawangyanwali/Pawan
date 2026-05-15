@@ -935,6 +935,7 @@ class Scanner:
         self.last_scan:           Optional[str]     = None
         self.is_running:          bool              = False
         self._callbacks:          list[Callable]    = []
+        self._per_ticker_cbs:     list[Callable]    = []
         self._last_retrain:       float             = 0.0
         self._last_deep_finetune: float             = 0.0   # hourly BiLSTM fine-tune
         self._first_scan_done:    threading.Event   = threading.Event()
@@ -943,12 +944,25 @@ class Scanner:
     def register_callback(self, fn: Callable) -> None:
         self._callbacks.append(fn)
 
+    def register_per_ticker_callback(self, fn: Callable) -> None:
+        """Register a callback invoked immediately as each ticker finishes analysis.
+        Signature: fn(signal: StockSignal, n_done: int, n_total: int) -> None
+        """
+        self._per_ticker_cbs.append(fn)
+
     def _notify(self, signals: list[StockSignal]) -> None:
         for fn in self._callbacks:
             try:
                 fn(signals)
             except Exception as e:
                 logger.warning(f"Callback error: {e}")
+
+    def _notify_ticker(self, sig, n_done: int, n_total: int) -> None:
+        for fn in self._per_ticker_cbs:
+            try:
+                fn(sig, n_done, n_total)
+            except Exception as e:
+                logger.debug(f"Per-ticker callback error: {e}")
 
     def _should_retrain(self) -> bool:
         if self._last_retrain == 0.0:
@@ -1069,8 +1083,10 @@ class Scanner:
         # Parallel scan — ThreadPoolExecutor runs analyse_ticker() concurrently
         # across all tickers. 8× faster than the old sequential for-loop.
         from agent.pipeline import get_pipeline
+        _n_total = len(active_tickers)
         results = get_pipeline(n_workers=PIPELINE_WORKERS).scan(
-            active_tickers, batch_1m, batch_5m, batch_1h, batch_1d
+            active_tickers, batch_1m, batch_5m, batch_1h, batch_1d,
+            on_ticker_done=lambda sig, n, t: self._notify_ticker(sig, n, _n_total),
         )
 
         # Attach per-ticker learning scores and compute learning_rank.

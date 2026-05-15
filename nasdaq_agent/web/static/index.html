@@ -1442,8 +1442,32 @@ let ws, reconnectDelay = 2000;
 function connectWS() {
   ws = new WebSocket(`${BACKEND_WS}/ws`);
   ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('ws-status').textContent = 'Live ●'; reconnectDelay = 2000; };
+  // Throttled render: at most one render per animation frame regardless of
+  // how many ticker_update messages arrive in rapid succession.
+  let _renderScheduled = false;
+  function _scheduleRender() {
+    if (_renderScheduled) return;
+    _renderScheduled = true;
+    requestAnimationFrame(() => { _renderScheduled = false; renderAll(); });
+  }
+
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
+
+    // Progressive ticker streaming — one signal arrives as soon as it's ready
+    if (m.type === 'ticker_update') {
+      const sig = m.signal;
+      const idx = allSignals.findIndex(s => s.ticker === sig.ticker);
+      if (idx >= 0) allSignals[idx] = sig;
+      else allSignals.push(sig);
+      // Update scan progress chip immediately (no render needed for this)
+      const sc = document.getElementById('scan-count');
+      if (sc) sc.textContent = `${m.n_done}/${m.n_total} scanned`;
+      hideLoading();
+      _scheduleRender();
+      return;
+    }
+
     if (m.type === 'update') {
       allSignals = m.signals;
       if (m.open_trades) allOpenTrades = m.open_trades;

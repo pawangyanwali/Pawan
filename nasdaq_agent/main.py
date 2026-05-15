@@ -218,6 +218,20 @@ def _on_signals(signals: list[StockSignal]) -> None:
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
 
+def _on_ticker(sig: StockSignal, n_done: int, n_total: int) -> None:
+    """Per-ticker callback — streams each result as it completes so the dashboard
+    fills progressively instead of waiting for the full scan batch."""
+    if _event_loop is None:
+        return
+    payload = _dumps({
+        "type":    "ticker_update",
+        "signal":  sig.to_dict(),
+        "n_done":  n_done,
+        "n_total": n_total,
+    })
+    asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
+
+
 # ── ThinkorSwim auto-trade toggle ────────────────────────────────────────────
 _tos_auto_trade: bool = os.getenv("SCHWAB_AUTO_TRADE", "false").lower() == "true"
 
@@ -228,6 +242,7 @@ async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
     scanner.register_callback(_on_signals)
+    scanner.register_per_ticker_callback(_on_ticker)
     scanner.start_background()
     learning_engine.start()
     # Schwab integration — only active when SCHWAB_ENABLED=true in .env
