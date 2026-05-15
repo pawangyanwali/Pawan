@@ -235,7 +235,7 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
       5. Time stop: 20-bar scalp or 90-bar intraday
       6. Exit signal analysis (MACD, RSI reversal, etc.)
     """
-    from agent.market_hours import is_hard_close_window
+    from agent.market_hours import is_hard_close_window, is_closing_caution
 
     closed_any = False
     won_any    = None   # last closed outcome for consecutive loss tracking
@@ -259,7 +259,7 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 bars = (row["bars_held"] or 0) + 1
                 c.execute("UPDATE paper_trades SET bars_held=? WHERE id=?", (bars, row["id"]))
 
-                entry           = float(row["entry_price"] or price)
+                entry           = float(row["entry_price"] or current_price)
                 stop_current    = float(row["stop"])
                 t1_price        = float(row["t1_price"] or 0)
                 t2_price        = float(row["t2_price"] or 0)
@@ -279,10 +279,59 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 close_shares = 0
                 is_partial   = False
 
+                # unrealized P&L % for smart EOD decisions
+                pnl_pct_now = (
+                    (ep - entry) / entry * 100 if direction == "BUY"
+                    else (entry - ep) / entry * 100
+                )
+
                 # ── 1. Hard close at 3:45 PM ET (PRD — non-overridable) ────────
                 if is_hard_close_window():
                     exit_reason  = "EOD_HARD_CLOSE_3:45PM"
                     close_shares = shares_rem
+
+                # ── 1.5. Smart EOD pre-close during CLOSING_CAUTION (3:30–3:44) ─
+                elif is_closing_caution():
+                    if pnl_pct_now >= 0.5:
+                        # Strong winner: tighten stop to trail 0.3% below current
+                        # so it can still hit T2 but profit is mostly locked
+                        tight_stop = (
+                            round(ep * (1 - 0.003), 4) if direction == "BUY"
+                            else round(ep * (1 + 0.003), 4)
+                        )
+                        improves = (
+                            (direction == "BUY"  and tight_stop > stop_current) or
+                            (direction == "SELL" and tight_stop < stop_current)
+                        )
+                        if improves:
+                            c.execute("UPDATE paper_trades SET stop=? WHERE id=?",
+                                      (tight_stop, row["id"]))
+                            stop_current = tight_stop
+                            logger.info(
+                                f"[PAPER] EOD_TRAIL {direction} {ticker} "
+                                f"@ ${ep:.2f} gain={pnl_pct_now:+.2f}% "
+                                f"→ stop tightened to ${tight_stop:.2f}"
+                            )
+                        # Don't force-close — let T2 or the tightened stop fire
+                    elif pnl_pct_now >= 0.1:
+                        # Small winner: take the profit now, don't risk giving it back
+                        exit_reason  = "EOD_LOCK_PROFIT"
+                        close_shares = shares_rem
+                        logger.info(
+                            f"[PAPER] EOD_LOCK_PROFIT {direction} {ticker} "
+                            f"@ ${ep:.2f} gain={pnl_pct_now:+.2f}%"
+                        )
+                    else:
+                        # Breakeven, small loser, or deep loser — exit to minimise damage
+                        exit_reason  = (
+                            "EOD_CUT_LOSS" if pnl_pct_now < -0.3
+                            else "EOD_BREAKEVEN_EXIT"
+                        )
+                        close_shares = shares_rem
+                        logger.info(
+                            f"[PAPER] {exit_reason} {direction} {ticker} "
+                            f"@ ${ep:.2f} pnl={pnl_pct_now:+.2f}%"
+                        )
 
                 # ── 2. T1 partial exit (1R profit) — if not already hit ────────
                 elif not t1_hit and t1_price > 0:
@@ -473,6 +522,102 @@ def close_all_positions_eod() -> int:
         logger.info(f"[PAPER] EOD hard close: {closed} positions closed at 3:45 PM ET")
         _trigger_paper_feedback()
     return closed
+
+
+def smart_eod_review() -> int:
+    """
+    Called every scan during CLOSING_CAUTION (3:30–3:44 PM ET).
+    Fetches current prices for ALL open positions and applies smart
+    pre-close rules so no position carries into the next day.
+
+    Rules (applied per trade):
+      gain >= 0.5%  → tighten trailing stop 0.3% from current price
+      gain  0.1–0.5% → exit immediately (lock in profit)
+      gain -0.3–0.1% → exit (breakeven, not worth overnight risk)
+      gain < -0.3%  → exit immediately (cut loss)
+
+    Returns number of positions acted on (tightened or closed).
+    """
+    from agent.data_fetcher import fetch_batch_realtime
+    from agent.market_hours import is_closing_caution
+    if not is_closing_caution():
+        return 0
+
+    acted = 0
+    with _lock:
+        with _conn() as c:
+            rows = c.execute("""
+                SELECT id, ticker, direction, entry_price, stop,
+                       COALESCE(shares_remaining, shares, 1) as shares_rem,
+                       COALESCE(shares, 1) as shares_total,
+                       COALESCE(partial_pnl_dollar, 0) as partial_pnl
+                FROM paper_trades WHERE status='OPEN'
+            """).fetchall()
+
+            if not rows:
+                return 0
+
+            tickers = list({r["ticker"] for r in rows})
+            try:
+                prices = fetch_batch_realtime(tickers)
+            except Exception:
+                prices = {}
+
+            for row in rows:
+                ticker     = row["ticker"]
+                direction  = row["direction"]
+                entry      = float(row["entry_price"])
+                stop_curr  = float(row["stop"])
+                shares_rem = int(row["shares_rem"])
+                shares_tot = int(row["shares_total"])
+                partial    = float(row["partial_pnl"])
+
+                df = prices.get(ticker)
+                ep = float(df.iloc[-1]["Close"]) if (df is not None and not df.empty) else None
+                if ep is None:
+                    continue
+
+                pnl_pct = (
+                    (ep - entry) / entry * 100 if direction == "BUY"
+                    else (entry - ep) / entry * 100
+                )
+
+                if pnl_pct >= 0.5:
+                    tight_stop = (
+                        round(ep * (1 - 0.003), 4) if direction == "BUY"
+                        else round(ep * (1 + 0.003), 4)
+                    )
+                    improves = (
+                        (direction == "BUY"  and tight_stop > stop_curr) or
+                        (direction == "SELL" and tight_stop < stop_curr)
+                    )
+                    if improves:
+                        c.execute("UPDATE paper_trades SET stop=? WHERE id=?",
+                                  (tight_stop, row["id"]))
+                        logger.info(
+                            f"[PAPER] EOD_TRAIL {direction} {ticker} @ ${ep:.2f} "
+                            f"gain={pnl_pct:+.2f}% → stop ${tight_stop:.2f}"
+                        )
+                        acted += 1
+                else:
+                    reason = (
+                        "EOD_LOCK_PROFIT"    if pnl_pct >= 0.1 else
+                        "EOD_CUT_LOSS"       if pnl_pct < -0.3 else
+                        "EOD_BREAKEVEN_EXIT"
+                    )
+                    _record_close(c, row["id"], ep, reason, entry, direction,
+                                  shares_rem, partial, shares_tot)
+                    logger.info(
+                        f"[PAPER] {reason} {direction} {ticker} @ ${ep:.2f} "
+                        f"pnl={pnl_pct:+.2f}%"
+                    )
+                    acted += 1
+
+            c.commit()
+
+    if acted:
+        _trigger_paper_feedback()
+    return acted
 
 
 def _trigger_paper_feedback() -> None:
