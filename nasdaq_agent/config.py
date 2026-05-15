@@ -12,6 +12,11 @@ if not TWELVE_DATA_API_KEY:
         "  TWELVE_DATA_API_KEY=your_key_here\n"
     )
 
+# ── Schwab integration gate ───────────────────────────────────────────────────
+# Set SCHWAB_ENABLED=true in .env when both apps are authorised and working.
+# When false (default) all Schwab code is skipped — agent runs on Twelve Data only.
+SCHWAB_ENABLED = os.getenv("SCHWAB_ENABLED", "false").lower() == "true"
+
 # ── Grow-377 plan limits ───────────────────────────────────────────────────────
 # 377 credits/minute, unlimited daily credits
 # 1 credit = 1 symbol in any /time_series request

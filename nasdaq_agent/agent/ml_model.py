@@ -193,29 +193,10 @@ def add_live_features(df: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
     v20 = df["Volume"].rolling(20, min_periods=1).mean()
     df["vol_trend"] = (v5 / v20.replace(0, np.nan)).fillna(1.0).clip(0, 5)
 
-    # ── Schwab streaming features (real-time, applied to the last row only) ───
-    # These are live scalping signals that can't be derived from OHLCV history:
-    #   bid_ask_imbalance : buy/sell pressure at the current moment
-    #   nq_futures_bias   : macro direction leader (NQ futures % change)
-    #   es_futures_bias   : S&P macro direction
-    try:
-        from agent.broker.schwab_streamer import (
-            get_bid_ask_imbalance, get_nq_futures_bias, get_es_futures_bias,
-        )
-        bai  = get_bid_ask_imbalance(ticker) if ticker else 0.0
-        nqb  = get_nq_futures_bias()
-        esb  = get_es_futures_bias()
-        df["bid_ask_imbalance"] = 0.0
-        df["nq_futures_bias"]   = 0.0
-        df["es_futures_bias"]   = 0.0
-        # Only the most recent bar gets live values; history stays at 0 (neutral)
-        df.iloc[-1, df.columns.get_loc("bid_ask_imbalance")] = bai
-        df.iloc[-1, df.columns.get_loc("nq_futures_bias")]   = nqb
-        df.iloc[-1, df.columns.get_loc("es_futures_bias")]   = esb
-    except Exception:
-        df["bid_ask_imbalance"] = 0.0
-        df["nq_futures_bias"]   = 0.0
-        df["es_futures_bias"]   = 0.0
+    # Streaming microstructure features — zero when Schwab disabled
+    df["bid_ask_imbalance"] = 0.0
+    df["nq_futures_bias"]   = 0.0
+    df["es_futures_bias"]   = 0.0
 
     return df
 

@@ -471,13 +471,7 @@ def analyse_ticker(
         # time-based check would miss)
         sess_info = get_session_info()
         sess_mult = confidence_multiplier()
-        try:
-            from agent.broker.schwab_market_data import is_market_open
-            schwab_open = is_market_open()
-            if schwab_open is False and sess_info.get("session") == "REGULAR":
-                sess_info = {**sess_info, "session": "CLOSED", "label": "Market Closed (Schwab)"}
-        except Exception:
-            pass
+        # Schwab market hours cross-check skipped when SCHWAB_ENABLED=false
 
         # Earnings blackout
         eb = earnings_blackout(ticker)
@@ -961,19 +955,19 @@ class Scanner:
         t0 = time.time()
         active_tickers = get_active_tickers()
 
-        # ── Re-order: screener movers first, rest follow ───────────────────────
-        # A 40-year trader watches what's MOVING, not a static alphabetical list.
-        # Tickers currently on NASDAQ's top-movers screener get scanned first so
-        # any signal they generate is acted on while the move is still in progress.
-        try:
-            from agent.broker.schwab_streamer import get_screener_priority
-            mover_symbols = get_screener_priority(tickers=set(active_tickers))
-            if mover_symbols:
-                rest = [t for t in active_tickers if t not in set(mover_symbols)]
-                active_tickers = mover_symbols + rest
-                logger.debug(f"[Scanner] Screener priority: {mover_symbols[:5]}…")
-        except Exception:
-            pass
+        from config import SCHWAB_ENABLED
+
+        # ── Schwab screener priority (only when Schwab is enabled) ────────────
+        if SCHWAB_ENABLED:
+            try:
+                from agent.broker.schwab_streamer import get_screener_priority
+                mover_symbols = get_screener_priority(tickers=set(active_tickers))
+                if mover_symbols:
+                    rest = [t for t in active_tickers if t not in set(mover_symbols)]
+                    active_tickers = mover_symbols + rest
+                    logger.debug(f"[Scanner] Screener priority: {mover_symbols[:5]}…")
+            except Exception:
+                pass
 
         logger.info(f"Scan starting — {len(active_tickers)} tickers…")
 

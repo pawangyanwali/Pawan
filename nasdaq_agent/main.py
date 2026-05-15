@@ -230,25 +230,27 @@ async def lifespan(app: FastAPI):
     scanner.register_callback(_on_signals)
     scanner.start_background()
     learning_engine.start()
-    # Load Schwab Accounts+Trading tokens → enables streamer + trading
-    try:
-        if os.getenv("SCHWAB_CLIENT_ID"):
-            ok = load_stored_tokens()
-            if ok:
-                logging.getLogger(__name__).info("Schwab Trader app connected from stored tokens.")
-                from config import NASDAQ_TICKERS
-                start_streamer(list(NASDAQ_TICKERS))
-    except Exception as _be:
-        logging.getLogger(__name__).warning(f"Schwab Trader token load skipped: {_be}")
-
-    # Load Schwab Market Data tokens → enables REST quotes/chains/movers
-    try:
-        if os.getenv("SCHWAB_MD_CLIENT_ID"):
-            ok_md = load_stored_md_tokens()
-            if ok_md:
-                logging.getLogger(__name__).info("Schwab Market Data app connected from stored tokens.")
-    except Exception as _be:
-        logging.getLogger(__name__).warning(f"Schwab MD token load skipped: {_be}")
+    # Schwab integration — only active when SCHWAB_ENABLED=true in .env
+    from config import SCHWAB_ENABLED
+    if SCHWAB_ENABLED:
+        try:
+            if os.getenv("SCHWAB_CLIENT_ID"):
+                ok = load_stored_tokens()
+                if ok:
+                    logging.getLogger(__name__).info("Schwab Trader app connected.")
+                    from config import NASDAQ_TICKERS
+                    start_streamer(list(NASDAQ_TICKERS))
+        except Exception as _be:
+            logging.getLogger(__name__).warning(f"Schwab Trader token load skipped: {_be}")
+        try:
+            if os.getenv("SCHWAB_MD_CLIENT_ID"):
+                ok_md = load_stored_md_tokens()
+                if ok_md:
+                    logging.getLogger(__name__).info("Schwab Market Data app connected.")
+        except Exception as _be:
+            logging.getLogger(__name__).warning(f"Schwab MD token load skipped: {_be}")
+    else:
+        logging.getLogger(__name__).info("Schwab disabled (SCHWAB_ENABLED not set) — running on Twelve Data only.")
     yield
     scanner.stop()
     learning_engine.stop()

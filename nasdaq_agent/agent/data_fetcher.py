@@ -351,10 +351,10 @@ def fetch_batch_interval(
                 if ttl > 0:
                     _cache_set(ticker, interval_key, df)
 
-        # Schwab fallback for any tickers that Twelve Data didn't return
-        failed = [t for t in batch if t not in parsed]
-        if failed:
-            _schwab_fallback(failed, interval, outputsize, interval_key, ttl, result)
+        # Schwab fallback disabled until SCHWAB_ENABLED=true in .env
+        # failed = [t for t in batch if t not in parsed]
+        # if failed:
+        #     _schwab_fallback(failed, interval, outputsize, interval_key, ttl, result)
 
     fetched = len([t for t in to_fetch if t in result])
     logger.info(f"[{interval_key}] fetched {fetched}/{len(to_fetch)} new + {len(tickers)-len(to_fetch)} cached")
