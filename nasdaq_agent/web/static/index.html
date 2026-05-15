@@ -597,6 +597,11 @@
   <button class="filter-btn cluster-btn" data-cluster="A" title="Mega-cap liquid (AAPL, MSFT, NVDA…)" style="border-color:#6366f1;color:#6366f1">A · Mega</button>
   <button class="filter-btn cluster-btn" data-cluster="B" title="Growth / SaaS / Fintech (PLTR, COIN…)" style="border-color:#f59e0b;color:#f59e0b">B · Growth</button>
   <button class="filter-btn cluster-btn" data-cluster="C" title="High-vol / Momentum (MARA, RIVN…)" style="border-color:#ef4444;color:#ef4444">C · Momo</button>
+  <span style="width:1px;height:20px;background:var(--border);margin:0 4px;display:inline-block;vertical-align:middle"></span>
+  <button class="filter-btn tier-btn active" data-tier="ALL" title="All trading tiers">All Tiers</button>
+  <button class="filter-btn tier-btn" data-tier="HIGH"     title="T1 · HIGH — mega-caps with real AH liquidity, trade at 50% size after hours" style="border-color:#22c55e;color:#22c55e">T1 · HIGH</button>
+  <button class="filter-btn tier-btn" data-tier="MODERATE" title="T2 · MOD — decent AH volume, monitored / half confidence boost" style="border-color:#f59e0b;color:#f59e0b">T2 · MOD</button>
+  <button class="filter-btn tier-btn" data-tier="REGULAR"  title="T3 · REG — thin AH spreads, regular session only" style="border-color:#64748b;color:#64748b">T3 · REG</button>
   <input class="search-input" id="search" type="text" placeholder="Search ticker…" />
   <select class="sort-select" id="sort-select">
     <option value="learning_rank">🧠 Sort: Learning Rank</option>
@@ -606,6 +611,7 @@
     <option value="rel_volume">Sort: Rel. Volume</option>
     <option value="rr_ratio">Sort: R:R Ratio</option>
     <option value="ml_prob">Sort: ML Prob</option>
+    <option value="trading_tier">Sort: AH Tier</option>
   </select>
   <span style="color:var(--muted);font-size:11px;margin-left:auto" id="scan-count"></span>
   <span style="color:var(--muted);font-size:10px;margin-left:8px" id="pipeline-speed" title="Scan cycle speed" style="display:none"></span>
@@ -1446,7 +1452,7 @@ TRADING_MAX_POSITION_PCT=10
 
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
-let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL';
+let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL', tierFilter = 'ALL';
 const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let allBreadth = null;
@@ -1634,15 +1640,18 @@ function filteredSorted() {
   if (filter === 'UVOL') d = d.filter(s => s.unusual_vol);
   else if (filter !== 'ALL') d = d.filter(s => s.prediction === filter);
   if (clusterFilter !== 'ALL') d = d.filter(s => (CLUSTER_MAP[s.ticker] || s.cluster) === clusterFilter);
+  if (tierFilter !== 'ALL') d = d.filter(s => (s.trading_tier || 'REGULAR') === tierFilter);
   if (searchQ) { const q = searchQ.toUpperCase(); d = d.filter(s => s.ticker.includes(q) || s.name.toUpperCase().includes(q)); }
+  const _tierOrder = {HIGH:0, MODERATE:1, REGULAR:2};
   d.sort((a,b) => {
     if (sortKey === 'learning_rank') return (b.learning_rank||0) - (a.learning_rank||0);
-    if (sortKey === 'confidence')  return b.confidence  - a.confidence;
-    if (sortKey === 'score')       return Math.abs(b.score) - Math.abs(a.score);
-    if (sortKey === 'change_pct')  return b.change_pct  - a.change_pct;
-    if (sortKey === 'rel_volume')  return b.rel_volume  - a.rel_volume;
-    if (sortKey === 'rr_ratio')    return b.rr_ratio    - a.rr_ratio;
-    if (sortKey === 'ml_prob')     return b.ml_prob     - a.ml_prob;
+    if (sortKey === 'confidence')    return b.confidence  - a.confidence;
+    if (sortKey === 'score')         return Math.abs(b.score) - Math.abs(a.score);
+    if (sortKey === 'change_pct')    return b.change_pct  - a.change_pct;
+    if (sortKey === 'rel_volume')    return b.rel_volume  - a.rel_volume;
+    if (sortKey === 'rr_ratio')      return b.rr_ratio    - a.rr_ratio;
+    if (sortKey === 'ml_prob')       return b.ml_prob     - a.ml_prob;
+    if (sortKey === 'trading_tier')  return (_tierOrder[a.trading_tier||'REGULAR']||2) - (_tierOrder[b.trading_tier||'REGULAR']||2);
     return 0;
   });
   return d;
@@ -1651,7 +1660,7 @@ function filteredSorted() {
 function renderTable() {
   const data  = filteredSorted();
   const tbody = document.getElementById('table-body');
-  if (!data.length) { tbody.innerHTML = `<tr><td colspan="20" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
+  if (!data.length) { tbody.innerHTML = `<tr><td colspan="21" style="text-align:center;color:var(--muted);padding:32px">No results.</td></tr>`; return; }
 
   tbody.innerHTML = data.map(s => {
     const chgC  = s.change_pct >= 0 ? 'pos' : 'neg';
@@ -2400,6 +2409,12 @@ document.querySelectorAll('.cluster-btn').forEach(b => b.addEventListener('click
   document.querySelectorAll('.cluster-btn').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   clusterFilter = b.dataset.cluster;
+  renderTable();
+}));
+document.querySelectorAll('.tier-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.tier-btn').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  tierFilter = b.dataset.tier;
   renderTable();
 }));
 
