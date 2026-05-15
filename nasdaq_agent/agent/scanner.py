@@ -780,8 +780,7 @@ def analyse_ticker(
             )
             # Paper trade execution — can_open_trade() inside applies all
             # session / risk / circuit-breaker rules at the execution layer.
-            # During AFTER_HOURS, cap HIGH-tier trades to 50% position size
-            _ah_size_cap = 0.5 if _session_now == "AFTER_HOURS" else 1.0
+            # AH 50% size cap is applied inside can_open_trade() via check_session_block().
             maybe_open_trade(
                 ticker            = ticker,
                 direction         = _norm_direction,
@@ -797,7 +796,7 @@ def analyse_ticker(
                 rsi_zone          = pred.get("rsi_zone", ""),
                 entry_type        = pred.get("entry_type", "IMMEDIATE"),
                 order_flow_score  = _of_score,
-                size_mult         = round(_sig_size_mult * _ah_size_cap, 2),
+                size_mult         = round(_sig_size_mult, 2),
                 trading_tier      = _trading_tier,
             )
 

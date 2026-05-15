@@ -40,17 +40,18 @@ from config import (
 _lock = threading.Lock()
 
 # ── State — resets each trading day ──────────────────────────────────────────
-_circuit_open:       bool  = False
-_circuit_reason:     str   = ""
-_circuit_date:       date  = None   # type: ignore[assignment]
-_warning_issued:     bool  = False  # 1.5% warning has been shown this session
-_cooldown_until:     float = 0.0    # epoch — blocked until this time
-_consecutive_losses: int   = 0
-_peak_daily_pnl:     float = 0.0    # tracks day's peak to measure drawdown in PPM
+_circuit_open:        bool  = False
+_circuit_reason:      str   = ""
+_circuit_date:        date  = None   # type: ignore[assignment]
+_circuit_pnl_based:   bool  = False  # True = triggered by P&L, not consecutive losses
+_warning_issued:      bool  = False  # 1.5% warning has been shown this session
+_cooldown_until:      float = 0.0    # epoch — blocked until this time
+_consecutive_losses:  int   = 0
+_peak_daily_pnl:      float = 0.0    # tracks day's peak to measure drawdown in PPM
 
 
 def _reset_if_new_day() -> None:
-    global _circuit_open, _circuit_reason, _circuit_date
+    global _circuit_open, _circuit_reason, _circuit_date, _circuit_pnl_based
     global _warning_issued, _cooldown_until, _consecutive_losses, _peak_daily_pnl
     today = date.today()
     if _circuit_date != today:
@@ -58,6 +59,7 @@ def _reset_if_new_day() -> None:
             _circuit_open        = False
             _circuit_reason      = ""
             _circuit_date        = today
+            _circuit_pnl_based   = False
             _warning_issued      = False
             _cooldown_until      = 0.0
             _consecutive_losses  = 0
@@ -114,12 +116,13 @@ def record_trade_outcome(won: bool) -> None:
             logger.info(f"[RiskControls] Consecutive losses: {_consecutive_losses}")
 
             if _consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-                _circuit_open   = True
-                _circuit_reason = (
+                _circuit_open        = True
+                _circuit_pnl_based   = False   # consecutive-loss halt, NOT P&L-based
+                _circuit_reason      = (
                     f"Full trading halt: {_consecutive_losses} consecutive losses "
                     f"(limit {MAX_CONSECUTIVE_LOSSES}). Resume tomorrow."
                 )
-                _circuit_date   = date.today()
+                _circuit_date        = date.today()
                 logger.warning(f"[RiskControls] {_circuit_reason}")
 
             elif _consecutive_losses >= COOLDOWN_AFTER_LOSSES:
@@ -156,23 +159,38 @@ def _get_trade_count() -> int:
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
 
-def check_circuit_breaker() -> tuple[bool, str]:
+def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
     """
     Returns (blocked, reason).
     Checks all daily loss tiers, consecutive loss state, and cooldown periods.
+
+    Pass session="AFTER_HOURS" (HIGH-tier AH trades) to bypass consecutive-loss
+    halts/cooldowns — those are reset for the AH window. P&L-based halts still apply.
     """
     global _circuit_open, _circuit_reason, _circuit_date, _warning_issued
-    global _cooldown_until, _peak_daily_pnl
+    global _cooldown_until, _peak_daily_pnl, _circuit_pnl_based, _consecutive_losses
     _reset_if_new_day()
 
     with _lock:
-        if _circuit_open:
-            return True, _circuit_reason
+        if session == "AFTER_HOURS":
+            # Consecutive-loss circuit/cooldown from the regular session is cleared
+            # for the AH window — AH HIGH-tier trades start fresh. P&L halts persist.
+            if _circuit_open and not _circuit_pnl_based:
+                _circuit_open       = False
+                _circuit_reason     = ""
+                _consecutive_losses = 0
+                _cooldown_until     = 0.0
+            elif _circuit_open and _circuit_pnl_based:
+                return True, _circuit_reason
+            # Skip the cooldown check in AH — fall through to P&L checks
+        else:
+            if _circuit_open:
+                return True, _circuit_reason
 
-        # Active cooldown from consecutive losses
-        if _cooldown_until > 0 and _time.time() < _cooldown_until:
-            remaining = int((_cooldown_until - _time.time()) / 60) + 1
-            return True, f"Cooldown active ({remaining} min remaining after consecutive losses)"
+            # Active cooldown from consecutive losses
+            if _cooldown_until > 0 and _time.time() < _cooldown_until:
+                remaining = int((_cooldown_until - _time.time()) / 60) + 1
+                return True, f"Cooldown active ({remaining} min remaining after consecutive losses)"
 
     pnl_dollar, pnl_pct = _get_today_pnl()
 
@@ -186,9 +204,10 @@ def check_circuit_breaker() -> tuple[bool, str]:
                 f"🛑 Daily loss halt: {pnl_pct:+.2f}% loss today "
                 f"(limit -{DAILY_LOSS_HALT_PCT}%). Trading halted until tomorrow."
             )
-            _circuit_open   = True
-            _circuit_reason = reason
-            _circuit_date   = date.today()
+            _circuit_open      = True
+            _circuit_pnl_based = True   # P&L-based — persists even in AH
+            _circuit_reason    = reason
+            _circuit_date      = date.today()
             logger.warning(f"[RiskControls] {reason}")
             return True, reason
 
@@ -198,9 +217,10 @@ def check_circuit_breaker() -> tuple[bool, str]:
                 f"✅ Daily profit ceiling reached: ${pnl_dollar:,.0f} "
                 f"(max ${DAILY_PROFIT_MAX_USD:,.0f}). Locking in gains — no new trades."
             )
-            _circuit_open   = True
-            _circuit_reason = reason
-            _circuit_date   = date.today()
+            _circuit_open      = True
+            _circuit_pnl_based = True   # P&L-based — persists even in AH
+            _circuit_reason    = reason
+            _circuit_date      = date.today()
             logger.info(f"[RiskControls] {reason}")
             return True, reason
 
@@ -212,9 +232,10 @@ def check_circuit_breaker() -> tuple[bool, str]:
                     f"⚠ Profit protect drawdown: pulled back ${peak_drawdown:.0f} "
                     f"from peak ${_peak_daily_pnl:.0f}. Protecting gains."
                 )
-                _circuit_open   = True
-                _circuit_reason = reason
-                _circuit_date   = date.today()
+                _circuit_open      = True
+                _circuit_pnl_based = True   # P&L-based — persists even in AH
+                _circuit_reason    = reason
+                _circuit_date      = date.today()
                 logger.warning(f"[RiskControls] {reason}")
                 return True, reason
 
@@ -384,7 +405,10 @@ def can_open_trade(
         return False, reason, 0.0
 
     # 2. Circuit breaker
-    blocked, reason = check_circuit_breaker()
+    # Pass session for AH HIGH-tier so consecutive-loss halts are bypassed
+    from agent.market_hours import get_session as _get_session
+    _cb_session = _get_session() if (trading_tier == "HIGH" and ah_size > 0) else ""
+    blocked, reason = check_circuit_breaker(_cb_session)
     if blocked:
         return False, reason, 0.0
 
