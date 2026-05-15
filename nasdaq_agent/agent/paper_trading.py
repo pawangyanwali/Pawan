@@ -133,6 +133,7 @@ def maybe_open_trade(
     entry_type:       str   = "",
     order_flow_score: float = 0.0,
     size_mult:        float = 1.0,
+    trading_tier:     str   = "REGULAR",
 ) -> Optional[int]:
     """
     Open a paper trade when all PRD entry gates pass.
@@ -147,7 +148,9 @@ def maybe_open_trade(
 
     # ── PRD master entry gate (session / circuit breaker / heat / sector) ──
     from agent.risk_controls import can_open_trade
-    allowed, block_reason, gate_size_mult = can_open_trade(ticker, direction, confidence)
+    allowed, block_reason, gate_size_mult = can_open_trade(
+        ticker, direction, confidence, trading_tier=trading_tier
+    )
     if not allowed:
         logger.debug(f"[PAPER] {ticker} blocked: {block_reason}")
         return None

@@ -341,20 +341,30 @@ def check_sector_concentration(ticker: str, direction: str) -> tuple[bool, str]:
 
 # ── Session block ─────────────────────────────────────────────────────────────
 
-def check_session_block() -> tuple[bool, str]:
-    """Returns (blocked, reason) based on current PRD session window."""
-    from agent.market_hours import no_new_entries, get_block_reason
+def check_session_block(trading_tier: str = "REGULAR") -> tuple[bool, str, float]:
+    """
+    Returns (blocked, reason, ah_size_mult) based on current session and tier.
+
+    AFTER_HOURS + HIGH tier → allowed at 50% size (mega-caps have real AH liquidity).
+    Everything else in AFTER_HOURS/CLOSED/PRE_MARKET/HARD_CLOSE → blocked.
+    """
+    from agent.market_hours import get_session, get_block_reason
+    session = get_session()
+    if session == "AFTER_HOURS" and trading_tier == "HIGH":
+        return False, "", 0.50   # allowed, no reason, 50% AH size cap
+    from agent.market_hours import no_new_entries
     if no_new_entries():
-        return True, get_block_reason()
-    return False, ""
+        return True, get_block_reason(), 0.0
+    return False, "", 1.0
 
 
 # ── Master entry gate ─────────────────────────────────────────────────────────
 
 def can_open_trade(
-    ticker:     str,
-    direction:  str,
-    confidence: float,
+    ticker:       str,
+    direction:    str,
+    confidence:   float,
+    trading_tier: str = "REGULAR",
 ) -> tuple[bool, str, float]:
     """
     Unified entry gate — runs all PRD checks in priority order.
@@ -362,13 +372,14 @@ def can_open_trade(
 
     Check order:
       1. Session block (market closed / hard-close window only)
+         — HIGH-tier AFTER_HOURS trades pass with 50% size cap
       2. Circuit breaker (daily loss / profit ceiling)
       3. Profit Protect Mode (adjusts confidence threshold and size)
       4. Portfolio heat / concurrent count
       5. Sector concentration
     """
     # 1. Session
-    blocked, reason = check_session_block()
+    blocked, reason, ah_size = check_session_block(trading_tier)
     if blocked:
         return False, reason, 0.0
 
@@ -397,10 +408,18 @@ def can_open_trade(
     if blocked:
         return False, reason, 0.0
 
-    # Also apply session size multiplier (e.g. 0.80 in STANDARD hours)
+    # Apply session size multiplier (e.g. 0.80 in STANDARD hours).
+    # For AH HIGH-tier trades, position_size_multiplier() returns 0.0 (AH session),
+    # so we use the ah_size cap returned by check_session_block() instead.
     from agent.market_hours import position_size_multiplier
     sess_size = position_size_multiplier()
-    final_size = round(size_mult * sess_size, 2) if sess_size > 0 else size_mult
+    if sess_size > 0:
+        final_size = round(size_mult * sess_size, 2)
+    elif ah_size > 0:
+        # AH HIGH-tier bypass: use the 50% AH cap in place of the session multiplier
+        final_size = round(size_mult * ah_size, 2)
+    else:
+        final_size = size_mult
 
     return True, "", final_size
 
@@ -443,5 +462,5 @@ def get_risk_status() -> dict:
         "portfolio_heat":         heat,
         # Session
         "session_blocked":        check_session_block()[0],
-        "session_block_reason":   check_session_block()[1],
+        "session_block_reason":   check_session_block()[1],   # [2] is ah_size, not needed here
     }

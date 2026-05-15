@@ -521,14 +521,33 @@ def analyse_ticker(
         if eb["blocked"] or macro_ev["blocked"]:
             pred["direction"] = "NEUTRAL"
 
-        # Hard-block trading during AFTER_HOURS and CLOSED sessions.
-        # Backtest data shows 0-2% win rates outside regular hours — no edge.
-        # Chart data and position tracking still run; only new signals are blocked.
-        _session_now = sess_info.get("session", "")
-        if _session_now in ("AFTER_HOURS", "CLOSED"):
+        # ── After-hours / CLOSED session gate ────────────────────────────────
+        # Compute trading tier now so we can gate both signal direction and
+        # the AH confidence boost on the same tier.
+        _session_now  = sess_info.get("session", "")
+        _static_tier  = get_trading_tier(ticker, 0.0)   # refined later with AH vol ratio
+
+        if _session_now == "CLOSED":
+            # Market fully closed (8pm–4am) — no new signals for anyone
             if pred["direction"] in ("BUY", "SELL"):
                 pred["direction"] = "NEUTRAL"
-                pred["reasons"]   = ["⛔ No new trades outside regular hours (AH/CLOSED 0-2% WR)"] + pred.get("reasons", [])
+                pred["reasons"]   = ["⛔ Market closed (8pm–4am) — monitoring only"] + pred.get("reasons", [])
+
+        elif _session_now == "AFTER_HOURS":
+            if _static_tier == "HIGH":
+                # Mega-cap (AAPL/TSLA/NVDA/MSFT/META/AMZN/GOOGL/NFLX/AMD/AVGO) —
+                # meaningful AH liquidity, allow trading at 50% size
+                if pred["direction"] in ("BUY", "SELL"):
+                    pred["reasons"] = [
+                        f"🌙 AH trade — {ticker} HIGH-tier (50% size, extended liquidity)"
+                    ] + pred.get("reasons", [])
+            else:
+                # MODERATE / REGULAR — thin AH spreads, no edge outside regular hours
+                if pred["direction"] in ("BUY", "SELL"):
+                    pred["direction"] = "NEUTRAL"
+                    pred["reasons"]   = [
+                        f"⛔ AH: {ticker} {_static_tier}-tier — thin liquidity, no new trades"
+                    ] + pred.get("reasons", [])
 
         # Exit signals (for open paper trades / active signals)
         exit_analysis = analyse_exits(
@@ -605,7 +624,7 @@ def analyse_ticker(
                 float(min(max(pred["confidence"] + boost, 25.0), 95.0)), 1
             )
 
-        # Apply after-hours opening bias to confidence
+        # Apply after-hours opening bias to confidence — gated by trading tier
         _ah_confirms = False
         _ah_change   = 0.0
         _ah_dir      = ""
@@ -619,6 +638,18 @@ def analyse_ticker(
             _ah_news    = bool(_ah_bias.get("news_likely", False))
             _ah_gap_est = float(_ah_bias.get("gap_estimate_pct", 0.0))
             _base_adj   = float(_ah_bias.get("confidence_adj", 0.0))
+
+            # Refine tier now that we have the live AH volume ratio
+            _ah_vol_ratio = float(_ah_bias.get("ah_volume_ratio", 0.0))
+            _trading_tier = get_trading_tier(ticker, _ah_vol_ratio)
+
+            # Scale the confidence adjustment by tier:
+            #   HIGH     → full adjustment (AH data reliable)
+            #   MODERATE → half adjustment (use with caution)
+            #   REGULAR  → no adjustment (AH data is noise for thin names)
+            _tier_scale = {"HIGH": 1.0, "MODERATE": 0.5, "REGULAR": 0.0}.get(_trading_tier, 0.0)
+            _base_adj   = round(_base_adj * _tier_scale, 1)
+
             # Confirms when AH direction matches prediction
             _ah_confirms = (
                 (_ah_dir == "BULLISH" and pred["direction"] == "BUY") or
@@ -631,8 +662,12 @@ def analyse_ticker(
                 )
                 _label = "confirms" if _ah_confirms else "opposes"
                 pred["reasons"].append(
-                    f"AH {_ah_dir} {_ah_change:+.1f}% ({_ah_mag}) {_label} signal"
+                    f"AH {_ah_dir} {_ah_change:+.1f}% ({_ah_mag}) {_label} signal "
+                    f"[{_trading_tier} tier ×{_tier_scale}]"
                 )
+        else:
+            # No AH bias data — use static tier for downstream use
+            _trading_tier = _static_tier
 
         # Check if ticker already has an open paper trade
         _has_open_position = False
@@ -740,6 +775,8 @@ def analyse_ticker(
             )
             # Paper trade execution — can_open_trade() inside applies all
             # session / risk / circuit-breaker rules at the execution layer.
+            # During AFTER_HOURS, cap HIGH-tier trades to 50% position size
+            _ah_size_cap = 0.5 if _session_now == "AFTER_HOURS" else 1.0
             maybe_open_trade(
                 ticker            = ticker,
                 direction         = _norm_direction,
@@ -755,7 +792,8 @@ def analyse_ticker(
                 rsi_zone          = pred.get("rsi_zone", ""),
                 entry_type        = pred.get("entry_type", "IMMEDIATE"),
                 order_flow_score  = _of_score,
-                size_mult         = _sig_size_mult,
+                size_mult         = round(_sig_size_mult * _ah_size_cap, 2),
+                trading_tier      = _trading_tier,
             )
 
         # Update open paper trades + live backtest tracking
