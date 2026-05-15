@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
-_FALLBACK_MIN_CONFIDENCE = 60.0
+_FALLBACK_MIN_CONFIDENCE = 55.0
 _MAX_BARS_HELD_SCALP     = 20   # 20-min hard close for scalps (PRD 6.3)
 _MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
 _MAX_CONCURRENT_TRADES   = 3    # PRD Section 6.3: max 3 simultaneous positions
@@ -144,8 +144,6 @@ def maybe_open_trade(
     min_conf = _get_min_confidence()
     if confidence < min_conf:
         return None
-    if not rr_qualifies:
-        return None
 
     # ── PRD master entry gate (session / circuit breaker / heat / sector) ──
     from agent.risk_controls import can_open_trade
@@ -154,8 +152,10 @@ def maybe_open_trade(
         logger.debug(f"[PAPER] {ticker} blocked: {block_reason}")
         return None
 
-    # Combine gate size multiplier with signal-level size multiplier
-    effective_size_mult = round(gate_size_mult * size_mult, 2)
+    # Combine gate size multiplier with signal-level size multiplier.
+    # Low R:R setups trade at half size — system still learns from the outcome.
+    rr_mult = 1.0 if rr_qualifies else 0.5
+    effective_size_mult = round(gate_size_mult * size_mult * rr_mult, 2)
     if effective_size_mult <= 0:
         return None
 

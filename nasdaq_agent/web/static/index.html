@@ -1675,10 +1675,11 @@ function renderTable() {
         <div style="font-size:11px;font-weight:700;color:${pnlCol}">${pnl>=0?'+':''}${pnl.toFixed(2)}% <span style="font-size:9px;color:var(--muted);font-weight:400">· Bar ${bars}</span></div>
       </div>`;
     } else if (s.prediction === 'BUY' || s.prediction === 'SELL' || s.prediction === 'STRONG BUY' || s.prediction === 'STRONG SELL') {
+      const rrNote = s.rr_qualifies ? 'Full size' : 'Half size (low R:R)';
       const watchCol = s.rr_qualifies ? 'var(--green)' : 'var(--yellow)';
       statusCell = `<div style="padding:5px 7px;background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.25);border-radius:6px;font-size:9px">
-        <div style="color:${watchCol};font-weight:700">👁 WATCHING</div>
-        <div style="color:var(--muted);margin-top:2px">${s.rr_qualifies ? 'R:R qualifies' : 'R:R too low'}</div>
+        <div style="color:var(--green);font-weight:700">✅ SIGNAL LIVE</div>
+        <div style="color:${watchCol};margin-top:2px">${rrNote}</div>
       </div>`;
     }
 
