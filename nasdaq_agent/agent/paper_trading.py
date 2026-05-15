@@ -153,8 +153,11 @@ def maybe_open_trade(
         return None
 
     # Combine gate size multiplier with signal-level size multiplier.
-    # Low R:R setups trade at half size — system still learns from the outcome.
-    rr_mult = 1.0 if rr_qualifies else 0.5
+    # Position size scales with R:R — every trade opens so the system learns,
+    # but conviction (and therefore size) rises with reward potential.
+    # Formula: clamp(rr_ratio / 2.0, 0.20, 1.0)
+    #   R:R 2.0+ → 100%  |  1.5 → 75%  |  1.0 → 50%  |  0.5 → 25%  |  <0.4 → 20%
+    rr_mult = round(min(1.0, max(0.20, rr_ratio / 2.0)), 2) if rr_ratio > 0 else 0.20
     effective_size_mult = round(gate_size_mult * size_mult * rr_mult, 2)
     if effective_size_mult <= 0:
         return None
