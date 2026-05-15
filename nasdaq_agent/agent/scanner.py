@@ -698,7 +698,12 @@ def analyse_ticker(
         # can_open_trade() decides whether to act on it.
         from agent.market_hours import no_new_entries, get_block_reason
         _trade_blocked_reason = ""
-        if no_new_entries():
+        # HIGH-tier mega-caps (AAPL/TSLA/NVDA etc.) are allowed to trade
+        # during AFTER_HOURS (4–8 PM ET) at 50% size — do NOT flag as blocked.
+        _is_ah_high_tier = (_session_now == "AFTER_HOURS" and _trading_tier == "HIGH")
+        if _is_ah_high_tier:
+            pass  # allowed — scanner AH gate above kept BUY/SELL direction
+        elif no_new_entries():
             _trade_blocked_reason = get_block_reason()
         elif pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
             _cb_blocked, _cb_msg = check_circuit_breaker()

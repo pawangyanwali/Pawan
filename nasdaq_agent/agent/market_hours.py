@@ -58,7 +58,7 @@ _SESSIONS: dict[str, dict] = {
     "AFTER_HOURS": {
         "label": "After-Hours", "color": "#64748b", "tradeable": False,
         "mult": 0.30, "size_mult": 0.0,
-        "advice": "After-hours — thin market. Signals are noise. Monitoring only.",
+        "advice": "After-hours (4–8 PM ET) — T1·HIGH mega-caps trade at 50% size. T2/T3 monitoring only.",
     },
     "CLOSED": {
         "label": "Market Closed", "color": "#334155", "tradeable": False,
