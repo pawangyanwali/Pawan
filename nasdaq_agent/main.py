@@ -702,11 +702,12 @@ async def schwab_md_web_callback(request: Request, code: str = "", state: str = 
 @app.get("/api/broker/status")
 async def broker_status():
     """Connection status for both Schwab apps, token TTLs, account info."""
+    from config import SCHWAB_ENABLED
     try:
         ts    = get_token_status()
         ts_md = get_md_token_status()
         acct  = {}
-        if ts.get("connected"):
+        if SCHWAB_ENABLED and ts.get("connected"):
             try:
                 acct = get_account_summary()
             except Exception:
@@ -714,6 +715,7 @@ async def broker_status():
         daily = get_daily_status()
         return {
             **ts,
+            "schwab_enabled":  SCHWAB_ENABLED,
             "market_data_app": ts_md,
             "account":         acct,
             "daily":           daily,
@@ -725,23 +727,19 @@ async def broker_status():
 
 @app.post("/api/broker/auth")
 async def broker_auth():
-    """
-    Initiate Schwab OAuth flow.
-    Opens the user's browser to Schwab login (including MFA).
-    Blocks until the user completes login (up to 5 min).
-    """
-    import asyncio
-    loop = asyncio.get_running_loop()
-    try:
-        result = await loop.run_in_executor(None, start_auth_flow)
-        return {"success": True, **result}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    """Initiate Schwab OAuth flow — redirect browser to /schwab/auth instead."""
+    from config import SCHWAB_ENABLED
+    if not SCHWAB_ENABLED:
+        return {"success": False, "error": "Schwab is disabled (SCHWAB_ENABLED=false in .env)"}
+    return {"success": False, "error": "Use the browser flow: visit /schwab/auth to authorise"}
 
 
 @app.get("/api/broker/positions")
 async def broker_positions():
     """Current open positions in the ThinkorSwim paper account."""
+    from config import SCHWAB_ENABLED
+    if not SCHWAB_ENABLED:
+        return {"positions": [], "schwab_enabled": False}
     try:
         return {"positions": get_positions()}
     except Exception as e:
@@ -751,6 +749,9 @@ async def broker_positions():
 @app.get("/api/broker/orders")
 async def broker_orders():
     """Recent working orders."""
+    from config import SCHWAB_ENABLED
+    if not SCHWAB_ENABLED:
+        return {"orders": [], "schwab_enabled": False}
     try:
         return {"orders": get_orders()}
     except Exception as e:
