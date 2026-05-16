@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 _PRE_EARNINGS_DAYS  = 3
 _POST_EARNINGS_DAYS = 1
-_CACHE_TTL          = 24 * 3600  # 24 hours — reduces API burst on cold start
+_CACHE_TTL          = 24 * 3600   # 24 h for successful fetches
+_CACHE_TTL_NONE     = 3600        # 1 h for failed/no-result fetches (retry sooner)
 
 _cache: dict[str, tuple[Optional[datetime], float]] = {}  # ticker → (next_date, fetched_at)
 
@@ -57,7 +58,9 @@ def get_next_earnings(ticker: str) -> Optional[datetime]:
         if now - fetched < _CACHE_TTL:
             return date
     date = _fetch_next_earnings(ticker)
-    _cache[ticker] = (date, now)
+    # Failed/no-result fetches use a shorter TTL so we retry sooner
+    ttl = _CACHE_TTL if date is not None else _CACHE_TTL_NONE
+    _cache[ticker] = (date, now - (_CACHE_TTL - ttl))
     return date
 
 

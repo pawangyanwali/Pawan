@@ -11,6 +11,7 @@ VIX proxy is estimated from SPY ATR / price — no separate VIX feed needed.
 """
 from __future__ import annotations
 import logging
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -155,17 +156,18 @@ def detect_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
 
 
 def apply_regime(score: float, regime: RegimeInfo) -> float:
-    """Scale composite score by regime multiplier based on direction."""
+    """Scale composite score by regime multiplier — result stays in [-1, +1]."""
     if score > 0:
-        return round(score * regime.long_mult,  4)
+        return round(float(np.clip(score * regime.long_mult,  -1.0, 1.0)), 4)
     elif score < 0:
-        return round(score * regime.short_mult, 4)
+        return round(float(np.clip(score * regime.short_mult, -1.0, 1.0)), 4)
     return score
 
 
 # ── Module-level singleton so scanner can share one instance ──────────────────
 
 _current_regime: RegimeInfo = RegimeInfo()
+_regime_lock = threading.Lock()
 
 
 def update_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
@@ -196,7 +198,8 @@ def update_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
     elif lstm_regime == heuristic.regime and lstm_regime != "UNKNOWN":
         heuristic.description += f" [LSTM confirms {lstm_regime}]"
 
-    _current_regime = heuristic
+    with _regime_lock:
+        _current_regime = heuristic
     logger.info(
         f"Regime updated: {_current_regime.regime} (LSTM:{lstm_regime}) | "
         f"SPY {_current_regime.spy_change:+.2f}% / QQQ {_current_regime.qqq_change:+.2f}%"
@@ -205,4 +208,5 @@ def update_regime(df_spy: pd.DataFrame, df_qqq: pd.DataFrame) -> RegimeInfo:
 
 
 def get_regime() -> RegimeInfo:
-    return _current_regime
+    with _regime_lock:
+        return _current_regime

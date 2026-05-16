@@ -61,7 +61,8 @@ def score_volume(df: pd.DataFrame) -> float:
             elif mfi > 80:
                 signals.append(-0.8)  # overbought → bearish
             else:
-                signals.append(np.clip((mfi - 50) / 50 * -1, -0.5, 0.5))
+                # MFI > 50 → more money flowing in → bullish (+)
+                signals.append(np.clip((mfi - 50) / 50, -0.5, 0.5))
 
     if not signals:
         return 0.0

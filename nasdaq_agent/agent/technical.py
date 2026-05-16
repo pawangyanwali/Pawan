@@ -6,11 +6,12 @@ import ta
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add a comprehensive set of technical indicators to an OHLCV DataFrame.
-    All indicator columns are added in-place and the enriched DataFrame is returned.
+    Returns an enriched copy — does NOT mutate the caller's DataFrame.
     """
     if df is None or len(df) < 30:
         return df
 
+    df    = df.copy()
     close = df["Close"]
     high  = df["High"]
     low   = df["Low"]
@@ -51,7 +52,8 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # ── Volume ─────────────────────────────────────────────────────────────────
     df["obv"]       = ta.volume.on_balance_volume(close, vol)
     df["vwap"]      = _compute_vwap(df)
-    df["vol_ratio"] = vol / vol.rolling(20).mean()   # relative volume vs 20-bar avg
+    rolling_mean    = vol.rolling(20).mean().replace(0, np.nan)
+    df["vol_ratio"] = vol / rolling_mean              # relative volume vs 20-bar avg
 
     # ── EMA crossover signal: +1 bullish / -1 bearish ────────────────────────
     df["ema_cross"] = np.where(df["ema_9"] > df["ema_20"], 1.0, -1.0)
@@ -65,11 +67,25 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _compute_vwap(df: pd.DataFrame) -> pd.Series:
-    """Session VWAP: cumulative (typical_price * volume) / cumulative volume."""
+    """
+    Session-anchored VWAP — resets at the start of each trading day.
+    Cumulative sums are computed per calendar date so multi-day DataFrames
+    produce correct intraday VWAP for every session.
+    """
     tp = (df["High"] + df["Low"] + df["Close"]) / 3
-    cum_vol  = df["Volume"].cumsum()
-    cum_tpvol = (tp * df["Volume"]).cumsum()
-    return cum_tpvol / cum_vol
+    tpvol = tp * df["Volume"]
+
+    if isinstance(df.index, pd.DatetimeIndex):
+        # Group by date; cumsum resets each day
+        dates = df.index.date
+        cum_vol   = df.groupby(dates)["Volume"].cumsum()
+        cum_tpvol = tpvol.groupby(dates).cumsum()
+    else:
+        cum_vol   = df["Volume"].cumsum()
+        cum_tpvol = tpvol.cumsum()
+
+    safe_vol = cum_vol.replace(0, np.nan)
+    return (cum_tpvol / safe_vol).fillna(method="ffill")
 
 
 def score_technical(row: pd.Series) -> float:
@@ -93,11 +109,11 @@ def score_technical(row: pd.Series) -> float:
         else:
             signals.append(0.0)
 
-    # RSI-7 fast signal
+    # RSI-7 fast signal: rsi7 > 50 → momentum is bullish (+), < 50 → bearish (-)
     if pd.notna(row.get("rsi_7")):
         rsi7 = row["rsi_7"]
-        sig = np.clip((50 - rsi7) / 50, -1, 1)
-        signals.append(-sig)  # invert: rsi7>50 means up momentum
+        sig = np.clip((rsi7 - 50) / 50, -1, 1)
+        signals.append(sig)
 
     # MACD histogram direction
     if pd.notna(row.get("macd_hist")):
