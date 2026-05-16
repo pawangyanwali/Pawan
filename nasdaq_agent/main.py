@@ -37,6 +37,7 @@ from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from agent.adaptive_filter import get_status as af_get_status, reset_filter as af_reset_filter
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
+import agent.weekend_learner as weekend_learner
 from agent.broker.schwab_auth import (
     load_stored_tokens, load_stored_md_tokens,
     get_token_status, get_md_token_status,
@@ -262,6 +263,15 @@ async def lifespan(app: FastAPI):
     scanner.register_per_ticker_callback(_on_ticker)
     scanner.start_background()
     learning_engine.start()
+
+    # Weekend learner — give it a broadcast handle, then auto-start if it's a weekend
+    def _wl_broadcast(payload: dict) -> None:
+        if _event_loop:
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast(json.dumps(payload)), _event_loop
+            )
+    weekend_learner.register_broadcast(_wl_broadcast)
+    weekend_learner.maybe_start()
     # Sweep any trades that were left open from a previous session
     try:
         from agent.paper_trading import close_stale_positions
@@ -546,6 +556,45 @@ async def ml_status():
         "pipeline_metrics":  pipeline_stats,
         "cluster_status":    cluster_status,
     }
+
+
+# ── Weekend Learning API ──────────────────────────────────────────────────────
+
+@app.get("/api/weekend-learning/status")
+async def wl_status():
+    """Current state of the weekend learning pipeline."""
+    return weekend_learner.get_status()
+
+
+@app.post("/api/weekend-learning/start")
+async def wl_start():
+    """Manually kick off the weekend learning pipeline (admin override)."""
+    started = weekend_learner.start()
+    return {
+        "status":  "started" if started else "already_running",
+        "message": ("Weekend learning started in background."
+                    if started else "Weekend learner is already running."),
+    }
+
+
+@app.post("/api/weekend-learning/stop")
+async def wl_stop():
+    """Signal the weekend learner to stop after the current phase."""
+    weekend_learner.stop()
+    return {"status": "stop_requested"}
+
+
+@app.get("/api/weekend-learning/history")
+async def wl_history():
+    """Cumulative weekend learning outcomes from SQLite records store."""
+    return weekend_learner.historical_performance()
+
+
+@app.get("/api/weekend-learning/cache-stats")
+async def wl_cache_stats():
+    """OHLCV cache stats — bars per ticker/interval stored so far."""
+    from agent.historical_cache import cache_stats
+    return cache_stats()
 
 
 @app.post("/api/ml-retrain")

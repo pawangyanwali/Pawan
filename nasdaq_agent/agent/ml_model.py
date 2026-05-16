@@ -358,7 +358,8 @@ def get_or_create(ticker: str) -> StockMLModel:
     return _model_registry[ticker]
 
 
-def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None) -> None:
+def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
+                hist_5m: dict = None, hist_15m: dict = None) -> None:
     """Train/retrain all models using a single batch historical fetch.
 
     Instead of calling fetch_historical() once per ticker (160 single-symbol API
@@ -373,6 +374,11 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None) -> N
     daily_data : optional mapping of ticker → daily OHLCV DataFrame.  When
                  provided, each ticker's DailyMLModel is also retrained from
                  the supplied DataFrame (no extra API call required).
+    hist_5m    : optional pre-fetched 5-min data dict {ticker: DataFrame}.
+                 When provided (e.g. from weekend_learner's deep SQLite cache),
+                 the API fetch is skipped — models train on the deeper history.
+    hist_15m   : optional pre-fetched 15-min data dict {ticker: DataFrame}.
+                 Same semantics as hist_5m.
     """
     global _is_retraining
     # Non-blocking guard: if another retrain is already running, skip this call
@@ -384,7 +390,8 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None) -> N
         return
     _is_retraining = True
     try:
-        _retrain_all_locked(tickers, delay=delay, daily_data=daily_data)
+        _retrain_all_locked(tickers, delay=delay, daily_data=daily_data,
+                            hist_5m=hist_5m, hist_15m=hist_15m)
     finally:
         _is_retraining = False
         _retrain_lock.release()
@@ -460,7 +467,8 @@ def _train_one_ticker(
     return t, ticker_models_ok, round(time.time() - t0, 1)
 
 
-def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = None) -> None:
+def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = None,
+                        hist_5m: dict = None, hist_15m: dict = None) -> None:
     """Internal retrain — only called while _retrain_lock is held."""
     import time as _t
     from agent.data_fetcher import fetch_batch_interval
@@ -472,15 +480,23 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
             current_ticker="", current_model="")
 
     # ── 5-min data: ~64 trading days (XGBoost scalp/ensemble models) ─────────
-    logger.info(f"[retrain_all] Batch-fetching 5min history for {len(tickers)} tickers…")
-    hist_5m = fetch_batch_interval(tickers, "5min", 5000, ttl=1800)
-    logger.info(f"[retrain_all] Got history for {len(hist_5m)}/{len(tickers)} tickers")
+    if hist_5m is not None:
+        # Weekend learner passed pre-fetched deep history — skip API call
+        logger.info(f"[retrain_all] Using pre-fetched 5min data: {len(hist_5m)} tickers "
+                    f"(avg {sum(len(v) for v in hist_5m.values())//max(len(hist_5m),1)} bars each)")
+    else:
+        logger.info(f"[retrain_all] Batch-fetching 5min history for {len(tickers)} tickers…")
+        hist_5m = fetch_batch_interval(tickers, "5min", 5000, ttl=1800)
+        logger.info(f"[retrain_all] Got history for {len(hist_5m)}/{len(tickers)} tickers")
 
     # ── 15-min data: ~6 months (deep BiLSTM + swing models) ─────────────────
     _rp_set(phase="fetching_15m", phase_label="Fetching 15-min data (6 months)…")
-    logger.info(f"[retrain_all] Batch-fetching 15min history ({len(tickers)} tickers)…")
-    hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600)
-    logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
+    if hist_15m is not None:
+        logger.info(f"[retrain_all] Using pre-fetched 15min data: {len(hist_15m)} tickers")
+    else:
+        logger.info(f"[retrain_all] Batch-fetching 15min history ({len(tickers)} tickers)…")
+        hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600)
+        logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
 
     _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")
 

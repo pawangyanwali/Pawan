@@ -98,12 +98,13 @@ _load()
 
 # ── Core update ───────────────────────────────────────────────────────────────
 
-def update_filter(stats: dict) -> None:
+def update_filter(stats: dict, source: str = "backtest") -> None:
     """
     Called after each backtest feedback retrain with fresh performance stats.
     Updates blocked/boosted context lists and the dynamic confidence threshold.
+    Pass source="weekend_walk_forward" when called from the weekend learner.
     """
-    _apply_stats(stats, source="backtest")
+    _apply_stats(stats, source=source)
 
 
 def update_from_paper_trades(stats: dict) -> None:
