@@ -501,9 +501,9 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
     _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")
 
     # ── Parallel ticker training ───────────────────────────────────────────────
-    # Each XGBoost uses nthread=1 so we match worker count to CPU count for
-    # clean utilisation with no over-subscription.
-    _workers = min(os.cpu_count() or 4, 8)
+    # Use at most half the available CPUs so the scanner, API throttler, and
+    # other threads stay responsive.  Each XGBoost already uses nthread=1.
+    _workers = max(1, min((os.cpu_count() or 2) // 2, 4))
     with ThreadPoolExecutor(max_workers=_workers) as executor:
         futures = {
             executor.submit(

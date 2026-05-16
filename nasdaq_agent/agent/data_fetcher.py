@@ -277,6 +277,61 @@ def _cache_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
     _interval_cache.setdefault(ticker, {})[interval] = (df, time.time())
 
 
+# ── SQLite-backed persistent cache ────────────────────────────────────────────
+# Consulted for training intervals so restarts and concurrent subsystems
+# (ml_model retrain + weekend_learner) never duplicate API calls for the
+# same data.  Realtime 1-min scanning always bypasses this (ttl=0).
+
+_SQLITE_TRAIN_INTERVALS: frozenset[str] = frozenset(
+    {"5min", "15min", "30min", "1h", "1day"}
+)
+# Use 4× the in-process TTL for SQLite so training data survives restarts
+# and market-closed periods without hitting the API again.
+_SQLITE_TTL_MULT = 4
+
+
+def _sqlite_get(ticker: str, interval: str, ttl: float) -> "pd.DataFrame | None":
+    """Return SQLite-cached OHLCV DataFrame if fresh enough, else None."""
+    if interval not in _SQLITE_TRAIN_INTERVALS or ttl <= 0:
+        return None
+    try:
+        from agent.historical_cache import _get_conn, get_bars
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT MAX(dt) FROM ohlcv_bars WHERE ticker=? AND interval=?",
+                (ticker, interval),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row or not row[0]:
+            return None
+        newest = pd.Timestamp(row[0])
+        # On weekends/holidays newest bar is always from the last trading day —
+        # accept data up to TTL * _SQLITE_TTL_MULT seconds old.
+        if (pd.Timestamp.now() - newest).total_seconds() > ttl * _SQLITE_TTL_MULT:
+            return None
+        df = get_bars(ticker, interval, min_bars=50)
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+def _sqlite_set(ticker: str, interval: str, df: "pd.DataFrame") -> None:
+    """Persist fetched DataFrame to SQLite (fire-and-forget)."""
+    if interval not in _SQLITE_TRAIN_INTERVALS or df is None or df.empty:
+        return
+    try:
+        from agent.historical_cache import _get_conn, _upsert_bars
+        conn = _get_conn()
+        try:
+            _upsert_bars(conn, ticker, interval, df)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 # ── Core batch fetcher ────────────────────────────────────────────────────────
 
 def fetch_batch_interval(
@@ -311,13 +366,25 @@ def fetch_batch_interval(
     result: dict[str, pd.DataFrame] = {}
     to_fetch: list[str] = []
 
-    # Serve cached tickers
+    # 1) In-process memory cache
     for ticker in tickers:
         cached = _cache_get(ticker, interval_key, ttl)
         if cached is not None:
             result[ticker] = cached
         else:
             to_fetch.append(ticker)
+
+    # 2) SQLite persistent cache (training intervals only, ttl > 0)
+    if to_fetch and ttl > 0 and not extended_hours:
+        still_miss: list[str] = []
+        for ticker in to_fetch:
+            df = _sqlite_get(ticker, interval, ttl)
+            if df is not None:
+                result[ticker] = df
+                _cache_set(ticker, interval_key, df)   # warm in-process cache too
+            else:
+                still_miss.append(ticker)
+        to_fetch = still_miss
 
     if not to_fetch:
         return result  # all served from cache — zero API calls
@@ -350,6 +417,8 @@ def fetch_batch_interval(
                 result[ticker] = df
                 if ttl > 0:
                     _cache_set(ticker, interval_key, df)
+                    if not extended_hours:
+                        _sqlite_set(ticker, interval, df)   # persist to SQLite
 
         # Schwab fallback disabled until SCHWAB_ENABLED=true in .env
         # failed = [t for t in batch if t not in parsed]
@@ -372,7 +441,7 @@ def fetch_batch_realtime(tickers: list, extended_hours: bool = False) -> dict[st
 def fetch_historical(ticker: str) -> pd.DataFrame:
     """Fetch ~6 months of 5-min OHLCV for intraday ML training (single ticker)."""
     # 180 days × 78 bars/day = 14040 bars; API caps at 5000 → ~64 days at 5min
-    result = fetch_batch_interval([ticker], "5min", 5000, ttl=0)
+    result = fetch_batch_interval([ticker], "5min", 5000, ttl=3600)
     return result.get(ticker, pd.DataFrame())
 
 

@@ -354,6 +354,16 @@ class LearningEngine:
         loop isn't blocked. Uses outcome-weighted samples from both backtest
         and paper trading.
         """
+        # Skip full retrain when weekend_learner is running its own deep retrain
+        # to avoid CPU/API contention.
+        try:
+            from agent.weekend_learner import is_running as _wl_running
+            if _wl_running():
+                _log("Skipping retrain — weekend learning in progress", level="DEBUG")
+                return
+        except Exception:
+            pass
+
         _log(f"ML feedback retrain triggered — "
              f"{stats['overall']['total']} total outcomes", significant=True)
 

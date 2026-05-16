@@ -191,11 +191,14 @@ def fetch_and_store(
     n_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
 
     if end_date is None:
-        # ── Current window: delegate entirely to the proven data_fetcher path ──
+        # ── Current window: use data_fetcher's rate-limited path.
+        # TTL=3600 lets the in-process cache serve this request if the same
+        # interval was already fetched recently (e.g. by ml_model retrain),
+        # avoiding duplicate API calls during startup.
         if broadcast_fn:
             broadcast_fn({"phase": "FETCHING",
                           "detail": f"{interval} {label}"})
-        fetched_all = fetch_batch_interval(tickers, interval, outputsize, ttl=0)
+        fetched_all = fetch_batch_interval(tickers, interval, outputsize, ttl=3600)
         for ticker, df in fetched_all.items():
             n = _upsert_bars(conn, ticker, interval, df)
             inserted[ticker] = n

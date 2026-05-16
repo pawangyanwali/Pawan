@@ -112,6 +112,11 @@ _thread:    threading.Thread | None = None
 _stop_flag: threading.Event         = threading.Event()
 _broadcast: Callable | None         = None   # injected by main.py
 
+# Don't start weekend learning until the initial ML retrain has had time to
+# run — otherwise they compete for API credits and CPU simultaneously.
+_STARTUP_GRACE_SECS = 300   # 5 minutes
+_process_start = time.time()
+
 
 def register_broadcast(fn: Callable) -> None:
     global _broadcast
@@ -481,10 +486,30 @@ def maybe_start(tickers: list[str] | None = None) -> bool:
 
     from agent.market_hours import get_session_info
     info = get_session_info()
-    if info.get("is_weekend") or info.get("is_holiday"):
-        logger.info("[WeekendLearner] Market closed — auto-starting weekend learning")
-        return start(tickers)
-    return False
+    if not (info.get("is_weekend") or info.get("is_holiday")):
+        return False
+
+    # Respect startup grace period — let initial ML retrain complete first.
+    elapsed = time.time() - _process_start
+    if elapsed < _STARTUP_GRACE_SECS:
+        remaining = int(_STARTUP_GRACE_SECS - elapsed)
+        logger.debug(
+            f"[WeekendLearner] Waiting {remaining}s for initial retrain to complete"
+        )
+        return False
+
+    # Don't start while ml_model retrain is actively running.
+    try:
+        from agent.ml_model import get_retrain_progress
+        rp = get_retrain_progress()
+        if rp.get("is_running"):
+            logger.debug("[WeekendLearner] ML retrain in progress — deferring start")
+            return False
+    except Exception:
+        pass
+
+    logger.info("[WeekendLearner] Market closed — auto-starting weekend learning")
+    return start(tickers)
 
 
 def historical_performance() -> dict:
