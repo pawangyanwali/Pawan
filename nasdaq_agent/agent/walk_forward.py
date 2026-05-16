@@ -71,6 +71,7 @@ def replay_signals(
     cooldown_bars:    int   = 8,
     min_vol_ratio:    float = 1.0,
     filter_session:   bool  = True,
+    timeframe:        str   = "5min",
 ) -> list[dict[str, Any]]:
     """
     Replay historical bars and return a list of labeled signal records.
@@ -193,6 +194,7 @@ def replay_signals(
 
         record: dict[str, Any] = {
             "ticker":      ticker,
+            "timeframe":   timeframe,
             "bar_dt":      str(idx),
             "direction":   direction,
             "entry_price": round(entry, 4),

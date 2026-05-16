@@ -597,6 +597,32 @@ async def wl_cache_stats():
     return cache_stats()
 
 
+# ── Multi-TF Backtest API ─────────────────────────────────────────────────────
+
+@app.get("/api/backtest/mtf")
+async def mtf_summary():
+    """
+    Aggregated multi-timeframe backtest results from the most recent weekend run.
+    Returns win rate, expectancy, Sharpe, and max-drawdown for each TF.
+    """
+    from agent.multi_tf_backtest import get_summary
+    return get_summary()
+
+
+@app.get("/api/backtest/mtf/history")
+async def mtf_history():
+    """List of past multi-TF backtest runs with aggregate stats."""
+    from agent.multi_tf_backtest import get_run_history
+    return get_run_history()
+
+
+@app.get("/api/backtest/mtf/{ticker}")
+async def mtf_ticker(ticker: str):
+    """Per-TF performance breakdown for a single ticker."""
+    from agent.multi_tf_backtest import get_ticker_stats
+    return get_ticker_stats(ticker.upper())
+
+
 @app.post("/api/ml-retrain")
 async def trigger_retrain(background_tasks: BackgroundTasks):
     """

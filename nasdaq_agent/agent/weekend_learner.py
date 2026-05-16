@@ -140,8 +140,17 @@ def _phase_fetch(tickers: list[str]) -> int:
     def _bcast(msg: dict):
         _emit({"phase_label": f"Phase 1 — {msg.get('detail','')}"})
 
-    # Always refresh the current window (5min + 15min + daily)
-    for interval, outputsize in [("5min", 5000), ("15min", 500), ("1day", 500)]:
+    # Fetch all 5 scalping timeframes for multi-TF backtesting
+    # outputsize=5000 gives: 1min≈13d, 5min≈64d, 15min≈192d, 30min≈384d, 1h≈769d
+    tf_schedule = [
+        ("1min",  5000),   # ultra-short scalp baseline
+        ("5min",  5000),   # standard scalp
+        ("15min", 5000),   # swing-scalp
+        ("30min", 5000),   # position scalp
+        ("1h",    5000),   # intraday momentum
+        ("1day",  500),    # daily model
+    ]
+    for interval, outputsize in tf_schedule:
         if _stop_flag.is_set():
             break
         inserted = fetch_and_store(tickers, interval, outputsize,
@@ -149,7 +158,7 @@ def _phase_fetch(tickers: list[str]) -> int:
         total_new += sum(inserted.values())
         _emit({"new_bars_fetched": _state["new_bars_fetched"] + sum(inserted.values())})
 
-    # Fetch OLDER windows for 5min (the key depth expansion)
+    # Extend 5min history backwards (the most valuable TF for ML training)
     for end_date in older_window_end_dates(weeks_back=16, step_weeks=8):
         if _stop_flag.is_set():
             break
@@ -162,15 +171,29 @@ def _phase_fetch(tickers: list[str]) -> int:
     return total_new
 
 
-def _phase_replay(tickers: list[str], weekend_dt: str) -> list[dict]:
-    """Phase 2: walk-forward replay on cached history → labeled signal records."""
+def _phase_replay_and_backtest(tickers: list[str], weekend_dt: str) -> list[dict]:
+    """
+    Phase 2: multi-timeframe walk-forward replay on all cached intervals.
+
+    For each ticker × each TF:
+      - Retrieve cached OHLCV bars from SQLite
+      - Run walk-forward replay with TF-specific parameters
+      - Accumulate labeled records for XGBoost retraining
+
+    Phase 3 (MTF backtest):
+      - Store per-TF trade records and performance stats in backtest_mtf.db
+      - This is the historical validation complement to live_backtest.py
+    """
     from agent.historical_cache import get_bars
-    from agent.walk_forward import replay_signals
+    from agent.multi_tf_backtest import (
+        TF_CONFIGS, TD_INTERVAL, run_ticker_mtf, store_results,
+    )
 
     _emit({"phase": "REPLAYING",
-           "phase_label": "Phase 2 — Walk-forward signal replay"})
+           "phase_label": "Phase 2 — Multi-TF walk-forward replay (1m/5m/15m/30m/1h)"})
 
-    all_records: list[dict] = []
+    all_records:  list[dict]                       = []
+    mtf_results:  dict[str, dict[str, list[dict]]] = {}
     n = len(tickers)
 
     for i, ticker in enumerate(tickers):
@@ -178,22 +201,41 @@ def _phase_replay(tickers: list[str], weekend_dt: str) -> list[dict]:
             break
 
         _emit({
-            "phase_label":   f"Phase 2 — Replaying {ticker} ({i+1}/{n})",
-            "tickers_done":  i,
+            "phase_label":  f"Phase 2 — {ticker} ({i+1}/{n}) all timeframes",
+            "tickers_done": i,
         })
 
-        df = get_bars(ticker, "5min", min_bars=100)
-        if df.empty:
-            continue
+        # Load all TFs for this ticker from cache
+        dfs_by_tf = {
+            tf: get_bars(ticker, td_iv, min_bars=60)
+            for tf, td_iv in TD_INTERVAL.items()
+        }
 
-        records = replay_signals(ticker, df)
-        if records:
-            all_records.extend(records)
-            _emit({"records_generated": len(all_records)})
+        # Run walk-forward on each TF
+        ticker_results = run_ticker_mtf(ticker, dfs_by_tf, weekend_dt)
+        mtf_results[ticker] = ticker_results
 
-    # Persist to SQLite for cumulative analytics
+        for tf_records in ticker_results.values():
+            all_records.extend(tf_records)
+
+        _emit({"records_generated": len(all_records)})
+
+    # Store walk-forward records to weekend_learning.db (legacy)
     _insert_records(all_records, weekend_dt)
-    logger.info(f"[WeekendLearner] Replay done — {len(all_records)} records from {n} tickers")
+
+    # Store MTF trade records + per-TF summary stats to backtest_mtf.db
+    _emit({"phase_label": "Phase 3 — Storing MTF backtest results to DB"})
+    store_results(mtf_results, weekend_dt)
+
+    total_per_tf = {
+        tf: sum(len(mtf_results[t].get(tf, [])) for t in tickers)
+        for tf in TF_CONFIGS
+    }
+    logger.info(
+        f"[WeekendLearner] MTF replay done — {len(all_records)} total records. "
+        f"Per-TF: { {tf: n for tf, n in total_per_tf.items()} }"
+    )
+    _emit({"mtf_per_tf": total_per_tf})
     return all_records
 
 
@@ -242,52 +284,74 @@ def _phase_retrain(tickers: list[str]) -> bool:
         return False
 
 
-def _phase_calibrate(records: list[dict]) -> bool:
-    """Phase 4: derive per-context win rates and update adaptive filter."""
+def _phase_calibrate(records: list[dict], weekend_dt: str) -> bool:
+    """
+    Phase 4: derive per-context win rates from both walk-forward records AND
+    the MTF backtest DB, then update the adaptive filter.
+    """
     from agent.walk_forward import compute_win_rate_by_context
+    from agent.multi_tf_backtest import compute_filter_calibration
     from agent.adaptive_filter import update_filter
 
     _emit({"phase": "CALIBRATING",
-           "phase_label": "Phase 4 — Calibrating adaptive filter from walk-forward outcomes"})
-
-    if not records:
-        logger.info("[WeekendLearner] No records — skipping calibration")
-        return False
-
-    # Overall win rate
-    total   = len(records)
-    wins    = sum(1 for r in records if r["won"])
-    overall_wr = wins / total if total else 0.0
-
-    # Context-level win rates
-    by_setup = compute_win_rate_by_context(records)
-
-    stats = {
-        "overall": {"win_rate": overall_wr, "count": total},
-        "by_setup": by_setup,
-    }
+           "phase_label": "Phase 4 — Calibrating adaptive filter (walk-forward + MTF backtest)"})
 
     discoveries = []
 
-    # Tag notable suppressions / boosts
-    for key, ctx in by_setup.items():
-        wr  = ctx["win_rate"]
-        cnt = ctx["count"]
+    # ── Walk-forward (5min primary) ──────────────────────────────────────────
+    wf_stats: dict = {}
+    if records:
+        total      = len(records)
+        wins       = sum(1 for r in records if r.get("won"))
+        overall_wr = wins / total if total else 0.0
+        by_setup   = compute_win_rate_by_context(records)
+        wf_stats   = {
+            "overall":  {"win_rate": overall_wr, "count": total},
+            "by_setup": by_setup,
+        }
+        for key, ctx in by_setup.items():
+            wr, cnt = ctx["win_rate"], ctx["count"]
+            if cnt < 10:
+                continue
+            if wr < 0.35:
+                discoveries.append({"label": f"Suppress: {key}",
+                                     "detail": f"{wr*100:.0f}% WR ({cnt} trades) — below threshold"})
+            elif wr >= 0.72:
+                discoveries.append({"label": f"Boost: {key}",
+                                     "detail": f"{wr*100:.0f}% WR ({cnt} trades) — confidence boost"})
+
+    # ── MTF backtest calibration ─────────────────────────────────────────────
+    mtf_calib = compute_filter_calibration(weekend_dt)
+    for key, ctx in mtf_calib.get("by_setup", {}).items():
+        wr, cnt = ctx["win_rate"], ctx["count"]
         if cnt < 10:
             continue
         if wr < 0.35:
-            discoveries.append({"label": f"Suppress: {key}", "detail": f"{wr*100:.0f}% win rate ({cnt} trades) — below threshold"})
+            discoveries.append({"label": f"MTF Suppress: {key}",
+                                 "detail": f"{wr*100:.0f}% WR ({cnt} trades across TFs)"})
         elif wr >= 0.72:
-            discoveries.append({"label": f"Boost: {key}",    "detail": f"{wr*100:.0f}% win rate ({cnt} trades) — confidence boost"})
+            discoveries.append({"label": f"MTF Boost: {key}",
+                                 "detail": f"{wr*100:.0f}% WR ({cnt} trades across TFs)"})
+
+    # Merge both stat sets into one update call
+    merged_by_setup = {**wf_stats.get("by_setup", {}), **mtf_calib.get("by_setup", {})}
+    merged_stats = {
+        "overall":  wf_stats.get("overall", mtf_calib.get("overall", {})),
+        "by_setup": merged_by_setup,
+    }
+
+    _emit({"discoveries": discoveries[:12]})
+
+    if not merged_stats.get("overall"):
+        logger.info("[WeekendLearner] No calibration data — skipping filter update")
+        return False
 
     try:
-        update_filter(stats, source="weekend_walk_forward")
+        update_filter(merged_stats, source="weekend_walk_forward")
         return True
     except Exception as exc:
         logger.error(f"[WeekendLearner] Filter calibration failed: {exc}")
         return False
-    finally:
-        _emit({"discoveries": discoveries[:10]})   # cap at 10 for the dashboard
 
 
 # ── Orchestrator thread ───────────────────────────────────────────────────────
@@ -319,19 +383,19 @@ def _run_learning(tickers: list[str]) -> None:
             return
         _emit({"cache_stats": cache_stats()})
 
-        # Phase 2 — walk-forward replay
-        records = _phase_replay(tickers, weekend_dt)
+        # Phase 2+3 — multi-TF walk-forward replay + MTF backtest storage
+        records = _phase_replay_and_backtest(tickers, weekend_dt)
         if _stop_flag.is_set():
             return
 
-        # Phase 3 — retrain with extended data
+        # Phase 4 — retrain with extended data
         retrained = _phase_retrain(tickers)
         _emit({"retrain_complete": retrained})
         if _stop_flag.is_set():
             return
 
-        # Phase 4 — calibrate adaptive filter
-        calibrated = _phase_calibrate(records)
+        # Phase 5 — calibrate adaptive filter from walk-forward + MTF data
+        calibrated = _phase_calibrate(records, weekend_dt)
         _emit({"filter_calibrated": calibrated})
 
         # Done

@@ -1403,6 +1403,15 @@ TRADING_MAX_POSITION_PCT=10
       </div>
     </div>
 
+    <!-- Multi-TF Backtest Results -->
+    <div style="background:var(--surface2);border-radius:8px;padding:14px 16px;border:1px solid var(--border);margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:11px;font-weight:700;color:var(--text)">📊 Multi-Timeframe Backtest — 1m / 5m / 15m / 30m / 1h</div>
+        <span style="font-size:10px;color:var(--muted)" id="mtf-run-dt"></span>
+      </div>
+      <div id="mtf-results" style="font-size:11px;color:var(--muted)">Run weekend learning to see per-timeframe results…</div>
+    </div>
+
     <!-- Historical weekend runs -->
     <div style="background:var(--surface2);border-radius:8px;padding:14px 16px;border:1px solid var(--border)">
       <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:10px">📅 Past Weekend Runs</div>
@@ -3730,18 +3739,65 @@ function _updateWlModal(s) {
   }
 }
 
+function _renderMtfResults(data) {
+  if (!data || !data.by_timeframe || !Object.keys(data.by_timeframe).length)
+    return '<span style="color:var(--muted)">No backtest data yet — run weekend learning first.</span>';
+
+  const tfOrder = ['1min','5min','15min','30min','1h'];
+  const rows = tfOrder.map(tf => {
+    const s = data.by_timeframe[tf];
+    if (!s) return '';
+    const wrCol  = s.win_rate >= 55 ? 'var(--green)' : s.win_rate >= 45 ? 'var(--yellow)' : 'var(--red)';
+    const expCol = s.expectancy > 0  ? 'var(--green)' : 'var(--red)';
+    const shpCol = s.sharpe > 0.5    ? 'var(--green)' : s.sharpe > 0 ? 'var(--yellow)' : 'var(--red)';
+    const edge   = s.win_rate >= 53 && s.expectancy > 0
+      ? '<span style="color:var(--green);font-size:9px;font-weight:700">✓ EDGE</span>'
+      : '<span style="color:var(--muted);font-size:9px">–</span>';
+    return `<tr style="border-top:1px solid var(--border)">
+      <td style="padding:6px 8px;font-weight:700;color:var(--text)">${tf}</td>
+      <td style="padding:6px 8px;color:var(--muted);font-size:10px">${s.label||''}</td>
+      <td style="padding:6px 8px;text-align:center">${s.total}</td>
+      <td style="padding:6px 8px;text-align:center;color:${wrCol};font-weight:700">${s.win_rate}%</td>
+      <td style="padding:6px 8px;text-align:center;color:${expCol}">${s.expectancy > 0 ? '+' : ''}${s.expectancy}</td>
+      <td style="padding:6px 8px;text-align:center;color:${shpCol}">${s.sharpe}</td>
+      <td style="padding:6px 8px;text-align:center;color:var(--red)">${s.max_dd_r}</td>
+      <td style="padding:6px 8px;text-align:center">${s.tickers}</td>
+      <td style="padding:6px 8px;text-align:center">${edge}</td>
+    </tr>`;
+  }).join('');
+
+  return `<table style="width:100%;border-collapse:collapse;font-size:11px">
+    <thead><tr style="color:var(--muted);font-size:10px">
+      <th style="text-align:left;padding:5px 8px">TF</th>
+      <th style="text-align:left;padding:5px 8px">Strategy</th>
+      <th style="padding:5px 8px">Trades</th>
+      <th style="padding:5px 8px">Win%</th>
+      <th style="padding:5px 8px">Expectancy R</th>
+      <th style="padding:5px 8px">Sharpe</th>
+      <th style="padding:5px 8px">Max DD R</th>
+      <th style="padding:5px 8px">Tickers</th>
+      <th style="padding:5px 8px">Edge</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 async function openWeekendLearning() {
   document.getElementById('wl-modal').style.display = 'flex';
   try {
-    const [status, history, cache] = await Promise.all([
+    const [status, history, cache, mtf] = await Promise.all([
       fetch(`${BACKEND_HTTP}/api/weekend-learning/status`).then(r => r.json()),
       fetch(`${BACKEND_HTTP}/api/weekend-learning/history`).then(r => r.json()),
       fetch(`${BACKEND_HTTP}/api/weekend-learning/cache-stats`).then(r => r.json()),
+      fetch(`${BACKEND_HTTP}/api/backtest/mtf`).then(r => r.json()).catch(() => null),
     ]);
     status.cache_stats = cache;
     _updateWlModal(status);
     const histEl = document.getElementById('wl-history');
     if (histEl) histEl.innerHTML = _renderWlHistory(history);
+    // MTF results
+    const mtfEl = document.getElementById('mtf-results');
+    const mtfDt = document.getElementById('mtf-run-dt');
+    if (mtfEl) mtfEl.innerHTML = _renderMtfResults(mtf);
+    if (mtfDt && mtf?.run_dt) mtfDt.textContent = `Run: ${mtf.run_dt}`;
   } catch(e) {
     console.warn('Weekend learning status fetch failed', e);
   }
