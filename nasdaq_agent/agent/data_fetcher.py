@@ -312,7 +312,13 @@ def _sqlite_get(ticker: str, interval: str, ttl: float) -> "pd.DataFrame | None"
         if (pd.Timestamp.now() - newest).total_seconds() > ttl * _SQLITE_TTL_MULT:
             return None
         df = get_bars(ticker, interval, min_bars=50)
-        return df if not df.empty else None
+        if df is None or df.empty:
+            return None
+        # get_bars() returns lowercase columns; rename to match _parse_values()
+        # title-case convention so all consumers see a consistent schema.
+        df = df.rename(columns={"open": "Open", "high": "High",
+                                 "low": "Low", "close": "Close", "volume": "Volume"})
+        return df
     except Exception:
         return None
 

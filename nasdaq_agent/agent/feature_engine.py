@@ -176,6 +176,11 @@ def compute_features(df: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
         return df
 
     df = df.copy()
+    # Normalise to Title-case so callers can pass either API (Title) or
+    # SQLite / walk-forward (lowercase) DataFrames without KeyErrors.
+    if "close" in df.columns:
+        df = df.rename(columns={"open": "Open", "high": "High",
+                                  "low": "Low", "close": "Close", "volume": "Volume"})
     close = df["Close"]
     high  = df["High"]
     low   = df["Low"]
