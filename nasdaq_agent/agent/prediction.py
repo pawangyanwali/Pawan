@@ -931,7 +931,9 @@ def generate_prediction(
     if ensemble_agreement > 0.0:
         try:
             from agent.ensemble_model import ensemble_confidence_multiplier
-            _agree_mult = ensemble_confidence_multiplier(1.0 - ensemble_agreement)
+            # Scale disagreement fraction [0,1] → prob_std range [0, 0.5]
+            # so that 100% agreement→0 (no penalty) and 36% agreement→0.18 (max penalty)
+            _agree_mult = ensemble_confidence_multiplier((1.0 - ensemble_agreement) * 0.5)
             if _agree_mult < 1.0:
                 confidence = round(float(np.clip(confidence * _agree_mult, 25.0, 95.0)), 1)
         except Exception:
@@ -970,10 +972,10 @@ def generate_prediction(
 
     # R:R quality reason — always shown so trader knows if setup is worth taking
     if rr_qualifies:
-        rr_reason = f"R:R {rr_ratio:.1f}:1 ({rr_quality}) — risk/reward qualifies ≥ 2:1 threshold"
+        rr_reason = f"R:R {rr_ratio:.1f}:1 ({rr_quality}) — risk/reward qualifies ≥ {_MIN_RR}:1 threshold"
     else:
         rr_reason = (
-            f"R:R {rr_ratio:.1f}:1 — below 2:1 minimum. "
+            f"R:R {rr_ratio:.1f}:1 — below {_MIN_RR}:1 minimum. "
             f"Target ${target:.2f} too close or stop ${stop_loss:.2f} too wide. "
             "Consider skipping or waiting for better entry."
         )

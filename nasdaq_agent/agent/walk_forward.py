@@ -136,7 +136,7 @@ def replay_signals(
             continue
 
         # ── Entry levels ─────────────────────────────────────────────────────
-        entry = float(row.get("close", 0.0))
+        entry = float(row.get("Close", 0.0))
         if entry <= 0:
             continue
 
@@ -154,8 +154,8 @@ def replay_signals(
         exit_price = entry
 
         for j, (_, frow) in enumerate(future_rows.iterrows(), start=1):
-            hi = float(frow.get("high", entry))
-            lo = float(frow.get("low",  entry))
+            hi = float(frow.get("High", entry))
+            lo = float(frow.get("Low",  entry))
             if direction == "BUY":
                 if hi >= target:
                     outcome   = "HIT_TARGET"

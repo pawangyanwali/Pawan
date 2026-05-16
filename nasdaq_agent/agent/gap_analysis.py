@@ -89,30 +89,37 @@ def analyse_gap(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
             return result
 
         prior_close = float(df_1d["Close"].iloc[-2])
-        today_open  = float(df_1m["Open"].iloc[0])
         current     = float(df_1m["Close"].iloc[-1])
 
         if prior_close <= 0:
             return result
 
-        gap_pct = (today_open - prior_close) / prior_close * 100
-
-        # Pre-market high/low from first bars before market open
-        # (1M bars timestamped before 09:30 ET)
-        pm_bars = df_1m.copy()
+        # Classify pre-market bars (before 09:30 ET) and regular-session bars
+        pm_bars = pd.DataFrame()
+        mkt_bars = df_1m.copy()
         try:
             import pytz
             et = pytz.timezone("America/New_York")
-            idx_et = df_1m.index.tz_convert(et) if df_1m.index.tzinfo else df_1m.index
-            pm_mask = pd.Series(idx_et, index=df_1m.index).apply(
-                lambda t: t.hour < 9 or (t.hour == 9 and t.minute < 30)
+            # Always localize tz-naive index to UTC first, then convert to ET
+            idx = df_1m.index
+            if idx.tzinfo is None:
+                idx = idx.tz_localize("UTC")
+            idx_et = idx.tz_convert(et)
+            pm_mask = pd.Series(
+                [(t.hour < 9 or (t.hour == 9 and t.minute < 30)) for t in idx_et],
+                index=df_1m.index,
             )
-            pm_bars = df_1m[pm_mask.values]
+            pm_bars  = df_1m[pm_mask.values]
+            mkt_bars = df_1m[~pm_mask.values]
         except Exception:
-            pm_bars = pd.DataFrame()
+            pass
 
-        pm_high = float(pm_bars["High"].max())  if not pm_bars.empty else 0.0
-        pm_low  = float(pm_bars["Low"].min())   if not pm_bars.empty else 0.0
+        # today_open is the first regular-session bar (09:30 ET), not a pre-market bar
+        today_open = float(mkt_bars["Open"].iloc[0]) if not mkt_bars.empty else float(df_1m["Open"].iloc[0])
+        gap_pct = (today_open - prior_close) / prior_close * 100
+
+        pm_high = float(pm_bars["High"].max()) if not pm_bars.empty else 0.0
+        pm_low  = float(pm_bars["Low"].min())  if not pm_bars.empty else 0.0
         result["premarket_high"] = round(pm_high, 4)
         result["premarket_low"]  = round(pm_low,  4)
 

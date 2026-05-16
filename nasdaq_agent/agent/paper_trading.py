@@ -371,8 +371,8 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                         )
                         new_partial_pnl = partial_pnl + t1_pnl
                         new_shares_rem  = shares_rem - partial_shares
-                        # Breakeven stop: entry ± $0.02 (PRD 6.3 — always auto)
-                        be_stop = round(entry - 0.02, 4) if direction == "BUY" else round(entry + 0.02, 4)
+                        # Breakeven stop: above entry for BUY, below for SELL (locks in ~breakeven)
+                        be_stop = round(entry + 0.02, 4) if direction == "BUY" else round(entry - 0.02, 4)
                         c.execute("""
                             UPDATE paper_trades
                             SET t1_hit=1, breakeven_set=1, stop=?,

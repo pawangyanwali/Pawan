@@ -85,8 +85,9 @@ def _scan_interval() -> int:
       14:30–16:00 ET  (closing power hour)         → 30s
       everything else                              → 60s
     """
-    from datetime import datetime, timezone, timedelta
-    now_et = datetime.now(timezone.utc) - timedelta(hours=4)  # UTC-4 for EDT
+    from datetime import datetime
+    import zoneinfo
+    now_et = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
     h, m = now_et.hour, now_et.minute
     minutes = h * 60 + m
     OPEN_RANGE_END  = 9 * 60 + 30 + 90   # 11:00 ET
@@ -1109,7 +1110,7 @@ class Scanner:
             df_qqq=etf_1m.get("QQQ"),
         )
 
-        active_tickers = get_active_tickers()
+        # (active_tickers already priority-ordered above — do NOT reload here)
 
         # Parallel scan — ThreadPoolExecutor runs analyse_ticker() concurrently
         # across all tickers. 8× faster than the old sequential for-loop.
@@ -1174,12 +1175,17 @@ class Scanner:
         maybe_trigger_feedback_retrain(active_tickers)
 
         if self._should_retrain():
-            logger.info("Scheduled ML retrain starting…")
-            daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
-            retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
+            logger.info("Scheduled ML retrain launching in background…")
             self._last_retrain       = time.time()
             self._last_deep_finetune = time.time()   # full retrain counts as fine-tune too
-            logger.info("Scheduled ML retrain complete.")
+            def _bg_retrain():
+                try:
+                    daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
+                    retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
+                    logger.info("Scheduled ML retrain complete.")
+                except Exception as _re:
+                    logger.warning(f"Background ML retrain failed: {_re}")
+            threading.Thread(target=_bg_retrain, daemon=True, name="ml-retrain").start()
 
         elif self._should_finetune_deep():
             # Hourly Deep BiLSTM fine-tune — uses cached 15-min data, no API calls.

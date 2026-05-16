@@ -225,8 +225,15 @@ def resolve_pending(ticker: str, current_price: float) -> None:
                         outcome = "LOSS"
 
                 if outcome:
-                    entry  = row["entry_price"] or 1.0
-                    pnl    = (exit_p - entry) / entry * 100
+                    entry = float(row["entry_price"] or 0)
+                    if entry <= 0:
+                        continue  # skip — bogus entry_price would produce absurd P&L
+                    # Use the actual target/stop fill price, not current_price (which may overshoot)
+                    if outcome == "WIN":
+                        exit_p = float(row["target"])
+                    else:
+                        exit_p = float(row["stop"])
+                    pnl = (exit_p - entry) / entry * 100
                     if d in ("SELL", "STRONG SELL"):
                         pnl = -pnl
                     c.execute("""

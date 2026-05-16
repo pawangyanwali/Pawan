@@ -118,25 +118,21 @@ def _fetch_with_end_date(batch: list[str], interval: str, outputsize: int,
                          end_date: str) -> dict[str, pd.DataFrame]:
     """
     GET /time_series with end_date to fetch an older window of bars.
-    Uses the same endpoint/params as data_fetcher.fetch_batch_interval()
-    but adds the end_date parameter that the standard fetcher doesn't expose.
+    Routes through data_fetcher._get() so the rate limiter is respected.
     """
-    params: dict = {
-        "symbol":     ",".join(batch),
-        "interval":   interval,
-        "outputsize": outputsize,
-        "end_date":   end_date,
-        "order":      "ASC",
-        "apikey":     TWELVE_DATA_API_KEY,
-    }
     try:
-        resp = requests.get(
-            f"{_BASE_URL}/time_series",
-            params=params,
-            timeout=45,
+        from agent.data_fetcher import _get
+        data = _get(
+            "/time_series",
+            {
+                "symbol":     ",".join(batch),
+                "interval":   interval,
+                "outputsize": outputsize,
+                "end_date":   end_date,
+                "order":      "ASC",
+            },
+            n_credits=len(batch),
         )
-        resp.raise_for_status()
-        data = resp.json()
     except Exception as exc:
         logger.warning(f"[HistCache] older-window fetch error (end_date={end_date}): {exc}")
         return {}
@@ -186,7 +182,6 @@ def fetch_and_store(
     from agent.data_fetcher import fetch_batch_interval
 
     inserted: dict[str, int] = {}
-    conn     = _get_conn()
     label    = f"ending {end_date}" if end_date else "latest"
     n_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
 
@@ -199,11 +194,15 @@ def fetch_and_store(
             broadcast_fn({"phase": "FETCHING",
                           "detail": f"{interval} {label}"})
         fetched_all = fetch_batch_interval(tickers, interval, outputsize, ttl=3600)
-        for ticker, df in fetched_all.items():
-            n = _upsert_bars(conn, ticker, interval, df)
-            inserted[ticker] = n
+        conn = _get_conn()
+        try:
+            for ticker, df in fetched_all.items():
+                n = _upsert_bars(conn, ticker, interval, df)
+                inserted[ticker] = n
+        finally:
+            conn.close()
     else:
-        # ── Older window: direct GET with end_date, batched manually ───────────
+        # ── Older window: batched, rate-limited via data_fetcher._get() ─────────
         for i in range(0, len(tickers), BATCH_SIZE):
             batch     = tickers[i : i + BATCH_SIZE]
             batch_num = i // BATCH_SIZE + 1
@@ -216,14 +215,14 @@ def fetch_and_store(
                               "detail": f"{interval} {label} — batch {batch_num}/{n_batches}"})
 
             fetched = _fetch_with_end_date(batch, interval, outputsize, end_date)
-            for ticker, df in fetched.items():
-                n = _upsert_bars(conn, ticker, interval, df)
-                inserted[ticker] = inserted.get(ticker, 0) + n
+            conn = _get_conn()
+            try:
+                for ticker, df in fetched.items():
+                    n = _upsert_bars(conn, ticker, interval, df)
+                    inserted[ticker] = inserted.get(ticker, 0) + n
+            finally:
+                conn.close()
 
-            if i + BATCH_SIZE < len(tickers):
-                time.sleep(max(CALL_GAP, 2.0))   # respect rate limit
-
-    conn.close()
     total_new = sum(inserted.values())
     logger.info(f"[HistCache] {interval} {label} done — {total_new} new bars stored")
     return inserted

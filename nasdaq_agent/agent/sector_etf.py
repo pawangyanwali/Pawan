@@ -42,8 +42,8 @@ SECTOR_MAP: dict[str, str] = {
     "LRCX": "SMH", "MRVL": "SMH", "ADI": "SMH", "SNPS": "SMH",
     "CDNS": "SMH", "SMCI": "SMH", "ARM": "SMH",
     # Internet / Communication
-    "GOOGL": "XLC", "META": "XLC", "NFLX": "XLC", "AMZN": "XLC",
-    "HOOD": "XLC", "TTD": "XLC",
+    "GOOGL": "XLC", "META": "XLC", "NFLX": "XLC",
+    "TTD": "XLC",
     # Consumer Discretionary
     "TSLA": "XLY", "AMZN": "XLY", "BKNG": "XLY", "ABNB": "XLY",
     "SBUX": "XLY", "MELI": "XLY",
@@ -137,12 +137,12 @@ def analyse_sector_context(
         rs = 1.0
     ctx.stock_rs = round(rs, 3)
 
-    if rs >= 1.3:
+    if rs < 0.0:
+        vs = "COUNTER"
+    elif rs >= 1.3:
         vs = "LEADING"
     elif rs <= 0.7:
         vs = "LAGGING"
-    elif rs < 0.0:
-        vs = "COUNTER"
     else:
         vs = "IN_LINE"
     ctx.stock_vs_sector = vs

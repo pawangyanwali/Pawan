@@ -54,8 +54,8 @@ def _reset_if_new_day() -> None:
     global _circuit_open, _circuit_reason, _circuit_date, _circuit_pnl_based
     global _warning_issued, _cooldown_until, _consecutive_losses, _peak_daily_pnl
     today = date.today()
-    if _circuit_date != today:
-        with _lock:
+    with _lock:
+        if _circuit_date != today:
             _circuit_open        = False
             _circuit_reason      = ""
             _circuit_date        = today
@@ -90,7 +90,7 @@ _SECTOR_MAP: dict[str, str] = {
     "BKNG":"CONSUMER","ABNB":"CONSUMER","MNST":"CONSUMER","ROST":"CONSUMER",
     "LYFT":"TRAVEL","UBER":"TRAVEL","EXPE":"TRAVEL",
     "SNAP":"MEDIA","PINS":"MEDIA","RBLX":"MEDIA","TTD":"MEDIA","ZM":"MEDIA",
-    "ROKU":"MEDIA","NFLX":"MEDIA",
+    "ROKU":"MEDIA",
     "ADP":"PAYROLL","PAYX":"PAYROLL","AXON":"DEFENSE","CEG":"ENERGY",
     "SMCI":"SERVERS","MELI":"LATAM","APP":"ADTECH","CVNA":"AUTO",
     "BIDU":"CHINA_TECH","LI":"CHINA_TECH","JD":"CHINA_TECH","PDD":"CHINA_TECH",
@@ -198,10 +198,11 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
         # Track peak daily P&L for Profit Protect Mode drawdown check
         _peak_daily_pnl = max(_peak_daily_pnl, pnl_dollar)
 
-        # ── Tier 3: 2.5% loss → HALT for the day ────────────────────────────
-        if pnl_pct <= -DAILY_LOSS_HALT_PCT:
+        # ── Tier 3: 2.5% account loss → HALT for the day ────────────────────
+        acct_loss_pct = (pnl_dollar / DEFAULT_ACCOUNT_SIZE * 100) if DEFAULT_ACCOUNT_SIZE > 0 else 0.0
+        if acct_loss_pct <= -DAILY_LOSS_HALT_PCT:
             reason = (
-                f"🛑 Daily loss halt: {pnl_pct:+.2f}% loss today "
+                f"🛑 Daily loss halt: {acct_loss_pct:+.2f}% account loss today "
                 f"(limit -{DAILY_LOSS_HALT_PCT}%). Trading halted until tomorrow."
             )
             _circuit_open      = True
@@ -239,11 +240,11 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
                 logger.warning(f"[RiskControls] {reason}")
                 return True, reason
 
-        # ── Tier 1: 1.5% warning — NOT a halt, just log once ────────────────
-        if pnl_pct <= -DAILY_LOSS_WARNING_PCT and not _warning_issued:
+        # ── Tier 1: 1.5% account loss warning — NOT a halt, just log once ────
+        if acct_loss_pct <= -DAILY_LOSS_WARNING_PCT and not _warning_issued:
             _warning_issued = True
             logger.warning(
-                f"[RiskControls] ⚠ Daily loss warning: {pnl_pct:+.2f}% "
+                f"[RiskControls] ⚠ Daily loss warning: {acct_loss_pct:+.2f}% "
                 f"(warning at -{DAILY_LOSS_WARNING_PCT}%). Review open positions."
             )
 
@@ -472,7 +473,7 @@ def get_risk_status() -> dict:
         "pnl_today_pct":          round(pnl_pct, 3),
         "daily_target":           DAILY_PROFIT_TARGET_USD,
         "daily_max":              DAILY_PROFIT_MAX_USD,
-        "progress_to_target_pct": round(min(pnl_dollar / DAILY_PROFIT_TARGET_USD * 100, 100), 1) if pnl_dollar > 0 else 0.0,
+        "progress_to_target_pct": round(min(pnl_dollar / DAILY_PROFIT_TARGET_USD * 100, 100), 1) if (pnl_dollar > 0 and DAILY_PROFIT_TARGET_USD > 0) else 0.0,
         # Loss limits
         "daily_loss_warning_pct": DAILY_LOSS_WARNING_PCT,
         "daily_loss_halt_pct":    DAILY_LOSS_HALT_PCT,

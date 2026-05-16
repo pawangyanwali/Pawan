@@ -85,12 +85,12 @@ def compute_relative_strength(df_stock: pd.DataFrame, df_spy: pd.DataFrame) -> d
         rs_ratio = stock_ret / spy_ret
         rs_score = _rs_to_score(rs_ratio)
 
-        if rs_ratio >= 1.2:
+        if rs_ratio < 0.0:
+            label = "COUNTER"
+        elif rs_ratio >= 1.2:
             label = "LEADING"
         elif rs_ratio <= 0.8:
             label = "LAGGING"
-        elif rs_ratio < 0.0:
-            label = "COUNTER"
         else:
             label = "IN_LINE"
 

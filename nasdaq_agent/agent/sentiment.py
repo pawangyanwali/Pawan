@@ -1,4 +1,5 @@
 import logging
+import re
 from textblob import TextBlob
 from agent.data_fetcher import fetch_news
 
@@ -25,8 +26,7 @@ def _score_text(text: str) -> float:
     blob = TextBlob(text)
     polarity = blob.sentiment.polarity   # base TextBlob score
 
-    lower = text.lower().split()
-    word_set = set(lower)
+    word_set = set(re.findall(r'\b\w+\b', text.lower()))
     bull_hits = len(word_set & BULLISH_KEYWORDS)
     bear_hits = len(word_set & BEARISH_KEYWORDS)
     keyword_boost = (bull_hits - bear_hits) * 0.15

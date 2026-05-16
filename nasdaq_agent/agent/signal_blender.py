@@ -110,12 +110,15 @@ class DynamicBlender:
             ts=time.time(),
         )
 
+        do_save = False
         with self._lock:
             self._history[model].append(outcome)
             self._unsaved_count += 1
             if self._unsaved_count >= SAVE_EVERY:
-                self._save()
+                do_save = True
                 self._unsaved_count = 0
+        if do_save:
+            self._save()
 
         logger.debug(
             "Recorded outcome for %s/%s: correct=%s (queue len=%d)",

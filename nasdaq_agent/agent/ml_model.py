@@ -103,8 +103,9 @@ def get_retrain_progress() -> dict:
 
 
 def _rp_set(**kwargs):
-    """Update _retrain_progress fields atomically (main-thread safe)."""
-    _retrain_progress.update(kwargs)
+    """Update _retrain_progress fields under lock (called from retrain thread)."""
+    with _progress_lock:
+        _retrain_progress.update(kwargs)
 
 
 def _rp_append_completed(entry: dict) -> None:
@@ -418,7 +419,7 @@ def _train_one_ticker(
 
     # ── Scalp model ───────────────────────────────────────────────────────
     try:
-        m = _model_registry.get(t, StockMLModel(t))
+        m = _model_registry[t] if t in _model_registry else StockMLModel(t)
         if m.train_from_df(df5m, _prepared=prepared_5m):
             ticker_models_ok.append("scalp")
         _model_registry[t] = m

@@ -71,8 +71,8 @@ _backoff_lock:  threading.Lock  = threading.Lock()
 
 def _wait_backoff() -> None:
     """Block until any active global 429 backoff period expires."""
-    global _backoff_until
-    remaining = _backoff_until - time.time()
+    with _backoff_lock:
+        remaining = _backoff_until - time.time()
     if remaining > 0:
         time.sleep(remaining)
 
@@ -207,7 +207,7 @@ def _get(endpoint: str, params: dict, n_credits: int = 1, _retry: int = 3) -> di
                 )
                 _set_backoff(65.0)
                 _wait_backoff()
-                return _get(endpoint, params, n_credits=0, _retry=_retry - 1)
+                return _get(endpoint, params, n_credits=n_credits, _retry=_retry - 1)
             return {}
         return data
     except Exception as e:

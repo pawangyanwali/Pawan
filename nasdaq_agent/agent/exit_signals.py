@@ -114,12 +114,12 @@ def analyse_exits(
     # 3. RSI Reversal ──────────────────────────────────────────────────────────
     rsi = float(last.get("rsi_14", 50))
     rsi_prev = float(prev.get("rsi_14", 50))
-    if is_buy and rsi > _RSI_OB and rsi_prev <= _RSI_OB:
+    if is_buy and rsi < _RSI_OB and rsi_prev >= _RSI_OB:
         signals.append(ExitSignal("RSI_REVERSAL", "HIGH",
-            f"RSI re-entered overbought ({rsi:.0f}) — consider scaling out", "SCALE_OUT"))
-    elif not is_buy and rsi < _RSI_OS and rsi_prev >= _RSI_OS:
+            f"RSI exited overbought ({rsi:.0f}) — momentum reversal, scale out", "SCALE_OUT"))
+    elif not is_buy and rsi > _RSI_OS and rsi_prev <= _RSI_OS:
         signals.append(ExitSignal("RSI_REVERSAL", "HIGH",
-            f"RSI re-entered oversold ({rsi:.0f}) — consider scaling out", "SCALE_OUT"))
+            f"RSI exited oversold ({rsi:.0f}) — momentum reversal, scale out", "SCALE_OUT"))
 
     # 4. Volume dry-up ─────────────────────────────────────────────────────────
     if len(df) >= _VOL_DRY_BARS + 1:
