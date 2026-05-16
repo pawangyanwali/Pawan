@@ -36,12 +36,13 @@ import requests
 
 from config import TWELVE_DATA_API_KEY, CALL_GAP, BATCH_SIZE
 
+_BASE_URL = "https://api.twelvedata.com"
+
 logger = logging.getLogger(__name__)
 
-_DB_PATH   = Path(__file__).parent.parent / "data" / "ohlcv_cache.db"
+_DB_PATH = Path(__file__).parent.parent / "data" / "ohlcv_cache.db"
 _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-_BASE_URL  = "https://api.twelvedata.com"
-_lock      = threading.Lock()
+_lock    = threading.Lock()
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
@@ -94,46 +95,72 @@ def _upsert_bars(conn: sqlite3.Connection, ticker: str, interval: str, df: pd.Da
         return cur.rowcount
 
 
-def _batch_fetch(batch: list[str], interval: str, outputsize: int,
-                 end_date: str | None = None) -> dict[str, pd.DataFrame]:
-    """Make one Twelve Data batch request; return {ticker: DataFrame}."""
-    payload: dict = {
+def _parse_td_values(values: list) -> pd.DataFrame:
+    """Convert a Twelve Data 'values' list → OHLCV DataFrame (oldest first)."""
+    if not values:
+        return pd.DataFrame()
+    try:
+        df = pd.DataFrame({
+            "open":   [float(v["open"])          for v in values],
+            "high":   [float(v["high"])          for v in values],
+            "low":    [float(v["low"])           for v in values],
+            "close":  [float(v["close"])         for v in values],
+            "volume": [float(v.get("volume", 0)) for v in values],
+        }, index=pd.to_datetime([v["datetime"] for v in values]))
+        df.index.name = "datetime"
+        return df.sort_index()
+    except Exception as exc:
+        logger.debug(f"[HistCache] parse error: {exc}")
+        return pd.DataFrame()
+
+
+def _fetch_with_end_date(batch: list[str], interval: str, outputsize: int,
+                         end_date: str) -> dict[str, pd.DataFrame]:
+    """
+    GET /time_series with end_date to fetch an older window of bars.
+    Uses the same endpoint/params as data_fetcher.fetch_batch_interval()
+    but adds the end_date parameter that the standard fetcher doesn't expose.
+    """
+    params: dict = {
+        "symbol":     ",".join(batch),
         "interval":   interval,
         "outputsize": outputsize,
-        "symbols":    ",".join(batch),
-        "apikey":     TWELVE_DATA_API_KEY,
+        "end_date":   end_date,
         "order":      "ASC",
+        "apikey":     TWELVE_DATA_API_KEY,
     }
-    if end_date:
-        payload["end_date"] = end_date
-
     try:
-        resp = requests.post(
-            f"{_BASE_URL}/time_series/batch",
-            json=payload,
+        resp = requests.get(
+            f"{_BASE_URL}/time_series",
+            params=params,
             timeout=45,
         )
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        logger.warning(f"[HistCache] batch fetch error: {exc}")
+        logger.warning(f"[HistCache] older-window fetch error (end_date={end_date}): {exc}")
         return {}
 
     result: dict[str, pd.DataFrame] = {}
-    for sym, val in data.items():
-        if not isinstance(val, dict) or "values" not in val:
+
+    # Single-ticker response has "values" at the top level
+    if "values" in data:
+        if data.get("status") != "error" and len(batch) == 1:
+            df = _parse_td_values(data["values"])
+            if not df.empty:
+                result[batch[0]] = df
+        return result
+
+    # Multi-ticker response is keyed by symbol
+    for ticker in batch:
+        td = data.get(ticker, {})
+        if not isinstance(td, dict) or td.get("status") == "error":
+            logger.debug(f"[HistCache] {ticker} not in older-window response: {td.get('message','')}")
             continue
-        rows = val["values"]
-        if not rows:
-            continue
-        df = pd.DataFrame(rows)
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        df = df.set_index("datetime").sort_index()
-        for col in ("open", "high", "low", "close", "volume"):
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.index.name = "datetime"
-        result[sym] = df
+        df = _parse_td_values(td.get("values", []))
+        if not df.empty:
+            result[ticker] = df
+
     return result
 
 
@@ -149,34 +176,53 @@ def fetch_and_store(
     """
     Fetch bars from Twelve Data and persist to SQLite.
     Returns {ticker: new_bars_inserted}.
+
+    When end_date is None: delegates to fetch_batch_interval() from
+    data_fetcher — uses the proven rate-limited path (GET /time_series).
+
+    When end_date is set: uses _fetch_with_end_date() which makes the same
+    GET /time_series call but with an end_date param to pull an older window.
     """
+    from agent.data_fetcher import fetch_batch_interval
+
     inserted: dict[str, int] = {}
-    conn = _get_conn()
+    conn     = _get_conn()
+    label    = f"ending {end_date}" if end_date else "latest"
     n_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    for i in range(0, len(tickers), BATCH_SIZE):
-        batch      = tickers[i : i + BATCH_SIZE]
-        batch_num  = i // BATCH_SIZE + 1
-        label      = f"ending {end_date}" if end_date else "latest"
-        logger.info(f"[HistCache] {interval} {label} batch {batch_num}/{n_batches}: {batch}")
-
+    if end_date is None:
+        # ── Current window: delegate entirely to the proven data_fetcher path ──
         if broadcast_fn:
-            broadcast_fn({
-                "phase": "FETCHING",
-                "detail": f"{interval} {label} — batch {batch_num}/{n_batches}",
-            })
-
-        fetched = _batch_fetch(batch, interval, outputsize, end_date)
-        for ticker, df in fetched.items():
+            broadcast_fn({"phase": "FETCHING",
+                          "detail": f"{interval} {label}"})
+        fetched_all = fetch_batch_interval(tickers, interval, outputsize, ttl=0)
+        for ticker, df in fetched_all.items():
             n = _upsert_bars(conn, ticker, interval, df)
-            inserted[ticker] = inserted.get(ticker, 0) + n
+            inserted[ticker] = n
+    else:
+        # ── Older window: direct GET with end_date, batched manually ───────────
+        for i in range(0, len(tickers), BATCH_SIZE):
+            batch     = tickers[i : i + BATCH_SIZE]
+            batch_num = i // BATCH_SIZE + 1
+            logger.info(
+                f"[HistCache] {interval} {label} batch {batch_num}/{n_batches}: "
+                f"{len(batch)} symbols"
+            )
+            if broadcast_fn:
+                broadcast_fn({"phase": "FETCHING",
+                              "detail": f"{interval} {label} — batch {batch_num}/{n_batches}"})
 
-        if i + BATCH_SIZE < len(tickers):
-            time.sleep(max(CALL_GAP, 1.5))   # respect rate limit
+            fetched = _fetch_with_end_date(batch, interval, outputsize, end_date)
+            for ticker, df in fetched.items():
+                n = _upsert_bars(conn, ticker, interval, df)
+                inserted[ticker] = inserted.get(ticker, 0) + n
+
+            if i + BATCH_SIZE < len(tickers):
+                time.sleep(max(CALL_GAP, 2.0))   # respect rate limit
 
     conn.close()
     total_new = sum(inserted.values())
-    logger.info(f"[HistCache] {interval} fetch done — {total_new} new bars stored")
+    logger.info(f"[HistCache] {interval} {label} done — {total_new} new bars stored")
     return inserted
 
 
