@@ -1,7 +1,7 @@
 """
 Market session awareness — session windows for Alpha Strike Trader.
 
-Session schedule (all times ET):
+Session schedule (all times ET, weekdays only):
   PRE_MARKET      04:00 – 09:29   Data collection only, no live trades
   RESTRICTED      09:30 – 09:44   First 15 min — price discovery, reduced size (60%)
   PRIME           09:45 – 11:29   Best setups, full position sizing
@@ -11,12 +11,51 @@ Session schedule (all times ET):
   HARD_CLOSE      15:45 – 16:00   Close ALL open positions at market, no new entries
   AFTER_HOURS     16:00 – 20:00   No new trades, data collection only
   CLOSED          20:00 – 04:00   Market closed
+
+Weekends and NYSE/NASDAQ market holidays always return CLOSED.
+Half-trading days (Black Friday, Christmas Eve, July 3 when applicable)
+close early at 1:00 PM ET — HARD_CLOSE starts at 12:45 PM.
 """
 from __future__ import annotations
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 import pytz
 
 ET = pytz.timezone("America/New_York")
+
+# ── US Market Holidays (NYSE / NASDAQ) 2025–2026 ────────────────────────────
+_MARKET_HOLIDAYS: frozenset[date] = frozenset({
+    # 2025
+    date(2025,  1,  1),   # New Year's Day
+    date(2025,  1, 20),   # Martin Luther King Jr. Day
+    date(2025,  2, 17),   # Presidents' Day
+    date(2025,  4, 18),   # Good Friday
+    date(2025,  5, 26),   # Memorial Day
+    date(2025,  6, 19),   # Juneteenth National Independence Day
+    date(2025,  7,  4),   # Independence Day
+    date(2025,  9,  1),   # Labor Day
+    date(2025, 11, 27),   # Thanksgiving Day
+    date(2025, 12, 25),   # Christmas Day
+    # 2026
+    date(2026,  1,  1),   # New Year's Day
+    date(2026,  1, 19),   # Martin Luther King Jr. Day
+    date(2026,  2, 16),   # Presidents' Day
+    date(2026,  4,  3),   # Good Friday
+    date(2026,  5, 25),   # Memorial Day
+    date(2026,  6, 19),   # Juneteenth National Independence Day
+    date(2026,  7,  3),   # Independence Day (observed; Jul 4 falls on Saturday)
+    date(2026,  9,  7),   # Labor Day
+    date(2026, 11, 26),   # Thanksgiving Day
+    date(2026, 12, 25),   # Christmas Day
+})
+
+# ── Half-trading days — market closes at 1:00 PM ET ─────────────────────────
+_HALF_DAYS: frozenset[date] = frozenset({
+    date(2025,  7,  3),   # Day before Independence Day (Jul 4 is Friday)
+    date(2025, 11, 28),   # Day after Thanksgiving (Black Friday)
+    date(2025, 12, 24),   # Christmas Eve
+    date(2026, 11, 27),   # Day after Thanksgiving (Black Friday)
+    date(2026, 12, 24),   # Christmas Eve
+})
 
 # Session metadata: label, hex colour, tradeable, confidence multiplier, size_mult
 _SESSIONS: dict[str, dict] = {
@@ -63,14 +102,38 @@ _SESSIONS: dict[str, dict] = {
     "CLOSED": {
         "label": "Market Closed", "color": "#334155", "tradeable": False,
         "mult": 0.00, "size_mult": 0.0,
-        "advice": "Market closed. Pre-market scan starts at 4:30 AM ET.",
+        "advice": "Market closed. Pre-market scan starts at 4:00 AM ET.",
     },
 }
 
 
+def _is_holiday(d: date) -> bool:
+    return d in _MARKET_HOLIDAYS
+
+
+def _is_half_day(d: date) -> bool:
+    return d in _HALF_DAYS
+
+
 def get_session() -> str:
-    """Return current session key based on ET time."""
-    t = datetime.now(ET).time()
+    """Return current session key based on ET time, weekday, and market calendar."""
+    now   = datetime.now(ET)
+    today = now.date()
+
+    # Weekends (Sat=5, Sun=6) and market holidays → always CLOSED
+    if now.weekday() >= 5 or _is_holiday(today):
+        return "CLOSED"
+
+    t = now.time()
+
+    # Half-day early-close (market closes at 1:00 PM ET)
+    if _is_half_day(today):
+        if t >= time(13, 0):
+            return "CLOSED"
+        if t >= time(12, 45):
+            return "HARD_CLOSE"
+        # Before 12:45 on a half-day: normal session windows apply
+
     if   time(4,   0) <= t < time(9,  30): return "PRE_MARKET"
     elif time(9,  30) <= t < time(9,  45): return "RESTRICTED"
     elif time(9,  45) <= t < time(11, 30): return "PRIME"
@@ -84,13 +147,47 @@ def get_session() -> str:
 
 def get_session_info() -> dict:
     """Full session info dict for broadcast to frontend."""
-    key  = get_session()
-    info = _SESSIONS[key].copy()
-    now  = datetime.now(ET)
-    info["session"]    = key
-    info["time_et"]    = now.strftime("%I:%M:%S %p ET")
-    info["date_et"]    = now.strftime("%A %b %d, %Y")
-    info["is_weekend"] = now.weekday() >= 5
+    now       = datetime.now(ET)
+    today     = now.date()
+    key       = get_session()
+    info      = _SESSIONS[key].copy()
+
+    is_weekend  = now.weekday() >= 5
+    is_holiday  = _is_holiday(today)
+    is_half_day = _is_half_day(today)
+
+    # Override label / advice / color for market-closed states
+    if is_weekend:
+        day_name = now.strftime("%A")
+        next_open = "Monday" if now.weekday() == 5 else "Monday"  # Sat→Mon, Sun→Mon
+        info["label"]  = f"🔴 {day_name} — Market Closed"
+        info["advice"] = (
+            f"U.S. stock markets are closed on weekends. "
+            f"Next session: {next_open} pre-market at 4:00 AM ET."
+        )
+        info["color"] = "#334155"
+    elif is_holiday:
+        info["label"]  = "🔴 Market Holiday — Closed"
+        info["advice"] = (
+            "U.S. markets are closed today for a scheduled NYSE/NASDAQ holiday. "
+            "Normal trading resumes the next business day."
+        )
+        info["color"] = "#334155"
+    elif is_half_day and key in ("CLOSED", "HARD_CLOSE"):
+        info["label"]  = "🟡 Half-Day — Early Close (1:00 PM ET)"
+        info["advice"] = "Half-trading day — market closed at 1:00 PM ET."
+        info["color"] = "#f59e0b"
+    elif is_half_day:
+        # Still within normal hours on a half-day — annotate advice
+        info["advice"] += " ⚠ Half-day: market closes early at 1:00 PM ET."
+
+    info["session"]     = key
+    info["time_et"]     = now.strftime("%I:%M:%S %p ET")
+    info["date_et"]     = now.strftime("%A, %b %d %Y")
+    info["day_name"]    = now.strftime("%A")
+    info["is_weekend"]  = is_weekend
+    info["is_holiday"]  = is_holiday
+    info["is_half_day"] = is_half_day
     return info
 
 
@@ -110,7 +207,9 @@ def is_tradeable() -> bool:
 
 
 def is_trading_day() -> bool:
-    return datetime.now(ET).weekday() < 5
+    """True on weekdays that are not NYSE/NASDAQ holidays."""
+    now = datetime.now(ET)
+    return now.weekday() < 5 and not _is_holiday(now.date())
 
 
 # ── Granular session checks (used by risk_controls and paper_trading) ──────────
@@ -151,10 +250,16 @@ def no_new_entries() -> bool:
 def get_block_reason() -> str:
     """Human-readable reason why new entries are blocked (or '' if not blocked)."""
     s = get_session()
+    now = datetime.now(ET)
+    if s == "CLOSED":
+        if now.weekday() >= 5:
+            return f"Market closed — {now.strftime('%A')}. Trading resumes Monday."
+        if _is_holiday(now.date()):
+            return "Market closed — NYSE/NASDAQ holiday today."
+        return "Market closed."
     reasons = {
         "HARD_CLOSE":  "🔴 Hard close window — all positions closing. No new entries.",
         "AFTER_HOURS": "After-hours — market closed for trading.",
-        "CLOSED":      "Market closed.",
         "PRE_MARKET":  "Pre-market — no live trading, data collection only.",
     }
     return reasons.get(s, "")
@@ -163,15 +268,19 @@ def get_block_reason() -> str:
 def minutes_until_open() -> int:
     """Minutes until next PRIME session starts (returns 0 if already in PRIME/STANDARD)."""
     now_et = datetime.now(ET)
-    t = now_et.time()
-    # Already in tradeable session
+
+    # Already in a tradeable session
     if is_tradeable():
         return 0
-    # Calculate minutes to next 9:45 AM
+
+    # Find the next 9:45 AM on a trading day
     target = now_et.replace(hour=9, minute=45, second=0, microsecond=0)
-    if t >= time(9, 45):
-        # Past today's open — next open is tomorrow
-        from datetime import timedelta
-        target = target + timedelta(days=1)
+    if now_et >= target:
+        target += timedelta(days=1)
+
+    # Skip weekends and holidays
+    while target.weekday() >= 5 or _is_holiday(target.date()):
+        target += timedelta(days=1)
+
     delta = target - now_et
     return max(0, int(delta.total_seconds() / 60))

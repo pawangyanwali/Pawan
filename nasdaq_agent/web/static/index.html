@@ -516,11 +516,6 @@
   <span id="macro-desc" style="color:var(--muted)"></span>
 </div>
 
-<!-- Dead Zone Warning Banner -->
-<div id="dead-zone-banner" style="display:none;background:rgba(234,179,8,.08);border-bottom:1px solid rgba(234,179,8,.25);padding:5px 20px;font-size:11px;color:#fbbf24;text-align:center">
-  ⚠ <strong>Dead Zone</strong> — 11:30 AM – 2:00 PM ET — Low volatility, choppy price action. Reduce position size or wait for 2pm momentum.
-</div>
-
 <!-- Session & Regime Banner -->
 <div class="session-banner">
   <span class="session-pill" id="session-pill" style="color:#94a3b8;border-color:#252a35">⏰ Loading…</span>
@@ -532,6 +527,9 @@
 </div>
 <div id="dead-zone-banner" style="display:none;background:rgba(234,179,8,.1);border-bottom:1px solid rgba(234,179,8,.3);padding:4px 20px;font-size:11px;color:#fbbf24;text-align:center">
   ⚠ <strong>Dead Zone</strong> — 11:30am–2:00pm ET — Low volatility, wide spreads. Reduce size or wait for 2pm momentum.
+</div>
+<div id="market-closed-banner" style="display:none;background:rgba(51,65,85,.35);border-bottom:1px solid rgba(51,65,85,.6);padding:6px 20px;font-size:11px;color:#94a3b8;text-align:center">
+  🔴 <strong id="market-closed-title">Market Closed</strong> — <span id="market-closed-detail">U.S. stock markets are closed on weekends.</span> &nbsp;·&nbsp; Scanner continues data collection. No paper trades will open.
 </div>
 
 <div class="summary-bar">
@@ -2430,6 +2428,8 @@ document.getElementById('sort-select').addEventListener('change', e => { sortKey
 
 // ─── Session Banner ───────────────────────────────────────────────────────────
 function checkDeadZone() {
+    // Never show dead-zone banner when market is closed (weekend/holiday)
+    if (_sessionInfo && (_sessionInfo.is_weekend || _sessionInfo.is_holiday)) return;
     const now = new Date();
     // Convert to ET (UTC-4 or UTC-5 depending on DST)
     const etOffset = -4; // Approximate; fine for display
@@ -2457,8 +2457,28 @@ function updateSessionBanner(s) {
   const adv = document.getElementById('session-advice');
   adv.textContent = s.advice || '';
 
+  // Show date + time (e.g. "Saturday, May 16 2026  ·  10:27:21 AM ET")
   const timeEl = document.getElementById('session-time');
-  timeEl.textContent = s.time_et || '';
+  timeEl.textContent = s.date_et ? `${s.date_et}  ·  ${s.time_et||''}` : (s.time_et || '');
+
+  // Weekend / holiday closed banner
+  const closedBanner = document.getElementById('market-closed-banner');
+  const dzBanner     = document.getElementById('dead-zone-banner');
+  if (closedBanner) {
+    const marketClosed = s.is_weekend || s.is_holiday;
+    closedBanner.style.display = marketClosed ? 'block' : 'none';
+    if (marketClosed) {
+      const title  = document.getElementById('market-closed-title');
+      const detail = document.getElementById('market-closed-detail');
+      if (s.is_weekend && title)  title.textContent  = `${s.day_name || 'Weekend'} — Market Closed`;
+      if (s.is_holiday && title)  title.textContent  = 'Market Holiday — Closed';
+      if (detail) detail.textContent = s.is_weekend
+        ? 'U.S. stock markets (NYSE/NASDAQ) are closed on Saturdays and Sundays.'
+        : 'U.S. markets are closed today for a scheduled NYSE/NASDAQ holiday.';
+      // Suppress dead-zone banner when market is closed
+      if (dzBanner) dzBanner.style.display = 'none';
+    }
+  }
 }
 
 function updateRegimeBanner(r) {
