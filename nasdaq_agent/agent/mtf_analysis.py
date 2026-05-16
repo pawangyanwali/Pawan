@@ -109,17 +109,21 @@ def _analyze_timeframe(df: pd.DataFrame, label: str, min_bars: int, weight: floa
 def _alignment_label(bull: int, bear: int, total: int) -> str:
     if total == 0:
         return "MIXED"
-    if bull >= 5:
+    if bull == bear:
+        return "MIXED"
+    bull_frac = bull / total
+    bear_frac = bear / total
+    if bull_frac >= 0.80:
         return "STRONGLY BULLISH"
-    if bull >= 4:
+    if bull_frac >= 0.60:
         return "BULLISH"
-    if bear >= 5:
+    if bear_frac >= 0.80:
         return "STRONGLY BEARISH"
-    if bear >= 4:
+    if bear_frac >= 0.60:
         return "BEARISH"
-    if bull >= 3:
+    if bull_frac >= 0.50:
         return "BULLISH"
-    if bear >= 3:
+    if bear_frac >= 0.50:
         return "BEARISH"
     return "MIXED"
 

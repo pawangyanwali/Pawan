@@ -5,6 +5,7 @@ real-time stock signals to all connected clients.
 """
 
 import asyncio
+import html as _html
 import json
 import logging
 import os
@@ -813,7 +814,7 @@ async def schwab_web_callback(request: Request, code: str = "", state: str = "",
     if error or not code:
         html = f"""<html><body style="font-family:sans-serif;padding:40px">
         <h2 style="color:#e53e3e">Schwab Auth Failed</h2>
-        <p>{error or 'No code received.'}</p>
+        <p>{_html.escape(error) or 'No code received.'}</p>
         <p><a href="/schwab/auth">Try again</a></p></body></html>"""
         return HTMLResponse(html, status_code=400)
 
@@ -862,7 +863,7 @@ async def schwab_md_web_callback(request: Request, code: str = "", state: str = 
     if error or not code:
         html = f"""<html><body style="font-family:sans-serif;padding:40px">
         <h2 style="color:#e53e3e">Schwab Market Data Auth Failed</h2>
-        <p>{error or 'No code received.'}</p>
+        <p>{_html.escape(error) or 'No code received.'}</p>
         <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
         return HTMLResponse(html, status_code=400)
 
@@ -924,7 +925,9 @@ async def broker_positions():
     if not SCHWAB_ENABLED:
         return {"positions": [], "schwab_enabled": False}
     try:
-        return {"positions": get_positions()}
+        loop = asyncio.get_running_loop()
+        positions = await loop.run_in_executor(None, get_positions)
+        return {"positions": positions}
     except Exception as e:
         return {"positions": [], "error": str(e)}
 
@@ -936,7 +939,9 @@ async def broker_orders():
     if not SCHWAB_ENABLED:
         return {"orders": [], "schwab_enabled": False}
     try:
-        return {"orders": get_orders()}
+        loop = asyncio.get_running_loop()
+        orders = await loop.run_in_executor(None, get_orders)
+        return {"orders": orders}
     except Exception as e:
         return {"orders": [], "error": str(e)}
 
@@ -999,7 +1004,9 @@ async def market_movers(index: str = "$COMPX", sort: str = "PERCENT_CHANGE_UP", 
     """Top movers for an index via Schwab. index: $COMPX | $SPX | $DJI"""
     try:
         from agent.broker.schwab_market_data import fetch_movers
-        return {"movers": fetch_movers(index, sort, freq), "index": index, "sort": sort}
+        loop = asyncio.get_running_loop()
+        movers = await loop.run_in_executor(None, lambda: fetch_movers(index, sort, freq))
+        return {"movers": movers, "index": index, "sort": sort}
     except Exception as e:
         return {"movers": [], "error": str(e)}
 
@@ -1009,7 +1016,8 @@ async def market_hours_endpoint(market: str = "equity"):
     """Current market session status via Schwab."""
     try:
         from agent.broker.schwab_market_data import fetch_market_hours
-        return fetch_market_hours(market)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: fetch_market_hours(market))
     except Exception as e:
         return {"is_open": None, "error": str(e)}
 
@@ -1019,7 +1027,8 @@ async def ticker_iv(ticker: str):
     """Implied volatility for a single ticker via Schwab option chains."""
     try:
         from agent.broker.schwab_market_data import fetch_iv
-        iv = fetch_iv(ticker.upper())
+        loop = asyncio.get_running_loop()
+        iv = await loop.run_in_executor(None, lambda: fetch_iv(ticker.upper()))
         return {"ticker": ticker.upper(), "iv": iv}
     except Exception as e:
         return {"ticker": ticker, "iv": None, "error": str(e)}

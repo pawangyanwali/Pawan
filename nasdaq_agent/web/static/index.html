@@ -214,9 +214,9 @@
     .earnings-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; font-weight:700; background:rgba(239,68,68,.2); color:var(--red); border:1px solid var(--red); }
     .earnings-warn  { background:rgba(245,158,11,.12); border-left:3px solid #f59e0b; padding:5px 10px; border-radius:4px; font-size:10px; color:#fbbf24; }
     .gap-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; font-weight:700; }
-    .gap-UP   { background:rgba(34,197,94,.2);  color:var(--green); }
-    .gap-DOWN { background:rgba(239,68,68,.2);  color:var(--red); }
-    .gap-FLAT { background:rgba(100,116,139,.15);color:var(--muted); }
+    .gap-GAP_UP   { background:rgba(34,197,94,.2);  color:var(--green); }
+    .gap-GAP_DOWN { background:rgba(239,68,68,.2);  color:var(--red); }
+    .gap-FLAT     { background:rgba(100,116,139,.15);color:var(--muted); }
     .rs-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:9px; font-weight:700; }
     .rs-LEADING  { background:rgba(34,197,94,.2); color:var(--green); }
     .rs-IN_LINE  { background:rgba(100,116,139,.15); color:var(--muted); }
@@ -447,7 +447,7 @@
       .alert-toast { right:8px; left:8px; max-width:none; }
 
       /* After-hours / broker / paper panels (fixed width → full width) */
-      #ah-panel, #broker-panel, #paper-trading-modal { width:100% !important; max-width:100% !important; }
+      #ah-panel, #broker-panel, #paper-modal { width:100% !important; max-width:100% !important; }
     }
 
     /* ── Very small phones (max 380px) ── */
@@ -1519,6 +1519,7 @@ TRADING_MAX_POSITION_PCT=10
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL', tierFilter = 'ALL';
+let _wsLastMsgAt = 0;  // epoch ms of last WS scan_complete message
 const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let allBreadth = null;
@@ -1569,6 +1570,7 @@ function connectWS() {
     }
 
     if (m.type === 'update') {
+      _wsLastMsgAt = Date.now();
       allSignals = m.signals;
       if (m.open_trades) allOpenTrades = m.open_trades;
       if (m.session)  { _sessionInfo = m.session; updateSessionBanner(m.session); }
@@ -1646,6 +1648,8 @@ async function pollPipelineMetrics() {
 }
 setInterval(pollPipelineMetrics, 15000);
 async function pollFallback() {
+  // Only use REST fallback when WS hasn't delivered data in the last 30 seconds
+  if (Date.now() - _wsLastMsgAt < 30000) return;
   try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); } } catch {}
 }
 setInterval(pollFallback, 10000);
@@ -2505,10 +2509,10 @@ function checkDeadZone() {
     // Never show dead-zone banner when market is closed (weekend/holiday)
     if (_sessionInfo && (_sessionInfo.is_weekend || _sessionInfo.is_holiday)) return;
     const now = new Date();
-    // Convert to ET (UTC-4 or UTC-5 depending on DST)
-    const etOffset = -4; // Approximate; fine for display
-    const etHour = (now.getUTCHours() + etOffset + 24) % 24;
-    const etMin  = now.getUTCMinutes();
+    // Use Intl API for DST-correct ET time (handles UTC-4 EDT and UTC-5 EST)
+    const etParts = new Intl.DateTimeFormat('en-US', {timeZone:'America/New_York', hour:'numeric', minute:'numeric', hour12:false}).formatToParts(now);
+    const etHour = parseInt(etParts.find(p=>p.type==='hour').value, 10);
+    const etMin  = parseInt(etParts.find(p=>p.type==='minute').value, 10);
     const etTime = etHour + etMin / 60;
     const el = document.getElementById('dead-zone-banner');
     if (!el) return;
@@ -3274,8 +3278,8 @@ function renderPnlKpis(s, today) {
   wrEl.textContent = wr != null ? wr.toFixed(1) + '%' : '—';
   wrEl.style.color = wr >= 60 ? 'var(--green-s)' : wr >= 50 ? 'var(--yellow)' : 'var(--red)';
   const totD = document.getElementById('pnl-kpi-total-dollar');
-  totD.textContent = s?.total_pnl != null ? `$${s.total_pnl.toFixed(2)}` : '—';
-  totD.style.color = pctColor(s?.total_pnl);
+  totD.textContent = s?.total_dollar_pnl != null ? `$${s.total_dollar_pnl.toFixed(2)}` : '—';
+  totD.style.color = pctColor(s?.total_dollar_pnl);
   const avgEl = document.getElementById('pnl-kpi-avg-pct');
   avgEl.textContent = s?.avg_pnl != null ? `${s.avg_pnl.toFixed(2)}%` : '—';
   avgEl.style.color = pctColor(s?.avg_pnl);
@@ -4077,6 +4081,7 @@ let _nnPollTimer = null;
 function openNeural() {
   document.getElementById('neural-modal').classList.add('open');
   loadNeuralStatus();
+  if (_nnPollTimer) { clearInterval(_nnPollTimer); _nnPollTimer = null; }
   _nnPollTimer = setInterval(() => {
     if (_nnData && _nnData.is_training_now) loadNeuralStatus();
   }, 3000);
@@ -4107,6 +4112,10 @@ async function loadNeuralStatus() {
 }
 
 function renderNeuralPanel(d) {
+  // ── Training phase helpers ────────────────────────────────────────────────
+  const rp = d.retrain_progress || {};
+  const phase = rp.phase || '';
+
   // Training banner — phase-specific message
   const banner = document.getElementById('nn-training-banner');
   const isActive = rp.is_running || d.is_training_now;
@@ -4126,10 +4135,6 @@ function renderNeuralPanel(d) {
   } else {
     banner.style.display = 'none';
   }
-
-  // ── Training phase helpers ────────────────────────────────────────────────
-  const rp = d.retrain_progress || {};
-  const phase = rp.phase || '';
   const xgbDone = ['deep', 'done'].includes(phase) ||
                   (phase === '' && (rp.done_count || 0) === (rp.total || 0) && rp.total > 0);
   const bilstmActive = phase === 'deep' || (d.is_training_now && xgbDone);
@@ -4661,12 +4666,10 @@ fetchPtStats();
 setInterval(fetchPtStats, 30000);
 // Load session/regime on startup
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/regime`)).json(); if(d.session) updateSessionBanner(d.session); if(d.regime) updateRegimeBanner(d.regime); } catch {} })();
-// Pre-populate Self-Learning pill immediately on page load (don't wait for WS scan)
-(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/learning-status`)).json(); if (d) updateLearnPill(d); } catch {} })();
+// Pre-populate Self-Learning pill and header button in a single fetch
+(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/learning-status`)).json(); if (d) { updateLearnPill(d); _updateLearnHeaderBtn(d.current_win_rate??0, d.dynamic_threshold??65, d.is_learning??false); } } catch {} })();
 // Load macro calendar on startup
 (async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/macro-calendar`)).json(); if(d.current) updateMacroBanner(d.current); } catch {} })();
-// Refresh learning header button on startup
-(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/learning-status`)).json(); _updateLearnHeaderBtn(d.current_win_rate??0, d.dynamic_threshold??65, d.is_learning??false); } catch {} })();
 // Register service worker for PWA
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/static/sw.js').catch(()=>{});

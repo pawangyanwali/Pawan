@@ -126,15 +126,15 @@ TICKER_NAMES = {
     "LULU":"Lululemon","NDAQ":"Nasdaq Inc","MPWR":"Monolithic Power","ENPH":"Enphase Energy",
     "FSLR":"First Solar","CELH":"Celsius Holdings","AXON":"Axon Enterprise",
     "SNOW":"Snowflake","MSTR":"MicroStrategy",
-    # Cluster B additions
-    "PLTR":"Palantir","MARA":"Marathon Digital","RIVN":"Rivian","LCID":"Lucid Motors",
+    # Cluster B additions (omit keys already defined above to avoid duplicate overrides)
+    "PLTR":"Palantir","MARA":"Marathon Digital",
     "SOUN":"SoundHound AI","IONQ":"IonQ","NET":"Cloudflare","ANET":"Arista Networks",
     "MDB":"MongoDB","SNAP":"Snap","RBLX":"Roblox","UPST":"Upstart","AFRM":"Affirm",
-    "CVNA":"Carvana","LYFT":"Lyft","ROKU":"Roku","PINS":"Pinterest","ZM":"Zoom",
-    "DOCU":"DocuSign","BILL":"Bill.com","TWLO":"Twilio","CHWY":"Chewy",
+    "CVNA":"Carvana","LYFT":"Lyft","ROKU":"Roku","PINS":"Pinterest",
+    "BILL":"Bill.com","TWLO":"Twilio","CHWY":"Chewy",
     "GTLB":"GitLab","HUBS":"HubSpot","DKNG":"DraftKings",
-    "LOGI":"Logitech","NDAQ":"Nasdaq Inc","MTCH":"Match Group","CYBR":"CyberArk",
-    "SOFI":"SoFi Technologies","MPWR":"Monolithic Power",
+    "LOGI":"Logitech","MTCH":"Match Group","CYBR":"CyberArk",
+    "SOFI":"SoFi Technologies",
     # Cluster C additions
     "RGTI":"Rigetti Computing","QUBT":"Quantum Computing Inc","RKLB":"Rocket Lab",
     "ASTS":"AST SpaceMobile","WOLF":"Wolfspeed","RUN":"Sunrun","ARRY":"Array Technologies",

@@ -222,7 +222,7 @@ class LearningEngine:
                 f"Threshold shifted {prev_threshold:.1f}% → {new_threshold:.1f}%  "
                 f"(WR {new_wr:.1f}%)", significant=True
             )
-        if blocked_n > len(status.get("blocked_contexts", {})):
+        if blocked_n > 0:
             _log(f"New context blocked — {blocked_n} total suppressed contexts",
                  significant=True)
 
@@ -256,7 +256,7 @@ class LearningEngine:
             count = stats.get("overall", {}).get("total", 0)
             return stats, count
         except Exception as e:
-            _log(f"bt_stats error: {e}", level="WARN")
+            _log(f"bt_stats error: {e}", level="WARNING")
             return {}, 0
 
     def _get_pt_stats(self) -> tuple[dict, int]:
@@ -267,7 +267,7 @@ class LearningEngine:
             count = stats.get("overall", {}).get("total", 0)
             return stats, count
         except Exception as e:
-            _log(f"pt_stats error: {e}", level="WARN")
+            _log(f"pt_stats error: {e}", level="WARNING")
             return {}, 0
 
     def _get_observation_stats(self) -> tuple[dict, int]:
@@ -292,7 +292,7 @@ class LearningEngine:
                 self._last_obs_count = count  # type: ignore[attr-defined]
             return stats, count
         except Exception as e:
-            _log(f"obs_stats error: {e}", level="WARN")
+            _log(f"obs_stats error: {e}", level="WARNING")
             return {}, 0
 
     # ── Stat merger ───────────────────────────────────────────────────────────

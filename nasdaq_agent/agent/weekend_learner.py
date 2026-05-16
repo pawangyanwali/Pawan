@@ -32,7 +32,7 @@ import logging
 import sqlite3
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -370,7 +370,7 @@ def _run_learning(tickers: list[str]) -> None:
     try:
         _emit({
             "phase":         "FETCHING",
-            "started_at":    datetime.utcnow().isoformat(),
+            "started_at":    datetime.now(timezone.utc).isoformat(),
             "weekend_dt":    weekend_dt,
             "tickers_total": len(tickers),
             "tickers_done":  0,
@@ -414,7 +414,7 @@ def _run_learning(tickers: list[str]) -> None:
                 f"{overall_wr:.1f}% win rate, "
                 f"{_state['new_bars_fetched']:,} new bars stored"
             ),
-            "finished_at": datetime.utcnow().isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
             "tickers_done": len(tickers),
             "cache_stats": cache_stats(),
         })

@@ -528,7 +528,8 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
     """
     global _trained, _is_training_now, _training_history
 
-    _is_training_now = True
+    with _lock:
+        _is_training_now = True
     try:
         try:
             import torch
@@ -597,7 +598,8 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
         return any_success
 
     finally:
-        _is_training_now = False
+        with _lock:
+            _is_training_now = False
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
@@ -609,17 +611,24 @@ def predict_deep(ticker: str, df_15m: pd.DataFrame) -> float:
     Returns 0.5 (neutral) when model is untrained or data insufficient.
     """
     cluster = TICKER_CLUSTER.get(ticker, "A")   # default to A for unknown tickers
-    model   = _cluster_models[cluster]
-    scaler  = _cluster_scalers[cluster]
+
+    # Read model/scaler/trained under lock to prevent using mismatched model+scaler
+    # when a retrain completes between reads
+    with _lock:
+        model  = _cluster_models[cluster]
+        scaler = _cluster_scalers[cluster]
+        trained = _cluster_trained[cluster]
 
     # Try loading from disk if not yet in memory
     if model is None:
         model = _get_cluster_model(cluster)
+        with _lock:
+            scaler  = _cluster_scalers[cluster]
+            trained = _cluster_trained[cluster]
 
-    if model is None or not _cluster_trained[cluster]:
+    if model is None or not trained:
         return 0.5
 
-    scaler = _cluster_scalers[cluster]
     if scaler is None:
         return 0.5
 
@@ -686,4 +695,5 @@ def get_training_history() -> list[dict]:
 
 
 def is_training_active() -> bool:
-    return _is_training_now
+    with _lock:
+        return _is_training_now
