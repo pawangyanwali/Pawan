@@ -1472,6 +1472,10 @@ TRADING_MAX_POSITION_PCT=10
         <span id="learn-learning-badge" style="font-size:10px"></span>
         <span>Resolved: <strong id="learn-resolved" style="color:var(--text)">—</strong></span>
       </div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:6px;border-top:1px solid var(--border);padding-top:6px">
+        <span>Signals suppressed this session: <strong id="learn-modal-sup" style="color:var(--yellow)">—</strong></span>
+        <span>Blocked patterns: <strong id="learn-modal-blocked" style="color:var(--red)">—</strong></span>
+      </div>
     </div>
 
     <!-- KPI row -->
@@ -1485,7 +1489,7 @@ TRADING_MAX_POSITION_PCT=10
 
     <!-- Blocked contexts -->
     <div style="margin-bottom:20px">
-      <div class="bt-section-title" style="color:var(--red)">🚫 Suppressed Contexts (<span id="learn-blocked-count">0</span>)</div>
+      <div class="bt-section-title" style="color:var(--red)">🚫 Blocked Context Patterns (<span id="learn-blocked-count">0</span>) <span style="font-weight:400;font-size:9px;color:var(--muted)">— specific setups the system auto-avoids</span></div>
       <div class="learn-context-grid" id="learn-blocked-grid">
         <div style="color:var(--muted);font-size:11px;padding:8px">No contexts suppressed yet — system is learning.</div>
       </div>
@@ -1493,7 +1497,7 @@ TRADING_MAX_POSITION_PCT=10
 
     <!-- Boosted contexts -->
     <div style="margin-bottom:20px">
-      <div class="bt-section-title" style="color:var(--green)">✅ Boosted Contexts (<span id="learn-boosted-count">0</span>)</div>
+      <div class="bt-section-title" style="color:var(--green)">✅ Boosted Context Patterns (<span id="learn-boosted-count">0</span>) <span style="font-weight:400;font-size:9px;color:var(--muted)">— high win-rate setups with confidence bonus</span></div>
       <div class="learn-context-grid" id="learn-boosted-grid">
         <div style="color:var(--muted);font-size:11px;padding:8px">No boosted contexts yet — need more resolved trades.</div>
       </div>
@@ -3904,6 +3908,11 @@ let _learnPollTimer = null;
 
 async function openLearning() {
   document.getElementById('learn-modal').classList.add('open');
+  // Immediately populate from localStorage so the modal never shows a blank/0% state
+  try {
+    const cached = JSON.parse(localStorage.getItem('lastLearnState') || 'null');
+    if (cached && (cached.win_rate > 0 || cached.current_win_rate > 0)) renderLearningStatus(cached);
+  } catch(e) {}
   await Promise.all([loadLearningStatus(), loadLearningLog()]);
   // Poll every 15s while panel is open so log and stats stay live
   if (!_learnPollTimer) {
@@ -3959,7 +3968,7 @@ async function loadLearningStatus() {
 }
 
 function renderLearningStatus(d) {
-  const wr      = d.current_win_rate ?? 0;   // already in % (0-100)
+  const wr      = d.current_win_rate ?? d.win_rate ?? 0;  // API uses current_win_rate; localStorage/WS uses win_rate
   const target  = d.target_win_rate  ?? 62;
   const thresh  = d.dynamic_threshold ?? 60;
   const total   = d.total_resolved ?? 0;
@@ -3974,6 +3983,10 @@ function renderLearningStatus(d) {
   document.getElementById('learn-wr-val').textContent = wr.toFixed(1) + '%';
   document.getElementById('learn-wr-val').style.color = col;
   document.getElementById('learn-resolved').textContent = total;
+  const supEl2 = document.getElementById('learn-modal-sup');
+  if (supEl2) supEl2.textContent = suppressed;
+  const blkEl2 = document.getElementById('learn-modal-blocked');
+  if (blkEl2) blkEl2.textContent = Object.keys(d.blocked_contexts || {}).length || d.blocked_count || 0;
   const tSubEl = document.getElementById('learn-target-subtitle');
   const tLblEl = document.getElementById('learn-target-label');
   if (tSubEl) tSubEl.textContent = target;
@@ -4623,7 +4636,7 @@ function updateLearnPill(l) {
 
   // Persist to localStorage so next refresh restores instantly
   if (wr > 0) {
-    localStorage.setItem('lastLearnState', JSON.stringify({ win_rate: wr, target_win_rate: target, dynamic_threshold: gate, suppressed_count: sup, is_learning: l.is_learning }));
+    localStorage.setItem('lastLearnState', JSON.stringify({ win_rate: wr, target_win_rate: target, dynamic_threshold: gate, suppressed_count: sup, is_learning: l.is_learning, blocked_count: l.blocked_count ?? 0 }));
   }
 
   // Also update header button
