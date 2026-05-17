@@ -21,6 +21,7 @@ Neutral                          → 1.00×
 """
 from __future__ import annotations
 import logging
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -170,11 +171,15 @@ def analyse_sector_context(
 # ── Shared ETF frame cache (updated each scan by scanner) ─────────────────────
 
 _etf_cache: dict[str, pd.DataFrame] = {}
+_etf_lock  = threading.Lock()
 
 
 def update_etf_cache(frames: dict[str, pd.DataFrame]) -> None:
-    _etf_cache.update(frames)
+    with _etf_lock:
+        _etf_cache.update(frames)
 
 
 def get_sector_context(ticker: str, df_stock: pd.DataFrame) -> SectorContext:
-    return analyse_sector_context(ticker, df_stock, _etf_cache)
+    with _etf_lock:
+        snapshot = dict(_etf_cache)   # copy under lock; analysis runs outside lock
+    return analyse_sector_context(ticker, df_stock, snapshot)

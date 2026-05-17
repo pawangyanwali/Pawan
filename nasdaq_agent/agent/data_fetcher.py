@@ -264,17 +264,32 @@ def _parse_batch_response(data: dict, batch: list) -> dict[str, pd.DataFrame]:
 # Structure: {ticker: {interval_str: (DataFrame, fetch_timestamp)}}
 
 _interval_cache: dict[str, dict[str, tuple[pd.DataFrame, float]]] = {}
+_interval_cache_lock = threading.Lock()
+_CACHE_MAX_TICKERS = 200   # evict oldest ticker when above this limit
 
 
 def _cache_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
-    entry = _interval_cache.get(ticker, {}).get(interval)
+    with _interval_cache_lock:
+        entry = _interval_cache.get(ticker, {}).get(interval)
     if entry and ttl > 0 and (time.time() - entry[1]) < ttl:
         return entry[0]
     return None
 
 
 def _cache_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
-    _interval_cache.setdefault(ticker, {})[interval] = (df, time.time())
+    now = time.time()
+    with _interval_cache_lock:
+        if ticker not in _interval_cache:
+            # Evict the stalest ticker when at capacity
+            if len(_interval_cache) >= _CACHE_MAX_TICKERS:
+                oldest = min(
+                    _interval_cache,
+                    key=lambda t: max(
+                        (v[1] for v in _interval_cache[t].values()), default=0
+                    ),
+                )
+                del _interval_cache[oldest]
+        _interval_cache.setdefault(ticker, {})[interval] = (df, now)
 
 
 # ── SQLite-backed persistent cache ────────────────────────────────────────────

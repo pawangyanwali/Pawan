@@ -14,6 +14,7 @@ Disagreement metric: std(probabilities) across models.
 from __future__ import annotations
 
 import logging
+import threading
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -162,7 +163,7 @@ class MetaEnsemble:
         Returns (final_probability, confidence_multiplier).
         Falls back to weighted average if meta-model not yet trained.
         """
-        probs = np.array([scalp_prob, ensemble_prob, daily_prob])
+        probs = np.array([scalp_prob, ensemble_prob, daily_prob, reversal_prob])
         prob_std = float(np.std(probs))
         mult = ensemble_confidence_multiplier(prob_std)
 
@@ -191,12 +192,19 @@ class MetaEnsemble:
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _meta_registry: dict[str, MetaEnsemble] = {}
+_meta_lock = threading.Lock()
+_MAX_META_TICKERS = 100  # cap to prevent unbounded RAM growth
 
 
 def get_or_create_meta(ticker: str) -> MetaEnsemble:
-    if ticker not in _meta_registry:
-        _meta_registry[ticker] = MetaEnsemble(ticker)
-    return _meta_registry[ticker]
+    with _meta_lock:
+        if ticker not in _meta_registry:
+            # Evict oldest entry if at cap (simple FIFO — LRU not needed here)
+            if len(_meta_registry) >= _MAX_META_TICKERS:
+                oldest = next(iter(_meta_registry))
+                del _meta_registry[oldest]
+            _meta_registry[ticker] = MetaEnsemble(ticker)
+        return _meta_registry[ticker]
 
 
 def get_meta_prediction(

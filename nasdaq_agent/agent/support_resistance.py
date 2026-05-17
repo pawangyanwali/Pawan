@@ -27,10 +27,13 @@ _POC_BUCKETS       = 50       # number of price buckets for volume profile
 
 # ── 1. Classic Pivot Points ───────────────────────────────────────────────────
 
-def calculate_pivot_points(df: pd.DataFrame) -> dict:
+def calculate_pivot_points(df: pd.DataFrame,
+                           df_daily: pd.DataFrame | None = None) -> dict:
     """
-    Calculate standard floor-trader pivot points from the most recent complete
-    session (last bar's High, Low, Close).
+    Calculate standard floor-trader pivot points from the prior complete session.
+
+    Pass df_daily (daily OHLCV) to use the correct prior-session H/L/C.
+    When df_daily is None, falls back to the last bar of df (intraday approximation).
 
     Returns
     -------
@@ -39,15 +42,24 @@ def calculate_pivot_points(df: pd.DataFrame) -> dict:
     """
     _empty = {k: 0.0 for k in ("PP", "R1", "R2", "R3", "S1", "S2", "S3")}
 
-    if df is None or len(df) < _MIN_ROWS_PIVOT:
-        return _empty
+    # Prefer prior complete session from daily data (correct floor-trader input)
+    if df_daily is not None and len(df_daily) >= 2:
+        try:
+            high  = float(df_daily["High"].iloc[-2])
+            low   = float(df_daily["Low"].iloc[-2])
+            close = float(df_daily["Close"].iloc[-2])
+        except (KeyError, TypeError, ValueError):
+            df_daily = None  # fall through to intraday fallback
 
-    try:
-        high  = float(df["High"].iloc[-1])
-        low   = float(df["Low"].iloc[-1])
-        close = float(df["Close"].iloc[-1])
-    except (KeyError, TypeError, ValueError):
-        return _empty
+    if df_daily is None or len(df_daily) < 2:
+        if df is None or len(df) < _MIN_ROWS_PIVOT:
+            return _empty
+        try:
+            high  = float(df["High"].iloc[-1])
+            low   = float(df["Low"].iloc[-1])
+            close = float(df["Close"].iloc[-1])
+        except (KeyError, TypeError, ValueError):
+            return _empty
 
     if high <= 0 or low <= 0 or close <= 0:
         return _empty
@@ -220,9 +232,12 @@ def calculate_volume_poc(df: pd.DataFrame) -> float:
 
 # ── 4. Combined SR Levels ─────────────────────────────────────────────────────
 
-def get_all_sr_levels(df: pd.DataFrame) -> dict:
+def get_all_sr_levels(df: pd.DataFrame,
+                      df_daily: pd.DataFrame | None = None) -> dict:
     """
     Aggregate all support/resistance methodologies into a single dictionary.
+
+    Pass df_daily to compute pivot points from the prior complete session.
 
     Returns
     -------
@@ -232,7 +247,7 @@ def get_all_sr_levels(df: pd.DataFrame) -> dict:
         resistances – list[float] sorted ascending
         poc         – float
     """
-    pivots = calculate_pivot_points(df)
+    pivots = calculate_pivot_points(df, df_daily=df_daily)
     swings = find_swing_levels(df)
     poc    = calculate_volume_poc(df)
 

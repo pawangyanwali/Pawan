@@ -194,12 +194,18 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
 
     pnl_dollar, pnl_pct = _get_today_pnl()
 
+    acct_loss_pct = (pnl_dollar / DEFAULT_ACCOUNT_SIZE * 100) if DEFAULT_ACCOUNT_SIZE > 0 else 0.0
+
     with _lock:
+        # Re-check _circuit_open here — another thread may have tripped it
+        # between our earlier check and this lock acquisition.
+        if _circuit_open:
+            return True, _circuit_reason
+
         # Track peak daily P&L for Profit Protect Mode drawdown check
         _peak_daily_pnl = max(_peak_daily_pnl, pnl_dollar)
 
         # ── Tier 3: 2.5% account loss → HALT for the day ────────────────────
-        acct_loss_pct = (pnl_dollar / DEFAULT_ACCOUNT_SIZE * 100) if DEFAULT_ACCOUNT_SIZE > 0 else 0.0
         if acct_loss_pct <= -DAILY_LOSS_HALT_PCT:
             reason = (
                 f"🛑 Daily loss halt: {acct_loss_pct:+.2f}% account loss today "

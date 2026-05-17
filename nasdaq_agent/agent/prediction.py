@@ -720,6 +720,7 @@ def generate_prediction(
     sector_mult:         float = 1.0,
     ensemble_prob:       float = 0.5,
     ensemble_agreement:  float = 0.0,
+    df_daily:            "pd.DataFrame | None" = None,
 ) -> dict:
     """
     Generate a complete, actionable scalping prediction for ``ticker``.
@@ -744,7 +745,7 @@ def generate_prediction(
 
     # ── 1. Support / Resistance ───────────────────────────────────────────────
     try:
-        sr = get_all_sr_levels(df)
+        sr = get_all_sr_levels(df, df_daily=df_daily)
     except Exception:
         sr = {"pivots": {}, "supports": [], "resistances": [], "poc": 0.0}
 

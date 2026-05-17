@@ -512,6 +512,7 @@ def analyse_ticker(
             sector_mult=sector_ctx.score_mult,
             ensemble_prob=ml_ensemble_p,
             ensemble_agreement=ml_agree,
+            df_daily=df_1d,
         )
 
         # Apply regime multiplier to score

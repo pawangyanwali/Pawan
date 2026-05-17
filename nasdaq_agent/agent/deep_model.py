@@ -318,7 +318,12 @@ def _make_sequences(
         if c_now <= 0:
             continue
         move  = (c_fut - c_now) / c_now
-        label = 1 if move > 0 else 0
+        if move >= MIN_MOVE_PCT:
+            label = 1
+        elif move <= -MIN_MOVE_PCT:
+            label = 0
+        else:
+            continue   # noise zone — skip this sample
         X_list.append(seq)
         y_list.append(label)
         w_list.append(sample_weight)
@@ -480,17 +485,18 @@ def _train_one_cluster(
             f"[DeepModel] Cluster {cluster_name} — "
             f"Epoch {epoch+1}/{n_epochs} — loss={avg_loss:.4f}"
         )
-        _training_history.append({
-            "epoch":        epoch + 1,
-            "total_epochs": n_epochs,
-            "loss":         round(avg_loss, 6),
-            "ts":           time.time(),
-            "tickers":      len(cluster_dfs),
-            "mode":         "full" if is_first_train else "finetune",
-            "cluster":      cluster_name,
-        })
-        if len(_training_history) > _MAX_HISTORY:
-            _training_history = _training_history[-_MAX_HISTORY:]
+        with _lock:
+            _training_history.append({
+                "epoch":        epoch + 1,
+                "total_epochs": n_epochs,
+                "loss":         round(avg_loss, 6),
+                "ts":           time.time(),
+                "tickers":      len(cluster_dfs),
+                "mode":         "full" if is_first_train else "finetune",
+                "cluster":      cluster_name,
+            })
+            if len(_training_history) > _MAX_HISTORY:
+                del _training_history[:-_MAX_HISTORY]
 
     # ── Save best checkpoint ──────────────────────────────────────────────────
     if best_state:

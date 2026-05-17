@@ -88,17 +88,8 @@ def compute_vwap_signal(df: pd.DataFrame) -> dict:
     was_below = all(closes[-(lookback+1):-1] < vwaps[-(lookback+1):-1])
     was_above = all(closes[-(lookback+1):-1] > vwaps[-(lookback+1):-1])
 
-    if deviation > _EXTENDED_PCT:
-        event = "EXTENDED_UP"
-        score = -0.7     # mean-reversion: fade the extension
-        desc  = f"Price {deviation*100:+.2f}% above VWAP — extended, mean-reversion risk"
-
-    elif deviation < -_EXTENDED_PCT:
-        event = "EXTENDED_DOWN"
-        score = +0.7
-        desc  = f"Price {deviation*100:+.2f}% below VWAP — extended, potential bounce"
-
-    elif current_price > current_vwap and was_below:
+    # Check RECLAIM/REJECTION first — fresh crossovers take priority over extension reads
+    if current_price > current_vwap and was_below:
         event = "RECLAIM"
         score = +1.0     # strongest long signal
         desc  = f"VWAP Reclaim — price crossed above VWAP ${current_vwap:.2f} (highest-probability long)"
@@ -107,6 +98,16 @@ def compute_vwap_signal(df: pd.DataFrame) -> dict:
         event = "REJECTION"
         score = -0.8
         desc  = f"VWAP Rejection — price broke below VWAP ${current_vwap:.2f} (avoid longs / short bias)"
+
+    elif deviation > _EXTENDED_PCT:
+        event = "EXTENDED_UP"
+        score = -0.7     # mean-reversion: fade the extension
+        desc  = f"Price {deviation*100:+.2f}% above VWAP — extended, mean-reversion risk"
+
+    elif deviation < -_EXTENDED_PCT:
+        event = "EXTENDED_DOWN"
+        score = +0.7
+        desc  = f"Price {deviation*100:+.2f}% below VWAP — extended, potential bounce"
 
     elif abs(deviation) <= _FLAT_PCT:
         event = "FLAT"

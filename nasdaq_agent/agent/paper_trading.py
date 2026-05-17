@@ -274,7 +274,9 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 entry_type      = row["entry_type"] or "IMMEDIATE"
 
                 # Determine time stop based on trade type (PRD 6.3)
-                is_scalp = entry_type in ("IMMEDIATE", "SCALP") or bars <= 20
+                # is_scalp is based solely on entry_type — not bar count, to avoid
+                # misclassifying WAIT_RETEST trades that happen to be <20 bars old
+                is_scalp = entry_type in ("IMMEDIATE", "SCALP")
                 max_bars = _MAX_BARS_HELD_SCALP if is_scalp else _MAX_BARS_HELD_INTRADAY
 
                 ep           = current_price
