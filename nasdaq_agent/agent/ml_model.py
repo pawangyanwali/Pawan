@@ -502,9 +502,10 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
     _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")
 
     # ── Parallel ticker training ───────────────────────────────────────────────
-    # Use at most half the available CPUs so the scanner, API throttler, and
-    # other threads stay responsive.  Each XGBoost already uses nthread=1.
-    _workers = max(1, min((os.cpu_count() or 2) // 2, 4))
+    # Cap at 2 workers regardless of CPU count — on a 4GB host each XGBoost
+    # retrain + feature engineering can spike 100-200 MB, so running 4+ in
+    # parallel risks OOM before the deep model phase even starts.
+    _workers = max(1, min((os.cpu_count() or 2) // 2, 2))
     with ThreadPoolExecutor(max_workers=_workers) as executor:
         futures = {
             executor.submit(
@@ -530,6 +531,9 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
                 "models":    models_ok,
                 "elapsed_s": elapsed,
             })
+
+    # Free XGBoost training memory before starting the deeper BiLSTM phase
+    gc.collect()
 
     # ── Deep BiLSTM model: universal, trained across all tickers ─────────────
     _rp_set(phase="deep", phase_label="Training Deep BiLSTM…",

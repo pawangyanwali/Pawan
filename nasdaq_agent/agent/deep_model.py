@@ -41,6 +41,7 @@ Persistence (per cluster)
 """
 from __future__ import annotations
 
+import gc
 import logging
 import pickle
 import threading
@@ -514,9 +515,15 @@ def _train_one_cluster(
     with torch.no_grad():
         preds = model(X_t, id_t).numpy()
     acc = float(((preds >= 0.5).astype(int) == y_all.astype(int)).mean())
+
+    # Free large training tensors/arrays — model weights are kept in _cluster_models
+    del X_t, y_t, w_t, id_t, X_scaled, flat, X_all, y_all, w_all, id_all, best_state
+    gc.collect()
+
+    n_samples = len(preds)
     logger.info(
         f"[DeepModel] Cluster {cluster_name} done — "
-        f"acc={acc:.3f}  samples={len(X_all):,}  best_loss={best_loss:.4f}"
+        f"acc={acc:.3f}  samples={n_samples:,}  best_loss={best_loss:.4f}"
     )
     return True
 
@@ -573,29 +580,23 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
             cluster = TICKER_CLUSTER.get(ticker, "A")   # default A for unknowns
             cluster_dfs[cluster][ticker] = df_raw
 
-        # ── Train clusters A / B / C in parallel threads ──────────────────────
-        # Each cluster model is independent — no shared mutable state during
-        # training. Threads share the GIL but torch releases it during compute,
-        # so wall-clock time drops to ~max(A, B, C) instead of A+B+C.
-        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
-
-        def _train_cluster(name: str) -> bool:
-            dfs = cluster_dfs[name]
-            if not dfs:
-                logger.info(f"[DeepModel] Cluster {name}: no tickers — skipping")
-                return False
-            return _train_one_cluster(name, dfs, bt_weights)
-
+        # ── Train clusters A / B / C sequentially to cap peak memory ────────────
+        # Parallel training triples peak RAM (one model + tensors per cluster
+        # simultaneously) — on a 4GB / no-swap host that causes OOM kills.
+        # Sequential costs ~1.5× wall-clock but keeps peak usage to one cluster
+        # at a time; gc.collect() between clusters releases tensors immediately.
         any_success = False
-        with _TPE(max_workers=3) as ex:
-            fs = {ex.submit(_train_cluster, c): c for c in ("A", "B", "C")}
-            for fut in _ac(fs):
-                c = fs[fut]
-                try:
-                    if fut.result():
-                        any_success = True
-                except Exception as exc:
-                    logger.warning(f"[DeepModel] Cluster {c} training raised: {exc}")
+        for cluster_name in ("A", "B", "C"):
+            dfs = cluster_dfs[cluster_name]
+            if not dfs:
+                logger.info(f"[DeepModel] Cluster {cluster_name}: no tickers — skipping")
+                continue
+            try:
+                if _train_one_cluster(cluster_name, dfs, bt_weights):
+                    any_success = True
+            except Exception as exc:
+                logger.warning(f"[DeepModel] Cluster {cluster_name} training raised: {exc}")
+            gc.collect()  # release tensors before next cluster loads
 
         if any_success:
             with _lock:
