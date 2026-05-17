@@ -8,12 +8,15 @@ Exit conditions checked (in priority order)
 -------------------------------------------
 1. TARGET HIT         price ≥ target (BUY) or ≤ target (SELL)
 2. STOP HIT           price ≤ stop   (BUY) or ≥ stop   (SELL)
-3. VWAP LOSS          was above VWAP, now below (BUY trade)
-4. VWAP LOSS          was below VWAP, now above (SELL trade)
-5. RSI REVERSAL       RSI re-enters OB zone on a BUY, or OS zone on a SELL
-6. VOLUME DRY-UP      vol < 50% avg for 2+ bars while price flat → stall
-7. MACD CROSS         MACD histogram flips against trade direction
-8. TIME STOP          trade open > 15 bars without meaningful progress
+3. CHANDELIER EXIT    price crosses below chandelier_long (BUY) / above chandelier_short (SELL)
+4. VWAP LOSS          was above VWAP, now below (BUY trade)
+5. VWAP LOSS          was below VWAP, now above (SELL trade)
+6. RSI REVERSAL       RSI re-enters OB zone on a BUY, or OS zone on a SELL
+7. PARTIAL_1R         price moved 1× initial risk in favor → scale out 25%
+8. PARTIAL_2R         price moved 2× initial risk in favor → scale out 50%
+9. VOLUME DRY-UP      vol < 50% avg for 2+ bars while price flat → stall
+10. MACD CROSS        MACD histogram flips against trade direction
+11. TIME STOP         trade open > 15 bars without meaningful progress
 
 Returns list of ExitSignal objects and an aggregate EXIT_NOW / WATCH / HOLD.
 """
@@ -36,7 +39,7 @@ _TIME_STOP_BARS  = 15
 
 @dataclass
 class ExitSignal:
-    signal:      str    # TARGET_HIT | STOP_HIT | VWAP_LOSS | RSI_REVERSAL | VOL_DRYUP | MACD_CROSS | TIME_STOP
+    signal:      str    # TARGET_HIT | STOP_HIT | CHANDELIER_EXIT | VWAP_LOSS | RSI_REVERSAL | PARTIAL_1R | PARTIAL_2R | VOL_DRYUP | MACD_CROSS | TIME_STOP
     priority:    str    # CRITICAL | HIGH | MEDIUM
     description: str
     action:      str    # EXIT_NOW | WATCH | SCALE_OUT
@@ -70,7 +73,7 @@ def analyse_exits(
     Parameters
     ----------
     df          : DataFrame with indicators computed (vwap, rsi_14, macd_hist,
-                  vol_ratio columns must be present)
+                  vol_ratio, chandelier_long, chandelier_short, atr_14 must be present)
     direction   : 'BUY' or 'SELL'
     entry_price : original entry price
     target      : profit target
@@ -100,7 +103,71 @@ def analyse_exits(
     elif not is_buy and price >= stop:
         signals.append(ExitSignal("STOP_HIT", "CRITICAL", f"Stop ${stop:.2f} breached at ${price:.2f}", "EXIT_NOW"))
 
-    # 2. VWAP Loss ─────────────────────────────────────────────────────────────
+    # 2. Chandelier Exit — dynamic ATR-based trailing stop ────────────────────
+    # chandelier_long  = Highest(High, 22) − 3×ATR(14): long trailing stop
+    # chandelier_short = Lowest(Low,  22) + 3×ATR(14): short trailing stop
+    # Price closing below chandelier_long on a long = trend reversal signal
+    try:
+        chan_long  = float(last.get("chandelier_long",  0))
+        chan_short = float(last.get("chandelier_short", 0))
+        if is_buy and chan_long > 0 and price < chan_long:
+            atr = float(last.get("atr_14", 0))
+            signals.append(ExitSignal(
+                "CHANDELIER_EXIT", "HIGH",
+                f"Price ${price:.2f} crossed below Chandelier Exit ${chan_long:.2f} "
+                f"(3×ATR={atr:.2f}) — trailing stop triggered, trend may be reversing",
+                "EXIT_NOW"
+            ))
+        elif not is_buy and chan_short > 0 and price > chan_short:
+            atr = float(last.get("atr_14", 0))
+            signals.append(ExitSignal(
+                "CHANDELIER_EXIT", "HIGH",
+                f"Price ${price:.2f} crossed above Chandelier Exit ${chan_short:.2f} "
+                f"(3×ATR={atr:.2f}) — trailing stop triggered, short thesis weakening",
+                "EXIT_NOW"
+            ))
+    except Exception:
+        pass
+
+    # 3. Partial profit at 1R and 2R ──────────────────────────────────────────
+    # Initial risk R = |entry_price - stop|. Scale out at 1R (25%) and 2R (50%).
+    if entry_price > 0 and stop > 0:
+        initial_risk = abs(entry_price - stop)
+        if initial_risk > 0:
+            if is_buy:
+                gain = price - entry_price
+                if gain >= 2.0 * initial_risk:
+                    signals.append(ExitSignal(
+                        "PARTIAL_2R", "HIGH",
+                        f"Price +2R (${price:.2f}, +${gain:.2f}) — scale out 50%, "
+                        f"move stop to breakeven, let remainder run",
+                        "SCALE_OUT"
+                    ))
+                elif gain >= 1.0 * initial_risk:
+                    signals.append(ExitSignal(
+                        "PARTIAL_1R", "MEDIUM",
+                        f"Price +1R (${price:.2f}, +${gain:.2f}) — scale out 25%, "
+                        f"move stop to entry (risk-free trade)",
+                        "SCALE_OUT"
+                    ))
+            else:
+                gain = entry_price - price
+                if gain >= 2.0 * initial_risk:
+                    signals.append(ExitSignal(
+                        "PARTIAL_2R", "HIGH",
+                        f"Price −2R (${price:.2f}, +${gain:.2f}) — scale out 50%, "
+                        f"move stop to breakeven, let remainder run",
+                        "SCALE_OUT"
+                    ))
+                elif gain >= 1.0 * initial_risk:
+                    signals.append(ExitSignal(
+                        "PARTIAL_1R", "MEDIUM",
+                        f"Price −1R (${price:.2f}, +${gain:.2f}) — scale out 25%, "
+                        f"move stop to entry (risk-free trade)",
+                        "SCALE_OUT"
+                    ))
+
+    # 4. VWAP Loss ─────────────────────────────────────────────────────────────
     vwap      = float(last.get("vwap", 0))
     vwap_prev = float(prev.get("vwap", 0))
     if vwap > 0 and vwap_prev > 0:
@@ -111,7 +178,7 @@ def analyse_exits(
         elif not is_buy and not prev_above and curr_above:
             signals.append(ExitSignal("VWAP_LOSS", "HIGH", f"Reclaimed VWAP ${vwap:.2f} — short thesis invalidated", "EXIT_NOW"))
 
-    # 3. RSI Reversal ──────────────────────────────────────────────────────────
+    # 5. RSI Reversal ──────────────────────────────────────────────────────────
     rsi = float(last.get("rsi_14", 50))
     rsi_prev = float(prev.get("rsi_14", 50))
     if is_buy and rsi < _RSI_OB and rsi_prev >= _RSI_OB:
@@ -121,7 +188,7 @@ def analyse_exits(
         signals.append(ExitSignal("RSI_REVERSAL", "HIGH",
             f"RSI exited oversold ({rsi:.0f}) — momentum reversal, scale out", "SCALE_OUT"))
 
-    # 4. Volume dry-up ─────────────────────────────────────────────────────────
+    # 9. Volume dry-up ─────────────────────────────────────────────────────────
     if len(df) >= _VOL_DRY_BARS + 1:
         vol_ratios = [float(df.iloc[-(i+1)].get("vol_ratio", 1)) for i in range(_VOL_DRY_BARS)]
         if all(v < _VOL_DRY_FACTOR for v in vol_ratios):
@@ -130,7 +197,7 @@ def analyse_exits(
                 signals.append(ExitSignal("VOL_DRYUP", "MEDIUM",
                     f"Volume dry-up ({_VOL_DRY_BARS} bars) with no progress — momentum stalled", "WATCH"))
 
-    # 5. MACD cross against trade ─────────────────────────────────────────────
+    # 10. MACD cross against trade ────────────────────────────────────────────
     hist      = float(last.get("macd_hist", 0))
     hist_prev = float(prev.get("macd_hist", 0))
     if is_buy and hist < 0 and hist_prev >= 0:
@@ -140,7 +207,7 @@ def analyse_exits(
         signals.append(ExitSignal("MACD_CROSS", "MEDIUM",
             "MACD histogram crossed positive — momentum shifting up", "WATCH"))
 
-    # 6. Time stop ─────────────────────────────────────────────────────────────
+    # 11. Time stop ────────────────────────────────────────────────────────────
     if bars_held >= _TIME_STOP_BARS:
         progress = (price - entry_price) / entry_price if is_buy else (entry_price - price) / entry_price
         if progress < 0.005:
@@ -149,7 +216,8 @@ def analyse_exits(
 
     # ── Aggregate recommendation ──────────────────────────────────────────────
     analysis.signals = signals
-    if any(s.signal in ("TARGET_HIT", "STOP_HIT", "VWAP_LOSS") and s.action == "EXIT_NOW" for s in signals):
+    exit_now_signals = {"TARGET_HIT", "STOP_HIT", "VWAP_LOSS", "CHANDELIER_EXIT"}
+    if any(s.signal in exit_now_signals and s.action == "EXIT_NOW" for s in signals):
         analysis.recommendation = "EXIT_NOW"
     elif any(s.signal == "TIME_STOP" for s in signals):
         analysis.recommendation = "EXIT_NOW"

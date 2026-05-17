@@ -19,6 +19,10 @@ Public API
 FEATURE_COLS_V2 : list[str]
     The 32 feature names expected by every XGBoost model variant.
 
+FEATURE_COLS_V3 : list[str]
+    40 features = V2 + 8 new professional indicators (kc_squeeze, cvd_5,
+    ema_200_dev, vwap_z, hidden_div_bull, hidden_div_bear, nr7, adx_regime).
+
 compute_features(df, ticker) -> pd.DataFrame
     Add all 32 features to a raw OHLCV DataFrame.  Safe for inference — every
     indicator is causal (uses only past data at each row).
@@ -79,6 +83,21 @@ _FEATURE_COLS_NEW: list[str] = [
 ]
 
 FEATURE_COLS_V2: list[str] = _FEATURE_COLS_V1 + _FEATURE_COLS_NEW
+
+# 8 additional features for V3 — leverage the new professional indicators
+# from technical.py (KC squeeze, CVD, Chandelier, hidden divergence, NR7).
+_FEATURE_COLS_V3_NEW: list[str] = [
+    "kc_squeeze",      # 1 when BB inside Keltner Channel (volatility compression)
+    "cvd_5",           # 5-bar Cumulative Volume Delta (buy vs sell pressure)
+    "ema_200_dev",     # (Close - EMA200) / EMA200 × 100, institutional context
+    "vwap_z",          # VWAP z-score: (price - VWAP) / VWAP_std, dynamic σ-bands
+    "hidden_div_bull", # 1 = hidden bullish RSI divergence (uptrend continuation)
+    "hidden_div_bear", # 1 = hidden bearish RSI divergence (downtrend continuation)
+    "nr7",             # 1 = current bar narrowest range of last 7 (compression)
+    "adx_regime",      # 1 = trend mode (ADX>0.25), 0 = mean-reversion (ADX<0.20)
+]
+
+FEATURE_COLS_V3: list[str] = FEATURE_COLS_V2 + _FEATURE_COLS_V3_NEW
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +315,110 @@ def compute_features(df: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
     df["gap_open"] = _safe_divide(
         df["Open"] - prev_close, prev_close, fill=0.0
     ).mul(100.0).clip(-5.0, 5.0)
+
+    # ------------------------------------------------------------------
+    # V3 features — new professional indicators
+    # ------------------------------------------------------------------
+
+    # -- kc_squeeze: Bollinger inside Keltner Channel ------------------
+    # Requires BB and KC already computed above; fallback to 0 if missing
+    try:
+        atr10 = ta.volatility.average_true_range(high, low, close, window=10).fillna(
+            ta.volatility.average_true_range(high, low, close, window=14)
+        )
+        ema20 = ta.trend.ema_indicator(close, window=20)
+        kc_upper = ema20 + 2.0 * atr10
+        kc_lower = ema20 - 2.0 * atr10
+        bb_obj2  = ta.volatility.BollingerBands(close, window=20, window_dev=2)
+        bb_upper2 = bb_obj2.bollinger_hband()
+        bb_lower2 = bb_obj2.bollinger_lband()
+        bb_rng = bb_upper2 - bb_lower2
+        kc_rng = kc_upper  - kc_lower
+        df["kc_squeeze"] = (bb_rng < kc_rng).astype(float).fillna(0.0)
+    except Exception:
+        df["kc_squeeze"] = 0.0
+
+    # -- cvd_5: 5-bar Cumulative Volume Delta --------------------------
+    try:
+        bar_range = (high - low).replace(0, np.nan)
+        buy_vol   = ((close - low) / bar_range * vol).fillna(0)
+        sell_vol  = vol - buy_vol
+        df["cvd_5"] = (buy_vol - sell_vol).rolling(5).sum().fillna(0)
+        # Normalise by average volume so it's comparable across tickers
+        avg_vol = vol.rolling(20, min_periods=1).mean().replace(0, np.nan)
+        df["cvd_5"] = (df["cvd_5"] / avg_vol).fillna(0.0).clip(-5.0, 5.0)
+    except Exception:
+        df["cvd_5"] = 0.0
+
+    # -- ema_200_dev: deviation from EMA(200) --------------------------
+    try:
+        ema200 = ta.trend.ema_indicator(close, window=200)
+        df["ema_200_dev"] = _safe_divide(close - ema200, ema200, fill=0.0).mul(100.0).clip(-10.0, 10.0)
+    except Exception:
+        df["ema_200_dev"] = 0.0
+
+    # -- vwap_z: VWAP z-score ------------------------------------------
+    # Volume-weighted σ from VWAP: z = (price - VWAP) / σ
+    try:
+        vwap_s = df["vwap"] if "vwap" in df.columns else vwap
+        closes_arr = close.values.astype(float)
+        vols_arr   = vol.values.astype(float)
+        vwap_arr   = vwap_s.values.astype(float)
+        z_scores   = np.zeros(len(df), dtype=float)
+        for i in range(20, len(df)):
+            p = closes_arr[max(0, i-20): i]
+            v = vols_arr[max(0, i-20): i]
+            w = vwap_arr[i]
+            total = float(np.sum(v))
+            if total > 0 and w > 0:
+                std = float(np.sqrt(np.sum(v * (p - w) ** 2) / total))
+                z_scores[i] = (closes_arr[i] - w) / std if std > 0 else 0.0
+        df["vwap_z"] = pd.Series(z_scores, index=df.index).clip(-4.0, 4.0)
+    except Exception:
+        df["vwap_z"] = 0.0
+
+    # -- hidden_div_bull / hidden_div_bear: hidden RSI divergence ------
+    try:
+        from agent.reversal import compute_reversal_features as _rev_feat, _DIV_LOOKBACK, _DIV_SWING_WINDOW, _find_swing_lows, _find_swing_highs
+        prices_arr = close.values.astype(float)
+        rsi_arr    = ta.momentum.rsi(close, window=14).fillna(50.0).values.astype(float)
+        hb  = np.zeros(len(df), dtype=float)
+        hbr = np.zeros(len(df), dtype=float)
+        lookback = _DIV_LOOKBACK
+        for i in range(lookback + _DIV_SWING_WINDOW + 1, len(df)):
+            p_sl = prices_arr[i - lookback: i]
+            r_sl = rsi_arr[i - lookback: i]
+            p_lows = _find_swing_lows(p_sl)
+            r_lows = _find_swing_lows(r_sl)
+            if len(p_lows) >= 2 and len(r_lows) >= 2:
+                if p_lows[-1][1] > p_lows[-2][1] and r_lows[-1][1] < r_lows[-2][1]:
+                    hb[i] = 1.0
+            p_highs = _find_swing_highs(p_sl)
+            r_highs = _find_swing_highs(r_sl)
+            if len(p_highs) >= 2 and len(r_highs) >= 2:
+                if p_highs[-1][1] < p_highs[-2][1] and r_highs[-1][1] > r_highs[-2][1]:
+                    hbr[i] = 1.0
+        df["hidden_div_bull"] = hb
+        df["hidden_div_bear"] = hbr
+    except Exception:
+        df["hidden_div_bull"] = 0.0
+        df["hidden_div_bear"] = 0.0
+
+    # -- nr7: narrowest range of last 7 bars ---------------------------
+    try:
+        bar_range_abs = (high - low).abs()
+        df["nr7"] = (bar_range_abs == bar_range_abs.rolling(7, min_periods=1).min()).astype(float)
+    except Exception:
+        df["nr7"] = 0.0
+
+    # -- adx_regime: 1 = trend (ADX>25), 0 = mean-reversion (ADX<20) --
+    # adx_14 in this file is normalised to 0-1 (divided by 100)
+    try:
+        adx_raw = df["adx_14"] * 100.0 if "adx_14" in df.columns else \
+                  ta.trend.ADXIndicator(high, low, close, window=14).adx().fillna(0.0)
+        df["adx_regime"] = np.where(adx_raw > 25, 1.0, np.where(adx_raw < 20, 0.0, 0.5))
+    except Exception:
+        df["adx_regime"] = 0.5
 
     return df
 

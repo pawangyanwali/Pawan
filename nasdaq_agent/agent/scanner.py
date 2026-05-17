@@ -39,9 +39,15 @@ from agent.volume import score_volume, relative_volume, detect_unusual_volume
 from agent.ml_model import predict, predict_daily, predict_reversal, predict_ensemble, predict_swing, get_or_create_swing, retrain_all
 from agent.sentiment import score_sentiment
 from agent.prediction import generate_prediction
+from agent.support_resistance import (
+    calculate_camarilla_pivots,
+    calculate_fibonacci_levels,
+    calculate_value_area,
+)
 from agent.mtf_analysis import multi_timeframe_analysis
 from agent.market_hours import get_session_info, confidence_multiplier
-from agent.market_regime import update_regime, get_regime, apply_regime
+from agent.market_regime import update_regime, get_regime, apply_regime, classify_day_type
+from agent.opening_range import compute_opening_range
 from agent.earnings import earnings_blackout
 from agent.gap_analysis import analyse_gap
 from agent.relative_strength import compute_relative_strength
@@ -211,18 +217,37 @@ class StockSignal:
     orb_high:       float = 0.0   # Opening range breakout high (first 30-min)
     orb_low:        float = 0.0   # Opening range breakout low (first 30-min)
     orb_breakout:   str   = ""    # "BULL" | "BEAR" | "" — if price broke ORB
+    orb15_high:     float = 0.0   # ORB-15 high (first 15-min)
+    orb15_low:      float = 0.0   # ORB-15 low (first 15-min)
+    orb15_breakout: str   = ""    # "BULL" | "BEAR" | "NONE"
+    orb15_score:    float = 0.0   # [-1, +1] directional score from ORB-15
+    orb30_score:    float = 0.0   # [-1, +1] directional score from ORB-30
+
+    # ── Volume profile (VAH/VAL) ──────────────────────────────────────────────
+    vah:            float = 0.0   # Value Area High (70% vol rule)
+    val:            float = 0.0   # Value Area Low
+
+    # ── Day type (TREND_DAY | RANGE_DAY | UNCERTAIN) ──────────────────────────
+    day_type:       str   = "UNCERTAIN"
+    day_type_label: str   = "Uncertain"
+
+    # ── Fibonacci retracement levels ─────────────────────────────────────────
+    fib_levels:     dict  = field(default_factory=dict)
 
     # ── Relative strength vs SPY ──────────────────────────────────────────────
     rs_ratio:   float = 1.0
     rs_score:   float = 0.0
     rs_label:   str   = "IN_LINE"
 
-    # ── VWAP signal ───────────────────────────────────────────────────────────
+    # ── VWAP signal + dynamic σ-bands ────────────────────────────────────────
     vwap_event:       str   = "FLAT"
     vwap_score:       float = 0.0
     vwap_price:       float = 0.0
     vwap_deviation:   float = 0.0
     vwap_description: str   = ""
+    vwap_z_score:     float = 0.0    # z-score: (price - VWAP) / VWAP_std
+    vwap_upper_2:     float = 0.0    # VWAP +2σ band
+    vwap_lower_2:     float = 0.0    # VWAP −2σ band
 
     # ── Sector ETF context ────────────────────────────────────────────────────
     sector_etf:         str   = "QQQ"
@@ -494,8 +519,28 @@ def analyse_ticker(
         regime = get_regime()
         rs = compute_relative_strength(df_1m, _spy_df_cache.get("SPY"))
 
-        # VWAP signal
+        # VWAP signal (now includes z_score, upper_2/lower_2 band levels)
         vwap_sig = compute_vwap_signal(df_ind)
+
+        # Opening Range (ORB-15 and ORB-30 levels + breakout classification)
+        orb_result = compute_opening_range(df_1m)
+
+        # Day type classification (TREND_DAY / RANGE_DAY / UNCERTAIN)
+        day_type_info = classify_day_type(df_ind, df_1d)
+
+        # Professional S/R: Camarilla pivots, Fibonacci retracements, Value Area
+        try:
+            _camarilla = calculate_camarilla_pivots(df_ind, df_1d)
+        except Exception:
+            _camarilla = {}
+        try:
+            _fibonacci = calculate_fibonacci_levels(df_ind)
+        except Exception:
+            _fibonacci = {}
+        try:
+            _value_area = calculate_value_area(df_ind)
+        except Exception:
+            _value_area = {"poc": 0.0, "vah": 0.0, "val": 0.0}
 
         # Sector ETF context
         sector_ctx = get_sector_context(ticker, df_1m)
@@ -515,8 +560,21 @@ def analyse_ticker(
             df_daily=df_1d,
         )
 
+        # Blend ORB signal into composite score (15% weight when OR is established)
+        _orb_signal = (orb_result.or15_score + orb_result.or30_score) / 2
+        _orb_weight = 0.15 if (orb_result.orh_15 > 0 or orb_result.orh_30 > 0) else 0.0
+        _pred_comp  = float(np.clip(pred["composite_score"], -1, 1))
+        _blended    = _pred_comp * (1.0 - _orb_weight) + _orb_signal * _orb_weight
+
+        # Day type multiplier: trend signals boosted on TREND_DAY, discounted on RANGE_DAY
+        if day_type_info.day_type == "TREND_DAY" and _blended > 0.1:
+            _blended = float(np.clip(_blended * day_type_info.trend_boost, -1.0, 1.0))
+        elif day_type_info.day_type == "RANGE_DAY" and abs(_blended) < 0.4:
+            # On range days, mean-reversion signals (close to 0) are more reliable
+            _blended = float(np.clip(_blended * day_type_info.mr_discount, -1.0, 1.0))
+
         # Apply regime multiplier to score
-        raw_score = round(float(np.clip(pred["composite_score"], -1, 1)), 4)
+        raw_score = round(float(np.clip(_blended, -1, 1)), 4)
         score     = round(float(np.clip(apply_regime(raw_score, regime), -1, 1)), 4)
 
         # Override direction to NEUTRAL if earnings or macro blackout
@@ -839,8 +897,13 @@ def analyse_ticker(
             ml_deep_trained   = _deep_trained,
             supports          = pred["supports"],
             resistances       = pred["resistances"],
-            pivots            = pred["pivots"],
-            poc               = pred["poc"],
+            # Merge Camarilla pivot levels into the pivots dict
+            pivots            = {
+                **pred.get("pivots", {}),
+                **{f"cam_{k}": round(float(v), 4) for k, v in _camarilla.items()
+                   if isinstance(v, (int, float)) and v > 0},
+            },
+            poc               = float(_value_area.get("poc", 0.0)) or pred["poc"],
             mtf_score         = float(mtf["mtf_score"]),
             mtf_alignment     = mtf["alignment"],
             mtf_bull_count    = int(mtf["bull_count"]),
@@ -883,23 +946,43 @@ def analyse_ticker(
             gap_fill_prob     = float(gap["fill_probability"]),
             premarket_high    = float(gap["premarket_high"]),
             premarket_low     = float(gap["premarket_low"]),
-            # PDH / PDL / ORB levels
+            # PDH / PDL / ORB levels (30-min)
             prev_day_high     = levels["prev_day_high"],
             prev_day_low      = levels["prev_day_low"],
             prev_day_close    = levels["prev_day_close"],
             orb_high          = levels["orb_high"],
             orb_low           = levels["orb_low"],
             orb_breakout      = levels["orb_breakout"],
+            # ORB-15 (more precise opening range)
+            orb15_high        = orb_result.orh_15,
+            orb15_low         = orb_result.orl_15,
+            orb15_breakout    = orb_result.breakout_15,
+            orb15_score       = orb_result.or15_score,
+            orb30_score       = orb_result.or30_score,
+            # Value Area (VAH/VAL)
+            vah               = float(_value_area.get("vah", 0.0)),
+            val               = float(_value_area.get("val", 0.0)),
+            # Day type
+            day_type          = day_type_info.day_type,
+            day_type_label    = day_type_info.label,
+            # Fibonacci retracement levels
+            fib_levels        = {
+                k: round(float(v), 4) for k, v in _fibonacci.items()
+                if isinstance(v, (int, float)) and v > 0
+            },
             # Relative strength
             rs_ratio          = float(rs["rs_ratio"]),
             rs_score          = float(rs["rs_score"]),
             rs_label          = rs["rs_label"],
-            # VWAP signal
+            # VWAP signal + dynamic σ-band levels
             vwap_event        = vwap_sig["event"],
             vwap_score        = float(vwap_sig["score"]),
             vwap_price        = float(vwap_sig["vwap"]),
             vwap_deviation    = float(vwap_sig["deviation"]),
             vwap_description  = vwap_sig["description"],
+            vwap_z_score      = float(vwap_sig.get("z_score",  0.0)),
+            vwap_upper_2      = float(vwap_sig.get("upper_2",  0.0)),
+            vwap_lower_2      = float(vwap_sig.get("lower_2",  0.0)),
             # Sector
             sector_etf        = sector_ctx.etf,
             sector_trend      = sector_ctx.sector_trend,

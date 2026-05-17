@@ -60,7 +60,7 @@ def _find_swing_highs(series: np.ndarray, window: int = _DIV_SWING_WINDOW) -> li
 
 def detect_rsi_divergence(df: pd.DataFrame) -> tuple[str, float, str]:
     """
-    Detect RSI divergence over the last _DIV_LOOKBACK bars.
+    Detect CLASSIC RSI divergence over the last _DIV_LOOKBACK bars.
 
     Bullish divergence: price makes lower low, RSI makes higher low
     → hidden buying pressure, reversal up likely.
@@ -127,6 +127,78 @@ def detect_rsi_divergence(df: pd.DataFrame) -> tuple[str, float, str]:
                 "— hidden selling pressure, reversal down expected"
             )
             return "BEARISH", round(strength, 3), desc
+
+    return "NONE", 0.0, ""
+
+
+def detect_hidden_rsi_divergence(df: pd.DataFrame) -> tuple[str, float, str]:
+    """
+    Detect HIDDEN RSI divergence — a CONTINUATION signal (not reversal).
+
+    Hidden bullish: price makes HIGHER LOW + RSI makes LOWER LOW
+    → uptrend is intact with hidden strength; continuation up expected.
+
+    Hidden bearish: price makes LOWER HIGH + RSI makes HIGHER HIGH
+    → downtrend is intact with hidden strength; continuation down expected.
+
+    Hidden divergence confirms the primary trend and is the professional
+    trader's preferred entry on pullbacks within a trend.
+
+    Returns
+    -------
+    (divergence_type, strength, description)
+      divergence_type : "HIDDEN_BULL" | "HIDDEN_BEAR" | "NONE"
+      strength        : 0.0–1.0
+      description     : human-readable explanation
+    """
+    if df is None or len(df) < _DIV_LOOKBACK + 5:
+        return "NONE", 0.0, ""
+    if "rsi_14" not in df.columns:
+        return "NONE", 0.0, ""
+
+    recent = df.tail(_DIV_LOOKBACK)
+    prices = recent["Close"].values.astype(float)
+    rsi    = recent["rsi_14"].values.astype(float)
+
+    price_lows = _find_swing_lows(prices)
+    rsi_lows   = _find_swing_lows(rsi)
+
+    # ── Hidden bullish: price higher low, RSI lower low ───────────────────────
+    if len(price_lows) >= 2 and len(rsi_lows) >= 2:
+        p1, p2 = price_lows[-2][1], price_lows[-1][1]
+        r1, r2 = rsi_lows[-2][1],   rsi_lows[-1][1]
+        price_diff = (p2 - p1) / max(abs(p1), 1e-9)   # positive = higher low
+        rsi_diff   = (r1 - r2) / max(abs(r1), 1e-9)   # positive = lower low
+
+        if p2 > p1 and r2 < r1 and price_diff > _DIV_MIN_STRENGTH * 0.5:
+            strength = float(np.clip((price_diff + rsi_diff) / 2, 0.0, 1.0))
+            desc = (
+                f"Hidden bullish RSI divergence: price made higher low "
+                f"(${p1:.2f} → ${p2:.2f}, +{price_diff*100:.1f}%) "
+                f"but RSI made lower low ({r1:.1f} → {r2:.1f}) — "
+                "uptrend continuation confirmed, buy the dip"
+            )
+            return "HIDDEN_BULL", round(strength, 3), desc
+
+    price_highs = _find_swing_highs(prices)
+    rsi_highs   = _find_swing_highs(rsi)
+
+    # ── Hidden bearish: price lower high, RSI higher high ─────────────────────
+    if len(price_highs) >= 2 and len(rsi_highs) >= 2:
+        p1, p2 = price_highs[-2][1], price_highs[-1][1]
+        r1, r2 = rsi_highs[-2][1],   rsi_highs[-1][1]
+        price_diff = (p1 - p2) / max(abs(p1), 1e-9)   # positive = lower high
+        rsi_diff   = (r2 - r1) / max(abs(r1), 1e-9)   # positive = higher high
+
+        if p2 < p1 and r2 > r1 and price_diff > _DIV_MIN_STRENGTH * 0.5:
+            strength = float(np.clip((price_diff + rsi_diff) / 2, 0.0, 1.0))
+            desc = (
+                f"Hidden bearish RSI divergence: price made lower high "
+                f"(${p1:.2f} → ${p2:.2f}, -{price_diff*100:.1f}%) "
+                f"but RSI made higher high ({r1:.1f} → {r2:.1f}) — "
+                "downtrend continuation confirmed, sell the bounce"
+            )
+            return "HIDDEN_BEAR", round(strength, 3), desc
 
     return "NONE", 0.0, ""
 
@@ -344,7 +416,7 @@ def compute_reversal_zone(
     if price <= 0:
         return result
 
-    # ── 1. RSI divergence (highest weight) ───────────────────────────────────
+    # ── 1. Classic RSI divergence (highest weight) ───────────────────────────
     rsi_div_type, rsi_div_str, rsi_div_desc = detect_rsi_divergence(df)
     if rsi_div_type == "BULLISH" and rsi_div_desc:
         signals_bull.append((0.30, rsi_div_desc))
@@ -352,6 +424,22 @@ def compute_reversal_zone(
     elif rsi_div_type == "BEARISH" and rsi_div_desc:
         signals_bear.append((0.30, rsi_div_desc))
         result["divergence_type"] = "BEARISH"
+
+    # ── 1b. Hidden RSI divergence (continuation — confirms trend direction) ──
+    hidden_div_type, hidden_div_str, hidden_div_desc = detect_hidden_rsi_divergence(df)
+    if hidden_div_type == "HIDDEN_BULL" and hidden_div_desc:
+        # Hidden bull = uptrend continuation; only meaningful if price is pulling back
+        rsi_now = float(last_row.get("rsi_14", 50))
+        if rsi_now < 55:   # on a pullback (not already overbought)
+            signals_bull.append((0.15, hidden_div_desc))
+            if result["divergence_type"] == "NONE":
+                result["divergence_type"] = "HIDDEN_BULL"
+    elif hidden_div_type == "HIDDEN_BEAR" and hidden_div_desc:
+        rsi_now = float(last_row.get("rsi_14", 50))
+        if rsi_now > 45:   # on a bounce (not already oversold)
+            signals_bear.append((0.15, hidden_div_desc))
+            if result["divergence_type"] == "NONE":
+                result["divergence_type"] = "HIDDEN_BEAR"
 
     # ── 2. MACD divergence ────────────────────────────────────────────────────
     macd_div_type, macd_div_str, macd_div_desc = detect_macd_divergence(df)
@@ -498,6 +586,29 @@ def compute_reversal_features(df: pd.DataFrame) -> pd.DataFrame:
     if "Volume" in df.columns:
         df["vol_slope_3"] = df["Volume"].pct_change(3)
 
+    # Hidden RSI divergence binary flags (1 = active, 0 = not)
+    # Computed row-by-row using a rolling window — causal, no look-ahead
+    if "rsi_14" in df.columns and "Close" in df.columns:
+        prices = df["Close"].values.astype(float)
+        rsi_v  = df["rsi_14"].values.astype(float)
+        hb = np.zeros(len(df), dtype=float)
+        hbr = np.zeros(len(df), dtype=float)
+        for i in range(_DIV_LOOKBACK + _DIV_SWING_WINDOW + 1, len(df)):
+            p_slice = prices[i - _DIV_LOOKBACK: i]
+            r_slice = rsi_v[i - _DIV_LOOKBACK: i]
+            p_lows = _find_swing_lows(p_slice)
+            r_lows = _find_swing_lows(r_slice)
+            if len(p_lows) >= 2 and len(r_lows) >= 2:
+                if p_lows[-1][1] > p_lows[-2][1] and r_lows[-1][1] < r_lows[-2][1]:
+                    hb[i] = 1.0
+            p_highs = _find_swing_highs(p_slice)
+            r_highs = _find_swing_highs(r_slice)
+            if len(p_highs) >= 2 and len(r_highs) >= 2:
+                if p_highs[-1][1] < p_highs[-2][1] and r_highs[-1][1] > r_highs[-2][1]:
+                    hbr[i] = 1.0
+        df["hidden_div_bull"] = hb
+        df["hidden_div_bear"] = hbr
+
     return df
 
 
@@ -512,4 +623,5 @@ REVERSAL_FEATURE_COLS = [
     "vol_ratio", "vol_slope_3",
     "lower_wick_ratio", "upper_wick_ratio",
     "atr_14",
+    "hidden_div_bull", "hidden_div_bear",
 ]

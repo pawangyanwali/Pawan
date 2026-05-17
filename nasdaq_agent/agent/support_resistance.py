@@ -361,3 +361,204 @@ def nearest_resistance(price: float, sr: dict) -> float:
 
     # Closest resistance = minimum value that is still above price
     return round(min(candidates), 4)
+
+
+# ── 6. Camarilla Pivot Levels ─────────────────────────────────────────────────
+
+def calculate_camarilla_pivots(df: pd.DataFrame,
+                                df_daily: pd.DataFrame | None = None) -> dict:
+    """
+    Camarilla pivots — tighter intraday S/R levels preferred by scalpers.
+
+    H4/L4: primary breakout/breakdown levels (most-watched)
+    H3/L3: entry zones for mean-reversion (price tends to reject H3/L3)
+    H2/L2: moderate extension
+    H1/L1: minor S/R near prior close
+
+    Formula: HN = Close + (H-L) × multiplier_N
+             LN = Close − (H-L) × multiplier_N
+    """
+    _empty = {k: 0.0 for k in ("H1","H2","H3","H4","L1","L2","L3","L4")}
+
+    if df_daily is not None and len(df_daily) >= 2:
+        try:
+            h = float(df_daily["High"].iloc[-2])
+            l = float(df_daily["Low"].iloc[-2])
+            c = float(df_daily["Close"].iloc[-2])
+        except Exception:
+            df_daily = None
+    if df_daily is None or len(df_daily if df_daily is not None else []) < 2:
+        if df is None or len(df) < 2:
+            return _empty
+        h = float(df["High"].max())
+        l = float(df["Low"].min())
+        c = float(df["Close"].iloc[-1])
+
+    rng = h - l
+    if rng <= 0 or c <= 0:
+        return _empty
+
+    return {
+        "H4": round(c + rng * 1.1 / 2,  4),
+        "H3": round(c + rng * 1.1 / 4,  4),
+        "H2": round(c + rng * 1.1 / 6,  4),
+        "H1": round(c + rng * 1.1 / 12, 4),
+        "L1": round(c - rng * 1.1 / 12, 4),
+        "L2": round(c - rng * 1.1 / 6,  4),
+        "L3": round(c - rng * 1.1 / 4,  4),
+        "L4": round(c - rng * 1.1 / 2,  4),
+    }
+
+
+# ── 7. Fibonacci Retracement from Prior Swing ─────────────────────────────────
+
+def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 50) -> dict:
+    """
+    Calculate Fibonacci retracement and extension levels from the most recent
+    significant swing high and swing low over the last `lookback` bars.
+
+    Retracements: 23.6%, 38.2%, 50%, 61.8%, 78.6%
+    Extensions:   127.2%, 161.8%, 200%, 261.8%
+
+    Returns dict with keys: swing_high, swing_low, direction, and all Fib levels.
+    """
+    _empty = {"swing_high": 0.0, "swing_low": 0.0, "direction": "NONE",
+              "fib_236": 0.0, "fib_382": 0.0, "fib_500": 0.0,
+              "fib_618": 0.0, "fib_786": 0.0,
+              "ext_1272": 0.0, "ext_1618": 0.0, "ext_2000": 0.0}
+
+    if df is None or len(df) < 10:
+        return _empty
+
+    tail = df.tail(lookback)
+    h = float(tail["High"].max())
+    l = float(tail["Low"].min())
+    c = float(df["Close"].iloc[-1])
+
+    if h <= l or h <= 0:
+        return _empty
+
+    rng = h - l
+    direction = "UP" if c > (h + l) / 2 else "DOWN"
+
+    if direction == "UP":
+        # Retracements of the up-move (from low to high): price may pull back to these
+        return {
+            "swing_high": round(h, 4),
+            "swing_low":  round(l, 4),
+            "direction":  direction,
+            "fib_236":  round(h - rng * 0.236, 4),
+            "fib_382":  round(h - rng * 0.382, 4),
+            "fib_500":  round(h - rng * 0.500, 4),
+            "fib_618":  round(h - rng * 0.618, 4),
+            "fib_786":  round(h - rng * 0.786, 4),
+            "ext_1272": round(h + rng * 0.272, 4),
+            "ext_1618": round(h + rng * 0.618, 4),
+            "ext_2000": round(h + rng * 1.000, 4),
+        }
+    else:
+        # Down-move retracements (price may bounce to these levels)
+        return {
+            "swing_high": round(h, 4),
+            "swing_low":  round(l, 4),
+            "direction":  direction,
+            "fib_236":  round(l + rng * 0.236, 4),
+            "fib_382":  round(l + rng * 0.382, 4),
+            "fib_500":  round(l + rng * 0.500, 4),
+            "fib_618":  round(l + rng * 0.618, 4),
+            "fib_786":  round(l + rng * 0.786, 4),
+            "ext_1272": round(l - rng * 0.272, 4),
+            "ext_1618": round(l - rng * 0.618, 4),
+            "ext_2000": round(l - rng * 1.000, 4),
+        }
+
+
+# ── 8. Volume Profile Value Area (VAH / VAL) ──────────────────────────────────
+
+def calculate_value_area(df: pd.DataFrame, va_pct: float = 0.70) -> dict:
+    """
+    Calculate Volume Profile Value Area (70% rule).
+
+    VAH (Value Area High): Top boundary where 70% of volume was traded
+    VAL (Value Area Low):  Bottom boundary
+    POC (Point of Control): Price with highest volume (same as calculate_volume_poc)
+
+    The 80% Rule: if price opens outside the value area and enters it,
+    there is an 80% probability of trading to the opposite VA boundary.
+
+    Returns dict with: poc, vah, val, va_pct_actual
+    """
+    _empty = {"poc": 0.0, "vah": 0.0, "val": 0.0, "va_pct_actual": 0.0}
+
+    if df is None or len(df) < 5:
+        return _empty
+
+    try:
+        highs   = df["High"].values.astype(float)
+        lows    = df["Low"].values.astype(float)
+        closes  = df["Close"].values.astype(float)
+        volumes = df["Volume"].values.astype(float)
+    except Exception:
+        return _empty
+
+    price_min = float(np.nanmin(lows))
+    price_max = float(np.nanmax(highs))
+    if price_max <= price_min or price_min <= 0:
+        return _empty
+
+    # Build volume profile histogram
+    n_buckets  = _POC_BUCKETS
+    bucket_sz  = (price_max - price_min) / n_buckets
+    vol_profile = np.zeros(n_buckets)
+    tp = (highs + lows + closes) / 3.0
+
+    for p, v in zip(tp, volumes):
+        if not np.isfinite(p) or not np.isfinite(v) or v <= 0:
+            continue
+        idx = min(int((p - price_min) / bucket_sz), n_buckets - 1)
+        vol_profile[idx] += v
+
+    total_vol = vol_profile.sum()
+    if total_vol == 0:
+        return _empty
+
+    poc_idx   = int(np.argmax(vol_profile))
+    poc_price = price_min + (poc_idx + 0.5) * bucket_sz
+
+    # Expand outward from POC until 70% of volume is captured
+    target_vol = total_vol * va_pct
+    va_vol      = vol_profile[poc_idx]
+    lo_idx      = poc_idx
+    hi_idx      = poc_idx
+
+    while va_vol < target_vol:
+        # Expand to whichever side has more volume next
+        next_lo = lo_idx - 1
+        next_hi = hi_idx + 1
+        can_lo  = next_lo >= 0
+        can_hi  = next_hi < n_buckets
+
+        if not can_lo and not can_hi:
+            break
+
+        vol_lo = vol_profile[next_lo] if can_lo else -1
+        vol_hi = vol_profile[next_hi] if can_hi else -1
+
+        if vol_hi >= vol_lo and can_hi:
+            hi_idx = next_hi
+            va_vol += vol_profile[hi_idx]
+        elif can_lo:
+            lo_idx = next_lo
+            va_vol += vol_profile[lo_idx]
+        else:
+            break
+
+    vah = price_min + (hi_idx + 1) * bucket_sz
+    val = price_min + lo_idx * bucket_sz
+
+    return {
+        "poc": round(poc_price, 4),
+        "vah": round(vah, 4),
+        "val": round(val, 4),
+        "va_pct_actual": round(va_vol / total_vol, 3),
+    }
