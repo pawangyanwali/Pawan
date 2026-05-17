@@ -1161,7 +1161,7 @@ class Scanner:
             from agent.adaptive_filter import update_filter as _af_live
             _live_stats = _st_stats()
             if _live_stats.get("overall", {}).get("total", 0) >= 5:
-                _af_live(_live_stats)
+                _af_live(_live_stats, source="observation")
         except Exception as _af_live_err:
             logger.debug(f"live adaptive filter update error: {_af_live_err}")
 

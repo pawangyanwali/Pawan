@@ -183,25 +183,35 @@ class LearningEngine:
         pt_stats, pt_count = self._get_pt_stats()
 
         # ── 3. Fetch real-time market observation stats ───────────────────────
-        # These come from every signal fired, not just closed trades.
-        # Includes session accuracy, AH tier performance, volume patterns, etc.
-        # Updates every 90s so learning is live even during non-trading hours.
+        # SHORT-TERM direction checks — fast feedback but SYSTEMATICALLY BIASED
+        # for mean-reversion signals (price moves against reversal for first few
+        # bars).  Kept SEPARATE from trade stats so it only informs CONTEXT
+        # pattern learning, never the main win rate or confidence threshold.
         obs_stats, obs_count = self._get_observation_stats()
 
-        # ── 4. Merge all three stat sources ──────────────────────────────────
+        # ── 4. Merge ONLY high-quality trade sources ──────────────────────────
+        # Observation stats are sent separately as source="observation" so they
+        # cannot corrupt current_win_rate or dynamic_threshold.
         merged = self._merge_stats(bt_stats, pt_stats)
-        merged = self._merge_stats(merged, obs_stats)   # layer observations on top
 
         if merged["overall"]["total"] < 3:
+            # Still push observation context patterns even when trade data is thin
+            if obs_count >= 5:
+                from agent.adaptive_filter import update_filter as _obs_update
+                _obs_update(obs_stats, source="observation")
             _log(f"Cycle #{self._cycle_count}: only {merged['overall']['total']} "
-                 "resolved — waiting for more data", level="DEBUG")
+                 "trade outcomes — waiting for more", level="DEBUG")
             self._last_cycle_ts = ts
             return
 
-        # ── 5. Push merged stats into adaptive filter ─────────────────────────
+        # ── 5. Push merged trade stats into adaptive filter ───────────────────
         from agent.adaptive_filter import update_filter, get_status as af_status
         prev_threshold = self._last_threshold
-        update_filter(merged)
+        update_filter(merged, source="backtest")
+
+        # Also push observation stats for context-only learning
+        if obs_count >= 5:
+            update_filter(obs_stats, source="observation")
 
         status = af_status()
         new_wr        = float(status.get("current_win_rate", 0.0))

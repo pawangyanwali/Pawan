@@ -2,21 +2,36 @@
 Adaptive signal filter — self-learning system that suppresses losing patterns
 and dynamically raises the confidence gate until win rate targets are met.
 
-How it works
-------------
-1.  After every feedback retrain cycle (≥20 new outcomes) the filter reads
-    the live backtest performance stats.
-2.  For each context dimension (vwap_event, session, regime, rsi_zone,
-    entry_type, direction) it identifies contexts where win_rate < SUPPRESS_BELOW
-    with at least MIN_SAMPLE resolved trades.
-3.  Suppressed contexts are stored in a JSON file so they survive restarts.
-4.  The dynamic confidence threshold is computed by finding the lowest confidence
-    band that historically achieves >= TARGET_WIN_RATE.
-5.  In scanner.py, before a signal is emitted, should_suppress() is called.
-    If suppressed the signal direction is forced to NEUTRAL so it never reaches
-    paper trading or the signal table as a tradeable idea.
+Architecture (two-tier data quality)
+-------------------------------------
+TIER 1  "trade" sources  ("backtest", "paper", "weekend_walk_forward")
+        → Actual TP/SL resolved trades — HIGH quality, slow feedback (~hours)
+        → Updates: current_win_rate, dynamic_threshold, context blocks/boosts
+        → Uses EWMA so a single bad batch doesn't destroy accumulated history
 
-Target: 62% win rate. The filter tightens automatically until reached.
+TIER 2  "observation" source  (short-term 90s direction checks from scanner)
+        → Fast feedback (~90s) but SYSTEMATICALLY BIASED for mean-reversion:
+          price almost always moves against a reversal signal for the first
+          few bars, so 90s-resolution accuracy is ~15-30% even for trades
+          that eventually hit target.
+        → Updates: observation_win_rate + context blocks/boosts ONLY
+        → Does NOT touch current_win_rate or dynamic_threshold
+
+Anti-deadlock
+-------------
+Scenario: low WR → high threshold → signals suppressed → no trades → no new
+data → WR stays low → threshold stays high → forever stuck.
+
+Fix: if dynamic_threshold has been at MAX and WR hasn't improved for
+MAX_STUCK_CYCLES consecutive "trade" updates → auto-relax to DEFAULT.
+This lets signals flow again so the system can generate new learning data.
+
+EWMA
+----
+current_win_rate is updated as an exponential moving average (α = 0.40).
+At α=0.40: a single update provides 40% of the new value, so ~5 "trade"
+updates are needed to fully reflect a regime change. Fast enough to react
+to real shifts, slow enough to resist random noise.
 """
 from __future__ import annotations
 
@@ -24,35 +39,41 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 TARGET_WIN_RATE   = 0.55   # goal win rate — system tightens until reached
-SUPPRESS_BELOW    = 0.35   # suppress context if win_rate < this
+SUPPRESS_BELOW    = 0.35   # suppress context pattern if win_rate < this
 BOOST_ABOVE       = 0.72   # boost confidence if win_rate >= this
 MIN_SAMPLE        = 8      # minimum resolved trades before suppressing a context
 RELAX_ABOVE       = 0.85   # if win rate exceeds this, slightly relax threshold
-DEFAULT_THRESHOLD = 55.0   # starting dynamic confidence gate (was 60)
-MIN_THRESHOLD     = 50.0   # never go below this (avoids suppressing all signals)
-MAX_THRESHOLD     = 63.0   # never require more than this — high gates kill signal flow and learning
-BOOTSTRAP_OUTCOMES = 30    # outcomes needed before threshold raises above DEFAULT
+DEFAULT_THRESHOLD = 55.0   # starting confidence gate
+MIN_THRESHOLD     = 50.0   # never go below this
+MAX_THRESHOLD     = 63.0   # never require more than this — high gates kill signal flow
+BOOTSTRAP_OUTCOMES = 30    # outcomes needed before threshold can rise above DEFAULT
+EWMA_ALPHA        = 0.40   # exponential smoothing: 0.40 = fast adaptation (~5 updates)
+MAX_STUCK_CYCLES  = 4      # consecutive max-threshold trade updates before anti-deadlock fires
+
+# Sources that produce reliable TP/SL-resolved trade data
+_TRADE_SOURCES = {"backtest", "paper", "weekend_walk_forward"}
 
 _FILTER_PATH = Path(__file__).parent.parent / "data" / "adaptive_filter.json"
 _lock = threading.Lock()
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 _state: dict = {
-    "blocked_contexts":    {},     # "vwap_event:REJECTION" → {win_rate, count, reason}
-    "boosted_contexts":    {},     # "vwap_event:RECLAIM"   → {win_rate, count}
+    "blocked_contexts":    {},
+    "boosted_contexts":    {},
     "dynamic_threshold":   DEFAULT_THRESHOLD,
-    "current_win_rate":    0.0,
+    "current_win_rate":    0.0,   # EWMA of trade-source win rates (fraction 0-1)
+    "observation_win_rate": 0.0,  # short-term direction accuracy (display only)
     "total_resolved":      0,
     "last_updated":        None,
-    "suppressed_count":    0,      # how many signals suppressed this session
-    "threshold_history":   [],     # [{threshold, win_rate, ts}] — last 10
-    "false_negative_count":  0,     # suppressed signals that would have been wins
+    "suppressed_count":    0,
+    "threshold_history":   [],
+    "false_negative_count": 0,
+    "_stuck_cycles":       0,     # consecutive cycles at MAX with low WR
 }
 
 
@@ -66,16 +87,17 @@ def _load():
                 saved = json.load(f)
             with _lock:
                 _state.update(saved)
-                # Cap persisted threshold to current MAX — prevents deadlock after config change
                 if _state["dynamic_threshold"] > MAX_THRESHOLD:
-                    _state["dynamic_threshold"] = DEFAULT_THRESHOLD  # reset to default, not just cap
+                    _state["dynamic_threshold"] = DEFAULT_THRESHOLD
                     logger.info(
-                        f"[AdaptiveFilter] Reset persisted threshold to DEFAULT {DEFAULT_THRESHOLD}% (was above MAX {MAX_THRESHOLD}%)"
+                        f"[AdaptiveFilter] Reset persisted threshold to DEFAULT "
+                        f"{DEFAULT_THRESHOLD}% (was above MAX {MAX_THRESHOLD}%)"
                     )
             logger.info(
                 f"[AdaptiveFilter] Loaded — threshold={_state['dynamic_threshold']:.1f}%  "
                 f"blocked={len(_state['blocked_contexts'])}  "
-                f"win_rate={_state['current_win_rate']*100:.1f}%"
+                f"trade_WR={_state['current_win_rate']*100:.1f}%  "
+                f"obs_WR={_state.get('observation_win_rate', 0)*100:.1f}%"
             )
     except Exception as e:
         logger.warning(f"[AdaptiveFilter] Could not load saved state: {e}")
@@ -92,7 +114,6 @@ def _save():
         logger.warning(f"[AdaptiveFilter] Could not save state: {e}")
 
 
-# Load persisted state at import time
 _load()
 
 
@@ -100,42 +121,56 @@ _load()
 
 def update_filter(stats: dict, source: str = "backtest") -> None:
     """
-    Called after each backtest feedback retrain with fresh performance stats.
-    Updates blocked/boosted context lists and the dynamic confidence threshold.
-    Pass source="weekend_walk_forward" when called from the weekend learner.
+    Update adaptive filter from new performance stats.
+
+    source="backtest" | "paper" | "weekend_walk_forward"
+        → High-quality TP/SL data: updates win rate, threshold, and context patterns.
+
+    source="observation"
+        → Short-term direction checks: only updates context patterns and
+          observation_win_rate.  Does NOT touch current_win_rate or threshold.
     """
     _apply_stats(stats, source=source)
 
 
 def update_from_paper_trades(stats: dict) -> None:
-    """
-    Called immediately after each paper trade closes.
-    Merges paper trading outcomes into the filter — complementing backtest data
-    with real simulated P&L so the system learns continuously, not just every
-    20 backtest resolutions.
-    """
+    """Called immediately after each paper trade closes."""
     _apply_stats(stats, source="paper")
 
 
 def _apply_stats(stats: dict, source: str = "backtest") -> None:
-    """Shared logic for update_filter and update_from_paper_trades."""
-    overall = stats.get("overall", {})
-    total   = overall.get("total", 0)
+    overall    = stats.get("overall", {})
+    total      = overall.get("total", 0)
     current_wr = float(overall.get("win_rate", 0.0))
 
-    # Always update win_rate and total so the dashboard shows live progress
-    # even before MIN_SAMPLE is reached for context blocking decisions.
-    if total > 0 and current_wr > 0:
+    is_trade_source = source in _TRADE_SOURCES
+
+    # ── Update win rate (trade sources only, with EWMA) ───────────────────────
+    if is_trade_source and total > 0 and current_wr > 0:
         with _lock:
-            _state["current_win_rate"] = current_wr
+            old_wr = _state["current_win_rate"]
+            # EWMA: blend new reading into history — prevents single-batch crashes
+            if old_wr > 0:
+                smoothed = EWMA_ALPHA * current_wr + (1.0 - EWMA_ALPHA) * old_wr
+            else:
+                smoothed = current_wr
+            _state["current_win_rate"] = smoothed
             _state["total_resolved"]   = total
         _save()
 
+    # ── Update observation win rate (separate, display-only) ──────────────────
+    if not is_trade_source and total > 0 and current_wr > 0:
+        with _lock:
+            old_obs = _state.get("observation_win_rate", 0.0)
+            if old_obs > 0:
+                _state["observation_win_rate"] = 0.3 * current_wr + 0.7 * old_obs
+            else:
+                _state["observation_win_rate"] = current_wr
+
     if total < MIN_SAMPLE:
         return
-    new_blocked: dict = {}
-    new_boosted: dict = {}
 
+    # ── Context blocking / boosting (ALL sources contribute) ─────────────────
     context_keys = [
         ("vwap_event",   stats.get("by_vwap_event",  {})),
         ("session",      stats.get("by_session",      {})),
@@ -147,51 +182,84 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
         ("ah_bias",      stats.get("by_ah_bias",      {})),
     ]
 
+    new_blocked: dict = {}
+    new_boosted: dict = {}
+
+    # For observation source: use higher MIN_SAMPLE and tighter SUPPRESS_BELOW
+    # to avoid killing context patterns based on noisy short-term checks
+    obs_suppress_below = 0.20 if not is_trade_source else SUPPRESS_BELOW
+    obs_min_sample     = max(MIN_SAMPLE * 3, 25) if not is_trade_source else MIN_SAMPLE
+
     for dim, breakdown in context_keys:
         for val, s in breakdown.items():
             count = s.get("total", 0)
             wr    = float(s.get("win_rate", 0.0))
-            if count < MIN_SAMPLE:
+            if count < obs_min_sample:
                 continue
             key = f"{dim}:{val}"
-            if wr < SUPPRESS_BELOW:
+            if wr < obs_suppress_below:
                 new_blocked[key] = {
                     "win_rate": round(wr, 3),
                     "count":    count,
-                    "reason":   f"{dim}={val} wins only {wr*100:.0f}% ({count} trades)",
+                    "reason":   f"{dim}={val} wins only {wr*100:.0f}% ({count} trades) [{source}]",
                 }
-            elif wr >= BOOST_ABOVE:
+            elif wr >= BOOST_ABOVE and is_trade_source:
+                # Only boost from high-quality trade data
                 new_boosted[key] = {"win_rate": round(wr, 3), "count": count}
 
-    # Dynamic threshold: find confidence band achieving TARGET_WIN_RATE
-    new_threshold = _compute_threshold(stats.get("by_confidence", {}), current_wr, total)
+    # Observation source: only merge in NEW blocks, don't wipe existing trade-derived blocks
+    if not is_trade_source:
+        with _lock:
+            existing_blocked = dict(_state["blocked_contexts"])
+            existing_boosted = dict(_state["boosted_contexts"])
+            existing_blocked.update(new_blocked)  # add/update obs-derived blocks
+            _state["blocked_contexts"] = existing_blocked
+            # Don't touch boosted from observations
+        _save()
+        return
+
+    # ── Trade source: full update of threshold + contexts ─────────────────────
+    with _lock:
+        smoothed_wr   = _state["current_win_rate"]
+        total_resolved = _state["total_resolved"]
+
+    new_threshold = _compute_threshold(
+        stats.get("by_confidence", {}), smoothed_wr, total_resolved
+    )
 
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
 
     with _lock:
+        # Anti-deadlock: if stuck at max threshold with very low WR → relax
+        if (new_threshold >= MAX_THRESHOLD - 0.5 and smoothed_wr < 0.35):
+            _state["_stuck_cycles"] = _state.get("_stuck_cycles", 0) + 1
+            if _state["_stuck_cycles"] >= MAX_STUCK_CYCLES:
+                new_threshold = DEFAULT_THRESHOLD
+                _state["_stuck_cycles"] = 0
+                logger.warning(
+                    f"[AdaptiveFilter] ANTI-DEADLOCK: threshold reset to "
+                    f"{DEFAULT_THRESHOLD}% after {MAX_STUCK_CYCLES} stuck cycles "
+                    f"(WR={smoothed_wr*100:.1f}%)"
+                )
+        else:
+            _state["_stuck_cycles"] = 0
+
         _state["blocked_contexts"]  = new_blocked
         _state["boosted_contexts"]  = new_boosted
         _state["dynamic_threshold"] = new_threshold
-        _state["current_win_rate"]  = current_wr
-        _state["total_resolved"]    = total
         _state["last_updated"]      = ts
         history = _state.setdefault("threshold_history", [])
-        history.append({"threshold": new_threshold, "win_rate": current_wr, "ts": ts})
-        _state["threshold_history"] = history[-10:]  # keep last 10
+        history.append({"threshold": new_threshold, "win_rate": smoothed_wr, "ts": ts})
+        _state["threshold_history"] = history[-10:]
 
     _save()
 
-    # Routine stats go to DEBUG — only surface to console if threshold shifted significantly
     logger.debug(
-        f"[AdaptiveFilter:{source}] Updated — win_rate={current_wr*100:.1f}%  "
+        f"[AdaptiveFilter:{source}] trade_WR={smoothed_wr*100:.1f}% (raw={current_wr*100:.1f}%)  "
         f"threshold={new_threshold:.1f}%  "
-        f"blocked={len(new_blocked)}  boosted={len(new_boosted)}  "
-        f"total={total}"
+        f"blocked={len(new_blocked)}  boosted={len(new_boosted)}  total={total}"
     )
-    if new_blocked:
-        for k, v in new_blocked.items():
-            logger.debug(f"  [SUPPRESS] {v['reason']}")
 
 
 def _compute_threshold(
@@ -202,13 +270,11 @@ def _compute_threshold(
     """
     Find the minimum confidence level where historical win rate >= TARGET_WIN_RATE.
 
-    Bands: '<50', '50-60', '60-70', '70-80', '80+'
-    We want the lowest band's lower-bound where cumulative above that band
-    achieves the target.
+    Key change from original: max raise is capped at +4 points per update
+    (original formula could raise by +11 points in a single update at low WR,
+    which caused catastrophic gate-tightening and learning starvation).
 
-    Bootstrap protection: don't raise above DEFAULT_THRESHOLD until
-    BOOTSTRAP_OUTCOMES resolved signals exist.  Early outcomes are too noisy
-    to justify blocking the entire signal stream.
+    Bootstrap guard: don't raise above DEFAULT during first BOOTSTRAP_OUTCOMES.
     """
     band_order = [("<50", 0), ("50-60", 50), ("60-70", 60), ("70-80", 70), ("80+", 80)]
 
@@ -231,19 +297,17 @@ def _compute_threshold(
     if current_wr >= RELAX_ABOVE:
         best_threshold = max(MIN_THRESHOLD, best_threshold - 5.0)
 
-    # Bootstrap guard: hold threshold at DEFAULT during the learning warm-up
-    # period so signals can flow and generate the outcomes the system needs.
     if total_resolved < BOOTSTRAP_OUTCOMES:
-        return round(float(max(MIN_THRESHOLD, min(MAX_THRESHOLD, best_threshold))), 1)
+        return round(float(max(MIN_THRESHOLD, min(DEFAULT_THRESHOLD, best_threshold))), 1)
 
-    # Post-bootstrap: raise threshold gently — the system needs signal volume to
-    # improve, so a large raise defeats the purpose. Max raise is +8 points even
-    # at worst win rate. (gap * 25 * scale: 0.20 gap * 25 * 1.0 = +5 points)
+    # Post-bootstrap: gentle raise — max +4 points per update cycle.
+    # Original formula could raise +11 points (gap*25*scale), causing deadlock.
+    # At 11% WR: gap=0.439, scale→1.0, raise=min(4, 0.439*10*1.0)=4.0 ✓
     if current_wr < TARGET_WIN_RATE:
-        gap   = TARGET_WIN_RATE - current_wr
-        # Scale: 0.0 at BOOTSTRAP_OUTCOMES outcomes → 1.0 at BOOTSTRAP_OUTCOMES+150
-        scale = min(1.0, (total_resolved - BOOTSTRAP_OUTCOMES) / 150.0)
-        raised = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + gap * 25 * scale)
+        gap          = TARGET_WIN_RATE - current_wr
+        scale        = min(1.0, (total_resolved - BOOTSTRAP_OUTCOMES) / 200.0)
+        raise_amount = min(4.0, gap * 10 * scale)
+        raised       = min(MAX_THRESHOLD, DEFAULT_THRESHOLD + raise_amount)
         best_threshold = max(best_threshold, raised)
 
     return round(float(max(MIN_THRESHOLD, min(MAX_THRESHOLD, best_threshold))), 1)
@@ -251,20 +315,11 @@ def _compute_threshold(
 
 # ── Signal suppression check ──────────────────────────────────────────────────
 
-def record_false_negative_check(
-    direction:    str,
-    price_moved:  float,   # pct move after suppression
-) -> None:
-    """
-    After suppressing a signal, check if price moved in the predicted direction.
-    If it would have been a WIN, count it as a false negative — the filter is
-    being too conservative.
-    """
+def record_false_negative_check(direction: str, price_moved: float) -> None:
     from agent.signal_tracker import SHORT_WIN_PCT, SLIPPAGE_PCT
     threshold = SHORT_WIN_PCT + SLIPPAGE_PCT
     d = 1 if "BUY" in direction else -1
-    would_have_won = (price_moved * d) >= threshold
-    if would_have_won:
+    if (price_moved * d) >= threshold:
         with _lock:
             _state["false_negative_count"] = _state.get("false_negative_count", 0) + 1
         _save()
@@ -280,35 +335,21 @@ def should_suppress(
     sector_trend: str = "",
     confidence:  float = 0.0,
 ) -> tuple[bool, str]:
-    """
-    Check whether a signal should be suppressed based on learned losing patterns.
-
-    Returns (suppress: bool, reason: str).
-    suppress=True means change direction to NEUTRAL — don't trade this setup.
-    """
     with _lock:
-        blocked  = dict(_state["blocked_contexts"])
+        blocked   = dict(_state["blocked_contexts"])
         threshold = float(_state["dynamic_threshold"])
 
-    checks = [
-        ("vwap_event",   vwap_event),
-        ("session",      session),
-        ("regime",       regime),
-        ("rsi_zone",     rsi_zone),
-        ("entry_type",   entry_type),
-        ("direction",    direction),
-        ("sector_trend", sector_trend),
-    ]
-
-    for dim, val in checks:
+    for dim, val in [
+        ("vwap_event", vwap_event), ("session", session), ("regime", regime),
+        ("rsi_zone", rsi_zone), ("entry_type", entry_type),
+        ("direction", direction), ("sector_trend", sector_trend),
+    ]:
         if not val:
             continue
         key = f"{dim}:{val}"
         if key in blocked:
-            info = blocked[key]
-            return True, f"Suppressed: {info['reason']}"
+            return True, f"Suppressed: {blocked[key]['reason']}"
 
-    # Confidence gate — use dynamic threshold learned from outcomes
     if confidence < threshold:
         return True, f"Confidence {confidence:.1f}% below learned threshold {threshold:.1f}%"
 
@@ -323,10 +364,6 @@ def get_confidence_boost(
     entry_type: str = "",
     direction:  str = "",
 ) -> float:
-    """
-    Return a confidence boost (positive) for high-win-rate contexts.
-    Applied in addition to backtest_reporter.adjust_confidence().
-    """
     with _lock:
         boosted = dict(_state["boosted_contexts"])
 
@@ -337,7 +374,7 @@ def get_confidence_boost(
         key = f"{dim}:{val}"
         if key in boosted:
             wr = boosted[key]["win_rate"]
-            boosts.append((wr - BOOST_ABOVE) * 30)  # up to +8.4 per context
+            boosts.append((wr - BOOST_ABOVE) * 30)
 
     return round(sum(boosts) / len(boosts), 1) if boosts else 0.0
 
@@ -346,17 +383,19 @@ def get_status() -> dict:
     """Return current filter state for the API and dashboard."""
     with _lock:
         return {
-            "dynamic_threshold":  _state["dynamic_threshold"],
-            "current_win_rate":   round(_state["current_win_rate"] * 100, 1),
-            "target_win_rate":    TARGET_WIN_RATE * 100,
-            "total_resolved":     _state["total_resolved"],
-            "blocked_contexts":   _state["blocked_contexts"],
-            "boosted_contexts":   _state["boosted_contexts"],
-            "suppressed_count":   _state["suppressed_count"],
+            "dynamic_threshold":    _state["dynamic_threshold"],
+            "current_win_rate":     round(_state["current_win_rate"] * 100, 1),
+            "observation_win_rate": round(_state.get("observation_win_rate", 0.0) * 100, 1),
+            "target_win_rate":      TARGET_WIN_RATE * 100,
+            "total_resolved":       _state["total_resolved"],
+            "blocked_contexts":     _state["blocked_contexts"],
+            "boosted_contexts":     _state["boosted_contexts"],
+            "suppressed_count":     _state["suppressed_count"],
             "false_negative_count": _state.get("false_negative_count", 0),
-            "last_updated":       _state["last_updated"],
-            "threshold_history":  _state["threshold_history"],
-            "is_learning":        _state["total_resolved"] >= MIN_SAMPLE,
+            "last_updated":         _state["last_updated"],
+            "threshold_history":    _state["threshold_history"],
+            "is_learning":          _state["total_resolved"] >= MIN_SAMPLE,
+            "stuck_cycles":         _state.get("_stuck_cycles", 0),
         }
 
 
@@ -366,17 +405,18 @@ def increment_suppressed():
 
 
 def reset_filter() -> None:
-    """Reset all learned state to factory defaults and delete the persisted file."""
     global _state
     fresh = {
         "blocked_contexts":    {},
         "boosted_contexts":    {},
         "dynamic_threshold":   DEFAULT_THRESHOLD,
         "current_win_rate":    0.0,
+        "observation_win_rate": 0.0,
         "total_resolved":      0,
         "last_updated":        None,
         "suppressed_count":    0,
         "threshold_history":   [],
+        "_stuck_cycles":       0,
     }
     with _lock:
         _state = fresh

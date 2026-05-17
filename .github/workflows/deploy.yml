@@ -12,16 +12,17 @@ jobs:
   deploy:
     name: SSH deploy & restart
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host:          ${{ secrets.DEPLOY_HOST }}
-          username:      ${{ secrets.DEPLOY_USER }}
-          key:           ${{ secrets.DEPLOY_SSH_KEY }}
-          port:          22
+          host:            ${{ secrets.DEPLOY_HOST }}
+          username:        ${{ secrets.DEPLOY_USER }}
+          key:             ${{ secrets.DEPLOY_SSH_KEY }}
+          port:            22
+          command_timeout: 10m
           script: |
             set -e
             APP_DIR="/opt/nasdaq-agent"
@@ -46,19 +47,44 @@ jobs:
 
             echo "=== Restarting service ==="
             sudo systemctl restart "$SERVICE"
-            sleep 5
 
-            echo "=== Health check ==="
-            status=$(systemctl is-active "$SERVICE")
-            if [ "$status" != "active" ]; then
-              echo "ERROR: Service failed to start"
-              sudo journalctl -u "$SERVICE" --no-pager -n 30
-              exit 1
-            fi
+            echo "=== Waiting for service to come up ==="
+            for i in $(seq 1 12); do
+              sleep 5
+              status=$(systemctl is-active "$SERVICE" 2>/dev/null || echo "unknown")
+              if [ "$status" = "active" ]; then
+                echo "Service is active after $((i*5))s"
+                break
+              fi
+              echo "  Attempt $i/12: status=$status"
+              if [ $i -eq 12 ]; then
+                echo "ERROR: Service failed to start within 60s"
+                sudo journalctl -u "$SERVICE" --no-pager -n 50
+                exit 1
+              fi
+            done
+
+            echo "=== Health check (internal) ==="
+            # localhost:8000 is correct here — this runs INSIDE the SSH session on the server
+            for i in 1 2 3; do
+              if curl -sf --max-time 10 http://localhost:8000/api/health \
+                   | python3 -c "import sys,json; d=json.load(sys.stdin); \
+                     print('Health:', d.get('status','?'), '| Tickers:', d.get('tickers','?'))"; then
+                break
+              fi
+              echo "Health check attempt $i failed, retrying..."
+              sleep 5
+            done
 
             echo "=== Deployed successfully ==="
-            curl -sf http://localhost:8000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); print('Health:', d.get('status','?'), '| Tickers:', d.get('tickers','?'))" || true
 
       - name: Notify on failure
         if: failure()
-        run: echo "Deployment FAILED — check GitHub Actions logs"
+        run: |
+          echo "Deployment FAILED — check GitHub Actions logs"
+          echo ""
+          echo "Common causes of 'i/o timeout' on port 22:"
+          echo "  1. AWS Lightsail firewall: add port 22 inbound rule for GitHub Actions IPs"
+          echo "     Reference: https://api.github.com/meta (look for 'actions' IP ranges)"
+          echo "  2. DEPLOY_HOST secret contains wrong IP address"
+          echo "  3. Server is stopped/rebooted and has a new IP"

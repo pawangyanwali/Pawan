@@ -4002,9 +4002,13 @@ function renderLearningStatus(d) {
   const obs = d.observations || {};
   const obsWR = obs.observation_wr ?? 0;
   const obsCol = obsWR >= 62 ? 'var(--green)' : obsWR >= 45 ? 'var(--yellow)' : 'var(--red)';
+  const filterObsWR = d.observation_win_rate ?? 0;
+  const filterObsCol = filterObsWR >= 55 ? 'var(--green)' : filterObsWR >= 35 ? 'var(--yellow)' : 'var(--red)';
   const kpis = [
     { label:'Confidence Gate',     value: thresh.toFixed(1) + '%',                     color:'var(--blue)' },
-    { label:'Win Rate (trades)',   value: wr.toFixed(1) + '%',                          color: col },
+    { label:'Trade Win Rate ✓',    value: wr.toFixed(1) + '%',                          color: col },
+    { label:'Signal Direction WR', value: filterObsWR > 0 ? filterObsWR.toFixed(1)+'%' : '—', color: filterObsCol,
+      title: 'Short-term (90s) direction accuracy — displayed separately, does not drive the confidence gate' },
     { label:'Market Obs. WR',      value: obs.observation_wr != null ? obsWR.toFixed(1)+'%' : '—', color: obsCol },
     { label:'Signals Observed',    value: obs.total_signals ?? '—',                     color:'var(--muted)' },
     { label:'Obs. Resolved',       value: obs.resolved ?? '—',                          color: obsWR >= 62 ? 'var(--green)' : 'var(--muted)' },

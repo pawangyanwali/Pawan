@@ -303,6 +303,7 @@ def get_market_breakdown_stats(min_count: int = 5, lookback_days: int = 30) -> d
                        outcome, short_outcome
                 FROM signals
                 WHERE ts >= datetime('now', ?)
+                  AND is_suppressed = 0
                   AND (outcome != 'PENDING' OR short_outcome != 'PENDING')
             """, (f"-{lookback_days} days",)).fetchall()
 
@@ -421,6 +422,7 @@ def get_observation_summary() -> dict:
                   SUM(CASE WHEN outcome='WIN' OR short_outcome='WIN' THEN 1 ELSE 0 END) as wins
                 FROM signals
                 WHERE ts >= datetime('now', '-30 days')
+                  AND is_suppressed = 0
             """).fetchone()
 
     total    = row["total"] or 0
