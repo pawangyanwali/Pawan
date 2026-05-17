@@ -85,7 +85,7 @@ def _compute_vwap(df: pd.DataFrame) -> pd.Series:
         cum_tpvol = tpvol.cumsum()
 
     safe_vol = cum_vol.replace(0, np.nan)
-    return (cum_tpvol / safe_vol).fillna(method="ffill")
+    return (cum_tpvol / safe_vol).ffill()
 
 
 def score_technical(row: pd.Series) -> float:
