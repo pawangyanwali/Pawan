@@ -4100,7 +4100,8 @@ function openNeural() {
   loadNeuralStatus();
   if (_nnPollTimer) { clearInterval(_nnPollTimer); _nnPollTimer = null; }
   _nnPollTimer = setInterval(() => {
-    if (_nnData && _nnData.is_training_now) loadNeuralStatus();
+    const _rp = _nnData?.retrain_progress || {};
+    if (_nnData && (_nnData.is_training_now || _rp.is_running)) loadNeuralStatus();
   }, 3000);
 }
 
@@ -4139,11 +4140,12 @@ function renderNeuralPanel(d) {
   if (isActive) {
     banner.style.cssText += ';display:flex!important';
     let msg = 'Training in progress…';
-    if (phase === 'fetching_5m')   msg = 'Fetching 5-min price history…';
-    else if (phase === 'fetching_15m') msg = 'Fetching 15-min price history…';
+    if (phase === 'fetching_5m')     msg = 'Fetching 5-min price history…';
+    else if (phase === 'fetching_15m')  msg = 'Fetching 15-min price history…';
+    else if (phase === 'fetching_daily') msg = 'Fetching daily bars (2 years)…';
     else if (phase === 'xgboost')  msg = `XGBoost: training ${rp.current_ticker || ''}` +
       (rp.total ? ` · ${rp.done_count || 0}/${rp.total} tickers` : '');
-    else if (phase === 'deep')     msg = '🧠 Deep BiLSTM training — A/B/C clusters in parallel…';
+    else if (phase === 'deep')     msg = '🧠 Deep BiLSTM training — clusters A → B → C sequentially…';
     document.getElementById('nn-training-msg').textContent = msg;
     const hist = d.training_history || [];
     const last = hist[hist.length - 1];
@@ -4230,7 +4232,8 @@ function renderNeuralPanel(d) {
   // BiLSTM phase sub-label
   const bilstmPhaseEl = document.getElementById('nn-bilstm-phase');
   if (bilstmPhaseEl) {
-    if (bilstmActive) bilstmPhaseEl.textContent = '⏳ Training across all clusters in parallel…';
+    if (bilstmActive) bilstmPhaseEl.textContent = '⏳ Training clusters A → B → C sequentially…';
+    else if (rp.is_running && !d.deep_trained) bilstmPhaseEl.textContent = '⏳ Queued — will train after XGBoost phase completes';
     else if (d.deep_trained) bilstmPhaseEl.textContent = '✓ Trained — fine-tunes every 1h';
     else bilstmPhaseEl.textContent = 'Awaiting first training run — click "Train BiLSTM" above';
   }
@@ -4262,21 +4265,29 @@ function renderNeuralPanel(d) {
     { label: 'Swing XGBoost',   icon: '📊', desc: '15-min · 2h ahead',  ...d.swing_models,
       active: ['xgboost','fetching_15m'].includes(phase) },
     { label: 'Deep BiLSTM',     icon: '🧠', desc: '15-min · universal',
-      total: 1, trained: d.deep_trained ? 1 : 0, active: bilstmActive },
+      total: 1, trained: d.deep_trained ? 1 : 0, active: bilstmActive,
+      queued: rp.is_running && !bilstmActive && !d.deep_trained },
   ];
 
   document.getElementById('nn-model-grid').innerHTML = modelDefs.map(m => {
     const pct   = m.total > 0 ? Math.round((m.trained / m.total) * 100) : 0;
-    const color = m.active ? '#a78bfa'
+    const color = m.active  ? '#a78bfa'
+                : m.queued  ? '#f59e0b'
                 : pct >= 80 ? 'var(--green)'
                 : pct >= 40 ? '#fbbf24'
                 : 'var(--muted)';
-    const border = m.active ? 'border:1px solid rgba(124,58,237,.5);' : '';
+    const border = m.active ? 'border:1px solid rgba(124,58,237,.5);'
+                 : m.queued ? 'border:1px solid rgba(245,158,11,.35);'
+                 : '';
     const activeDot = m.active
       ? `<div style="width:7px;height:7px;border-radius:50%;background:#a78bfa;animation:pulse 1s infinite;flex-shrink:0"></div>`
+      : m.queued
+      ? `<div style="width:7px;height:7px;border-radius:50%;background:#f59e0b;flex-shrink:0"></div>`
       : '';
     const statusText = m.active
       ? `<span style="font-size:10px;color:#a78bfa;font-weight:700;animation:pulse 1.5s infinite">Training…</span>`
+      : m.queued
+      ? `<span style="font-size:10px;color:#f59e0b;font-weight:700">⏳ Queued</span>`
       : `<span style="font-size:10px;color:${color};margin-top:3px">${pct}% trained</span>`;
     return `<div class="nn-model-card" style="${border}">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:4px">
@@ -4306,7 +4317,7 @@ function renderNeuralPanel(d) {
           <span>Features: <b style="color:var(--text)">${di.n_features||23}</b></span>
           <span>Epochs: <b style="color:var(--text)">${di.epochs||10} full / 3 fine-tune</b></span>
           <span>Fine-tune: <b style="color:var(--accent)">every 1h</b></span>
-          <span>Status: <b style="color:${d.deep_trained?'var(--green)':'#f59e0b'}">${d.deep_trained?'✓ Trained':'⏳ Click "Train BiLSTM" above to start'}</b></span>
+          <span>Status: <b style="color:${d.deep_trained?'var(--green)':'#f59e0b'}">${d.deep_trained?'✓ Trained':rp.is_running?'⏳ Queued — trains after XGBoost':'⏳ Click "Train BiLSTM" above to start'}</b></span>
         </div>
       </div>`;
   }

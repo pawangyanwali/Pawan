@@ -499,6 +499,15 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600)
         logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
 
+    # ── Daily data: ~2 years (DailyMLModel — next-day direction) ─────────────
+    _rp_set(phase="fetching_daily", phase_label="Fetching daily bars (2 years)…")
+    if daily_data is not None:
+        logger.info(f"[retrain_all] Using pre-fetched daily data: {len(daily_data)} tickers")
+    else:
+        logger.info(f"[retrain_all] Batch-fetching daily history ({len(tickers)} tickers)…")
+        daily_data = fetch_batch_interval(tickers, "1day", 500, ttl=86400)
+        logger.info(f"[retrain_all] Daily data: {len(daily_data)}/{len(tickers)} tickers")
+
     _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")
 
     # ── Parallel ticker training ───────────────────────────────────────────────
