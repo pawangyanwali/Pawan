@@ -8,7 +8,8 @@ Architecture
               Each TRACKING signal is evaluated bar by bar:
               - WIN      : price reaches target
               - LOSS     : price hits stop
-              - VWAP_LOSS: price loses VWAP (for BUY) or reclaims it (for SELL)
+              - VWAP_LOSS: price loses VWAP after ≥3 bars AND already at -0.2R+
+                           (delayed check prevents single-scan dips from poisoning stats)
               - TIMEOUT  : signal open > MAX_BARS without resolution
 3. Report   — stats are computed on-demand via get_performance_stats()
 
@@ -40,7 +41,12 @@ logger = logging.getLogger(__name__)
 
 _DB_PATH  = Path(__file__).parent.parent / "data" / "live_backtest.db"
 _lock     = threading.Lock()
-MAX_BARS  = 20     # TIMEOUT after N bars if not resolved
+MAX_BARS  = 40     # TIMEOUT after N bars if not resolved (40 scan-cycles ≈ 40 min at 60s intervals)
+
+# VWAP_LOSS guard: only trigger after this many bars open AND this much adverse R
+# Prevents single-scan artifacts (momentary VWAP dip) from poisoning win-rate stats.
+_VWAP_LOSS_MIN_BARS = 3     # trade must be open ≥3 bars before VWAP_LOSS can fire
+_VWAP_LOSS_MIN_ADV_R = 0.2  # price must be ≥0.2R against trade before VWAP_LOSS fires
 MIN_MOVE_TO_RECORD = 0.0   # record all signals (no minimum)
 
 
@@ -217,14 +223,19 @@ def update_tracking(ticker: str, current_price: float, vwap: float = 0.0) -> lis
                         status = "WIN";  exit_reason = "TARGET"
                     elif current_price <= stp:
                         status = "LOSS"; exit_reason = "STOP"
-                    elif vwap > 0 and current_price < vwap and entry >= vwap:
+                    elif (vwap > 0 and current_price < vwap and entry >= vwap
+                          and bars >= _VWAP_LOSS_MIN_BARS and r_val <= -_VWAP_LOSS_MIN_ADV_R):
+                        # Only call VWAP_LOSS when: trade open ≥3 bars AND already ≥0.2R
+                        # against us. This prevents momentary single-bar VWAP dips from
+                        # being counted as losses — the #1 cause of false 29% win rates.
                         status = "LOSS"; exit_reason = "VWAP_LOSS"
                 else:
                     if current_price <= tgt:
                         status = "WIN";  exit_reason = "TARGET"
                     elif current_price >= stp:
                         status = "LOSS"; exit_reason = "STOP"
-                    elif vwap > 0 and current_price > vwap and entry <= vwap:
+                    elif (vwap > 0 and current_price > vwap and entry <= vwap
+                          and bars >= _VWAP_LOSS_MIN_BARS and r_val <= -_VWAP_LOSS_MIN_ADV_R):
                         status = "LOSS"; exit_reason = "VWAP_LOSS"
 
                 if bars >= MAX_BARS and not status:

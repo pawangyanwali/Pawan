@@ -116,6 +116,35 @@ def _save():
 
 _load()
 
+# ── Startup poisoned-state guard ──────────────────────────────────────────────
+# If we previously crashed into a state with very low WR and many blocked
+# contexts (false-positive flood from bad VWAP_LOSS logic), auto-reset rather
+# than letting the system start in a permanently broken configuration.
+def _auto_reset_if_poisoned() -> None:
+    with _lock:
+        wr      = _state.get("current_win_rate", 0.0)
+        blocked = len(_state.get("blocked_contexts", {}))
+    if wr < 0.30 and blocked > 10:
+        logger.warning(
+            f"[AdaptiveFilter] Poisoned state detected on load "
+            f"(WR={wr*100:.1f}%, {blocked} blocked contexts) — auto-resetting."
+        )
+        with _lock:
+            _state["blocked_contexts"]     = {}
+            _state["boosted_contexts"]     = {}
+            _state["dynamic_threshold"]    = DEFAULT_THRESHOLD
+            _state["current_win_rate"]     = 0.0
+            _state["observation_win_rate"] = 0.0
+            _state["suppressed_count"]     = 0
+            _state["_stuck_cycles"]        = 0
+            _state["threshold_history"]    = []
+            _state["last_updated"]         = None
+        _save()
+        logger.info(
+            f"[AdaptiveFilter] Auto-reset complete — threshold → {DEFAULT_THRESHOLD}%"
+        )
+
+_auto_reset_if_poisoned()
 
 # ── Core update ───────────────────────────────────────────────────────────────
 
@@ -386,7 +415,7 @@ def get_status() -> dict:
             "dynamic_threshold":    _state["dynamic_threshold"],
             "current_win_rate":     round(_state["current_win_rate"] * 100, 1),
             "observation_win_rate": round(_state.get("observation_win_rate", 0.0) * 100, 1),
-            "target_win_rate":      TARGET_WIN_RATE * 100,
+            "target_win_rate":      round(TARGET_WIN_RATE * 100, 1),   # fix 55.000000001% display
             "total_resolved":       _state["total_resolved"],
             "blocked_contexts":     _state["blocked_contexts"],
             "boosted_contexts":     _state["boosted_contexts"],
@@ -399,30 +428,40 @@ def get_status() -> dict:
         }
 
 
+def reset_filter(reason: str = "manual") -> dict:
+    """
+    Reset the learned state: clear all blocked/boosted contexts and recalibrate
+    win rate from zero.  The confidence gate is restored to DEFAULT (55%).
+
+    Called when:
+      - User requests a manual reset via /api/reset-learning
+      - System detects poisoned state at startup (win_rate < 25% with many blocks)
+
+    Does NOT clear the live_backtest.db signal history — new outcomes will
+    naturally rebuild correct context statistics from clean data.
+    """
+    global _state
+    with _lock:
+        _state["blocked_contexts"]     = {}
+        _state["boosted_contexts"]     = {}
+        _state["dynamic_threshold"]    = DEFAULT_THRESHOLD
+        _state["current_win_rate"]     = 0.0
+        _state["observation_win_rate"] = 0.0
+        _state["suppressed_count"]     = 0
+        _state["_stuck_cycles"]        = 0
+        _state["threshold_history"]    = []
+        _state["last_updated"]         = None
+        snapshot = dict(_state)
+    _save()
+    logger.info(
+        f"[AdaptiveFilter] RESET ({reason}): cleared all blocked/boosted contexts, "
+        f"win_rate → 0.0, threshold → {DEFAULT_THRESHOLD}%"
+    )
+    return {"status": "reset", "reason": reason, "threshold": DEFAULT_THRESHOLD}
+
+
 def increment_suppressed():
     with _lock:
         _state["suppressed_count"] = _state.get("suppressed_count", 0) + 1
 
 
-def reset_filter() -> None:
-    global _state
-    fresh = {
-        "blocked_contexts":    {},
-        "boosted_contexts":    {},
-        "dynamic_threshold":   DEFAULT_THRESHOLD,
-        "current_win_rate":    0.0,
-        "observation_win_rate": 0.0,
-        "total_resolved":      0,
-        "last_updated":        None,
-        "suppressed_count":    0,
-        "threshold_history":   [],
-        "_stuck_cycles":       0,
-    }
-    with _lock:
-        _state = fresh
-    try:
-        if _FILTER_PATH.exists():
-            _FILTER_PATH.unlink()
-    except Exception as e:
-        logger.warning(f"[AdaptiveFilter] Could not delete persisted state: {e}")
-    logger.info(f"[AdaptiveFilter] Reset to defaults — threshold={DEFAULT_THRESHOLD}%")
