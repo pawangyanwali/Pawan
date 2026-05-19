@@ -1536,11 +1536,49 @@ let _sessionInfo = null, _regimeInfo = null;
 const BACKEND_HTTP = '';
 const BACKEND_WS   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
 
-// ─── WebSocket ─────────────────────────────────────────────────────────────────
-let ws, reconnectDelay = 2000;
+// ─── WebSocket — persistent, self-healing connection ─────────────────────────
+// Design goals:
+//   1. Reconnect in ≤1s after any drop (no exponential backoff)
+//   2. Detect silent proxy/NAT drops via watchdog (45s without server message)
+//   3. Reply to server pings to confirm we're alive
+//   4. Send a heartbeat every 20s to keep AWS ELB / nginx from closing the idle TCP
+//   5. Reconnect instantly when the tab becomes visible (e.g. after phone unlock)
+
+let ws;
+let _wsWatchdog = null;
+const _WS_RECONNECT_MS  = 1000;   // always reconnect after 1 second
+const _WS_WATCHDOG_MS   = 45000;  // reconnect if no server message for 45s
+const _WS_HEARTBEAT_MS  = 20000;  // send heartbeat to server every 20s
+
+function _wsSend(obj) {
+  try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+  catch (_) {}
+}
+
+function _resetWatchdog() {
+  if (_wsWatchdog) clearTimeout(_wsWatchdog);
+  _wsWatchdog = setTimeout(() => {
+    // No server message in 45s — connection is silently dead (proxy dropped it)
+    console.warn('[WS] Watchdog fired — no message in 45s, reconnecting');
+    if (ws) { try { ws.close(); } catch(_){} }
+    else connectWS();
+  }, _WS_WATCHDOG_MS);
+}
+
 function connectWS() {
+  // Guard: don't stack connections if already open or connecting
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
   ws = new WebSocket(`${BACKEND_WS}/ws`);
-  ws.onopen  = () => { document.getElementById('dot').classList.add('live'); document.getElementById('ws-status').textContent = 'Live ●'; reconnectDelay = 2000; };
+
+  ws.onopen = () => {
+    document.getElementById('dot').classList.add('live');
+    document.getElementById('ws-status').textContent = 'Live ●';
+    _resetWatchdog();
+    // Announce ourselves so the server knows the connection is active
+    _wsSend({ type: 'pong' });
+  };
+
   // Throttled render: at most one render per animation frame regardless of
   // how many ticker_update messages arrive in rapid succession.
   let _renderScheduled = false;
@@ -1551,7 +1589,15 @@ function connectWS() {
   }
 
   ws.onmessage = e => {
-    const m = JSON.parse(e.data);
+    _resetWatchdog();   // any server message = connection is alive
+    let m;
+    try { m = JSON.parse(e.data); } catch(_) { return; }
+
+    // Server keepalive ping — reply immediately so server knows we're alive
+    if (m.type === 'ping') {
+      _wsSend({ type: 'pong' });
+      return;
+    }
 
     // Progressive ticker streaming — one signal arrives as soon as it's ready
     if (m.type === 'ticker_update') {
@@ -1595,9 +1641,31 @@ function connectWS() {
       hideLoading();
     }
   };
-  ws.onclose = () => { document.getElementById('dot').classList.remove('live'); document.getElementById('ws-status').textContent = `Reconnecting…`; setTimeout(connectWS, reconnectDelay); reconnectDelay = Math.min(reconnectDelay*2, 30000); };
-  ws.onerror = () => ws.close();
+
+  ws.onclose = () => {
+    document.getElementById('dot').classList.remove('live');
+    document.getElementById('ws-status').textContent = 'Reconnecting…';
+    if (_wsWatchdog) { clearTimeout(_wsWatchdog); _wsWatchdog = null; }
+    setTimeout(connectWS, _WS_RECONNECT_MS);
+  };
+
+  ws.onerror = () => { try { ws.close(); } catch(_){} };
 }
+
+// Heartbeat: send pong to server every 20s to keep proxy/NAT alive
+setInterval(() => _wsSend({ type: 'pong' }), _WS_HEARTBEAT_MS);
+
+// Reconnect immediately when tab becomes visible (e.g. phone unlock, tab switch back)
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      connectWS();
+    } else if (ws.readyState === WebSocket.OPEN && Date.now() - _wsLastMsgAt > 30000) {
+      // Tab was hidden, connection appears open but data is stale — refresh
+      ws.close();
+    }
+  }
+});
 
 // ─── Loading helpers ───────────────────────────────────────────────────────────
 const _t0 = Date.now();
@@ -1652,11 +1720,14 @@ async function pollPipelineMetrics() {
 }
 setInterval(pollPipelineMetrics, 15000);
 async function pollFallback() {
-  // Only use REST fallback when WS hasn't delivered data in the last 30 seconds
-  if (Date.now() - _wsLastMsgAt < 30000) return;
+  // REST fallback: only when WS is not connected AND hasn't delivered recent data.
+  // The watchdog handles reconnection; this just ensures stale UI gets refreshed
+  // while a reconnect attempt is in flight.
+  const wsLive = ws && ws.readyState === WebSocket.OPEN;
+  if (wsLive && Date.now() - _wsLastMsgAt < 60000) return;
   try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); } } catch {}
 }
-setInterval(pollFallback, 10000);
+setInterval(pollFallback, 15000);
 function hideLoading() { const el = document.getElementById('loading'); el.classList.add('hidden'); setTimeout(() => el.style.display='none', 600); }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────

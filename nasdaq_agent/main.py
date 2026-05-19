@@ -1131,12 +1131,15 @@ async def ticker_clusters():
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
+_PING_INTERVAL = 20   # send app-level ping after this many seconds of client silence
+_PING_TIMEOUT  = 10   # if client doesn't respond within this many seconds → dead
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     logger.info(f"WebSocket client connected. Total: {len(manager.active)}")
     try:
-        # Send current state immediately on connect
+        # Send current state immediately on connect so tab is live before first scan
         if scanner.signals:
             payload = _dumps({
                 "type": "update",
@@ -1145,14 +1148,32 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_text(payload)
 
         while True:
-            # Keep connection alive; scanner thread pushes updates
-            await ws.receive_text()
+            # Wait for a client message (pong/heartbeat) for up to _PING_INTERVAL seconds.
+            # If the client goes quiet for that long, send a ping to verify the
+            # connection is still alive.  This detects TCP connections silently
+            # killed by AWS ELB / nginx / NAT idle-timeout without a FIN/RST.
+            try:
+                await asyncio.wait_for(ws.receive_text(), timeout=float(_PING_INTERVAL))
+                # Got a pong or any client message — connection is alive, loop
+            except asyncio.TimeoutError:
+                # No client heartbeat for _PING_INTERVAL seconds — probe the connection
+                try:
+                    await asyncio.wait_for(
+                        ws.send_json({"type": "ping"}),
+                        timeout=float(_PING_TIMEOUT),
+                    )
+                    # Ping sent successfully; wait for client pong on next iteration
+                except Exception:
+                    # Can't write to socket → connection is dead; remove and exit
+                    break
+
     except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug(f"WebSocket loop error: {e}")
+    finally:
         manager.disconnect(ws)
         logger.info(f"WebSocket client disconnected. Total: {len(manager.active)}")
-    except Exception as e:
-        manager.disconnect(ws)
-        logger.warning(f"WebSocket error: {e}")
 
 
 if __name__ == "__main__":
