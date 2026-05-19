@@ -162,12 +162,15 @@ def _fast_xgb_fit(
     Speed wins vs the old CalibratedClassifierCV(cv=3):
       - tree_method='hist'  : histogram-based splits — 10-50× faster than 'exact'
       - nthread=1           : 1 thread/model lets ThreadPoolExecutor fill all CPUs cleanly
-      - early_stopping_rounds=15: stops at ~60-100 trees instead of always 200+
+      - early_stopping_rounds=20: stops at ~60-100 trees instead of always 200+
       - cv='prefit'         : calibrate on holdout in <1 ms vs training 3 extra folds
     Net result: ~8-15× faster per model, zero quality loss.
+
+    Fallback: if early stopping fires too early (best_iteration < 5 = model barely
+    trained), we retrain without early stopping using a conservative fixed n_estimators.
+    This prevents degenerate "trees=0" models on noisy tickers.
     """
-    base = XGBClassifier(
-        n_estimators=n_estimators,
+    _common_kwargs = dict(
         max_depth=max_depth,
         learning_rate=learning_rate,
         subsample=subsample,
@@ -178,12 +181,27 @@ def _fast_xgb_fit(
         device="cpu",
         nthread=1,
         eval_metric="logloss",
-        early_stopping_rounds=15,
         verbosity=0,
+    )
+    base = XGBClassifier(
+        n_estimators=n_estimators,
+        early_stopping_rounds=20,
+        **_common_kwargs,
     )
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore")
         base.fit(X_tr, y_tr, eval_set=[(X_cal, y_cal)], verbose=False)
+
+    # Guard: if early stopping killed the model before it learned anything,
+    # fall back to a fixed 60-tree model (no early stopping) so we always have
+    # a usable model rather than a degenerate 0-tree estimator.
+    best_iter = getattr(base, "best_iteration", 99)
+    if best_iter < 5:
+        base = XGBClassifier(n_estimators=60, **_common_kwargs)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            base.fit(X_tr, y_tr)
+
     # sklearn ≥1.6 removed cv='prefit'; FrozenEstimator is the replacement —
     # it prevents re-fitting inside CalibratedClassifierCV, same behaviour.
     cal = CalibratedClassifierCV(FrozenEstimator(base), method="sigmoid")
@@ -793,6 +811,10 @@ class ReversalMLModel:
 
         X = df[REVERSAL_FEATURE_COLS].values
         y = df["label"].values
+
+        # Guard: replace any remaining inf/-inf with 0 (e.g. from vol pct_change
+        # on zero-volume bars that slipped through compute_reversal_features).
+        X = np.nan_to_num(X, nan=0.0, posinf=5.0, neginf=-5.0)
 
         if len(X) < 60 or y.sum() < 10:
             return False

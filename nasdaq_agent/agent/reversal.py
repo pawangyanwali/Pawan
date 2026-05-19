@@ -556,17 +556,17 @@ def compute_reversal_features(df: pd.DataFrame) -> pd.DataFrame:
         df["rsi_slope_3"] = df["rsi_14"].diff(3)
         df["rsi_slope_5"] = df["rsi_14"].diff(5)
 
-    # Price slope
+    # Price slope — clip to ±50% to guard against pct_change on zero-price bars
     if "Close" in df.columns:
-        df["price_slope_3"] = df["Close"].pct_change(3)
-        df["price_slope_5"] = df["Close"].pct_change(5)
+        df["price_slope_3"] = df["Close"].pct_change(3).replace([np.inf, -np.inf], np.nan).clip(-0.5, 0.5).fillna(0.0)
+        df["price_slope_5"] = df["Close"].pct_change(5).replace([np.inf, -np.inf], np.nan).clip(-0.5, 0.5).fillna(0.0)
 
     # RSI / price divergence score (rolling window)
     if "rsi_14" in df.columns and "Close" in df.columns:
         # If RSI is rising (+) but price is falling (-), we have bullish divergence
         # Score in [-1,+1]: positive = bullish div, negative = bearish div
         rsi_dir   = df["rsi_14"].diff(5).apply(np.sign)
-        price_dir = df["Close"].pct_change(5).apply(np.sign)
+        price_dir = df["Close"].pct_change(5).replace([np.inf, -np.inf], np.nan).fillna(0.0).apply(np.sign)
         df["rsi_price_div"] = rsi_dir - price_dir   # +2 = bullish, -2 = bearish
 
     # MACD histogram slope
@@ -582,9 +582,13 @@ def compute_reversal_features(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
 
-    # Volume slope
+    # Volume slope — replace inf from zero-volume bars (data gaps, pre-market)
     if "Volume" in df.columns:
-        df["vol_slope_3"] = df["Volume"].pct_change(3)
+        df["vol_slope_3"] = (
+            df["Volume"].replace(0, np.nan).pct_change(3)
+            .replace([np.inf, -np.inf], np.nan)
+            .clip(-5.0, 5.0).fillna(0.0)
+        )
 
     # Hidden RSI divergence binary flags (1 = active, 0 = not)
     # Computed row-by-row using a rolling window — causal, no look-ahead

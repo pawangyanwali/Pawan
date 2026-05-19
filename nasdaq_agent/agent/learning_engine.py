@@ -127,15 +127,16 @@ class LearningEngine:
     """
 
     def __init__(self):
-        self._thread:         Optional[threading.Thread] = None
-        self._running:        bool  = False
-        self._cycle_count:    int   = 0
-        self._last_retrain_t: float = 0.0
-        self._last_bt_count:  int   = 0
-        self._last_pt_count:  int   = 0
-        self._last_cycle_ts:  Optional[str] = None
-        self._last_win_rate:  float = 0.0
-        self._last_threshold: float = 65.0
+        self._thread:           Optional[threading.Thread] = None
+        self._running:          bool  = False
+        self._cycle_count:      int   = 0
+        self._last_retrain_t:   float = 0.0
+        self._last_bt_count:    int   = 0
+        self._last_pt_count:    int   = 0
+        self._last_cycle_ts:    Optional[str] = None
+        self._last_win_rate:    float = 0.0
+        self._last_threshold:   float = 65.0
+        self._last_blocked_n:   int   = 0     # track to only log NEW blocked contexts
 
     def start(self) -> None:
         if self._running:
@@ -232,9 +233,10 @@ class LearningEngine:
                 f"Threshold shifted {prev_threshold:.1f}% → {new_threshold:.1f}%  "
                 f"(WR {new_wr:.1f}%)", significant=True
             )
-        if blocked_n > 0:
+        if blocked_n > self._last_blocked_n:
             _log(f"New context blocked — {blocked_n} total suppressed contexts",
                  significant=True)
+            self._last_blocked_n = blocked_n
 
         self._last_win_rate  = new_wr
         self._last_threshold = new_threshold
