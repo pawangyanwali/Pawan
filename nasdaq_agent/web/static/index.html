@@ -1632,6 +1632,7 @@ function connectWS() {
         if (high != null && high > 0) sig.high = high;
         if (low  != null && low  > 0) sig.low  = low;
         if (volume != null) sig.volume = volume;
+        sig._tick_updated = true;  // preserve these values on next scan merge
       }
 
       // Surgically update the table row — no re-render needed
@@ -1676,7 +1677,19 @@ function connectWS() {
 
     if (m.type === 'update') {
       _wsLastMsgAt = Date.now();
-      allSignals = m.signals;
+      // Merge tick-updated prices/change_pct into fresh scan signals so
+      // real-time values don't flicker back to the scan's computed values.
+      const prevByTicker = Object.fromEntries(allSignals.map(s => [s.ticker, s]));
+      allSignals = (m.signals || []).map(s => {
+        const prev = prevByTicker[s.ticker];
+        if (prev && prev._tick_updated) {
+          // Preserve tick-sourced price and change_pct if they're more recent
+          s.price      = prev.price;
+          s.change_pct = prev.change_pct;
+          s._tick_updated = true;
+        }
+        return s;
+      });
       if (m.universe_total) window._universeTotal = m.universe_total;
       if (m.scanned_count != null) window._scannedCount = m.scanned_count;
       if (m.open_trades) allOpenTrades = m.open_trades;

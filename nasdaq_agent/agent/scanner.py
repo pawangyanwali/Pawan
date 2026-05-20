@@ -431,11 +431,24 @@ def analyse_ticker(
         price    = float(last["Close"])
         bar_high = float(last["High"])
         bar_low  = float(last["Low"])
-        # Change % vs previous daily close (works for both regular session and AH).
-        # During AH, df_1d.iloc[-1] is today's close → gives true AH move.
-        # During regular session, Twelve Data daily bars lag until EOD so
-        # df_1d.iloc[-1] is yesterday's close → gives correct intraday change.
-        _prev_close = float(df_1d.iloc[-1]["Close"]) if not df_1d.empty else 0.0
+
+        # Change % vs previous confirmed trading day's close.
+        # Schwab's daily series may include a live intraday bar for today
+        # (with Close = current live price), which would make change_pct = 0%.
+        # Always use the LAST CONFIRMED bar: if the newest daily bar is from
+        # today, use iloc[-2] (yesterday); otherwise use iloc[-1].
+        _prev_close = 0.0
+        if not df_1d.empty:
+            try:
+                import zoneinfo as _zi
+                _today = pd.Timestamp.now(tz=_zi.ZoneInfo("America/New_York")).date()
+                _last_bar_date = df_1d.index[-1].date()
+                if _last_bar_date >= _today and len(df_1d) >= 2:
+                    _prev_close = float(df_1d.iloc[-2]["Close"])
+                else:
+                    _prev_close = float(df_1d.iloc[-1]["Close"])
+            except Exception:
+                _prev_close = float(df_1d.iloc[-1]["Close"])
         if _prev_close <= 0:
             _prev_close = float(df_ind.iloc[0]["Open"]) or price
         change_pct = round((price - _prev_close) / _prev_close * 100, 3) if _prev_close else 0.0
