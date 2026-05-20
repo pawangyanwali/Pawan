@@ -687,14 +687,14 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     Runs in background — check /api/ml-status for progress.
     """
     from agent.ml_model import retrain_all, _is_retraining
-    from config import NASDAQ_TICKERS
+    from config import TRAINING_TICKERS
 
     if _is_retraining:
         return {"status": "already_running", "message": "Retrain already in progress."}
 
     def _run():
         try:
-            retrain_all(NASDAQ_TICKERS)
+            retrain_all(TRAINING_TICKERS)
         except Exception as e:
             logger.warning(f"[manual retrain] failed: {e}")
 
@@ -710,15 +710,15 @@ async def trigger_deep_train(background_tasks: BackgroundTasks):
     """
     from agent.deep_model import is_training_active, retrain_deep_all
     from agent.data_fetcher import fetch_batch_interval
-    from config import NASDAQ_TICKERS
+    from config import TRAINING_TICKERS
 
     if is_training_active():
         return {"status": "already_running", "message": "Deep model training already in progress."}
 
     def _run():
         try:
-            logger.info("[manual deep train] Fetching 15-min data…")
-            hist_15m = fetch_batch_interval(NASDAQ_TICKERS, "15min", 5000, ttl=3600)
+            logger.info(f"[manual deep train] Fetching 15-min data ({len(TRAINING_TICKERS)} Tier-1)…")
+            hist_15m = fetch_batch_interval(TRAINING_TICKERS, "15min", 5000, ttl=3600)
             logger.info(f"[manual deep train] Got {len(hist_15m)} tickers — starting training…")
             retrain_deep_all(hist_15m)
         except Exception as e:

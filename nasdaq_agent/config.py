@@ -25,7 +25,7 @@ DATA_PERIOD_DAYS    = 180    # 6 months of 5-min data for intraday ML (~14,040 b
 REALTIME_OUTPUTSIZE = 300   # 1-min bars per scan (≈5h coverage, reduced for memory)
 
 # ── Per-interval cache TTLs (seconds) ────────────────────────────────────────
-CACHE_TTL_5M  =   300   # 5 minutes
+CACHE_TTL_5M  =   600   # 10 min — doubled from 300s; halves 5-min API calls per cycle
 CACHE_TTL_1H  =  3600   # 1 hour
 CACHE_TTL_1D  = 86400   # 24 hours  (also used as DAILY_CACHE_TTL for compatibility)
 DAILY_CACHE_TTL = CACHE_TTL_1D
@@ -41,6 +41,10 @@ STRONG_SELL_THRESHOLD = -0.60
 # codebase can still use NASDAQ_TICKERS, CLUSTER_*_TICKERS from config.
 
 from agent.ticker_universe import TIER1, TIER2, TIER3, FULL_UNIVERSE  # noqa: E402
+
+# ML training uses Tier 1 only — 100 liquid NASDAQ-100 tickers.
+# Avoids fetching history for all 477 tickers during retrain (~10 min → ~2 min).
+TRAINING_TICKERS: list[str] = list(TIER1)
 
 # Cluster A = Tier 1 (NASDAQ-100 core, always scanned)
 CLUSTER_A_TICKERS: list[str] = list(TIER1)

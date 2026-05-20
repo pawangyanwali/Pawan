@@ -19,6 +19,7 @@ import pandas as pd
 
 from config import (
     NASDAQ_TICKERS,
+    TRAINING_TICKERS,
     SCAN_INTERVAL_SECONDS,
     ML_RETRAIN_INTERVAL,
     DEEP_FINETUNE_INTERVAL,
@@ -1097,9 +1098,9 @@ class Scanner:
         # Extra buffer: let the second cycle finish so 5min cache is also warm
         time.sleep(90)
 
-        logger.info("ML training starting (intraday + daily models)…")
-        daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
-        retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
+        logger.info(f"ML training starting ({len(TRAINING_TICKERS)} Tier-1 tickers)…")
+        daily_data = fetch_batch_interval(TRAINING_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
+        retrain_all(TRAINING_TICKERS, daily_data=daily_data)
         self._last_retrain       = time.time()
         self._last_deep_finetune = time.time()   # startup full train counts as fine-tune
         logger.info("ML training complete.")
@@ -1260,19 +1261,19 @@ class Scanner:
         self._scan_count += 1
         if self._scan_count == 1:
             self._first_scan_done.set()   # unblock _train_ml_background
-        logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(NASDAQ_TICKERS)} tickers analysed")
+        logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(active_tickers)} active (universe: {len(NASDAQ_TICKERS)})")
 
         # ML feedback: retrain if enough new backtest outcomes have accumulated
         maybe_trigger_feedback_retrain(active_tickers)
 
         if self._should_retrain():
-            logger.info("Scheduled ML retrain launching in background…")
+            logger.info(f"Scheduled ML retrain launching ({len(TRAINING_TICKERS)} Tier-1 tickers)…")
             self._last_retrain       = time.time()
             self._last_deep_finetune = time.time()   # full retrain counts as fine-tune too
             def _bg_retrain():
                 try:
-                    daily_data = fetch_batch_interval(NASDAQ_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
-                    retrain_all(NASDAQ_TICKERS, daily_data=daily_data)
+                    daily_data = fetch_batch_interval(TRAINING_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
+                    retrain_all(TRAINING_TICKERS, daily_data=daily_data)
                     logger.info("Scheduled ML retrain complete.")
                 except Exception as _re:
                     logger.warning(f"Background ML retrain failed: {_re}")
