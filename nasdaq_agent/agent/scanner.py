@@ -1184,14 +1184,20 @@ class Scanner:
         # 4pm–8pm AH session candles rather than stopping at the 4pm close.
         _is_extended = _sess.get("session", "") in ("AFTER_HOURS", "PRE_MARKET", "CLOSED")
 
-        # Always-fresh 1M data — include extended-hours bars during AH/PM/CLOSED so
-        # the chart reflects actual after-market price action, not stale closes.
-        batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
+        # Fetch all intervals concurrently — cached intervals return instantly
+        # without blocking API-required ones, so steady-state scans are fast.
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ifetch") as _ifex:
+            _f1m = _ifex.submit(fetch_batch_realtime,  active_tickers, _is_extended)
+            _f5m = _ifex.submit(fetch_batch_interval,  active_tickers, "5min", 500, CACHE_TTL_5M)
+            _f1h = _ifex.submit(fetch_batch_interval,  active_tickers, "1h",   500, CACHE_TTL_1H)
+            _f1d = _ifex.submit(fetch_batch_interval,  active_tickers, "1day", 500, CACHE_TTL_1D)
+            _cf.wait([_f1m, _f5m, _f1h, _f1d], return_when=_cf.ALL_COMPLETED)
 
-        # Cached higher-TF data (only refetched when TTL expires)
-        batch_5m = fetch_batch_interval(active_tickers, "5min", 500,  ttl=CACHE_TTL_5M)
-        batch_1h = fetch_batch_interval(active_tickers, "1h",   500,  ttl=CACHE_TTL_1H)
-        batch_1d = fetch_batch_interval(active_tickers, "1day", 500,  ttl=CACHE_TTL_1D)
+        batch_1m = _f1m.result()
+        batch_5m = _f5m.result()
+        batch_1h = _f1h.result()
+        batch_1d = _f1d.result()
 
         # Fetch SPY/QQQ + sector ETFs for regime, RS and sector context
         etf_1m = fetch_batch_realtime(SECTOR_ETF_TICKERS, extended_hours=_is_extended)
@@ -1357,11 +1363,35 @@ class Scanner:
                 logger.debug(f"[RT-Monitor] loop error: {_loop_e}")
             time.sleep(5)
 
+    def _warmup_cache(self) -> None:
+        """Pre-fetch higher-TTL intervals so the first scan cycle sees cache hits."""
+        try:
+            from config import get_active_tickers
+            tickers = get_active_tickers()
+            logger.info(f"[Warmup] Pre-caching 5min/1h/1day for {len(tickers)} tickers …")
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=3, thread_name_prefix="warmup") as ex:
+                f5m = ex.submit(fetch_batch_interval, tickers, "5min", 500, CACHE_TTL_5M)
+                f1h = ex.submit(fetch_batch_interval, tickers, "1h",   500, CACHE_TTL_1H)
+                f1d = ex.submit(fetch_batch_interval, tickers, "1day", 500, CACHE_TTL_1D)
+                r5m = f5m.result()
+                r1h = f1h.result()
+                r1d = f1d.result()
+            logger.info(
+                f"[Warmup] Done — 5min:{len(r5m)} 1h:{len(r1h)} 1day:{len(r1d)} tickers cached"
+            )
+        except Exception as e:
+            logger.warning(f"[Warmup] Cache pre-warm failed (non-fatal): {e}")
+
     def start_background(self) -> None:
         init_db()      # signal_history.db
         pt_init_db()   # paper_trades.db
         bt_init_db()   # live_backtest.db
         ah_init_db()   # ah_snapshots.db
+
+        # Thread 0: Pre-warm higher-TTL interval cache before first scan
+        warmup_thread = threading.Thread(target=self._warmup_cache, daemon=True, name="cache-warmup")
+        warmup_thread.start()
 
         # Thread 1: ML training (waits 30s for first scan to warm cache)
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)

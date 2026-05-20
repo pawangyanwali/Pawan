@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 _interval_cache: dict[str, dict[str, tuple[pd.DataFrame, float]]] = {}
 _interval_cache_lock = threading.Lock()
-_CACHE_MAX_TICKERS = 200
+_CACHE_MAX_TICKERS = 600
 
 
 def _cache_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
