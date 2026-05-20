@@ -32,6 +32,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_PROCESS_START         = time.time()
+_STARTUP_RETRAIN_GRACE = 360     # no ML retrain for 6 min — lets scanner warm SQLite first
+
 # ── Tunable parameters ────────────────────────────────────────────────────────
 LEARN_INTERVAL_SECS   = 90      # how often to run a learning cycle (1.5 min)
 RETRAIN_MIN_NEW       = 15      # new outcomes needed to trigger ML retrain
@@ -249,10 +252,16 @@ class LearningEngine:
         cooldown_ok     = (time.time() - self._last_retrain_t) > RETRAIN_COOLDOWN_SECS
 
         if total_new >= RETRAIN_MIN_NEW and cooldown_ok:
-            self._last_bt_count   = bt_count
-            self._last_pt_count   = pt_count
-            self._last_retrain_t  = time.time()
-            self._trigger_retrain(merged)
+            self._last_bt_count  = bt_count
+            self._last_pt_count  = pt_count
+            # Startup grace: suppress retrain until the scanner has warmed SQLite.
+            # The loop fires immediately at startup; without this gate it hits the
+            # Schwab API before the first scan, starving the scanner's rate budget.
+            if time.time() - _PROCESS_START < _STARTUP_RETRAIN_GRACE:
+                _log("Retrain deferred — startup SQLite warm-up in progress", level="INFO")
+            else:
+                self._last_retrain_t = time.time()
+                self._trigger_retrain(merged)
         else:
             # Update counts even when not retraining (avoid stale baseline)
             self._last_bt_count = max(self._last_bt_count, bt_count)
