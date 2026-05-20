@@ -850,6 +850,19 @@ async def after_hours_endpoint():
 
 # ── ThinkorSwim / Schwab Broker API ──────────────────────────────────────────
 
+def _schwab_callback_url(request: Request) -> str:
+    """
+    Return the public callback URL registered in the Schwab Developer Portal.
+    Reads SCHWAB_CALLBACK_URL from .env first (required when behind a reverse
+    proxy such as IIS, where request.base_url would return http://localhost:8000/).
+    Falls back to constructing from the incoming request for local dev.
+    """
+    explicit = os.getenv("SCHWAB_CALLBACK_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit + "/schwab/callback"
+    return str(request.base_url).rstrip("/") + "/schwab/callback"
+
+
 @app.get("/schwab/auth")
 async def schwab_web_auth(request: Request):
     """Redirect browser to Schwab Market Data OAuth login.
@@ -870,8 +883,8 @@ async def schwab_web_callback(request: Request, code: str = "", state: str = "",
         <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
         return HTMLResponse(html, status_code=400)
 
-    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback"
-    success = exchange_md_auth_code(code, state, redirect_uri)
+    redirect_uri = _schwab_callback_url(request)
+    success, reason = exchange_md_auth_code(code, state, redirect_uri)
     if success:
         # Start the MD poller if it isn't running yet
         try:
@@ -888,9 +901,13 @@ async def schwab_web_callback(request: Request, code: str = "", state: str = "",
         <p><a href="/">&#8592; Back to Dashboard</a></p></body></html>"""
         return HTMLResponse(html)
     else:
-        html = """<html><body style="font-family:sans-serif;padding:40px">
+        html = f"""<html><body style="font-family:sans-serif;padding:40px">
         <h2 style="color:#e53e3e">Token Exchange Failed</h2>
-        <p>Check server logs for details.</p>
+        <p><b>Reason:</b> {_html.escape(reason) if reason else 'See server logs.'}</p>
+        <p><b>redirect_uri used:</b> <code>{_html.escape(redirect_uri)}</code></p>
+        <p>If the redirect_uri above does not match what is registered in the Schwab
+        Developer Portal, set <code>SCHWAB_CALLBACK_URL=https://scalpingstocksai.com</code>
+        in your <code>.env</code> file and restart.</p>
         <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
         return HTMLResponse(html, status_code=500)
 
@@ -906,7 +923,7 @@ async def schwab_md_web_auth(request: Request):
             "<p>Add the Market Data app credentials and restart.</p>",
             status_code=400,
         )
-    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback"
+    redirect_uri = _schwab_callback_url(request)
     return RedirectResponse(url=build_md_auth_url(redirect_uri))
 
 

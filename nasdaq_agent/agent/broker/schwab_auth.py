@@ -214,8 +214,8 @@ class _TokenManager:
         })
         return f"{AUTH_URL}?{params}"
 
-    def exchange_code(self, code: str, state: str, redirect_uri: str) -> bool:
-        """Exchange auth code for tokens. Returns True on success."""
+    def exchange_code(self, code: str, state: str, redirect_uri: str) -> tuple[bool, str]:
+        """Exchange auth code for tokens. Returns (True, "") on success or (False, reason)."""
         with self._pending_lock:
             code_verifier = self._pending.pop(state, None)
         try:
@@ -232,10 +232,18 @@ class _TokenManager:
             self._store(data)
             self._schedule_refresh(data.get("expires_in", 1800))
             logger.info(f"[Schwab/{self.name}] Web OAuth complete.")
-            return True
+            return True, ""
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = "<unreadable>"
+            reason = f"HTTP {e.code}: {body}"
+            logger.error(f"[Schwab/{self.name}] Code exchange failed: {reason}")
+            return False, reason
         except Exception as e:
             logger.error(f"[Schwab/{self.name}] Code exchange failed: {e}")
-            return False
+            return False, str(e)
 
     # ── Public getters ────────────────────────────────────────────────────────
 
@@ -323,13 +331,13 @@ def refresh_access_token() -> bool:
 def build_auth_url(redirect_uri: str) -> str:
     return _trader.build_auth_url(redirect_uri)
 
-def exchange_auth_code(code: str, state: str, redirect_uri: str) -> bool:
+def exchange_auth_code(code: str, state: str, redirect_uri: str) -> tuple[bool, str]:
     return _trader.exchange_code(code, state, redirect_uri)
 
 def build_md_auth_url(redirect_uri: str) -> str:
     return _market_data.build_auth_url(redirect_uri)
 
-def exchange_md_auth_code(code: str, state: str, redirect_uri: str) -> bool:
+def exchange_md_auth_code(code: str, state: str, redirect_uri: str) -> tuple[bool, str]:
     return _market_data.exchange_code(code, state, redirect_uri)
 
 # Legacy aliases kept for any code that still imports these names
