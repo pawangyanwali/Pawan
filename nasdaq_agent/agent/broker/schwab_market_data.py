@@ -94,9 +94,22 @@ _rate_lock = threading.Lock()
 _rate_last = 0.0
 _RATE_GAP  = 1.0 / 1.5   # 0.667 s between requests
 
+# Background-caller throttle: retrain / warmup tasks are capped at 0.4 req/s
+# (24/min) so they consume at most 27% of the API budget, leaving ≥1.1/s for
+# the live scan.  Applied IN ADDITION to the shared rate limit above.
+_bg_lock = threading.Lock()
+_bg_last = 0.0
+_BG_GAP  = 1.0 / 0.4   # 2.5 s between background calls
 
-def _rate_wait() -> None:
-    global _rate_last
+
+def _rate_wait(background: bool = False) -> None:
+    global _rate_last, _bg_last
+    if background:
+        with _bg_lock:
+            gap = time.time() - _bg_last
+            if gap < _BG_GAP:
+                time.sleep(_BG_GAP - gap)
+            _bg_last = time.time()
     with _rate_lock:
         gap = time.time() - _rate_last
         if gap < _RATE_GAP:
@@ -181,10 +194,12 @@ def fetch_price_history_batch(
     outputsize:     int  = 300,
     extended_hours: bool = False,
     max_workers:    int  = 5,
+    background:     bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
     Parallel price-history fetch for multiple tickers.
     One Schwab /pricehistory call per ticker, rate-limited to 1.5 req/s.
+    Pass background=True for retrain/warmup tasks to limit to 0.4 req/s.
     """
     if not _is_authorised() or not tickers:
         return {}
@@ -193,7 +208,7 @@ def fetch_price_history_batch(
     lock = threading.Lock()
 
     def _one(ticker: str) -> None:
-        _rate_wait()
+        _rate_wait(background=background)
         df = fetch_price_history(ticker, interval, outputsize, extended_hours)
         if not df.empty:
             with lock:

@@ -500,7 +500,7 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
                     f"(avg {sum(len(v) for v in hist_5m.values())//max(len(hist_5m),1)} bars each)")
     else:
         logger.info(f"[retrain_all] Batch-fetching 1min history for {len(tickers)} tickers…")
-        hist_5m = fetch_batch_interval(tickers, "1min", 3900, ttl=1800)
+        hist_5m = fetch_batch_interval(tickers, "1min", 3900, ttl=1800, background=True)
         logger.info(f"[retrain_all] Got 1min history for {len(hist_5m)}/{len(tickers)} tickers")
 
     # ── 15-min data: ~6 months (swing models + deep BiLSTM) ─────────────────
@@ -509,7 +509,7 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         logger.info(f"[retrain_all] Using pre-fetched 15min data: {len(hist_15m)} tickers")
     else:
         logger.info(f"[retrain_all] Batch-fetching 15min history ({len(tickers)} tickers)…")
-        hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600)
+        hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600, background=True)
         logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
 
     # ── Daily data: ~2 years (DailyMLModel — next-day direction) ─────────────
@@ -518,7 +518,7 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         logger.info(f"[retrain_all] Using pre-fetched daily data: {len(daily_data)} tickers")
     else:
         logger.info(f"[retrain_all] Batch-fetching daily history ({len(tickers)} tickers)…")
-        daily_data = fetch_batch_interval(tickers, "1day", 500, ttl=86400)
+        daily_data = fetch_batch_interval(tickers, "1day", 500, ttl=86400, background=True)
         logger.info(f"[retrain_all] Daily data: {len(daily_data)}/{len(tickers)} tickers")
 
     _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")

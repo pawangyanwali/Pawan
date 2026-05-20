@@ -120,6 +120,7 @@ def fetch_batch_interval(
     outputsize:     int,
     ttl:            float = 0.0,
     extended_hours: bool  = False,
+    background:     bool  = False,
 ) -> dict[str, pd.DataFrame]:
     """
     Fetch OHLCV data for multiple tickers at a given interval via Schwab.
@@ -175,6 +176,7 @@ def fetch_batch_interval(
         fetched = fetch_price_history_batch(
             to_fetch, interval=interval,
             outputsize=outputsize, extended_hours=extended_hours,
+            background=background,
         )
     except Exception as e:
         logger.warning(f"[Schwab] batch fetch error {interval}: {e}")
