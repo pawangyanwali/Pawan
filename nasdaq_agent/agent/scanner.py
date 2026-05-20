@@ -1518,22 +1518,12 @@ class Scanner:
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
         ml_thread.start()
 
-        # Thread 2: Scan loop — event-driven when streamer is active, polling fallback
-        def _choose_loop():
-            # Give the streamer 15s to connect before deciding mode
-            time.sleep(15)
-            try:
-                from agent.broker.schwab_streamer import is_streamer_ready
-                if is_streamer_ready():
-                    logger.info("[Scanner] Streamer ready — starting event-driven scan loop")
-                    self._bar_driven_loop()
-                    return
-            except Exception:
-                pass
-            logger.info("[Scanner] Streamer not ready — starting polling scan loop")
-            self._loop()
-
-        scan_thread = threading.Thread(target=_choose_loop, daemon=True, name="scan-loop")
+        # Thread 2: Scan loop — polling with streaming-first data (Tier 1+2)
+        # fetch_batch_realtime() already uses streaming candles when the
+        # CHART_EQUITY buffer is warm (Tier A), and async REST when not (Tier B).
+        # Event-driven scheduling (Tier 3) only helps in steady state after
+        # the buffer is warm (~20 min); at startup it creates silent gaps.
+        scan_thread = threading.Thread(target=self._loop, daemon=True, name="scan-loop")
         scan_thread.start()
 
         # Thread 3: Real-time position monitor
