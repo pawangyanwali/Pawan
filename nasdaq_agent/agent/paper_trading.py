@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
-_PAPER_MIN_CONF          = 45.0  # floor confidence for paper trade data collection
-_FALLBACK_MIN_CONFIDENCE = 45.0  # used if adaptive filter is unavailable
+_PAPER_MIN_CONF          = 25.0  # floor confidence for paper trade data collection
+_FALLBACK_MIN_CONFIDENCE = 25.0  # used if adaptive filter is unavailable
 _MAX_BARS_HELD_SCALP     = 20   # 20-min hard close for scalps (PRD 6.3)
 _MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
 _MAX_CONCURRENT_TRADES   = 20   # Paper sim: high cap so every signal gets a trade and generates learning data
