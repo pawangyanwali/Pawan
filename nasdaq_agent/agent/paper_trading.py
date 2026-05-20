@@ -158,14 +158,33 @@ def maybe_open_trade(
         logger.debug(f"[PAPER] {ticker} skip: conf {confidence:.0f}% < floor {min_conf:.0f}%")
         return None
 
-    # ── PRD master entry gate (session / circuit breaker / heat / sector) ──
-    from agent.risk_controls import can_open_trade
-    allowed, block_reason, gate_size_mult = can_open_trade(
-        ticker, direction, confidence, trading_tier=trading_tier
-    )
-    if not allowed:
-        logger.debug(f"[PAPER] {ticker} blocked by risk gate: {block_reason}")
+    # ── Paper-mode entry gate (session + max concurrent only) ─────────────
+    # Paper trading is DATA COLLECTION — we need every signal's outcome so
+    # ML can learn.  Sector concentration, profit-protect mode, and circuit
+    # breakers are real-money risk rules and must NOT starve the learner.
+    # Only two hard stops apply here:
+    #   1. Market literally closed (HARD_CLOSE / AFTER_HOURS / CLOSED / PRE_MARKET)
+    #   2. Global concurrent cap (avoids unbounded DB growth)
+    from agent.risk_controls import check_session_block, check_portfolio_heat
+    sess_blocked, sess_reason, ah_size = check_session_block(trading_tier)
+    if sess_blocked:
+        logger.debug(f"[PAPER] {ticker} blocked by session: {sess_reason}")
         return None
+
+    heat_blocked, heat_reason = check_portfolio_heat()
+    if heat_blocked:
+        logger.debug(f"[PAPER] {ticker} blocked by heat: {heat_reason}")
+        return None
+
+    # gate_size_mult: AH HIGH-tier cap (0.50) or session size multiplier (≤1.0)
+    from agent.market_hours import position_size_multiplier
+    sess_size = position_size_multiplier()
+    if sess_size > 0:
+        gate_size_mult = sess_size
+    elif ah_size > 0:
+        gate_size_mult = ah_size   # AH HIGH-tier 50% cap
+    else:
+        gate_size_mult = 1.0
 
     # Combine gate size multiplier with signal-level size multiplier.
     # Position size scales with R:R — every trade opens so the system learns,
