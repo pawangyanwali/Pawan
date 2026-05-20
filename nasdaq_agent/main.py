@@ -130,6 +130,40 @@ manager = ConnectionManager()
 # Captured at startup so the scanner background thread can schedule broadcasts
 _event_loop: asyncio.AbstractEventLoop | None = None
 
+# ── Schwab tick → WebSocket broadcast ────────────────────────────────────────
+_schwab_tick_registered: bool = False
+
+def _on_schwab_tick(ticker: str, quote: dict) -> None:
+    """Forward a Schwab real-time quote to all WebSocket clients (250ms throttled)."""
+    if not manager.active or _event_loop is None:
+        return
+    last = quote.get("last")
+    if last is None:
+        return
+    try:
+        payload = json.dumps({
+            "type":           "tick",
+            "ticker":         ticker,
+            "last":           last,
+            "bid":            quote.get("bid"),
+            "ask":            quote.get("ask"),
+            "volume":         quote.get("volume"),
+            "high":           quote.get("high"),
+            "low":            quote.get("low"),
+            "net_pct_change": quote.get("net_pct_change"),
+        }, default=lambda x: None)
+        asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
+    except Exception:
+        pass
+
+def _ensure_tick_broadcast_registered() -> None:
+    """Register the tick→WebSocket callback exactly once."""
+    global _schwab_tick_registered
+    if _schwab_tick_registered:
+        return
+    register_tick_callback(_on_schwab_tick)
+    _schwab_tick_registered = True
+
 
 def _on_signals(signals: list[StockSignal]) -> None:
     """Callback invoked by the scanner thread; schedule a broadcast on the main loop."""
@@ -295,32 +329,7 @@ async def lifespan(app: FastAPI):
                     )
                     from config import NASDAQ_TICKERS
                     start_md_poller(list(NASDAQ_TICKERS), interval=1.0)
-
-                    # Wire real-time tick → WebSocket broadcast (250ms throttle per ticker)
-                    def _on_schwab_tick(ticker: str, quote: dict) -> None:
-                        if not manager.active or _event_loop is None:
-                            return
-                        last = quote.get("last")
-                        if last is None:
-                            return
-                        try:
-                            payload = json.dumps({
-                                "type":              "tick",
-                                "ticker":            ticker,
-                                "last":              last,
-                                "bid":               quote.get("bid"),
-                                "ask":               quote.get("ask"),
-                                "volume":            quote.get("volume"),
-                                "high":              quote.get("high"),
-                                "low":               quote.get("low"),
-                                "net_pct_change":    quote.get("net_pct_change"),
-                            }, default=lambda x: None)
-                            asyncio.run_coroutine_threadsafe(
-                                manager.broadcast(payload), _event_loop
-                            )
-                        except Exception:
-                            pass
-                    register_tick_callback(_on_schwab_tick)
+                    _ensure_tick_broadcast_registered()
                 else:
                     logging.getLogger(__name__).warning(
                         "Schwab Market Data token not found — visit /schwab/auth/md to authenticate."
@@ -886,12 +895,13 @@ async def schwab_web_callback(request: Request, code: str = "", state: str = "",
     redirect_uri = _schwab_callback_url(request)
     success, reason = exchange_md_auth_code(code, state, redirect_uri)
     if success:
-        # Start the MD poller if it isn't running yet
+        # Start the MD poller and wire tick broadcasts if not already running
         try:
             from config import NASDAQ_TICKERS
             from agent.broker.schwab_streamer import is_streamer_ready
             if not is_streamer_ready():
                 start_md_poller(list(NASDAQ_TICKERS), interval=1.0)
+            _ensure_tick_broadcast_registered()
         except Exception:
             pass
         html = """<html><body style="font-family:sans-serif;padding:40px;background:#f0fff4">
