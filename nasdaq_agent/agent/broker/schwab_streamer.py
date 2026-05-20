@@ -59,6 +59,18 @@ _subscribed_tickers: list[str] = []
 
 MAX_CANDLE_HISTORY = 300   # 5 hours of 1-min bars
 
+# ── Real-time tick callback registry ─────────────────────────────────────────
+# Registered functions are called on every LEVELONE_EQUITIES update.
+# Throttled per-ticker to _TICK_MIN_INTERVAL seconds to avoid flooding WebSocket.
+_tick_callbacks:    list          = []
+_last_tick_ts:      dict[str, float] = {}
+_TICK_MIN_INTERVAL: float         = 0.25   # max 4 price updates/s per ticker
+
+
+def register_tick_callback(fn) -> None:
+    """Register fn(ticker: str, quote: dict) — called on every throttled tick."""
+    _tick_callbacks.append(fn)
+
 
 # ── User Preferences (provides streamer URL + client IDs) ─────────────────────
 
@@ -143,6 +155,7 @@ _CHART_FIELDS = {
 
 
 def _process_levelone_equities(content: list) -> None:
+    updated: list[tuple[str, dict]] = []
     with _lock:
         for item in content:
             sym = item.get("key", "")
@@ -167,6 +180,20 @@ def _process_levelone_equities(content: list) -> None:
                 logger.warning(f"[Streamer] {sym} HALTED")
             else:
                 _halted.discard(sym)
+
+            updated.append((sym, dict(quote)))   # snapshot for callbacks (outside lock)
+
+    # Fire tick callbacks outside the lock — 250ms throttle per ticker
+    if updated and _tick_callbacks:
+        now = time.time()
+        for sym, quote in updated:
+            if now - _last_tick_ts.get(sym, 0.0) >= _TICK_MIN_INTERVAL:
+                _last_tick_ts[sym] = now
+                for fn in _tick_callbacks:
+                    try:
+                        fn(sym, quote)
+                    except Exception:
+                        pass
 
 
 def _process_levelone_futures(content: list) -> None:

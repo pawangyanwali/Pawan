@@ -1619,6 +1619,61 @@ function connectWS() {
       return;
     }
 
+    // Real-time Schwab tick — update price & change% in the table without full re-render
+    if (m.type === 'tick') {
+      const { ticker, last, net_pct_change, bid, ask, volume, high, low } = m;
+      if (!ticker || last == null) return;
+
+      // Keep in-memory signal current so the detail panel reflects live prices
+      const sig = allSignals.find(s => s.ticker === ticker);
+      if (sig) {
+        sig.price = last;
+        if (net_pct_change != null) sig.change_pct = net_pct_change;
+        if (high != null && high > 0) sig.high = high;
+        if (low  != null && low  > 0) sig.low  = low;
+        if (volume != null) sig.volume = volume;
+      }
+
+      // Surgically update the table row — no re-render needed
+      const row = document.querySelector(`tr[data-ticker="${ticker}"]`);
+      if (row) {
+        const chgCell = row.querySelector('.chg-cell');
+        if (chgCell) {
+          const chg = net_pct_change ?? (sig ? sig.change_pct : null);
+          chgCell.className = `chg-cell ${(chg ?? 0) >= 0 ? 'pos' : 'neg'}`;
+          const divs = chgCell.querySelectorAll('div');
+          if (divs[0] && chg != null) {
+            divs[0].firstChild.textContent = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
+          }
+          if (divs[1]) divs[1].textContent = `$${fmt(last)}`;
+        }
+
+        // Update live P&L inside the status cell if this ticker is in a paper trade
+        const trade = allOpenTrades[ticker];
+        if (trade) {
+          const ep      = trade.entry_price || 1;
+          const pnl     = trade.direction === 'BUY' ? (last - ep) / ep * 100 : (ep - last) / ep * 100;
+          const pnlCol  = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--muted)';
+          const pnlEl   = row.querySelector('[data-rt-pnl]');
+          if (pnlEl) {
+            pnlEl.style.color = pnlCol;
+            pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
+          }
+        }
+      }
+
+      // Update the detail panel price badge if it's showing this ticker
+      const dpTicker = document.getElementById('dp-ticker');
+      if (dpTicker && dpTicker.textContent === ticker) {
+        const badge = document.getElementById('dp-price-badge');
+        if (badge) {
+          const chg = net_pct_change ?? (sig ? sig.change_pct : 0);
+          badge.innerHTML = `$${fmt(last, 4)} | ${chg >= 0 ? '+' : ''}${fmt(chg)}% today`;
+        }
+      }
+      return;
+    }
+
     if (m.type === 'update') {
       _wsLastMsgAt = Date.now();
       allSignals = m.signals;
@@ -1855,7 +1910,7 @@ function renderTable() {
           <span style="color:${dirCol};font-size:9px;font-weight:700">${trade.direction}</span>
         </div>
         <div style="font-size:10px;color:var(--muted)">Entry: <strong style="color:var(--text)">$${fmt(ep)}</strong></div>
-        <div style="font-size:11px;font-weight:700;color:${pnlCol}">${pnl>=0?'+':''}${pnl.toFixed(2)}% <span style="font-size:9px;color:var(--muted);font-weight:400">· Bar ${bars}</span></div>
+        <div style="font-size:11px;font-weight:700;color:${pnlCol}" data-rt-pnl>${pnl>=0?'+':''}${pnl.toFixed(2)}% <span style="font-size:9px;color:var(--muted);font-weight:400">· Bar ${bars}</span></div>
       </div>`;
     } else if (s.prediction === 'BUY' || s.prediction === 'SELL' || s.prediction === 'STRONG BUY' || s.prediction === 'STRONG SELL') {
       const rrNote = s.rr_qualifies ? 'Full size' : 'Half size (low R:R)';

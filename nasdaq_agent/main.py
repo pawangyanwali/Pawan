@@ -45,7 +45,7 @@ from agent.broker.schwab_auth import (
     build_auth_url, exchange_auth_code,
     build_md_auth_url, exchange_md_auth_code,
 )
-from agent.broker.schwab_streamer import start_streamer, get_streamer_status
+from agent.broker.schwab_streamer import start_streamer, get_streamer_status, register_tick_callback
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
 from config import (
@@ -293,6 +293,33 @@ async def lifespan(app: FastAPI):
                     logging.getLogger(__name__).info("Schwab Trader app connected.")
                     from config import NASDAQ_TICKERS
                     start_streamer(list(NASDAQ_TICKERS))
+                    # Wire real-time tick → WebSocket broadcast (250ms throttle per ticker)
+                    def _on_schwab_tick(ticker: str, quote: dict) -> None:
+                        if not manager.active or _event_loop is None:
+                            return
+                        last = quote.get("last")
+                        if last is None:
+                            return
+                        try:
+                            payload = json.dumps({
+                                "type":              "tick",
+                                "ticker":            ticker,
+                                "last":              last,
+                                "bid":               quote.get("bid"),
+                                "ask":               quote.get("ask"),
+                                "volume":            quote.get("volume"),
+                                "high":              quote.get("high"),
+                                "low":               quote.get("low"),
+                                "net_change":        quote.get("net_change"),
+                                "net_pct_change":    quote.get("net_pct_change"),
+                                "bid_ask_imbalance": quote.get("bid_ask_imbalance"),
+                            }, default=lambda x: None)
+                            asyncio.run_coroutine_threadsafe(
+                                manager.broadcast(payload), _event_loop
+                            )
+                        except Exception:
+                            pass
+                    register_tick_callback(_on_schwab_tick)
         except Exception as _be:
             logging.getLogger(__name__).warning(f"Schwab Trader token load skipped: {_be}")
         try:
