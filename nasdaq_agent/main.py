@@ -165,6 +165,15 @@ def _ensure_tick_broadcast_registered() -> None:
     _schwab_tick_registered = True
 
 
+def _get_universe_total() -> int:
+    try:
+        from agent.ticker_universe import FULL_UNIVERSE
+        return len(FULL_UNIVERSE)
+    except Exception:
+        from config import NASDAQ_TICKERS
+        return len(NASDAQ_TICKERS)
+
+
 def _on_signals(signals: list[StockSignal]) -> None:
     """Callback invoked by the scanner thread; schedule a broadcast on the main loop."""
     if _event_loop is None:
@@ -256,17 +265,19 @@ def _on_signals(signals: list[StockSignal]) -> None:
             )
 
     payload = _dumps({
-        "type":        "update",
-        "signals":     [s.to_dict() for s in signals],
-        "regime":      regime.to_dict(),
-        "session":     session,
-        "alerts":      alerts,
-        "macro":       macro,
-        "backtest":    bt_summary,
-        "learning":    learn_compact,
-        "open_trades": open_trades,
-        "pt_stats":    pt_stats,
-        "breadth":     breadth,
+        "type":          "update",
+        "signals":       [s.to_dict() for s in signals],
+        "regime":        regime.to_dict(),
+        "session":       session,
+        "alerts":        alerts,
+        "macro":         macro,
+        "backtest":      bt_summary,
+        "learning":      learn_compact,
+        "open_trades":   open_trades,
+        "pt_stats":      pt_stats,
+        "breadth":       breadth,
+        "universe_total": _get_universe_total(),
+        "scanned_count": len(signals),
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 

@@ -534,7 +534,7 @@
 </div>
 
 <div class="summary-bar">
-  <div class="pill"><div class="pill-label">Tracked</div><div class="pill-value" style="color:var(--blue)" id="s-total">—</div></div>
+  <div class="pill" title="Total NASDAQ universe tracked. Active scan = tickers analyzed this cycle."><div class="pill-label">Tracked</div><div class="pill-value" style="color:var(--blue)" id="s-total">—</div></div>
   <div class="pill"><div class="pill-label">Strong Buy</div><div class="pill-value" style="color:var(--green-s)" id="s-sbuy">—</div></div>
   <div class="pill"><div class="pill-label">Buy</div><div class="pill-value" style="color:var(--green);font-size:16px" id="s-buy">—</div></div>
   <div class="pill"><div class="pill-label">Neutral</div><div class="pill-value" id="s-neutral">—</div></div>
@@ -1677,6 +1677,8 @@ function connectWS() {
     if (m.type === 'update') {
       _wsLastMsgAt = Date.now();
       allSignals = m.signals;
+      if (m.universe_total) window._universeTotal = m.universe_total;
+      if (m.scanned_count != null) window._scannedCount = m.scanned_count;
       if (m.open_trades) allOpenTrades = m.open_trades;
       if (m.session)  { _sessionInfo = m.session; updateSessionBanner(m.session); }
       if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
@@ -1816,14 +1818,19 @@ function fmt(n, d=2) { return n != null ? Number(n).toFixed(d) : '—'; }
 function updateSummary() {
   const c = {'STRONG BUY':0,'BUY':0,'NEUTRAL':0,'SELL':0,'STRONG SELL':0,'UVOL':0};
   allSignals.forEach(s => { c[s.prediction]=(c[s.prediction]||0)+1; if(s.unusual_vol) c.UVOL++; });
-  document.getElementById('s-total').textContent   = allSignals.length;
+  document.getElementById('s-total').textContent   = window._universeTotal || allSignals.length;
   document.getElementById('s-sbuy').textContent    = c['STRONG BUY'];
   document.getElementById('s-buy').textContent     = c['BUY'];
   document.getElementById('s-neutral').textContent = c['NEUTRAL'];
   document.getElementById('s-sell').textContent    = c['SELL'];
   document.getElementById('s-ssell').textContent   = c['STRONG SELL'];
   document.getElementById('s-uvol').textContent    = c['UVOL'];
-  document.getElementById('scan-count').textContent = `${allSignals.length} stocks scanned`;
+  const _uni = window._universeTotal || allSignals.length;
+  const _act = window._scannedCount  || allSignals.length;
+  document.getElementById('scan-count').textContent =
+    _uni > _act
+      ? `${_act} analyzed · ${_uni} in universe`
+      : `${_act} stocks scanned`;
   if (allSignals[0]?.scanned_at) {
     const rawTs = allSignals[0].scanned_at;
     // isoformat() from Python already includes +00:00 — don't append Z again
