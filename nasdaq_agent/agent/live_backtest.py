@@ -342,6 +342,14 @@ def get_performance_stats(
     if not rows:
         return _empty_stats()
 
+    # Context breakdowns (by_session, by_regime, etc.) should only include signals
+    # where the model had at least some conviction.  Mixing 15%-confidence noise
+    # into session/regime stats makes good contexts appear bad when low-quality
+    # signals in that context happen to lose.  Confidence calibration (by_confidence)
+    # still uses ALL signals so we can measure accuracy across every band.
+    _CONTEXT_MIN_CONF = 45.0
+    quality_rows = [r for r in rows if (r.get("confidence") or 0) >= _CONTEXT_MIN_CONF]
+
     def _stats(subset: list[dict]) -> dict:
         n      = len(subset)
         wins   = sum(1 for r in subset if r["status"] == "WIN")
@@ -368,8 +376,10 @@ def get_performance_stats(
         }
 
     def _breakdown(key: str) -> dict:
+        # Use quality_rows (confidence >= 45%) so low-conviction noise doesn't
+        # poison context statistics used for adaptive filter blocking decisions.
         groups: dict[str, list] = {}
-        for r in rows:
+        for r in quality_rows:
             v = r.get(key) or "UNKNOWN"
             groups.setdefault(v, []).append(r)
         return {k: _stats(v) for k, v in groups.items() if len(v) >= min_resolved}
@@ -392,18 +402,23 @@ def get_performance_stats(
         exit_reasons[er] = exit_reasons.get(er, 0) + 1
 
     return {
+        # overall includes ALL resolved signals (full calibration picture)
         "overall":          _stats(rows),
+        # quality_overall uses only 45%+ confidence (what drives context blocking)
+        "quality_overall":  _stats(quality_rows),
         "tracking_count":   len(get_tracking_signals()),
         "lookback_days":    lookback_days,
+        # context breakdowns: 45%+ confidence signals only
         "by_direction":     _breakdown("direction"),
         "by_session":       _breakdown("session"),
         "by_regime":        _breakdown("regime"),
         "by_vwap_event":    _breakdown("vwap_event"),
         "by_rsi_zone":      _breakdown("rsi_zone"),
         "by_entry_type":    _breakdown("entry_type"),
-        "by_confidence":    _confidence_bands(),
         "by_sector_trend":  _breakdown("sector_trend"),
         "by_mtf":           _breakdown("mtf_alignment"),
+        # confidence bands: ALL signals, used for threshold calibration
+        "by_confidence":    _confidence_bands(),
         "exit_reasons":     exit_reasons,
     }
 
