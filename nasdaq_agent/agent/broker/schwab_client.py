@@ -40,6 +40,11 @@ def _headers() -> dict:
     }
 
 
+def _is_trader_connected() -> bool:
+    """True only when the Accounts+Trading token is present."""
+    return bool(get_access_token())
+
+
 def _get(path: str) -> dict:
     url = f"{TRADER_BASE}{path}"
     req = urllib.request.Request(url, headers=_headers())
@@ -77,7 +82,10 @@ def get_account() -> dict:
 
 
 def get_positions() -> list[dict]:
-    """Return current open positions."""
+    """Return current open positions. Empty list if Trader app not connected."""
+    if not _is_trader_connected():
+        logger.debug("get_positions: Trader app not connected — skipping")
+        return []
     acct = _account_number()
     try:
         data = _get(f"/accounts/{acct}?fields=positions")
@@ -89,11 +97,11 @@ def get_positions() -> list[dict]:
         for p in positions:
             instr = p.get("instrument", {})
             result.append({
-                "ticker":       instr.get("symbol", ""),
-                "qty":          p.get("longQuantity", 0) - p.get("shortQuantity", 0),
-                "avg_price":    p.get("averagePrice", 0),
-                "market_value": p.get("marketValue", 0),
-                "unrealized_pnl": p.get("currentDayProfitLoss", 0),
+                "ticker":           instr.get("symbol", ""),
+                "qty":              p.get("longQuantity", 0) - p.get("shortQuantity", 0),
+                "avg_price":        p.get("averagePrice", 0),
+                "market_value":     p.get("marketValue", 0),
+                "unrealized_pnl":   p.get("currentDayProfitLoss", 0),
                 "unrealized_pnl_pct": p.get("currentDayProfitLossPercentage", 0),
             })
         return result
@@ -103,7 +111,10 @@ def get_positions() -> list[dict]:
 
 
 def get_orders(status: str = "WORKING") -> list[dict]:
-    """Return open/recent orders."""
+    """Return open/recent orders. Empty list if Trader app not connected."""
+    if not _is_trader_connected():
+        logger.debug("get_orders: Trader app not connected — skipping")
+        return []
     acct = _account_number()
     try:
         data = _get(f"/accounts/{acct}/orders?status={status}&maxResults=50")
@@ -114,7 +125,10 @@ def get_orders(status: str = "WORKING") -> list[dict]:
 
 
 def get_account_summary() -> dict:
-    """Return simplified balance summary for the dashboard."""
+    """Return simplified balance summary. Empty dict if Trader app not connected."""
+    if not _is_trader_connected():
+        logger.debug("get_account_summary: Trader app not connected — skipping")
+        return {}
     try:
         data   = get_account()
         acct_d = data.get("securitiesAccount", {})
