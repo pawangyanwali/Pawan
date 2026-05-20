@@ -134,24 +134,39 @@ def _run_async(coro, timeout: float = 60.0):
     return fut.result(timeout=timeout)
 
 
-# Async token-bucket rate limiter (mirrors the sync _rate_wait)
-_aio_rate_event: asyncio.Event | None = None   # created lazily inside the loop
+# Async-specific rate state — separate from the sync globals so there is
+# no shared threading.Lock between the event loop thread and caller threads.
+# asyncio runs all coroutines on ONE thread, so plain globals are safe here.
+_aio_rate_last: float = 0.0
+_aio_bg_last:   float = 0.0
 
 
 async def _aio_rate_wait(background: bool = False) -> None:
-    """Async equivalent of _rate_wait(): enforces 1.5/s (0.4/s for background)."""
-    global _rate_last, _bg_last
+    """
+    Slot-reservation rate limiter for the async path.
+
+    NEVER holds a threading.Lock across an await — doing so blocks the entire
+    SchwabAioHTTP event loop thread and deadlocks all in-flight coroutines.
+    asyncio is single-threaded so plain globals are race-condition-free.
+    """
+    global _aio_rate_last, _aio_bg_last
+    now = time.time()
+
     if background:
-        with _bg_lock:
-            gap = time.time() - _bg_last
-            if gap < _BG_GAP:
-                await asyncio.sleep(_BG_GAP - gap)
-            _bg_last = time.time()
-    with _rate_lock:
-        gap = time.time() - _rate_last
-        if gap < _RATE_GAP:
-            await asyncio.sleep(_RATE_GAP - gap)
-        _rate_last = time.time()
+        # Reserve next background slot and sleep until it's our turn
+        fire_at = max(now, _aio_bg_last + _BG_GAP)
+        _aio_bg_last = fire_at
+        delay = fire_at - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+        now = time.time()   # refresh after bg sleep
+
+    # Reserve next foreground slot and sleep until it's our turn
+    fire_at = max(now, _aio_rate_last + _RATE_GAP)
+    _aio_rate_last = fire_at
+    delay = fire_at - now
+    if delay > 0:
+        await asyncio.sleep(delay)
 
 
 def _rate_wait(background: bool = False) -> None:
@@ -385,9 +400,12 @@ def fetch_price_history_batch_async(
     blocks until complete.  Drop-in replacement for fetch_price_history_batch().
     Requires `aiohttp` installed (pip install aiohttp).
     """
+    # Dynamic timeout: each ticker needs up to _RATE_GAP seconds in the queue
+    # plus 15s per request (aiohttp timeout) plus a 30s buffer.
+    timeout = max(120.0, len(tickers) * _RATE_GAP + 30.0)
     return _run_async(
         _fetch_batch_async_coro(tickers, interval, outputsize, extended_hours, background),
-        timeout=120.0,
+        timeout=timeout,
     )
 
 
