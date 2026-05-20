@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 _DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
-_FALLBACK_MIN_CONFIDENCE = 55.0
+_PAPER_MIN_CONF          = 45.0  # floor confidence for paper trade data collection
+_FALLBACK_MIN_CONFIDENCE = 45.0  # used if adaptive filter is unavailable
 _MAX_BARS_HELD_SCALP     = 20   # 20-min hard close for scalps (PRD 6.3)
 _MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
 _MAX_CONCURRENT_TRADES   = 20   # Paper sim: high cap so every signal gets a trade and generates learning data
@@ -110,11 +111,21 @@ def _migrate_columns(c: sqlite3.Connection) -> None:
 
 
 def _get_min_confidence() -> float:
-    try:
-        from agent.adaptive_filter import get_status as _af
-        return float(_af().get("dynamic_threshold", _FALLBACK_MIN_CONFIDENCE))
-    except Exception:
-        return _FALLBACK_MIN_CONFIDENCE
+    """
+    Return the minimum confidence required to open a paper trade.
+
+    Paper trading is the system's DATA COLLECTION layer — it needs to capture
+    as many signal outcomes as possible so the adaptive filter and ML models
+    can learn.  We therefore use a fixed 45% floor rather than the adaptive
+    filter's dynamic_threshold (which governs LIVE trading recommendations).
+
+    The adaptive filter's dynamic_threshold is intentionally NOT used here:
+      - It starts at 55–65% and can rise further as it learns
+      - At 57%+, it would block 80%+ of scanner signals, starving the learner
+      - The adaptive filter should OBSERVE 45-55% confidence trades to decide
+        whether those contexts are worth blocking — it can't learn without data
+    """
+    return _PAPER_MIN_CONF
 
 
 def maybe_open_trade(
@@ -144,6 +155,7 @@ def maybe_open_trade(
 
     min_conf = _get_min_confidence()
     if confidence < min_conf:
+        logger.debug(f"[PAPER] {ticker} skip: conf {confidence:.0f}% < floor {min_conf:.0f}%")
         return None
 
     # ── PRD master entry gate (session / circuit breaker / heat / sector) ──
@@ -152,7 +164,7 @@ def maybe_open_trade(
         ticker, direction, confidence, trading_tier=trading_tier
     )
     if not allowed:
-        logger.debug(f"[PAPER] {ticker} blocked: {block_reason}")
+        logger.debug(f"[PAPER] {ticker} blocked by risk gate: {block_reason}")
         return None
 
     # Combine gate size multiplier with signal-level size multiplier.
@@ -193,12 +205,14 @@ def maybe_open_trade(
                 "SELECT id FROM paper_trades WHERE ticker=? AND status='OPEN'", (ticker,)
             ).fetchone()
             if existing:
+                logger.debug(f"[PAPER] {ticker} skip: already has open trade #{existing[0]}")
                 return None
 
             open_count = c.execute(
                 "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
             ).fetchone()[0]
             if open_count >= _MAX_CONCURRENT_TRADES:
+                logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_MAX_CONCURRENT_TRADES}) reached")
                 return None
 
             cur = c.execute("""
