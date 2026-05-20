@@ -242,7 +242,8 @@ def maybe_open_trade(
             return cur.lastrowid
 
 
-def update_open_trades(ticker: str, df, current_price: float) -> None:
+def update_open_trades(ticker: str, df, current_price: float,
+                       bar_high: float = 0.0, bar_low: float = 0.0) -> None:
     """
     PRD-compliant position management:
       1. Hard close at 3:45 PM ET (EOD rule)
@@ -297,6 +298,13 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 exit_reason  = None
                 close_shares = 0
                 is_partial   = False
+
+                # Intrabar high/low for stop/target detection.  When available,
+                # using bar_high/bar_low catches moves that close back inside the
+                # range — e.g. a spike through target that doesn't hold the close.
+                # Fall back to ep (close) when bar data is unavailable.
+                _hi = bar_high if bar_high > 0 else ep
+                _lo = bar_low  if bar_low  > 0 else ep
 
                 # unrealized P&L % for smart EOD decisions
                 pnl_pct_now = (
@@ -375,8 +383,8 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 # ── 2. T1 partial exit (1R profit) — if not already hit ────────
                 if not exit_reason and not t1_hit and t1_price > 0:
                     t1_hit_now = (
-                        (direction == "BUY"  and ep >= t1_price) or
-                        (direction == "SELL" and ep <= t1_price)
+                        (direction == "BUY"  and _hi >= t1_price) or
+                        (direction == "SELL" and _lo <= t1_price)
                     )
                     if t1_hit_now:
                         # Exit 50% at T1, move stop to breakeven
@@ -419,8 +427,8 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 # ── 3. T2 full exit (2R profit) — only if T1 already hit ──────
                 if not exit_reason and t1_hit and t2_price > 0:
                     t2_hit_now = (
-                        (direction == "BUY"  and ep >= t2_price) or
-                        (direction == "SELL" and ep <= t2_price)
+                        (direction == "BUY"  and _hi >= t2_price) or
+                        (direction == "SELL" and _lo <= t2_price)
                     )
                     if t2_hit_now:
                         exit_reason  = "TARGET_T2"
@@ -430,8 +438,8 @@ def update_open_trades(ticker: str, df, current_price: float) -> None:
                 # ── 4. Stop hit ────────────────────────────────────────────────
                 if not exit_reason:
                     stop_hit = (
-                        (direction == "BUY"  and ep <= stop_current) or
-                        (direction == "SELL" and ep >= stop_current)
+                        (direction == "BUY"  and _lo <= stop_current) or
+                        (direction == "SELL" and _hi >= stop_current)
                     )
                     if stop_hit:
                         exit_reason  = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"

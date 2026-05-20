@@ -425,7 +425,9 @@ def analyse_ticker(
         df_ind = compute_indicators(df_1m.copy())
         last   = df_ind.iloc[-1]
 
-        price = float(last["Close"])
+        price    = float(last["Close"])
+        bar_high = float(last["High"])
+        bar_low  = float(last["Low"])
         # Change % vs previous daily close (works for both regular session and AH).
         # During AH, df_1d.iloc[-1] is today's close → gives true AH move.
         # During regular session, Twelve Data daily bars lag until EOD so
@@ -860,9 +862,12 @@ def analyse_ticker(
                 trading_tier      = _trading_tier,
             )
 
-        # Update open paper trades + live backtest tracking
-        update_open_trades(ticker, df_ind, price)
-        bt_update(ticker, price, vwap_sig["vwap"])
+        # Update open paper trades + live backtest tracking.
+        # Pass bar_high/bar_low so stop/target detection uses the full intrabar
+        # range rather than just the close — catches moves that spike through a
+        # level then close back inside the same 1-min candle.
+        update_open_trades(ticker, df_ind, price, bar_high=bar_high, bar_low=bar_low)
+        bt_update(ticker, price, vwap_sig["vwap"], bar_high=bar_high, bar_low=bar_low)
 
         candles = _build_candles(df_1m)
         info    = _get_info(ticker)

@@ -184,9 +184,13 @@ def _compute_r(current: float, entry: float, stop: float, direction: str) -> flo
         return (entry - current) / risk
 
 
-def update_tracking(ticker: str, current_price: float, vwap: float = 0.0) -> list[dict]:
+def update_tracking(ticker: str, current_price: float, vwap: float = 0.0,
+                    bar_high: float = 0.0, bar_low: float = 0.0) -> list[dict]:
     """
     Update all TRACKING signals for ticker with current_price.
+    bar_high / bar_low: the 1-min candle's high and low (same bar as current_price).
+    When provided, stop/target detection uses the full intrabar range so we catch
+    moves that touched a level but closed back inside — standard in pro backtesting.
     Returns list of newly resolved signals (for broadcast).
     """
     resolved = []
@@ -207,6 +211,10 @@ def update_tracking(ticker: str, current_price: float, vwap: float = 0.0) -> lis
                 r_val  = _compute_r(current_price, entry, stp, d)
                 max_r  = max(row["max_favorable_r"] or 0, r_val)
 
+                # Use intrabar range when available; fall back to close price
+                _hi = bar_high if bar_high > 0 else current_price
+                _lo = bar_low  if bar_low  > 0 else current_price
+
                 # Record price path
                 c.execute("""
                     INSERT INTO bt_price_path (signal_id, bar, price, r_val, ts)
@@ -214,15 +222,20 @@ def update_tracking(ticker: str, current_price: float, vwap: float = 0.0) -> lis
                 """, (sid, bars, round(current_price, 4), round(r_val, 4),
                       datetime.now(timezone.utc).isoformat()))
 
-                # Check resolution
+                # Check resolution — target/stop use bar high/low (intrabar);
+                # VWAP_LOSS uses close price (needs directional context vs VWAP).
+                # When both stop and target are touched in the same bar, stop takes
+                # priority (conservative assumption: adverse move came first).
                 status = None
                 exit_reason = None
 
                 if d == "BUY":
-                    if current_price >= tgt:
-                        status = "WIN";  exit_reason = "TARGET"
-                    elif current_price <= stp:
+                    tgt_hit  = _hi >= tgt
+                    stop_hit = _lo <= stp
+                    if stop_hit:                          # stop checked first (conservative)
                         status = "LOSS"; exit_reason = "STOP"
+                    elif tgt_hit:
+                        status = "WIN";  exit_reason = "TARGET"
                     elif (vwap > 0 and current_price < vwap and entry >= vwap
                           and bars >= _VWAP_LOSS_MIN_BARS and r_val <= -_VWAP_LOSS_MIN_ADV_R):
                         # Only call VWAP_LOSS when: trade open ≥3 bars AND already ≥0.2R
@@ -230,10 +243,12 @@ def update_tracking(ticker: str, current_price: float, vwap: float = 0.0) -> lis
                         # being counted as losses — the #1 cause of false 29% win rates.
                         status = "LOSS"; exit_reason = "VWAP_LOSS"
                 else:
-                    if current_price <= tgt:
-                        status = "WIN";  exit_reason = "TARGET"
-                    elif current_price >= stp:
+                    tgt_hit  = _lo <= tgt
+                    stop_hit = _hi >= stp
+                    if stop_hit:
                         status = "LOSS"; exit_reason = "STOP"
+                    elif tgt_hit:
+                        status = "WIN";  exit_reason = "TARGET"
                     elif (vwap > 0 and current_price > vwap and entry <= vwap
                           and bars >= _VWAP_LOSS_MIN_BARS and r_val <= -_VWAP_LOSS_MIN_ADV_R):
                         status = "LOSS"; exit_reason = "VWAP_LOSS"
