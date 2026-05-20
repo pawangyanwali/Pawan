@@ -290,6 +290,63 @@ def update_tracking(ticker: str, current_price: float, vwap: float = 0.0,
     return resolved
 
 
+def rt_check_resolution(ticker: str, last_price: float) -> list[dict]:
+    """
+    Lightweight real-time stop/target check using Schwab streaming last price.
+    Called every ~5s by the RT monitor — does NOT record a price-path bar or
+    increment bars_tracked (those remain the responsibility of update_tracking).
+    Only resolves signals that have clearly hit stop or target.
+    Returns list of newly resolved signals.
+    """
+    resolved = []
+    with _lock:
+        with _conn() as c:
+            rows = c.execute(
+                "SELECT signal_id, direction, entry_price, target, stop, bars_tracked "
+                "FROM bt_signals WHERE ticker=? AND status='TRACKING'",
+                (ticker,),
+            ).fetchall()
+            for row in rows:
+                d, entry, tgt, stp = row["direction"], row["entry_price"], row["target"], row["stop"]
+                if d == "BUY":
+                    if last_price >= tgt:
+                        status, reason = "WIN",  "TARGET"
+                    elif last_price <= stp:
+                        status, reason = "LOSS", "STOP"
+                    else:
+                        continue
+                else:
+                    if last_price <= tgt:
+                        status, reason = "WIN",  "TARGET"
+                    elif last_price >= stp:
+                        status, reason = "LOSS", "STOP"
+                    else:
+                        continue
+                pnl   = (last_price - entry) / entry * 100
+                if d == "SELL":
+                    pnl = -pnl
+                r_val = _compute_r(last_price, entry, stp, d)
+                c.execute("""
+                    UPDATE bt_signals
+                    SET status=?, resolved_at=?, exit_price=?, exit_reason=?,
+                        pnl_pct=?, r_multiple=?
+                    WHERE signal_id=?
+                """, (
+                    status,
+                    datetime.now(timezone.utc).isoformat(),
+                    round(last_price, 4), f"{reason}_RT",
+                    round(pnl, 3), round(r_val, 3),
+                    row["signal_id"],
+                ))
+                resolved.append({"signal_id": row["signal_id"], "status": status, "reason": reason})
+                logger.info(
+                    f"[BT-RT] {status} {d} {ticker} @ ${last_price:.2f} | "
+                    f"R={r_val:.2f} | {reason} (real-time)"
+                )
+            c.commit()
+    return resolved
+
+
 # ── Query helpers ──────────────────────────────────────────────────────────────
 
 def get_tracking_signals() -> list[dict]:

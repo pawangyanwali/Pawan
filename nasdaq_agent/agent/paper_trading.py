@@ -911,6 +911,86 @@ def get_today_pnl() -> dict:
         conn.close()
 
 
+def rt_check_positions(ticker: str, last_price: float) -> list[str]:
+    """
+    Lightweight real-time stop/T1/T2 check using Schwab streaming last price.
+    Called every ~5s by the RT monitor — NO df required, NO EOD logic.
+    Handles: stop hit, T1 partial exit at 1R, T2 full exit at 2R.
+    Full update_open_trades() (EOD, momentum, trailing) still runs every 60s scan.
+    Returns list of exit reasons for any positions closed.
+    """
+    actions: list[str] = []
+    with _lock:
+        with _conn() as c:
+            rows = c.execute("""
+                SELECT id, direction, entry_price, stop, t1_price, t2_price,
+                       COALESCE(t1_hit, 0) as t1_hit,
+                       COALESCE(breakeven_set, 0) as breakeven_set,
+                       COALESCE(shares, 1) as shares,
+                       COALESCE(shares_remaining, shares, 1) as shares_remaining,
+                       COALESCE(partial_pnl_dollar, 0) as partial_pnl_dollar
+                FROM paper_trades WHERE ticker=? AND status='OPEN'
+            """, (ticker,)).fetchall()
+
+            for row in rows:
+                d        = row["direction"]
+                entry    = float(row["entry_price"])
+                stp      = float(row["stop"])
+                t1       = float(row["t1_price"] or 0)
+                t2       = float(row["t2_price"] or 0)
+                t1_hit   = bool(row["t1_hit"])
+                shares_r = int(row["shares_remaining"])
+                partial  = float(row["partial_pnl_dollar"])
+
+                exit_reason = None
+
+                # ── Stop hit ────────────────────────────────────────────────────
+                if (d == "BUY" and last_price <= stp) or (d == "SELL" and last_price >= stp):
+                    exit_reason = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"
+                    _record_close(c, row["id"], last_price, exit_reason, entry, d,
+                                  int(row["shares"]), partial, shares_r)
+                    actions.append(exit_reason)
+                    logger.info(
+                        f"[PAPER-RT] {exit_reason} {d} {ticker} @ ${last_price:.2f} "
+                        f"(real-time stop check)"
+                    )
+                    continue
+
+                # ── T2 full exit (only if T1 already hit) ───────────────────────
+                if t1_hit and t2 > 0:
+                    if (d == "BUY" and last_price >= t2) or (d == "SELL" and last_price <= t2):
+                        _record_close(c, row["id"], t2, "TARGET_T2", entry, d,
+                                      int(row["shares"]), partial, shares_r)
+                        actions.append("TARGET_T2")
+                        logger.info(
+                            f"[PAPER-RT] TARGET_T2 {d} {ticker} @ ${t2:.2f} (real-time)"
+                        )
+                        continue
+
+                # ── T1 partial exit (1R) ─────────────────────────────────────────
+                if not t1_hit and t1 > 0:
+                    if (d == "BUY" and last_price >= t1) or (d == "SELL" and last_price <= t1):
+                        partial_sh  = max(1, shares_r // 2)
+                        t1_pnl      = ((t1 - entry) if d == "BUY" else (entry - t1)) * partial_sh
+                        new_partial = partial + t1_pnl
+                        new_rem     = shares_r - partial_sh
+                        be_stop     = round(entry + 0.02, 4) if d == "BUY" else round(entry - 0.02, 4)
+                        c.execute("""
+                            UPDATE paper_trades
+                            SET t1_hit=1, breakeven_set=1, stop=?,
+                                partial_pnl_dollar=?, shares_remaining=?
+                            WHERE id=?
+                        """, (be_stop, round(new_partial, 2), new_rem, row["id"]))
+                        actions.append("T1_HIT_RT")
+                        logger.info(
+                            f"[PAPER-RT] T1 {d} {ticker} @ ${t1:.2f} "
+                            f"partial {partial_sh}sh locked ${t1_pnl:+.2f} "
+                            f"stop → breakeven ${be_stop:.2f} (real-time)"
+                        )
+            c.commit()
+    return actions
+
+
 def get_open_trades() -> list[dict]:
     with _lock:
         with _conn() as c:

@@ -454,9 +454,50 @@ def fetch_batch_interval(
 # ── Convenience wrappers ──────────────────────────────────────────────────────
 
 def fetch_batch_realtime(tickers: list, extended_hours: bool = False) -> dict[str, pd.DataFrame]:
-    """Fetch fresh 1-min bars for all tickers (no caching — always live)."""
-    return fetch_batch_interval(tickers, "1min", REALTIME_OUTPUTSIZE, ttl=0,
-                                extended_hours=extended_hours)
+    """
+    Fetch fresh 1-min bars for all tickers.
+
+    When the Schwab WebSocket streamer is connected and has live candles, those
+    are used as the primary source (sub-second latency, zero API credits).
+    Tickers without Schwab data fall back to Twelve Data.  Extended-hours
+    sessions always use Twelve Data because the Schwab CHART_EQUITY stream
+    only covers regular market hours.
+    """
+    result: dict[str, pd.DataFrame] = {}
+    td_tickers = list(tickers)   # default: all go to Twelve Data
+
+    if not extended_hours:
+        try:
+            from config import SCHWAB_ENABLED
+            if SCHWAB_ENABLED:
+                from agent.broker.schwab_streamer import is_streamer_ready, get_live_1m_df
+                if is_streamer_ready():
+                    td_tickers = []
+                    for ticker in tickers:
+                        df = get_live_1m_df(ticker)
+                        if df is not None and not df.empty:
+                            result[ticker] = df
+                        else:
+                            td_tickers.append(ticker)
+                    if td_tickers:
+                        logger.debug(
+                            f"[Schwab 1m] {len(result)}/{len(tickers)} from stream; "
+                            f"{len(td_tickers)} falling back to Twelve Data"
+                        )
+                    else:
+                        logger.debug(f"[Schwab 1m] all {len(result)} tickers served from stream")
+        except Exception as _e:
+            logger.debug(f"[Schwab 1m] fallback to Twelve Data: {_e}")
+            td_tickers = list(tickers)
+
+    if td_tickers:
+        td_result = fetch_batch_interval(
+            td_tickers, "1min", REALTIME_OUTPUTSIZE, ttl=0,
+            extended_hours=extended_hours,
+        )
+        result.update(td_result)
+
+    return result
 
 
 def fetch_historical(ticker: str) -> pd.DataFrame:

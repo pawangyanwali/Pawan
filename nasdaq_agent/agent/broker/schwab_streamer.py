@@ -491,7 +491,44 @@ def get_halted_tickers() -> set[str]:
         return set(_halted)
 
 
-def get_streamer_status() -> dict:
+def get_live_1m_df(ticker: str) -> "Optional[object]":
+    """
+    Convert the live CHART_EQUITY candle deque into a pandas DataFrame that
+    matches the Twelve Data format used by the scanner and feature engine.
+
+    Columns: Open, High, Low, Close, Volume  (float64)
+    Index:   DatetimeIndex in America/New_York tz, oldest first.
+
+    Returns None if fewer than 5 candles are available (not enough for indicators).
+    """
+    import pandas as pd
+    candles = get_live_candles(ticker, MAX_CANDLE_HISTORY)
+    if len(candles) < 5:
+        return None
+    df = pd.DataFrame({
+        "Open":   [float(c.get("open",   0)) for c in candles],
+        "High":   [float(c.get("high",   0)) for c in candles],
+        "Low":    [float(c.get("low",    0)) for c in candles],
+        "Close":  [float(c.get("close",  0)) for c in candles],
+        "Volume": [float(c.get("volume", 0)) for c in candles],
+    })
+    # Build DatetimeIndex from Schwab epoch-ms timestamps if available
+    if candles[0].get("time_ms"):
+        ts = pd.to_datetime([c.get("time_ms", 0) for c in candles],
+                            unit="ms", utc=True)
+        df.index = ts.tz_convert("America/New_York")
+    # Drop bars with zero close (incomplete / bad data)
+    df = df[df["Close"] > 0].copy()
+    return df if len(df) >= 5 else None
+
+
+def is_streamer_ready() -> bool:
+    """True when the streamer is connected and has live quote data."""
+    with _lock:
+        return bool(_ws_connected and _live_quotes)
+
+
+
     sym_nq = _front_month("NQ")
     sym_es = _front_month("ES")
     with _lock:

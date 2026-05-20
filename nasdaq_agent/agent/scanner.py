@@ -56,12 +56,13 @@ from agent.signal_tracker import init_db, record_signal, resolve_pending, record
 from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.exit_signals import analyse_exits
-from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades
+from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades, rt_check_positions as pt_rt_check
 from agent.macro_calendar import check_macro_event
 from agent.live_backtest import (
     init_db as bt_init_db,
     record_signal as bt_record,
     update_tracking as bt_update,
+    rt_check_resolution as bt_rt_check,
 )
 from agent.backtest_reporter import maybe_trigger_feedback_retrain, adjust_confidence
 from agent.adaptive_filter import (
@@ -1306,6 +1307,54 @@ class Scanner:
                 logger.error(f"Scanner loop error: {e}", exc_info=True)
             time.sleep(_scan_interval())
 
+    def _rt_monitor_loop(self) -> None:
+        """
+        Real-time Schwab price monitor — 5-second check cycle, zero API credits.
+        Resolves open paper trades and backtest signals using live last-price from
+        the Schwab WebSocket stream without waiting for the next 60-second scan.
+        """
+        from config import SCHWAB_ENABLED
+        if not SCHWAB_ENABLED:
+            logger.debug("[RT-Monitor] Schwab not enabled — RT monitor inactive")
+            return
+        try:
+            from agent.broker.schwab_streamer import is_streamer_ready, get_live_quote
+        except ImportError:
+            logger.debug("[RT-Monitor] schwab_streamer not available — RT monitor inactive")
+            return
+
+        logger.info("[RT-Monitor] Real-time Schwab price monitor started (5s cycle)")
+        while self.is_running:
+            try:
+                if is_streamer_ready():
+                    from agent.paper_trading import get_open_trades as _get_open
+                    open_trades = _get_open()
+                    tickers = list({t["ticker"] for t in open_trades})
+                    for ticker in tickers:
+                        quote = get_live_quote(ticker)
+                        if not quote:
+                            continue
+                        last_price = float(quote.get("last") or quote.get("close") or 0)
+                        if last_price <= 0:
+                            continue
+                        try:
+                            resolved_bt = bt_rt_check(ticker, last_price)
+                            if resolved_bt:
+                                for r in resolved_bt:
+                                    logger.info(f"[RT-Monitor] BT {ticker}: {r}")
+                        except Exception as _e:
+                            logger.debug(f"[RT-Monitor] bt_rt_check {ticker}: {_e}")
+                        try:
+                            resolved_pt = pt_rt_check(ticker, last_price)
+                            if resolved_pt:
+                                for r in resolved_pt:
+                                    logger.info(f"[RT-Monitor] PT {ticker}: {r}")
+                        except Exception as _e:
+                            logger.debug(f"[RT-Monitor] pt_rt_check {ticker}: {_e}")
+            except Exception as _loop_e:
+                logger.debug(f"[RT-Monitor] loop error: {_loop_e}")
+            time.sleep(5)
+
     def start_background(self) -> None:
         init_db()      # signal_history.db
         pt_init_db()   # paper_trades.db
@@ -1319,6 +1368,10 @@ class Scanner:
         # Thread 2: Main scan loop (starts immediately)
         scan_thread = threading.Thread(target=self._loop, daemon=True)
         scan_thread.start()
+
+        # Thread 3: Real-time Schwab price monitor (5s cycle for open trades)
+        rt_thread = threading.Thread(target=self._rt_monitor_loop, daemon=True, name="rt-monitor")
+        rt_thread.start()
 
         logger.info(f"Scanner started. {len(NASDAQ_TICKERS)} tickers · {PIPELINE_WORKERS} parallel workers · 1-min scan interval.")
 
