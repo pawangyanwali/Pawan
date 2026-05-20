@@ -2,19 +2,16 @@
 Schwab Market Data API.
 
 Endpoints used:
-  /pricehistory              — OHLCV bars (fallback for Twelve Data)
+  /pricehistory              — OHLCV bars (primary historical data source)
   /quotes                    — real-time last price for a list of symbols
   /movers/{index}            — top gainers/losers for NASDAQ / S&P 500
   /chains                    — option chain (IV, OI, Greeks)
   /markets                   — market session hours (open/closed check)
 
-Twelve Data intervals → Schwab parameters:
-  "1min"  → frequencyType=minute, frequency=1,  periodType=day,   period=10
-  "5min"  → frequencyType=minute, frequency=5,  periodType=month, period=3
-  "15min" → frequencyType=minute, frequency=15, periodType=month, period=6
-  "30min" → frequencyType=minute, frequency=30, periodType=month, period=6
-  "1h"    → frequencyType=minute, frequency=60, periodType=month, period=6
-  "1day"  → frequencyType=daily,  frequency=1,  periodType=year,  period=2
+Schwab /pricehistory constraint:
+  frequencyType=minute is ONLY valid with periodType=day (max period=10).
+  All sub-daily intervals are therefore capped at 10 trading days.
+  periodType=month/year only supports daily/weekly/monthly frequencies.
 """
 from __future__ import annotations
 
@@ -35,13 +32,13 @@ MARKETDATA_BASE = "https://api.schwabapi.com/marketdata/v1"
 
 # Twelve Data interval → (frequencyType, frequency, periodType, period)
 _IV_MAP = {
-    "1min":  ("minute",  1,  "day",   10),
-    "5min":  ("minute",  5,  "month",  3),
-    "15min": ("minute", 15,  "month",  6),
-    "30min": ("minute", 30,  "month",  6),
-    "1h":    ("minute", 60,  "month",  6),
-    "4h":    ("minute", 60,  "year",   1),
-    "1day":  ("daily",   1,  "year",   2),
+    "1min":  ("minute",  1,  "day",  10),   # 10 days ≈ 3,900 bars
+    "5min":  ("minute",  5,  "day",  10),   # 10 days ≈   780 bars
+    "15min": ("minute", 15,  "day",  10),   # 10 days ≈   260 bars
+    "30min": ("minute", 30,  "day",  10),   # 10 days ≈   130 bars
+    "1h":    ("minute", 60,  "day",  10),   # 10 days ≈    65 bars
+    "4h":    ("minute", 60,  "day",  10),   # same — no native 4h on Schwab
+    "1day":  ("daily",   1,  "year",  2),   # 2 years ≈   504 bars
 }
 
 
