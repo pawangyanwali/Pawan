@@ -322,8 +322,8 @@ async def _fetch_batch_async_coro(
 ) -> dict[str, pd.DataFrame]:
     """
     Async batch fetch using aiohttp.  All HTTP requests run concurrently;
-    the async token bucket (_aio_rate_wait) still enforces ≤1.5 req/s
-    (≤0.4 req/s for background tasks) so we stay within Schwab limits.
+    the async token bucket (_aio_rate_wait) enforces ≤10 req/s (adaptive 429
+    backoff to 1.5 req/s minimum); background tasks capped at 1 req/s.
     """
     if not _is_authorised() or not tickers:
         return {}

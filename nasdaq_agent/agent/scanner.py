@@ -1108,11 +1108,10 @@ class Scanner:
         Train both intraday (5M) and daily ML models at startup.
         Daily data served from fetch_batch_interval cache (fetched during first scan).
 
-        Wait for the first scan AND its cache-fill to fully complete before
-        training touches the API.  First scan populates 1min, 5min, 1h, 1day,
-        and sector ETF caches — that costs ~600-700 credits and takes 2-3 min
-        under the CREDIT_LIMIT=340 gate.  Starting training during that window
-        used to spike to 541 credits/minute and trigger 429s.
+        Wait for the first scan to complete before training touches the API.
+        First scan populates 1min, 5min, 1h, 1day SQLite caches via Schwab REST.
+        Starting retrain during that window would compete for the API rate budget
+        and potentially trigger 429s that slow the scan.
         """
         logger.info("ML training: waiting for first two scan cycles to warm data cache…")
         # Wait for the first scan event (set at the end of run_once)
