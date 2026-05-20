@@ -50,6 +50,11 @@ _screener_vol:  list[dict]            = []   # NASDAQ top volume
 _futures:      dict[str, dict]        = {}   # /NQ, /ES → quote dict
 _halted:       set[str]               = set()
 
+# ── Bar-close event bus ───────────────────────────────────────────────────────
+import queue as _q
+_bar_close_queue: _q.Queue = _q.Queue(maxsize=20000)
+_bar_close_callbacks: list = []
+
 # Streamer lifecycle
 _streamer_thread:  Optional[threading.Thread] = None
 _event_loop:       Optional[asyncio.AbstractEventLoop] = None
@@ -210,6 +215,7 @@ def _process_levelone_futures(content: list) -> None:
 
 
 def _process_chart_equity(content: list) -> None:
+    new_bars: list[tuple[str, dict]] = []
     with _lock:
         for item in content:
             sym = item.get("key", "")
@@ -221,6 +227,19 @@ def _process_chart_equity(content: list) -> None:
             if sym not in _live_candles:
                 _live_candles[sym] = deque(maxlen=MAX_CANDLE_HISTORY)
             _live_candles[sym].append(candle)
+            new_bars.append((sym, candle))
+
+    # Fire bar-close events outside the lock so callbacks never deadlock
+    for sym, candle in new_bars:
+        try:
+            _bar_close_queue.put_nowait((sym, candle))
+        except _q.Full:
+            pass
+        for fn in _bar_close_callbacks:
+            try:
+                fn(sym, candle)
+            except Exception:
+                pass
 
 
 def _process_screener(service: str, content: list) -> None:
@@ -593,6 +612,23 @@ def is_ticker_halted(ticker: str) -> bool:
     """True if the ticker's security status is currently Halted."""
     with _lock:
         return ticker in _halted
+
+
+def register_bar_close_callback(fn) -> None:
+    """Register fn(ticker: str, candle: dict) — called when each 1-min bar closes."""
+    _bar_close_callbacks.append(fn)
+
+
+def get_bar_close_queue() -> "_q.Queue":
+    """Queue of (ticker, candle) tuples published on every CHART_EQUITY bar close."""
+    return _bar_close_queue
+
+
+def get_streaming_bar_count(ticker: str) -> int:
+    """Number of 1-min bars currently buffered for ticker (0 if not streaming)."""
+    with _lock:
+        dq = _live_candles.get(ticker)
+        return len(dq) if dq else 0
 
 
 def get_halted_tickers() -> set[str]:

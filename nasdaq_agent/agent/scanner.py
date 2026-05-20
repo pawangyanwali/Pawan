@@ -1388,25 +1388,150 @@ class Scanner:
                 logger.debug(f"[RT-Monitor] loop error: {_loop_e}")
             time.sleep(5)
 
+    def _bar_driven_loop(self) -> None:
+        """
+        Tier 3: Event-driven scan — triggered by CHART_EQUITY bar-close events
+        instead of a 60-second polling clock.
+
+        Architecture:
+          1. Drain the bar-close queue in bursts (collect events for up to 2s
+             so bars closing at the same minute boundary are batched together).
+          2. Analyse only the tickers that received new bars — not all 175.
+          3. Merge results into self.signals and notify callbacks.
+          4. A 90s watchdog re-scans ALL tickers in case any missed bar events
+             (reconnect gaps, tickers not yet subscribed, etc.).
+
+        Falls back to _loop() polling if the queue stays empty for 120s
+        (streamer disconnected or not yet authenticated).
+        """
+        from agent.broker.schwab_streamer import get_bar_close_queue
+        bar_q = get_bar_close_queue()
+
+        logger.info("[Scanner] Event-driven mode active — waiting for CHART_EQUITY bars…")
+
+        _dirty:       set[str] = set()   # tickers with new bars this burst
+        _burst_start: float    = time.time()
+        _last_full:   float    = 0.0     # timestamp of last full-universe scan
+        _BURST_WINDOW = 2.0              # collect events for 2s before analysing
+        _WATCHDOG     = 90.0             # full scan every 90s regardless
+        _QUEUE_TIMEOUT = 120.0           # fall back to polling if no events for 2 min
+
+        _last_event_ts = time.time()
+
+        while self.is_running:
+            # ── Drain bar-close events ────────────────────────────────────────
+            try:
+                ticker, _candle = bar_q.get(timeout=1.0)
+                _dirty.add(ticker)
+                _last_event_ts = time.time()
+
+                # Collect more events in the burst window
+                burst_deadline = time.time() + _BURST_WINDOW
+                while time.time() < burst_deadline:
+                    try:
+                        t2, _ = bar_q.get_nowait()
+                        _dirty.add(t2)
+                    except Exception:
+                        break
+
+            except Exception:
+                pass  # queue.Empty — no new bars, continue
+
+            now = time.time()
+
+            # ── Fallback: if no events for 2 min, switch to polling ───────────
+            if now - _last_event_ts > _QUEUE_TIMEOUT:
+                logger.info("[Scanner] No bar events for 2 min — falling back to polling loop")
+                self._loop()
+                return
+
+            # ── Watchdog: full scan every 90s ─────────────────────────────────
+            if now - _last_full >= _WATCHDOG:
+                try:
+                    results = self.run_once()
+                    self._scan_count += 1
+                    _dirty.clear()
+                    _last_full = now
+                except Exception as e:
+                    logger.warning(f"[Scanner] Watchdog scan error: {e}")
+                continue
+
+            # ── Burst scan: analyse only dirty tickers ────────────────────────
+            if _dirty and (now - _burst_start) >= _BURST_WINDOW:
+                dirty_list = list(_dirty)
+                _dirty.clear()
+                _burst_start = now
+                try:
+                    self._scan_subset(dirty_list)
+                except Exception as e:
+                    logger.debug(f"[Scanner] Burst scan error: {e}")
+
+    def _scan_subset(self, tickers: list[str]) -> None:
+        """
+        Analyse a subset of tickers using fresh streaming data.
+        Merges results into self.signals without displacing uncovered tickers.
+        """
+        if not tickers:
+            return
+
+        _sess = get_session_info()
+        _is_extended = _sess.get("session", "") in ("AFTER_HOURS", "PRE_MARKET", "CLOSED")
+
+        # 1min comes from streaming (instant); HTF comes from cache (instant)
+        batch_1m = fetch_batch_realtime(tickers, extended_hours=_is_extended)
+        batch_5m = fetch_batch_interval(tickers, "5min", 500, ttl=CACHE_TTL_5M)
+        batch_1h = fetch_batch_interval(tickers, "1h",   500, ttl=CACHE_TTL_1H)
+        batch_1d = fetch_batch_interval(tickers, "1day", 500, ttl=CACHE_TTL_1D)
+
+        from agent.pipeline import get_pipeline
+        n_total = len(tickers)
+        new_results = get_pipeline(n_workers=min(PIPELINE_WORKERS, n_total)).scan(
+            tickers, batch_1m, batch_5m, batch_1h, batch_1d,
+            on_ticker_done=lambda sig, n, t: self._notify_ticker(sig, n, n_total),
+        )
+
+        # Merge: replace existing signals for these tickers, keep others
+        existing = {s.ticker: s for s in self.signals if s.ticker not in set(tickers)}
+        for sig in new_results:
+            existing[sig.ticker] = sig
+        self.signals   = list(existing.values())
+        self.last_scan = datetime.now(timezone.utc).isoformat()
+        self._notify(self.signals)
+        logger.debug(f"[Scanner] Burst: {len(new_results)}/{len(tickers)} tickers updated")
+
     def start_background(self) -> None:
-        init_db()      # signal_history.db
-        pt_init_db()   # paper_trades.db
-        bt_init_db()   # live_backtest.db
-        ah_init_db()   # ah_snapshots.db
+        init_db()
+        pt_init_db()
+        bt_init_db()
+        ah_init_db()
 
         # Thread 1: ML training (waits for first scan to warm cache)
         ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
         ml_thread.start()
 
-        # Thread 2: Main scan loop (starts immediately)
-        scan_thread = threading.Thread(target=self._loop, daemon=True)
+        # Thread 2: Scan loop — event-driven when streamer is active, polling fallback
+        def _choose_loop():
+            # Give the streamer 15s to connect before deciding mode
+            time.sleep(15)
+            try:
+                from agent.broker.schwab_streamer import is_streamer_ready
+                if is_streamer_ready():
+                    logger.info("[Scanner] Streamer ready — starting event-driven scan loop")
+                    self._bar_driven_loop()
+                    return
+            except Exception:
+                pass
+            logger.info("[Scanner] Streamer not ready — starting polling scan loop")
+            self._loop()
+
+        scan_thread = threading.Thread(target=_choose_loop, daemon=True, name="scan-loop")
         scan_thread.start()
 
-        # Thread 3: Real-time Schwab price monitor (5s cycle for open trades)
+        # Thread 3: Real-time position monitor
         rt_thread = threading.Thread(target=self._rt_monitor_loop, daemon=True, name="rt-monitor")
         rt_thread.start()
 
-        logger.info(f"Scanner started. {len(NASDAQ_TICKERS)} tickers · {PIPELINE_WORKERS} parallel workers · 1-min scan interval.")
+        logger.info(f"Scanner started. {len(NASDAQ_TICKERS)} tickers · {PIPELINE_WORKERS} workers · streaming+polling modes.")
 
     def stop(self) -> None:
         self.is_running = False

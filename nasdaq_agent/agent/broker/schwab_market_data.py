@@ -17,12 +17,14 @@ Schwab /pricehistory constraint:
 """
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import logging
 import threading
 import time
 from datetime import date
 
+import aiohttp
 import pandas as pd
 import requests
 
@@ -100,6 +102,56 @@ _RATE_GAP  = 1.0 / 1.5   # 0.667 s between requests
 _bg_lock = threading.Lock()
 _bg_last = 0.0
 _BG_GAP  = 1.0 / 0.4   # 2.5 s between background calls
+
+
+# ── Async HTTP layer (aiohttp + token bucket) ─────────────────────────────────
+# A single background event loop handles all async HTTP so sync callers can
+# submit coroutines via asyncio.run_coroutine_threadsafe() and block for results.
+
+_aio_loop:   asyncio.AbstractEventLoop | None = None
+_aio_thread: "threading.Thread | None"        = None
+_aio_lock    = threading.Lock()
+
+
+def _get_aio_loop() -> asyncio.AbstractEventLoop:
+    """Return (and lazily start) the shared async event loop thread."""
+    global _aio_loop, _aio_thread
+    with _aio_lock:
+        if _aio_loop is None or _aio_loop.is_closed():
+            _aio_loop = asyncio.new_event_loop()
+            _aio_thread = threading.Thread(
+                target=_aio_loop.run_forever,
+                daemon=True,
+                name="SchwabAioHTTP",
+            )
+            _aio_thread.start()
+        return _aio_loop
+
+
+def _run_async(coro, timeout: float = 60.0):
+    """Block the calling thread until `coro` completes on the async loop."""
+    fut = asyncio.run_coroutine_threadsafe(coro, _get_aio_loop())
+    return fut.result(timeout=timeout)
+
+
+# Async token-bucket rate limiter (mirrors the sync _rate_wait)
+_aio_rate_event: asyncio.Event | None = None   # created lazily inside the loop
+
+
+async def _aio_rate_wait(background: bool = False) -> None:
+    """Async equivalent of _rate_wait(): enforces 1.5/s (0.4/s for background)."""
+    global _rate_last, _bg_last
+    if background:
+        with _bg_lock:
+            gap = time.time() - _bg_last
+            if gap < _BG_GAP:
+                await asyncio.sleep(_BG_GAP - gap)
+            _bg_last = time.time()
+    with _rate_lock:
+        gap = time.time() - _rate_last
+        if gap < _RATE_GAP:
+            await asyncio.sleep(_RATE_GAP - gap)
+        _rate_last = time.time()
 
 
 def _rate_wait(background: bool = False) -> None:
@@ -219,6 +271,124 @@ def fetch_price_history_batch(
 
     logger.info(f"[Schwab MD] batch {interval}: {len(result)}/{len(tickers)} tickers")
     return result
+
+
+async def _fetch_batch_async_coro(
+    tickers:        list[str],
+    interval:       str,
+    outputsize:     int,
+    extended_hours: bool,
+    background:     bool,
+) -> dict[str, pd.DataFrame]:
+    """
+    Async batch fetch using aiohttp.  All HTTP requests run concurrently;
+    the async token bucket (_aio_rate_wait) still enforces ≤1.5 req/s
+    (≤0.4 req/s for background tasks) so we stay within Schwab limits.
+    """
+    if not _is_authorised() or not tickers:
+        return {}
+
+    from agent.broker.schwab_auth import _market_data as _md_app
+
+    result:    dict[str, pd.DataFrame] = {}
+    aio_lock = asyncio.Lock()
+
+    async def _one(session: "aiohttp.ClientSession", ticker: str) -> None:
+        await _aio_rate_wait(background=background)
+        try:
+            token = _md_app.get_access_token()
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+            # Handle resample intervals
+            if interval in _RESAMPLE_MAP:
+                src_iv, resample_freq = _RESAMPLE_MAP[interval]
+                df = await _fetch_one_async(session, ticker, src_iv,
+                                             outputsize * 2, extended_hours, headers)
+                if not df.empty:
+                    df = df.resample(resample_freq).agg({
+                        "Open": "first", "High": "max",
+                        "Low": "min", "Close": "last", "Volume": "sum",
+                    }).dropna(subset=["Open", "Close"])
+                    if outputsize and len(df) > outputsize:
+                        df = df.iloc[-outputsize:]
+            else:
+                df = await _fetch_one_async(session, ticker, interval,
+                                             outputsize, extended_hours, headers)
+
+            if not df.empty:
+                async with aio_lock:
+                    result[ticker] = df
+        except Exception as e:
+            logger.debug(f"[AioFetch] {ticker}/{interval}: {e}")
+
+    async with aiohttp.ClientSession() as session:
+        await asyncio.gather(*[_one(session, t) for t in tickers])
+
+    logger.info(f"[Schwab AIO] batch {interval}: {len(result)}/{len(tickers)} tickers")
+    return result
+
+
+async def _fetch_one_async(
+    session,
+    ticker: str,
+    interval: str,
+    outputsize: int,
+    extended_hours: bool,
+    headers: dict,
+) -> pd.DataFrame:
+    """Single async /pricehistory call."""
+    mapping = _IV_MAP.get(interval)
+    if not mapping:
+        return pd.DataFrame()
+    freq_type, freq, period_type, period = mapping
+    params = {
+        "symbol":                ticker,
+        "periodType":            period_type,
+        "period":                period,
+        "frequencyType":         freq_type,
+        "frequency":             freq,
+        "needExtendedHoursData": "true" if extended_hours else "false",
+    }
+    url = f"{MARKETDATA_BASE}/pricehistory"
+    async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        if resp.status != 200:
+            return pd.DataFrame()
+        data = await resp.json(content_type=None)
+    candles = data.get("candles", []) if isinstance(data, dict) else []
+    if not candles:
+        return pd.DataFrame()
+    try:
+        df = pd.DataFrame({
+            "Open":   [c["open"]   for c in candles],
+            "High":   [c["high"]   for c in candles],
+            "Low":    [c["low"]    for c in candles],
+            "Close":  [c["close"]  for c in candles],
+            "Volume": [float(c.get("volume", 0)) for c in candles],
+        }, index=pd.to_datetime([c["datetime"] for c in candles], unit="ms", utc=True))
+        df = df.sort_index()
+        if outputsize and len(df) > outputsize:
+            df = df.iloc[-outputsize:]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def fetch_price_history_batch_async(
+    tickers:        list[str],
+    interval:       str  = "1min",
+    outputsize:     int  = 300,
+    extended_hours: bool = False,
+    background:     bool = False,
+) -> dict[str, pd.DataFrame]:
+    """
+    Sync wrapper: submits the async batch fetch to the shared event loop and
+    blocks until complete.  Drop-in replacement for fetch_price_history_batch().
+    Requires `aiohttp` installed (pip install aiohttp).
+    """
+    return _run_async(
+        _fetch_batch_async_coro(tickers, interval, outputsize, extended_hours, background),
+        timeout=120.0,
+    )
 
 
 # ── Real-time quotes ──────────────────────────────────────────────────────────

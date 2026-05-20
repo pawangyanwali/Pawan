@@ -172,15 +172,23 @@ def fetch_batch_interval(
         f"(+ {len(tickers) - len(to_fetch)} cached)"
     )
     try:
-        from agent.broker.schwab_market_data import fetch_price_history_batch
-        fetched = fetch_price_history_batch(
+        from agent.broker.schwab_market_data import fetch_price_history_batch_async
+        fetched = fetch_price_history_batch_async(
             to_fetch, interval=interval,
             outputsize=outputsize, extended_hours=extended_hours,
             background=background,
         )
-    except Exception as e:
-        logger.warning(f"[Schwab] batch fetch error {interval}: {e}")
-        fetched = {}
+    except Exception:
+        try:
+            from agent.broker.schwab_market_data import fetch_price_history_batch
+            fetched = fetch_price_history_batch(
+                to_fetch, interval=interval,
+                outputsize=outputsize, extended_hours=extended_hours,
+                background=background,
+            )
+        except Exception as e:
+            logger.warning(f"[Schwab] batch fetch error {interval}: {e}")
+            fetched = {}
 
     for ticker, df in fetched.items():
         result[ticker] = df
@@ -201,20 +209,95 @@ def fetch_batch_realtime(
     extended_hours: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """
-    1-min OHLCV bars with the latest live price overlaid on the current bar.
+    1-min OHLCV bars — streaming-first, REST fallback.
 
-    Historical bars come from Schwab /pricehistory (cached 5 min between
-    refreshes).  The current bar's Close is updated from the MD quote
-    poller (_live_quotes) which is refreshed every 1 second — so the
-    scanner always sees the most recent price without a per-scan API call.
+    Tier A (instant, zero API calls):
+      When the Schwab WebSocket streamer is connected and has ≥20 bars for a
+      ticker, the bars come directly from the in-memory _live_candles deque.
+      This eliminates all REST polling for 1-min data in steady state.
+
+    Tier B (REST fallback):
+      Tickers not yet in the streamer buffer (startup, reconnect gap, new
+      subscriptions) fall back to Schwab /pricehistory via aiohttp batch fetch.
+      Results are cached so subsequent calls return instantly.
+
+    Live price overlay (both tiers):
+      The current bar's Close is updated from the LEVELONE_EQUITIES quote
+      (updated every 250ms by the streamer) so signals always reflect the
+      latest traded price.
     """
-    # Fetch 1-min history (cached 5 min; first call may be slower)
-    result = fetch_batch_interval(
-        tickers, "1min", REALTIME_OUTPUTSIZE,
-        ttl=300, extended_hours=extended_hours,
-    )
+    result:       dict[str, pd.DataFrame] = {}
+    rest_needed:  list[str]               = []
 
-    # Overlay current live price onto the last bar's Close
+    # ── Tier A: streaming candles ─────────────────────────────────────────────
+    try:
+        from agent.broker.schwab_streamer import get_live_1m_df, is_streamer_ready, get_streaming_bar_count
+        streamer_up = is_streamer_ready()
+        if streamer_up:
+            for ticker in tickers:
+                if get_streaming_bar_count(ticker) >= 20:
+                    df = get_live_1m_df(ticker)
+                    if df is not None and not df.empty:
+                        result[ticker] = df
+                        continue
+                rest_needed.append(ticker)
+        else:
+            rest_needed = list(tickers)
+    except Exception:
+        rest_needed = list(tickers)
+
+    streaming_count = len(result)
+
+    # ── Tier B: async REST fallback ───────────────────────────────────────────
+    if rest_needed:
+        interval_key = f"1min:ext" if extended_hours else "1min"
+        # Check memory cache first
+        cache_miss = []
+        for ticker in rest_needed:
+            cached = _cache_get(ticker, interval_key, 300)
+            if cached is not None:
+                result[ticker] = cached
+            else:
+                cache_miss.append(ticker)
+
+        if cache_miss:
+            # Try SQLite
+            still_miss = []
+            for ticker in cache_miss:
+                df = _sqlite_get(ticker, "1min", 300)
+                if df is not None:
+                    result[ticker] = df
+                    _cache_set(ticker, interval_key, df)
+                else:
+                    still_miss.append(ticker)
+
+            if still_miss:
+                logger.info(
+                    f"[Schwab] 1min: fetching {len(still_miss)} tickers "
+                    f"(+{len(tickers)-len(still_miss)} stream/cached) "
+                    f"[stream:{streaming_count} rest:{len(still_miss)}]"
+                )
+                try:
+                    from agent.broker.schwab_market_data import fetch_price_history_batch_async
+                    fetched = fetch_price_history_batch_async(
+                        still_miss, interval="1min",
+                        outputsize=REALTIME_OUTPUTSIZE,
+                        extended_hours=extended_hours,
+                    )
+                except Exception:
+                    from agent.broker.schwab_market_data import fetch_price_history_batch
+                    fetched = fetch_price_history_batch(
+                        still_miss, interval="1min",
+                        outputsize=REALTIME_OUTPUTSIZE,
+                        extended_hours=extended_hours,
+                    )
+                for ticker, df in fetched.items():
+                    result[ticker] = df
+                    _cache_set(ticker, interval_key, df)
+                    _sqlite_set(ticker, "1min", df)
+                logger.info(f"[Schwab] 1min: {len(fetched)}/{len(still_miss)} fetched from API")
+
+    # ── Live price overlay ────────────────────────────────────────────────────
     try:
         from agent.broker.schwab_streamer import get_live_quote
         for ticker, df in result.items():
