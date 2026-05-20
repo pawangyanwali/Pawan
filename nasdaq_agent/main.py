@@ -852,43 +852,46 @@ async def after_hours_endpoint():
 
 @app.get("/schwab/auth")
 async def schwab_web_auth(request: Request):
-    """Redirect browser to Schwab Accounts+Trading OAuth login (for streamer + trading)."""
+    """Redirect browser to Schwab Market Data OAuth login.
+    The Accounts+Trading app is no longer required — Market Data only."""
     from fastapi.responses import RedirectResponse
-    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback"
-    return RedirectResponse(url=build_auth_url(redirect_uri))
+    return RedirectResponse(url="/schwab/auth/md")
 
 
 @app.get("/schwab/callback")
 async def schwab_web_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-    """Schwab callback for Accounts+Trading app. Exchange code → start streamer."""
+    """Schwab OAuth callback — handles Market Data app token exchange.
+    Register https://scalpingstocksai.com/schwab/callback in the Schwab Developer Portal."""
     from fastapi.responses import HTMLResponse
     if error or not code:
         html = f"""<html><body style="font-family:sans-serif;padding:40px">
         <h2 style="color:#e53e3e">Schwab Auth Failed</h2>
         <p>{_html.escape(error) or 'No code received.'}</p>
-        <p><a href="/schwab/auth">Try again</a></p></body></html>"""
+        <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
         return HTMLResponse(html, status_code=400)
 
     redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback"
-    success = exchange_auth_code(code, state, redirect_uri)
+    success = exchange_md_auth_code(code, state, redirect_uri)
     if success:
+        # Start the MD poller if it isn't running yet
         try:
             from config import NASDAQ_TICKERS
-            start_streamer(list(NASDAQ_TICKERS))
+            from agent.broker.schwab_streamer import is_streamer_ready
+            if not is_streamer_ready():
+                start_md_poller(list(NASDAQ_TICKERS), interval=1.0)
         except Exception:
             pass
         html = """<html><body style="font-family:sans-serif;padding:40px;background:#f0fff4">
-        <h2 style="color:#276749">&#10003; Schwab Connected! (Accounts &amp; Trading)</h2>
-        <p>Tokens saved. Real-time WebSocket streamer started.</p>
-        <p>Streaming: Level 1 quotes, 1-min candles, NASDAQ screener, NQ/ES futures.</p>
-        <p>Now authorise the <b>Market Data</b> app: <a href="/schwab/auth/md">/schwab/auth/md</a></p>
+        <h2 style="color:#276749">&#10003; Schwab Market Data Connected!</h2>
+        <p>Tokens saved. REST quotes, IV, movers and price history are now live.</p>
+        <p>Real-time 1-second quote poller started for all NASDAQ tickers.</p>
         <p><a href="/">&#8592; Back to Dashboard</a></p></body></html>"""
         return HTMLResponse(html)
     else:
         html = """<html><body style="font-family:sans-serif;padding:40px">
         <h2 style="color:#e53e3e">Token Exchange Failed</h2>
         <p>Check server logs for details.</p>
-        <p><a href="/schwab/auth">Try again</a></p></body></html>"""
+        <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
         return HTMLResponse(html, status_code=500)
 
 
@@ -903,35 +906,18 @@ async def schwab_md_web_auth(request: Request):
             "<p>Add the Market Data app credentials and restart.</p>",
             status_code=400,
         )
-    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback/md"
+    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback"
     return RedirectResponse(url=build_md_auth_url(redirect_uri))
 
 
 @app.get("/schwab/callback/md")
 async def schwab_md_web_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-    """Schwab callback for Market Data app."""
-    from fastapi.responses import HTMLResponse
-    if error or not code:
-        html = f"""<html><body style="font-family:sans-serif;padding:40px">
-        <h2 style="color:#e53e3e">Schwab Market Data Auth Failed</h2>
-        <p>{_html.escape(error) or 'No code received.'}</p>
-        <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
-        return HTMLResponse(html, status_code=400)
-
-    redirect_uri = str(request.base_url).rstrip("/") + "/schwab/callback/md"
-    success = exchange_md_auth_code(code, state, redirect_uri)
-    if success:
-        html = """<html><body style="font-family:sans-serif;padding:40px;background:#f0fff4">
-        <h2 style="color:#276749">&#10003; Schwab Market Data Connected!</h2>
-        <p>Tokens saved. REST quotes, IV, movers and price history are now live.</p>
-        <p><a href="/">&#8592; Back to Dashboard</a></p></body></html>"""
-        return HTMLResponse(html)
-    else:
-        html = """<html><body style="font-family:sans-serif;padding:40px">
-        <h2 style="color:#e53e3e">Market Data Token Exchange Failed</h2>
-        <p>Check server logs for details.</p>
-        <p><a href="/schwab/auth/md">Try again</a></p></body></html>"""
-        return HTMLResponse(html, status_code=500)
+    """Legacy callback path — redirects to the active /schwab/callback handler."""
+    from fastapi.responses import RedirectResponse
+    # Forward all query params to the active callback route
+    params = str(request.url.query)
+    target = f"/schwab/callback?{params}" if params else "/schwab/callback"
+    return RedirectResponse(url=target)
 
 
 @app.get("/api/broker/status")
