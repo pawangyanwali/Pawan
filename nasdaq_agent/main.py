@@ -45,7 +45,7 @@ from agent.broker.schwab_auth import (
     build_auth_url, exchange_auth_code,
     build_md_auth_url, exchange_md_auth_code,
 )
-from agent.broker.schwab_streamer import start_streamer, get_streamer_status, register_tick_callback
+from agent.broker.schwab_streamer import start_streamer, start_md_poller, get_streamer_status, register_tick_callback
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
 from config import (
@@ -283,16 +283,19 @@ async def lifespan(app: FastAPI):
             )
     except Exception as _sp_e:
         logging.getLogger(__name__).warning(f"Startup stale-trade sweep failed: {_sp_e}")
-    # Schwab integration — only active when SCHWAB_ENABLED=true in .env
+    # Schwab integration — Market Data app only (no Accounts+Trading required)
     from config import SCHWAB_ENABLED
     if SCHWAB_ENABLED:
         try:
-            if os.getenv("SCHWAB_CLIENT_ID"):
-                ok = load_stored_tokens()
-                if ok:
-                    logging.getLogger(__name__).info("Schwab Trader app connected.")
+            if os.getenv("SCHWAB_MD_CLIENT_ID"):
+                ok_md = load_stored_md_tokens()
+                if ok_md:
+                    logging.getLogger(__name__).info(
+                        "Schwab Market Data connected — starting 1s quote poller."
+                    )
                     from config import NASDAQ_TICKERS
-                    start_streamer(list(NASDAQ_TICKERS))
+                    start_md_poller(list(NASDAQ_TICKERS), interval=1.0)
+
                     # Wire real-time tick → WebSocket broadcast (250ms throttle per ticker)
                     def _on_schwab_tick(ticker: str, quote: dict) -> None:
                         if not manager.active or _event_loop is None:
@@ -310,9 +313,7 @@ async def lifespan(app: FastAPI):
                                 "volume":            quote.get("volume"),
                                 "high":              quote.get("high"),
                                 "low":               quote.get("low"),
-                                "net_change":        quote.get("net_change"),
                                 "net_pct_change":    quote.get("net_pct_change"),
-                                "bid_ask_imbalance": quote.get("bid_ask_imbalance"),
                             }, default=lambda x: None)
                             asyncio.run_coroutine_threadsafe(
                                 manager.broadcast(payload), _event_loop
@@ -320,17 +321,16 @@ async def lifespan(app: FastAPI):
                         except Exception:
                             pass
                     register_tick_callback(_on_schwab_tick)
+                else:
+                    logging.getLogger(__name__).warning(
+                        "Schwab Market Data token not found — visit /schwab/auth/md to authenticate."
+                    )
         except Exception as _be:
-            logging.getLogger(__name__).warning(f"Schwab Trader token load skipped: {_be}")
-        try:
-            if os.getenv("SCHWAB_MD_CLIENT_ID"):
-                ok_md = load_stored_md_tokens()
-                if ok_md:
-                    logging.getLogger(__name__).info("Schwab Market Data app connected.")
-        except Exception as _be:
-            logging.getLogger(__name__).warning(f"Schwab MD token load skipped: {_be}")
+            logging.getLogger(__name__).warning(f"Schwab Market Data startup failed: {_be}")
     else:
-        logging.getLogger(__name__).info("Schwab disabled (SCHWAB_ENABLED not set) — running on Twelve Data only.")
+        logging.getLogger(__name__).info(
+            "Schwab disabled (SCHWAB_ENABLED not set) — running on Twelve Data only."
+        )
     yield
     scanner.stop()
     learning_engine.stop()

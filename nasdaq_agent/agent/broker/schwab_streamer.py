@@ -399,7 +399,89 @@ async def _streamer_main(tickers: list[str]) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def start_streamer(tickers: list[str]) -> None:
+def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
+    """
+    REST-based real-time quote poller — Market Data app only.
+    No Accounts+Trading credentials required.
+
+    Polls /marketdata/v1/quotes every `interval` seconds for all tickers,
+    populates _live_quotes, and fires _tick_callbacks exactly like the
+    WebSocket streamer would.  All downstream consumers (RT monitor,
+    data_fetcher, dashboard tick broadcast) work unchanged.
+
+    Trade-off vs WebSocket: ~1s latency instead of sub-100ms, which is
+    more than adequate for a scalping dashboard and RT position monitor.
+    """
+    global _streamer_thread, _subscribed_tickers
+
+    if _streamer_thread and _streamer_thread.is_alive():
+        logger.debug("[MDPoller] Already running.")
+        return
+
+    _subscribed_tickers = list(tickers)
+
+    def _poll_loop() -> None:
+        global _ws_connected, _ws_error
+        from agent.broker.schwab_market_data import fetch_full_quotes, _is_authorised
+
+        logger.info(f"[MDPoller] Started — {len(tickers)} tickers @ {interval}s interval")
+        while True:
+            try:
+                if not _is_authorised():
+                    _ws_connected = False
+                    _ws_error = "Schwab Market Data not authorized — visit /schwab/auth/md"
+                    time.sleep(10)
+                    continue
+
+                quotes = fetch_full_quotes(list(tickers))
+                if quotes:
+                    _ws_connected = True
+                    _ws_error = None
+                    updated: list[tuple[str, dict]] = []
+                    with _lock:
+                        for sym, q in quotes.items():
+                            quote = _live_quotes.setdefault(sym, {})
+                            quote["last"]           = float(q.get("last") or 0)
+                            quote["bid"]            = float(q.get("bid")  or 0)
+                            quote["ask"]            = float(q.get("ask")  or 0)
+                            quote["volume"]         = float(q.get("volume") or 0)
+                            quote["high"]           = float(q.get("high")  or 0)
+                            quote["low"]            = float(q.get("low")   or 0)
+                            quote["prev_close"]     = float(q.get("close") or 0)
+                            quote["net_pct_change"] = float(q.get("pct_change") or 0)
+                            quote["updated_at"]     = time.time()
+                            # Halt detection via zero last price
+                            if quote["last"] <= 0:
+                                _halted.add(sym)
+                            else:
+                                _halted.discard(sym)
+                            updated.append((sym, dict(quote)))
+
+                    # Fire tick callbacks (same throttle as WebSocket path)
+                    if updated and _tick_callbacks:
+                        now = time.time()
+                        for sym, quote in updated:
+                            if now - _last_tick_ts.get(sym, 0.0) >= _TICK_MIN_INTERVAL:
+                                _last_tick_ts[sym] = now
+                                for fn in _tick_callbacks:
+                                    try:
+                                        fn(sym, quote)
+                                    except Exception:
+                                        pass
+
+            except Exception as _e:
+                logger.warning(f"[MDPoller] poll error: {_e}")
+
+            time.sleep(interval)
+
+    _streamer_thread = threading.Thread(
+        target=_poll_loop, daemon=True, name="SchwabMDPoller"
+    )
+    _streamer_thread.start()
+    logger.info(f"[MDPoller] Thread started for {len(tickers)} tickers.")
+
+
+
     """
     Launch the Schwab WebSocket streamer in a background daemon thread.
     Safe to call multiple times — only starts once.
