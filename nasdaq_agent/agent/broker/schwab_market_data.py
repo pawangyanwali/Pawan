@@ -81,7 +81,11 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
     try:
         r = requests.get(f"{MARKETDATA_BASE}{path}", headers=headers,
                          params=params, timeout=timeout)
+        if r.status_code == 429:
+            _on_429()
+            return {}
         r.raise_for_status()
+        _on_success()
         return r.json()
     except Exception as e:
         logger.warning(f"[Schwab MD] {path} failed: {e}")
@@ -91,17 +95,38 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
 # ── Price history ─────────────────────────────────────────────────────────────
 
 # ── Global rate limiter (shared across all callers) ───────────────────────────
-# Schwab Market Data: 120 req/min limit. Use 90 req/min (1.5/s) for headroom.
-_rate_lock = threading.Lock()
-_rate_last = 0.0
-_RATE_GAP  = 1.0 / 1.5   # 0.667 s between requests
+# Schwab Market Data Production has no documented REST rate limit in their
+# Streamer API docs.  The 120 req/min figure was from the sandbox tier.
+# Production tier appears to be much higher.  We target 10 req/s (600/min)
+# with automatic 429 back-off: on a 429 the gap doubles (exponential backoff)
+# up to _RATE_GAP_MAX, then resets to _RATE_GAP_FLOOR after a clean window.
+_rate_lock    = threading.Lock()
+_rate_last    = 0.0
+_RATE_GAP_FLOOR = 1.0 / 10.0   # 0.10 s  → 600 req/min target
+_RATE_GAP_MAX   = 1.0 / 1.5    # 0.667 s → 90 req/min hard floor on backoff
+_RATE_GAP       = _RATE_GAP_FLOOR   # mutable; doubles on 429, resets on clean run
 
-# Background-caller throttle: retrain / warmup tasks are capped at 0.4 req/s
-# (24/min) so they consume at most 27% of the API budget, leaving ≥1.1/s for
-# the live scan.  Applied IN ADDITION to the shared rate limit above.
+# Background-caller throttle: retrain tasks capped at 1 req/s so they never
+# consume more than 10% of the budget, leaving ≥9 req/s for the live scan.
 _bg_lock = threading.Lock()
 _bg_last = 0.0
-_BG_GAP  = 1.0 / 0.4   # 2.5 s between background calls
+_BG_GAP  = 1.0 / 1.0   # 1 s between background calls
+
+
+def _on_429() -> None:
+    """Called when Schwab returns HTTP 429. Doubles the rate gap up to the floor."""
+    global _RATE_GAP
+    with _rate_lock:
+        _RATE_GAP = min(_RATE_GAP * 2.0, _RATE_GAP_MAX)
+    logger.warning(f"[Schwab MD] 429 received — throttling to {1/_RATE_GAP:.1f} req/s")
+
+
+def _on_success() -> None:
+    """Gradually recover toward the fast rate after a clean run."""
+    global _RATE_GAP
+    if _RATE_GAP > _RATE_GAP_FLOOR:
+        with _rate_lock:
+            _RATE_GAP = max(_RATE_GAP * 0.9, _RATE_GAP_FLOOR)
 
 
 # ── Async HTTP layer (aiohttp + token bucket) ─────────────────────────────────
@@ -161,7 +186,7 @@ async def _aio_rate_wait(background: bool = False) -> None:
             await asyncio.sleep(delay)
         now = time.time()   # refresh after bg sleep
 
-    # Reserve next foreground slot and sleep until it's our turn
+    # Reserve next foreground slot using the current dynamic gap
     fire_at = max(now, _aio_rate_last + _RATE_GAP)
     _aio_rate_last = fire_at
     delay = fire_at - now
@@ -366,8 +391,12 @@ async def _fetch_one_async(
     }
     url = f"{MARKETDATA_BASE}/pricehistory"
     async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+        if resp.status == 429:
+            _on_429()
+            return pd.DataFrame()
         if resp.status != 200:
             return pd.DataFrame()
+        _on_success()
         data = await resp.json(content_type=None)
     candles = data.get("candles", []) if isinstance(data, dict) else []
     if not candles:
