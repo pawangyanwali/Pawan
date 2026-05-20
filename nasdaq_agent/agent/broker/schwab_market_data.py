@@ -18,7 +18,10 @@ Twelve Data intervals → Schwab parameters:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import threading
+import time
 from datetime import date
 
 import pandas as pd
@@ -82,10 +85,27 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
 
 # ── Price history ─────────────────────────────────────────────────────────────
 
+# ── Global rate limiter (shared across all callers) ───────────────────────────
+# Schwab Market Data: 120 req/min limit. Use 90 req/min (1.5/s) for headroom.
+_rate_lock = threading.Lock()
+_rate_last = 0.0
+_RATE_GAP  = 1.0 / 1.5   # 0.667 s between requests
+
+
+def _rate_wait() -> None:
+    global _rate_last
+    with _rate_lock:
+        gap = time.time() - _rate_last
+        if gap < _RATE_GAP:
+            time.sleep(_RATE_GAP - gap)
+        _rate_last = time.time()
+
+
 def fetch_price_history(
-    ticker:     str,
-    interval:   str,
-    outputsize: int = 300,
+    ticker:         str,
+    interval:       str,
+    outputsize:     int  = 300,
+    extended_hours: bool = False,
 ) -> pd.DataFrame:
     """
     Fetch OHLCV for one ticker from Schwab.
@@ -108,7 +128,7 @@ def fetch_price_history(
         "period":                period,
         "frequencyType":         freq_type,
         "frequency":             freq,
-        "needExtendedHoursData": False,
+        "needExtendedHoursData": extended_hours,
     })
     candles = data.get("candles", []) if isinstance(data, dict) else []
     if not candles:
@@ -130,6 +150,37 @@ def fetch_price_history(
     except Exception as e:
         logger.debug(f"[Schwab MD] parse error {ticker}: {e}")
         return pd.DataFrame()
+
+
+def fetch_price_history_batch(
+    tickers:        list[str],
+    interval:       str  = "1min",
+    outputsize:     int  = 300,
+    extended_hours: bool = False,
+    max_workers:    int  = 5,
+) -> dict[str, pd.DataFrame]:
+    """
+    Parallel price-history fetch for multiple tickers.
+    One Schwab /pricehistory call per ticker, rate-limited to 1.5 req/s.
+    """
+    if not _is_authorised() or not tickers:
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    lock = threading.Lock()
+
+    def _one(ticker: str) -> None:
+        _rate_wait()
+        df = fetch_price_history(ticker, interval, outputsize, extended_hours)
+        if not df.empty:
+            with lock:
+                result[ticker] = df
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        concurrent.futures.wait([ex.submit(_one, t) for t in tickers])
+
+    logger.info(f"[Schwab MD] batch {interval}: {len(result)}/{len(tickers)} tickers")
+    return result
 
 
 # ── Real-time quotes ──────────────────────────────────────────────────────────

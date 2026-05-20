@@ -25,28 +25,8 @@ _cache: dict[str, tuple[Optional[datetime], float]] = {}  # ticker → (next_dat
 
 
 def _fetch_next_earnings(ticker: str) -> Optional[datetime]:
-    """Fetch next earnings date from Twelve Data /earnings. Returns None on failure."""
-    try:
-        from agent.data_fetcher import _get
-        data = _get("/earnings", {"symbol": ticker, "outputsize": 5}, n_credits=1)
-        earnings = data.get("earnings") or data.get("data") or []
-        if not earnings:
-            return None
-        now = datetime.now(timezone.utc)
-        future: list[datetime] = []
-        for entry in earnings:
-            date_str = entry.get("date") or entry.get("report_date") or ""
-            if not date_str:
-                continue
-            try:
-                dt = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
-                if dt > now:
-                    future.append(dt)
-            except ValueError:
-                continue
-        return min(future) if future else None
-    except Exception as e:
-        logger.debug(f"[{ticker}] earnings fetch failed: {e}")
+    """Schwab Market Data does not provide an earnings calendar endpoint.
+    Returns None — earnings blocking is effectively disabled."""
     return None
 
 

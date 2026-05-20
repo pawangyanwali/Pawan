@@ -3,27 +3,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
+# Twelve Data removed — all market data now served by Schwab Market Data API.
+# TWELVE_DATA_API_KEY kept as empty string so any stale imports don't hard-error.
+TWELVE_DATA_API_KEY = ""
 
-if not TWELVE_DATA_API_KEY:
-    raise RuntimeError(
-        "\n\n  ERROR: TWELVE_DATA_API_KEY not set.\n"
-        "  Create a file called .env in the nasdaq_agent folder with:\n"
-        "  TWELVE_DATA_API_KEY=your_key_here\n"
-    )
+# ── Schwab Market Data (primary data source) ─────────────────────────────────
+# Always enabled — Twelve Data has been removed.
+SCHWAB_ENABLED = True
 
-# ── Schwab integration gate ───────────────────────────────────────────────────
-# Set SCHWAB_ENABLED=true in .env when both apps are authorised and working.
-# When false (default) all Schwab code is skipped — agent runs on Twelve Data only.
-SCHWAB_ENABLED = os.getenv("SCHWAB_ENABLED", "false").lower() == "true"
-
-# ── Grow-377 plan limits ───────────────────────────────────────────────────────
-# 377 credits/minute, unlimited daily credits
-# 1 credit = 1 symbol in any /time_series request
-# Batch up to 20 symbols per request → 20 credits per call
-
-CALL_GAP    = 0.20   # seconds between API calls  (60 / 377 ≈ 0.16s, use 0.20s for safety)
-BATCH_SIZE  = 20     # symbols per request (each symbol = 1 credit; Twelve Data supports up to 55)
+# ── Legacy stubs kept for import compat (no longer used functionally) ─────────
+CALL_GAP    = 0.67   # Schwab rate gap: 1.5 req/s → 90 req/min (limit is 120)
+BATCH_SIZE  = 1      # Schwab pricehistory is per-symbol (no multi-symbol batching)
 
 # ── Scan / retrain cadence ────────────────────────────────────────────────────
 SCAN_INTERVAL_SECONDS   = 60      # 1 min — 50 tickers / 20 per batch = 3 calls ≈ 0.6s scan

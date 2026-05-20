@@ -121,7 +121,7 @@ def _rp_append_failed(entry: dict) -> None:
         _retrain_progress["failed"].append(entry)
 
 
-LOOKAHEAD_BARS = 3   # predict direction 3×5min = 15 min ahead
+LOOKAHEAD_BARS = 3   # predict direction 3×1min = 3 min ahead (scalping)
 
 
 # ── Atomic model save helper ──────────────────────────────────────────────────
@@ -381,23 +381,17 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
                 hist_5m: dict = None, hist_15m: dict = None) -> None:
     """Train/retrain all models using a single batch historical fetch.
 
-    Instead of calling fetch_historical() once per ticker (160 single-symbol API
-    calls for 80 tickers × 2 models), this pre-fetches all 5-min data in batches
-    of 20 (4 API calls = 80 credits) and trains every model from the shared result.
+    XGBoost scalp/ensemble/reversal models train on 1-min bars (Schwab provides
+    ~10 days; cache grows over time).  SwingML uses 15-min bars.  DailyML uses
+    daily bars (2 years).
 
     Parameters
     ----------
     tickers    : list of ticker symbols to retrain.
-    delay      : seconds to sleep between tickers (default 0 — no longer needed
-                 since the batch fetch already rate-limits via _charge_credits).
-    daily_data : optional mapping of ticker → daily OHLCV DataFrame.  When
-                 provided, each ticker's DailyMLModel is also retrained from
-                 the supplied DataFrame (no extra API call required).
-    hist_5m    : optional pre-fetched 5-min data dict {ticker: DataFrame}.
-                 When provided (e.g. from weekend_learner's deep SQLite cache),
-                 the API fetch is skipped — models train on the deeper history.
+    delay      : unused (kept for API compat).
+    daily_data : optional mapping of ticker → daily OHLCV DataFrame.
+    hist_5m    : accepted for API compat; treated as hist_1m (1-min data).
     hist_15m   : optional pre-fetched 15-min data dict {ticker: DataFrame}.
-                 Same semantics as hist_5m.
     """
     global _is_retraining
     # Non-blocking guard: if another retrain is already running, skip this call
@@ -492,24 +486,25 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
     import time as _t
     from agent.data_fetcher import fetch_batch_interval
 
-    _rp_set(is_running=True, phase="fetching_5m",
-            phase_label="Fetching 5-min data…",
+    _rp_set(is_running=True, phase="fetching_1m",
+            phase_label="Fetching 1-min data (Schwab ~10 days)…",
             started_at=_t.time(), total=len(tickers),
             done_count=0, completed=[], failed=[],
             current_ticker="", current_model="")
 
-    # ── 5-min data: ~64 trading days (XGBoost scalp/ensemble models) ─────────
+    # ── 1-min data: ~10 days (XGBoost scalp/ensemble/reversal models) ────────
+    # hist_5m param accepted for API compat — callers may pass pre-fetched data;
+    # treat it as 1-min data (same variable, just a different source interval now).
     if hist_5m is not None:
-        # Weekend learner passed pre-fetched deep history — skip API call
-        logger.info(f"[retrain_all] Using pre-fetched 5min data: {len(hist_5m)} tickers "
+        logger.info(f"[retrain_all] Using pre-fetched 1min data: {len(hist_5m)} tickers "
                     f"(avg {sum(len(v) for v in hist_5m.values())//max(len(hist_5m),1)} bars each)")
     else:
-        logger.info(f"[retrain_all] Batch-fetching 5min history for {len(tickers)} tickers…")
-        hist_5m = fetch_batch_interval(tickers, "5min", 5000, ttl=1800)
-        logger.info(f"[retrain_all] Got history for {len(hist_5m)}/{len(tickers)} tickers")
+        logger.info(f"[retrain_all] Batch-fetching 1min history for {len(tickers)} tickers…")
+        hist_5m = fetch_batch_interval(tickers, "1min", 3900, ttl=1800)
+        logger.info(f"[retrain_all] Got 1min history for {len(hist_5m)}/{len(tickers)} tickers")
 
-    # ── 15-min data: ~6 months (deep BiLSTM + swing models) ─────────────────
-    _rp_set(phase="fetching_15m", phase_label="Fetching 15-min data (6 months)…")
+    # ── 15-min data: ~6 months (swing models + deep BiLSTM) ─────────────────
+    _rp_set(phase="fetching_15m", phase_label="Fetching 15-min data (Schwab ~6 months)…")
     if hist_15m is not None:
         logger.info(f"[retrain_all] Using pre-fetched 15min data: {len(hist_15m)} tickers")
     else:
