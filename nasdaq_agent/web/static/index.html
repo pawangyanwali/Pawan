@@ -3035,6 +3035,12 @@ function _ptContextTags(t) {
 
 async function openPaperTrading() {
   document.getElementById('paper-modal').classList.add('open');
+  // Show a loading placeholder while the API call is in flight so the panel
+  // never appears empty — only shows "no trades" after data has actually loaded.
+  const _loadingHtml = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading…</div>';
+  document.getElementById('pt-panel-open').innerHTML   = _loadingHtml;
+  document.getElementById('pt-panel-closed').innerHTML = _loadingHtml;
+  document.getElementById('paper-stats').innerHTML     = _loadingHtml;
   ptTab('open');
   try {
     const [d, ls] = await Promise.all([
@@ -3050,15 +3056,16 @@ async function openPaperTrading() {
     const atLabel = (atd !== null && Math.abs(atd - td) > 1)
       ? `<div style="font-size:8px;color:var(--muted);margin-top:1px">All-time: ${atd>=0?'+$':'-$'}${Math.abs(atd).toFixed(0)}</div>`
       : '';
+    const periodLabel = s.display_period === 'today' ? 'Today' : 'All-time';
     document.getElementById('paper-stats').innerHTML = [
-      ['Open',       s.open,                               'var(--blue)'],
-      ['Closed',     s.closed,                             'var(--text)'],
-      ['Wins',       s.wins,                               'var(--green)'],
-      ['Losses',     s.losses,                             'var(--red)'],
-      ['Win Rate',   s.win_rate+'%',                       s.win_rate>=62?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
-      ['Avg P&L',    (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
-      ['Today P&L',  (td>=0?'+$':'-$')+Math.abs(td).toFixed(2)+atLabel, td>=0?'var(--green-s)':'var(--red-s)'],
-      ['Target',     '62% WR',                             'var(--muted)'],
+      ['Open',                     s.open,                               'var(--blue)'],
+      [periodLabel+' Closed',      s.closed,                             'var(--text)'],
+      [periodLabel+' Wins',        s.wins,                               'var(--green)'],
+      [periodLabel+' Losses',      s.losses,                             'var(--red)'],
+      [periodLabel+' Win Rate',    s.win_rate+'%',                       s.win_rate>=62?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
+      ['Avg P&L',                  (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
+      ['Today P&L',                (td>=0?'+$':'-$')+Math.abs(td).toFixed(2)+atLabel, td>=0?'var(--green-s)':'var(--red-s)'],
+      ['Target',                   '62% WR',                             'var(--muted)'],
     ].map(([l,v,c])=>`<div class="paper-stat">
       <div style="font-size:9px;color:var(--muted);margin-bottom:2px">${l}</div>
       <div style="font-size:15px;font-weight:700;color:${c}">${v}</div>

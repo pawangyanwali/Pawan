@@ -429,17 +429,22 @@ async def paper_trading_endpoint():
     all_stats   = _stats(all_trades)
 
     summary = pt_summary()
-    # Use TODAY stats for the primary display (consistent system, no legacy 100-share noise)
+    # Use TODAY stats when there are enough trades; fall back to all-time so the
+    # dashboard doesn't show all zeros every morning before the first trade closes.
+    display_stats  = today_stats if today_stats["closed"] >= 3 else all_stats
+    display_period = "today" if today_stats["closed"] >= 3 else "all-time"
     summary.update({
-        "closed":           today_stats["closed"],
-        "wins":             today_stats["wins"],
-        "losses":           today_stats["losses"],
-        "win_rate":         today_stats["win_rate"],
-        "avg_pnl":          today_stats["avg_pnl"],
-        "total_pnl":        today_stats["avg_pnl"],
-        "total_dollar_pnl": today_stats["total_dollar_pnl"],
+        "closed":           display_stats["closed"],
+        "wins":             display_stats["wins"],
+        "losses":           display_stats["losses"],
+        "win_rate":         display_stats["win_rate"],
+        "avg_pnl":          display_stats["avg_pnl"],
+        "total_pnl":        display_stats["avg_pnl"],
+        "total_dollar_pnl": today_stats["total_dollar_pnl"],   # always today's P&L
         "all_time_dollar":  all_stats["total_dollar_pnl"],
         "all_time_closed":  all_stats["closed"],
+        "today_closed":     today_stats["closed"],
+        "display_period":   display_period,
     })
     return {
         "summary":       summary,
@@ -1153,8 +1158,17 @@ async def websocket_endpoint(ws: WebSocket):
             # connection is still alive.  This detects TCP connections silently
             # killed by AWS ELB / nginx / NAT idle-timeout without a FIN/RST.
             try:
-                await asyncio.wait_for(ws.receive_text(), timeout=float(_PING_INTERVAL))
-                # Got a pong or any client message — connection is alive, loop
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=float(_PING_INTERVAL))
+                # Client is alive — echo a ping back so client's watchdog resets.
+                # Without this reply the client never gets a server message and its
+                # 45-second watchdog fires, causing the ~50s disconnect loop.
+                try:
+                    await asyncio.wait_for(
+                        ws.send_json({"type": "ping"}),
+                        timeout=float(_PING_TIMEOUT),
+                    )
+                except Exception:
+                    break
             except asyncio.TimeoutError:
                 # No client heartbeat for _PING_INTERVAL seconds — probe the connection
                 try:
