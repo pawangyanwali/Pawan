@@ -17,27 +17,38 @@ from __future__ import annotations
 
 # ── Static tier map ───────────────────────────────────────────────────────────
 
-# Mega-caps — consistently heavy AH volume, tight spreads
+# Mega-caps — consistently heavy AH + pre-market volume, tight spreads
 _HIGH: frozenset[str] = frozenset({
     "AAPL", "MSFT", "NVDA", "AMZN", "META",
-    "GOOGL", "TSLA", "AVGO", "NFLX", "AMD",
+    "GOOGL", "GOOG", "TSLA", "AVGO", "NFLX",
+    "AMD",   "QCOM", "INTC", "MU",   "SMCI",
 })
 
-# Large-caps — meaningful AH activity; crypto-adjacent names often spike AH
+# Large-caps — meaningful AH/PM activity; news-driven and crypto-adjacent names
 _MODERATE: frozenset[str] = frozenset({
-    "ADBE", "QCOM", "CSCO", "INTU", "AMAT",
-    "MU",   "PANW", "CRWD", "MRVL", "KLAC",
-    "LRCX", "ADI",  "SNPS", "CDNS", "ISRG",
-    "REGN", "BKNG", "ADP",  "SBUX", "INTC",
-    "COST", "AMGN", "ABNB", "DDOG", "ZS",
-    "WDAY", "MELI", "ARM",  "APP",  "COIN",
-    "TTD",  "HOOD", "SMCI", "TEAM", "OKTA",
-    "FTNT", "PYPL", "CEG",  "AXON", "SNOW",
-    # Expansion — high retail AH participation, news-driven AH spikes
-    "PLTR", "MSTR", "MARA", "RIVN", "SOUN",
-    "IONQ", "CELH", "ENPH", "NET",  "ANET",
-    "SNAP", "RBLX", "UPST", "AFRM", "CVNA",
-    "ROKU", "PINS", "LYFT", "DKNG", "MDB",
+    # NASDAQ-100 tech
+    "ADBE", "CSCO", "INTU", "AMAT", "PANW",
+    "CRWD", "MRVL", "KLAC", "LRCX", "ADI",
+    "SNPS", "CDNS", "ISRG", "REGN", "BKNG",
+    "ADP",  "SBUX", "COST", "AMGN", "ABNB",
+    "DDOG", "ZS",   "WDAY", "MELI", "ARM",
+    "APP",  "COIN", "TTD",  "HOOD", "TEAM",
+    "OKTA", "FTNT", "PYPL", "CEG",  "AXON",
+    "SNOW", "NET",  "ANET", "MDB",  "HUBS",
+    # High retail AH/PM participation
+    "PLTR", "MSTR", "MARA", "RIVN", "LCID",
+    "SOUN", "IONQ", "CELH", "ENPH", "RKLB",
+    "ASTS", "RGTI", "QUBT", "SNAP", "RBLX",
+    "UPST", "AFRM", "CVNA", "ROKU", "PINS",
+    "LYFT", "DKNG", "SOFI", "HOOD", "RIOT",
+    # Biotech / pharma — earnings + FDA catalyst spikes in AH/PM
+    "MRNA", "BNTX", "VRTX", "ALNY", "REGN",
+    "GILD", "BIIB", "AMGN", "CRSP", "BEAM",
+    # China ADRs — trade in AH when Hong Kong/China market opens
+    "BIDU", "PDD",  "JD",   "BABA", "NIO",
+    "XPEV", "LI",   "BILI",
+    # ETF-based momentum (high volume, trades continuously in AH)
+    "TQQQ", "SQQQ", "SOXL",
 })
 
 # Anything not listed above defaults to REGULAR
@@ -69,16 +80,12 @@ def get_trading_tier(ticker: str, ah_volume_ratio: float = 0.0) -> str:
 
 
 def is_signal_recommended(tier: str, session: str) -> bool:
-    """
-    Return True if acting on a signal is recommended given the tier and session.
-
-    Used to soften — not suppress — signals so the user can decide.
-    """
-    if session in ("OPEN", "POWER_HOUR", "AVOID_ZONE"):
-        return True                    # all tiers OK during regular hours
+    """Return True if acting on a signal is recommended given tier and session."""
+    if session in ("PRIME", "STANDARD", "LUNCH_BLOCK", "CLOSING_CAUTION", "RESTRICTED"):
+        return True                                    # all tiers OK in regular hours
     if session in ("AFTER_HOURS", "PRE_MARKET"):
-        return tier in ("HIGH", "MODERATE")
-    return False                       # CLOSED — display only, don't trade
+        return tier in ("HIGH", "MODERATE")            # extended-hours: two tiers eligible
+    return False                                       # CLOSED / HARD_CLOSE — no trades
 
 
 _TIER_META: dict[str, dict] = {

@@ -593,25 +593,45 @@ def analyse_ticker(
         _static_tier  = get_trading_tier(ticker, 0.0)   # refined later with AH vol ratio
 
         if _session_now == "CLOSED":
-            # Market fully closed (8pm–4am) — no new signals for anyone
+            # Market fully closed (8pm–4am) — monitoring only
             if pred["direction"] in ("BUY", "SELL"):
                 pred["direction"] = "NEUTRAL"
                 pred["reasons"]   = ["⛔ Market closed (8pm–4am) — monitoring only"] + pred.get("reasons", [])
 
         elif _session_now == "AFTER_HOURS":
             if _static_tier == "HIGH":
-                # Mega-cap (AAPL/TSLA/NVDA/MSFT/META/AMZN/GOOGL/NFLX/AMD/AVGO) —
-                # meaningful AH liquidity, allow trading at 50% size
                 if pred["direction"] in ("BUY", "SELL"):
                     pred["reasons"] = [
-                        f"🌙 AH trade — {ticker} HIGH-tier (50% size, extended liquidity)"
+                        f"🌙 AH {ticker} HIGH-tier — 50% size, extended liquidity"
+                    ] + pred.get("reasons", [])
+            elif _static_tier == "MODERATE":
+                if pred["direction"] in ("BUY", "SELL"):
+                    pred["reasons"] = [
+                        f"🌙 AH {ticker} MODERATE-tier — 30% size, caution advised"
                     ] + pred.get("reasons", [])
             else:
-                # MODERATE / REGULAR — thin AH spreads, no edge outside regular hours
                 if pred["direction"] in ("BUY", "SELL"):
                     pred["direction"] = "NEUTRAL"
                     pred["reasons"]   = [
-                        f"⛔ AH: {ticker} {_static_tier}-tier — thin liquidity, no new trades"
+                        f"⛔ AH {ticker} REGULAR-tier — thin ECN spreads, monitoring only"
+                    ] + pred.get("reasons", [])
+
+        elif _session_now == "PRE_MARKET":
+            if _static_tier == "HIGH":
+                if pred["direction"] in ("BUY", "SELL"):
+                    pred["reasons"] = [
+                        f"🌅 PM {ticker} HIGH-tier — 40% size, pre-market momentum"
+                    ] + pred.get("reasons", [])
+            elif _static_tier == "MODERATE":
+                if pred["direction"] in ("BUY", "SELL"):
+                    pred["reasons"] = [
+                        f"🌅 PM {ticker} MODERATE-tier — 25% size, caution advised"
+                    ] + pred.get("reasons", [])
+            else:
+                if pred["direction"] in ("BUY", "SELL"):
+                    pred["direction"] = "NEUTRAL"
+                    pred["reasons"]   = [
+                        f"⛔ PM {ticker} REGULAR-tier — insufficient pre-market liquidity"
                     ] + pred.get("reasons", [])
 
         # Exit signals (for open paper trades / active signals)
@@ -763,11 +783,13 @@ def analyse_ticker(
         # can_open_trade() decides whether to act on it.
         from agent.market_hours import no_new_entries, get_block_reason
         _trade_blocked_reason = ""
-        # HIGH-tier mega-caps (AAPL/TSLA/NVDA etc.) are allowed to trade
-        # during AFTER_HOURS (4–8 PM ET) at 50% size — do NOT flag as blocked.
-        _is_ah_high_tier = (_session_now == "AFTER_HOURS" and _trading_tier == "HIGH")
-        if _is_ah_high_tier:
-            pass  # allowed — scanner AH gate above kept BUY/SELL direction
+        # Extended-hours allowed: AH HIGH(50%), AH MODERATE(30%), PM HIGH(40%), PM MODERATE(25%)
+        _is_extended_trade = (
+            (_session_now == "AFTER_HOURS" and _trading_tier in ("HIGH", "MODERATE")) or
+            (_session_now == "PRE_MARKET"  and _trading_tier in ("HIGH", "MODERATE"))
+        )
+        if _is_extended_trade:
+            pass  # allowed — session gate above kept BUY/SELL direction
         elif no_new_entries():
             _trade_blocked_reason = get_block_reason()
         elif pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
@@ -845,7 +867,7 @@ def analyse_ticker(
             )
             # Paper trade execution — can_open_trade() inside applies all
             # session / risk / circuit-breaker rules at the execution layer.
-            # AH 50% size cap is applied inside can_open_trade() via check_session_block().
+            # Extended-hours size caps: AH HIGH=50%, AH MODERATE=30%, PM HIGH=40%, PM MODERATE=25%.
             maybe_open_trade(
                 ticker            = ticker,
                 direction         = _norm_direction,

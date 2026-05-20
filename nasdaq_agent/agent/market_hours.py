@@ -60,9 +60,9 @@ _HALF_DAYS: frozenset[date] = frozenset({
 # Session metadata: label, hex colour, tradeable, confidence multiplier, size_mult
 _SESSIONS: dict[str, dict] = {
     "PRE_MARKET": {
-        "label": "Pre-Market", "color": "#64748b", "tradeable": False,
-        "mult": 0.40, "size_mult": 0.0,
-        "advice": "Pre-market — data collection only. Morning scan running.",
+        "label": "Pre-Market", "color": "#7c3aed", "tradeable": True,
+        "mult": 0.45, "size_mult": 0.35,
+        "advice": "Pre-market (4–9:30 AM ET) — HIGH-tier at 40% size, MODERATE-tier at 25% size. REGULAR-tier monitoring only.",
     },
     "RESTRICTED": {
         "label": "⚠ Price Discovery (09:30–09:44)", "color": "#f59e0b", "tradeable": True,
@@ -95,9 +95,9 @@ _SESSIONS: dict[str, dict] = {
         "advice": "Hard close (3:45–4:00 PM ET) — ALL positions closing at market. No new entries.",
     },
     "AFTER_HOURS": {
-        "label": "After-Hours", "color": "#64748b", "tradeable": False,
-        "mult": 0.30, "size_mult": 0.0,
-        "advice": "After-hours (4–8 PM ET) — T1·HIGH mega-caps trade at 50% size. T2/T3 monitoring only.",
+        "label": "After-Hours", "color": "#4f46e5", "tradeable": True,
+        "mult": 0.40, "size_mult": 0.30,
+        "advice": "After-hours (4–8 PM ET) — HIGH-tier at 50% size, MODERATE-tier at 30% size. REGULAR-tier monitoring only.",
     },
     "CLOSED": {
         "label": "Market Closed", "color": "#334155", "tradeable": False,
@@ -243,8 +243,11 @@ def is_after_hours() -> bool:
 
 
 def no_new_entries() -> bool:
-    """True only when the market is literally closed or in hard-close wind-down."""
-    return get_session() in ("HARD_CLOSE", "AFTER_HOURS", "CLOSED", "PRE_MARKET")
+    """True only when the market is literally closed or in hard-close wind-down.
+    Extended-hours sessions (PRE_MARKET, AFTER_HOURS) are NOT fully blocked —
+    tier-specific size caps are enforced by check_session_block() in risk_controls.
+    """
+    return get_session() in ("HARD_CLOSE", "CLOSED")
 
 
 def get_block_reason() -> str:
@@ -258,9 +261,7 @@ def get_block_reason() -> str:
             return "Market closed — NYSE/NASDAQ holiday today."
         return "Market closed."
     reasons = {
-        "HARD_CLOSE":  "🔴 Hard close window — all positions closing. No new entries.",
-        "AFTER_HOURS": "After-hours — market closed for trading.",
-        "PRE_MARKET":  "Pre-market — no live trading, data collection only.",
+        "HARD_CLOSE": "🔴 Hard close window — all positions closing. No new entries.",
     }
     return reasons.get(s, "")
 

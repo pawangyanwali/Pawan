@@ -373,14 +373,31 @@ def check_session_block(trading_tier: str = "REGULAR") -> tuple[bool, str, float
     """
     Returns (blocked, reason, ah_size_mult) based on current session and tier.
 
-    AFTER_HOURS + HIGH tier → allowed at 50% size (mega-caps have real AH liquidity).
-    Everything else in AFTER_HOURS/CLOSED/PRE_MARKET/HARD_CLOSE → blocked.
+    AFTER_HOURS  HIGH     → 50% size  (mega-caps — consistent AH liquidity)
+    AFTER_HOURS  MODERATE → 30% size  (large-caps — meaningful AH activity)
+    AFTER_HOURS  REGULAR  → blocked   (thin spreads, no edge)
+    PRE_MARKET   HIGH     → 40% size  (mega-caps with strong pre-market volume)
+    PRE_MARKET   MODERATE → 25% size  (large-caps — notable PM activity)
+    PRE_MARKET   REGULAR  → blocked   (too thin)
+    HARD_CLOSE / CLOSED   → blocked for all tiers
     """
-    from agent.market_hours import get_session, get_block_reason
+    from agent.market_hours import get_session, get_block_reason, no_new_entries
     session = get_session()
-    if session == "AFTER_HOURS" and trading_tier == "HIGH":
-        return False, "", 0.50   # allowed, no reason, 50% AH size cap
-    from agent.market_hours import no_new_entries
+
+    if session == "AFTER_HOURS":
+        if trading_tier == "HIGH":
+            return False, "", 0.50
+        if trading_tier == "MODERATE":
+            return False, "", 0.30
+        return True, "After-hours — REGULAR-tier: thin ECN spreads, no edge outside regular hours.", 0.0
+
+    if session == "PRE_MARKET":
+        if trading_tier == "HIGH":
+            return False, "", 0.40
+        if trading_tier == "MODERATE":
+            return False, "", 0.25
+        return True, "Pre-market — REGULAR-tier: insufficient pre-market liquidity.", 0.0
+
     if no_new_entries():
         return True, get_block_reason(), 0.0
     return False, "", 1.0
@@ -411,10 +428,9 @@ def can_open_trade(
     if blocked:
         return False, reason, 0.0
 
-    # 2. Circuit breaker
-    # Pass session for AH HIGH-tier so consecutive-loss halts are bypassed
+    # 2. Circuit breaker — bypass consecutive-loss halt during extended-hours trades
     from agent.market_hours import get_session as _get_session
-    _cb_session = _get_session() if (trading_tier == "HIGH" and ah_size > 0) else ""
+    _cb_session = _get_session() if (trading_tier in ("HIGH", "MODERATE") and ah_size > 0) else ""
     blocked, reason = check_circuit_breaker(_cb_session)
     if blocked:
         return False, reason, 0.0
@@ -439,18 +455,17 @@ def can_open_trade(
     if blocked:
         return False, reason, 0.0
 
-    # Apply session size multiplier (e.g. 0.80 in STANDARD hours).
-    # For AH HIGH-tier trades, position_size_multiplier() returns 0.0 (AH session),
-    # so we use the ah_size cap returned by check_session_block() instead.
+    # Apply size multiplier.
+    # Priority: tier-specific extended-hours cap (ah_size) > session default > PPM mult.
+    # ah_size is non-zero only when check_session_block() granted extended-hours access;
+    # that cap is more granular than the generic session size_mult from market_hours.
     from agent.market_hours import position_size_multiplier
-    sess_size = position_size_multiplier()
-    if sess_size > 0:
-        final_size = round(size_mult * sess_size, 2)
-    elif ah_size > 0:
-        # AH HIGH-tier bypass: use the 50% AH cap in place of the session multiplier
+    if ah_size > 0:
+        # Extended-hours: use tier+session specific cap (50%/30% AH, 40%/25% PM)
         final_size = round(size_mult * ah_size, 2)
     else:
-        final_size = size_mult
+        sess_size = position_size_multiplier()
+        final_size = round(size_mult * sess_size, 2) if sess_size > 0 else size_mult
 
     return True, "", final_size
 
