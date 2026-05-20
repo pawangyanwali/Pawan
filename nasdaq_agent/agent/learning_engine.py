@@ -386,14 +386,14 @@ class LearningEngine:
                 )
                 from agent.live_backtest import get_outcomes_for_ml
                 from agent.ml_model import retrain_all
-                from config import NASDAQ_TICKERS
+                from config import TRAINING_TICKERS
 
                 outcomes_df = get_outcomes_for_ml(min_count=5)
                 if outcomes_df is not None and not outcomes_df.empty:
                     _log_attribution(outcomes_df)
                     _update_confidence_calibration(outcomes_df)
 
-                retrain_all(NASDAQ_TICKERS)
+                retrain_all(TRAINING_TICKERS)
                 _log("ML retrain complete", significant=True)
             except Exception as e:
                 _log(f"ML retrain failed: {e}", level="ERROR", significant=True)

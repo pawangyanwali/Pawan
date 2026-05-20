@@ -115,18 +115,12 @@ def _run_feedback_retrain(outcomes_df: pd.DataFrame, tickers: list) -> None:
     """
     Background thread: retrain ML models, boosting weights on patterns that
     the live backtest shows winning vs losing.
-
-    Strategy:
-    1. Group outcomes by context (vwap_event, rsi_zone, session, regime)
-    2. Log which contexts have high/low win rates for interpretability
-    3. Pass the outcome data to the confidence calibrator (adjust prediction
-       thresholds based on observed accuracy per context)
-    4. Full retrain with outcome-weighted samples
     """
     try:
         from agent.ml_model import retrain_all
         from agent.adaptive_filter import update_filter as _af_update
         from agent.live_backtest import get_performance_stats
+        from config import TRAINING_TICKERS
 
         logger.info("[BT Feedback] Starting feedback-weighted retrain…")
         _log_attribution(outcomes_df)
@@ -138,8 +132,9 @@ def _run_feedback_retrain(outcomes_df: pd.DataFrame, tickers: list) -> None:
         stats = get_performance_stats(lookback_days=30)
         _af_update(stats)
 
-        # 3. Retrain ML models with outcome-weighted samples
-        retrain_all(tickers)
+        # 3. Retrain ML models — always use Tier-1 training set, never the full
+        #    active-ticker list (which can be 477 on fallback and starves the scan).
+        retrain_all(TRAINING_TICKERS)
         logger.info("[BT Feedback] Feedback retrain complete.")
 
     except Exception as e:
