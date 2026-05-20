@@ -94,42 +94,44 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
 
 # ── Price history ─────────────────────────────────────────────────────────────
 
-# ── Global rate limiter (shared across all callers) ───────────────────────────
-# Schwab Market Data Production has no documented REST rate limit in their
-# Streamer API docs.  The 120 req/min figure was from the sandbox tier.
-# Production tier appears to be much higher.  We target 10 req/s (600/min)
-# with automatic 429 back-off: on a 429 the gap doubles (exponential backoff)
-# up to _RATE_GAP_MAX, then resets to _RATE_GAP_FLOOR after a clean window.
-_rate_lock    = threading.Lock()
-_rate_last    = 0.0
-_RATE_GAP_FLOOR = 1.0 / 10.0   # 0.10 s  → 600 req/min target
-_RATE_GAP_MAX   = 1.0 / 1.5    # 0.667 s → 90 req/min hard floor on backoff
-_RATE_GAP       = _RATE_GAP_FLOOR   # mutable; doubles on 429, resets on clean run
+# ── 429 adaptive back-off (no artificial pre-throttle) ────────────────────────
+# Schwab Market Data Production has NO documented REST rate limit.
+# We fire all requests concurrently (zero artificial delay for live scans).
+# If Schwab ever returns 429 we back off and retry with exponential delay.
+#
+# Background retrain tasks use a 1 req/s cap so they never starve live scans.
 
-# Background-caller throttle: retrain tasks capped at 1 req/s so they never
-# consume more than 10% of the budget, leaving ≥9 req/s for the live scan.
+_rate_lock    = threading.Lock()
+_backoff_until: float = 0.0        # epoch time when 429 back-off expires
+_BACKOFF_BASE   = 2.0              # seconds for first 429 back-off
+_BACKOFF_MAX    = 30.0             # cap at 30s
+
+# Background-caller throttle: retrain tasks capped at 1 req/s.
 _bg_lock = threading.Lock()
 _bg_last = 0.0
-_BG_GAP  = 1.0 / 1.0   # 1 s between background calls
+_BG_GAP  = 1.0   # 1 s between background calls
 
 
 def _on_429() -> None:
-    """Called when Schwab returns HTTP 429. Doubles the rate gap up to the floor."""
-    global _RATE_GAP
+    """Called when Schwab returns HTTP 429. Sets a short back-off window."""
+    global _backoff_until
     with _rate_lock:
-        _RATE_GAP = min(_RATE_GAP * 2.0, _RATE_GAP_MAX)
-    logger.warning(f"[Schwab MD] 429 received — throttling to {1/_RATE_GAP:.1f} req/s")
+        remaining = _backoff_until - time.time()
+        # Double the back-off each consecutive 429 (exponential), cap at max.
+        new_backoff = min(max(remaining * 2.0, _BACKOFF_BASE), _BACKOFF_MAX)
+        _backoff_until = time.time() + new_backoff
+    logger.warning(f"[Schwab MD] 429 received — pausing {new_backoff:.1f}s")
 
 
 def _on_success() -> None:
-    """Gradually recover toward the fast rate after a clean run."""
-    global _RATE_GAP
-    if _RATE_GAP > _RATE_GAP_FLOOR:
+    """Clear back-off window after a clean response."""
+    global _backoff_until
+    if _backoff_until > time.time():
         with _rate_lock:
-            _RATE_GAP = max(_RATE_GAP * 0.9, _RATE_GAP_FLOOR)
+            _backoff_until = 0.0
 
 
-# ── Async HTTP layer (aiohttp + token bucket) ─────────────────────────────────
+# ── Async HTTP layer (aiohttp, concurrent, no pre-throttle) ──────────────────
 # A single background event loop handles all async HTTP so sync callers can
 # submit coroutines via asyncio.run_coroutine_threadsafe() and block for results.
 
@@ -159,54 +161,40 @@ def _run_async(coro, timeout: float = 60.0):
     return fut.result(timeout=timeout)
 
 
-# Async-specific rate state — separate from the sync globals so there is
-# no shared threading.Lock between the event loop thread and caller threads.
-# asyncio runs all coroutines on ONE thread, so plain globals are safe here.
-_aio_rate_last: float = 0.0
-_aio_bg_last:   float = 0.0
+# Async background-task rate state (plain globals — asyncio is single-threaded).
+_aio_bg_last: float = 0.0
 
 
-async def _aio_rate_wait(background: bool = False) -> None:
-    """
-    Slot-reservation rate limiter for the async path.
+async def _aio_maybe_backoff() -> None:
+    """If a 429 back-off window is active, sleep until it expires."""
+    remaining = _backoff_until - time.time()
+    if remaining > 0:
+        await asyncio.sleep(remaining)
 
-    NEVER holds a threading.Lock across an await — doing so blocks the entire
-    SchwabAioHTTP event loop thread and deadlocks all in-flight coroutines.
-    asyncio is single-threaded so plain globals are race-condition-free.
-    """
-    global _aio_rate_last, _aio_bg_last
+
+async def _aio_bg_wait() -> None:
+    """Throttle background callers to 1 req/s so they don't starve live scans."""
+    global _aio_bg_last
     now = time.time()
-
-    if background:
-        # Reserve next background slot and sleep until it's our turn
-        fire_at = max(now, _aio_bg_last + _BG_GAP)
-        _aio_bg_last = fire_at
-        delay = fire_at - now
-        if delay > 0:
-            await asyncio.sleep(delay)
-        now = time.time()   # refresh after bg sleep
-
-    # Reserve next foreground slot using the current dynamic gap
-    fire_at = max(now, _aio_rate_last + _RATE_GAP)
-    _aio_rate_last = fire_at
+    fire_at = max(now, _aio_bg_last + _BG_GAP)
+    _aio_bg_last = fire_at
     delay = fire_at - now
     if delay > 0:
         await asyncio.sleep(delay)
 
 
 def _rate_wait(background: bool = False) -> None:
-    global _rate_last, _bg_last
+    """Sync path: background throttle + 429 back-off wait."""
     if background:
         with _bg_lock:
             gap = time.time() - _bg_last
             if gap < _BG_GAP:
                 time.sleep(_BG_GAP - gap)
             _bg_last = time.time()
-    with _rate_lock:
-        gap = time.time() - _rate_last
-        if gap < _RATE_GAP:
-            time.sleep(_RATE_GAP - gap)
-        _rate_last = time.time()
+    # Honour any active 429 back-off
+    remaining = _backoff_until - time.time()
+    if remaining > 0:
+        time.sleep(remaining)
 
 
 def fetch_price_history(
@@ -334,7 +322,10 @@ async def _fetch_batch_async_coro(
     aio_lock = asyncio.Lock()
 
     async def _one(session: "aiohttp.ClientSession", ticker: str) -> None:
-        await _aio_rate_wait(background=background)
+        if background:
+            await _aio_bg_wait()      # throttle retrain tasks to 1 req/s
+        else:
+            await _aio_maybe_backoff()  # honour any active 429 back-off, else fire immediately
         try:
             token = _md_app.get_access_token()
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -426,14 +417,12 @@ def fetch_price_history_batch_async(
 ) -> dict[str, pd.DataFrame]:
     """
     Sync wrapper: submits the async batch fetch to the shared event loop and
-    blocks until complete.  Drop-in replacement for fetch_price_history_batch().
-    Requires `aiohttp` installed (pip install aiohttp).
+    blocks until complete.  All requests fire concurrently (no pre-throttle);
+    Schwab production has no documented REST rate limit.
     """
-    # Dynamic timeout with a 300s floor.  When multiple batches run in parallel
-    # (1min + 5min + 1h + 1day), they all share _aio_rate_last so each batch's
-    # last slot fires later than its own ticker-count implies.  300s covers up to
-    # 450 concurrent tickers across all parallel batches at 1.5 req/s.
-    timeout = max(300.0, len(tickers) * _RATE_GAP + 60.0)
+    # All tickers fire concurrently — timeout is just HTTP round-trip overhead.
+    # 60s per ticker × 15s per HTTP call; 120s is generous for any batch size.
+    timeout = 120.0
     return _run_async(
         _fetch_batch_async_coro(tickers, interval, outputsize, extended_hours, background),
         timeout=timeout,
