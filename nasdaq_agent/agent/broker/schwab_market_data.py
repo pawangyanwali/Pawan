@@ -400,9 +400,11 @@ def fetch_price_history_batch_async(
     blocks until complete.  Drop-in replacement for fetch_price_history_batch().
     Requires `aiohttp` installed (pip install aiohttp).
     """
-    # Dynamic timeout: each ticker needs up to _RATE_GAP seconds in the queue
-    # plus 15s per request (aiohttp timeout) plus a 30s buffer.
-    timeout = max(120.0, len(tickers) * _RATE_GAP + 30.0)
+    # Dynamic timeout with a 300s floor.  When multiple batches run in parallel
+    # (1min + 5min + 1h + 1day), they all share _aio_rate_last so each batch's
+    # last slot fires later than its own ticker-count implies.  300s covers up to
+    # 450 concurrent tickers across all parallel batches at 1.5 req/s.
+    timeout = max(300.0, len(tickers) * _RATE_GAP + 60.0)
     return _run_async(
         _fetch_batch_async_coro(tickers, interval, outputsize, extended_hours, background),
         timeout=timeout,

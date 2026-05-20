@@ -66,7 +66,20 @@ def _cache_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
 _SQLITE_TRAIN_INTERVALS: frozenset[str] = frozenset(
     {"1min", "5min", "15min", "30min", "1h", "1day"}
 )
-_SQLITE_TTL_MULT = 8   # retrain uses ttl=86400 → accepts SQLite data up to 8 days old
+
+# Per-interval SQLite TTL multipliers.
+# Higher-frequency intervals need fresher data; lower-frequency bars are valid
+# for much longer.  This lets restarts use SQLite for HTF intervals (5min/1h/1day)
+# without hitting the API, so only the 1min interval needs REST calls.
+_SQLITE_TTL_MULT = 8   # default / retrain fallback
+_SQLITE_TTL_BY_INTERVAL: dict[str, int] = {
+    "1min":  4,    # 4 × 300s  =  20 min  — keeps live signals fresh
+    "5min":  24,   # 24 × 600s =   4 h    — 5min bars don't change structure
+    "15min": 16,   # 16 × 900s =   4 h
+    "30min": 12,
+    "1h":    24,   # 24 × 3600s = 24 h
+    "1day":  30,   # 30 × 86400s = 30 days
+}
 
 
 def _sqlite_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
@@ -85,7 +98,8 @@ def _sqlite_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
         if not row or not row[0]:
             return None
         newest = pd.Timestamp(row[0])
-        if (pd.Timestamp.now() - newest).total_seconds() > ttl * _SQLITE_TTL_MULT:
+        mult = _SQLITE_TTL_BY_INTERVAL.get(interval, _SQLITE_TTL_MULT)
+        if (pd.Timestamp.now() - newest).total_seconds() > ttl * mult:
             return None
         df = get_bars(ticker, interval, min_bars=50)
         if df is None or df.empty:
