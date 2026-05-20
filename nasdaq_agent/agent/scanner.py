@@ -1206,17 +1206,20 @@ class Scanner:
         # 4pm–8pm AH session candles rather than stopping at the 4pm close.
         _is_extended = _sess.get("session", "") in ("AFTER_HOURS", "PRE_MARKET", "CLOSED")
 
-        # Fetch all intervals concurrently — cached intervals return instantly
-        # without blocking API-required ones, so steady-state scans are fast.
-        import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ifetch") as _ifex:
-            _f1m = _ifex.submit(fetch_batch_realtime,  active_tickers, _is_extended)
-            _f5m = _ifex.submit(fetch_batch_interval,  active_tickers, "5min", 500, CACHE_TTL_5M)
-            _f1h = _ifex.submit(fetch_batch_interval,  active_tickers, "1h",   500, CACHE_TTL_1H)
-            _f1d = _ifex.submit(fetch_batch_interval,  active_tickers, "1day", 500, CACHE_TTL_1D)
-            _cf.wait([_f1m, _f5m, _f1h, _f1d], return_when=_cf.ALL_COMPLETED)
+        # ── Data fetch strategy ───────────────────────────────────────────────
+        # 1min gets the FULL rate budget (1.5 req/s) so it finishes in ~2 min max.
+        # Higher-TF intervals follow in parallel: in steady state they're 100%
+        # cached (TTL 10min/1h/24h) and return in milliseconds; on cold start
+        # they share the rate budget AFTER 1min is already done, so no contention.
+        batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
 
-        batch_1m = _f1m.result()
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=3, thread_name_prefix="htf") as _htf:
+            _f5m = _htf.submit(fetch_batch_interval, active_tickers, "5min", 500, CACHE_TTL_5M)
+            _f1h = _htf.submit(fetch_batch_interval, active_tickers, "1h",   500, CACHE_TTL_1H)
+            _f1d = _htf.submit(fetch_batch_interval, active_tickers, "1day", 500, CACHE_TTL_1D)
+            _cf.wait([_f5m, _f1h, _f1d], return_when=_cf.ALL_COMPLETED)
+
         batch_5m = _f5m.result()
         batch_1h = _f1h.result()
         batch_1d = _f1d.result()

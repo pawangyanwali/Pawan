@@ -28,7 +28,7 @@ from agent.live_backtest import (
 
 logger = logging.getLogger(__name__)
 
-FEEDBACK_MIN_NEW     = 20     # min new outcomes before triggering ML retrain
+FEEDBACK_MIN_NEW     = 100    # min new outcomes before triggering ML retrain
 FEEDBACK_CHECK_SECS  = 300    # check every 5 minutes
 
 _last_feedback_count = 0
@@ -82,8 +82,18 @@ def maybe_trigger_feedback_retrain(tickers: list) -> None:
     """
     Called after each scan.  If enough new outcomes have accumulated,
     triggers a background retrain using backtest outcomes as additional labels.
+    Only runs during CLOSED session (8pm–4am ET) so it never competes with
+    the live scan's API rate budget.
     """
     global _last_feedback_count
+
+    # Gate: never retrain while the market is tradeable — scan gets full rate budget
+    try:
+        from agent.market_hours import get_session as _get_sess
+        if _get_sess() not in ("CLOSED",):
+            return
+    except Exception:
+        pass
 
     outcomes_df = get_outcomes_for_ml(min_count=FEEDBACK_MIN_NEW)
     if outcomes_df is None:

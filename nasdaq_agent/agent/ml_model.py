@@ -499,25 +499,27 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         logger.info(f"[retrain_all] Using pre-fetched 1min data: {len(hist_5m)} tickers "
                     f"(avg {sum(len(v) for v in hist_5m.values())//max(len(hist_5m),1)} bars each)")
     else:
-        logger.info(f"[retrain_all] Batch-fetching 1min history for {len(tickers)} tickers…")
-        hist_5m = fetch_batch_interval(tickers, "1min", 3900, ttl=1800, background=True)
+        # ttl=86400 → SQLite check uses 4-day window, so stored history is used
+        # instead of live API calls whenever the scan has previously written bars.
+        logger.info(f"[retrain_all] Fetching 1min history for {len(tickers)} tickers (SQLite-first)…")
+        hist_5m = fetch_batch_interval(tickers, "1min", 3900, ttl=86400, background=True)
         logger.info(f"[retrain_all] Got 1min history for {len(hist_5m)}/{len(tickers)} tickers")
 
     # ── 15-min data: ~6 months (swing models + deep BiLSTM) ─────────────────
-    _rp_set(phase="fetching_15m", phase_label="Fetching 15-min data (Schwab ~6 months)…")
+    _rp_set(phase="fetching_15m", phase_label="Fetching 15-min data (SQLite/Schwab)…")
     if hist_15m is not None:
         logger.info(f"[retrain_all] Using pre-fetched 15min data: {len(hist_15m)} tickers")
     else:
-        logger.info(f"[retrain_all] Batch-fetching 15min history ({len(tickers)} tickers)…")
-        hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=3600, background=True)
+        logger.info(f"[retrain_all] Fetching 15min history ({len(tickers)} tickers, SQLite-first)…")
+        hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=86400, background=True)
         logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
 
     # ── Daily data: ~2 years (DailyMLModel — next-day direction) ─────────────
-    _rp_set(phase="fetching_daily", phase_label="Fetching daily bars (2 years)…")
+    _rp_set(phase="fetching_daily", phase_label="Fetching daily bars (SQLite/Schwab)…")
     if daily_data is not None:
         logger.info(f"[retrain_all] Using pre-fetched daily data: {len(daily_data)} tickers")
     else:
-        logger.info(f"[retrain_all] Batch-fetching daily history ({len(tickers)} tickers)…")
+        logger.info(f"[retrain_all] Fetching daily history ({len(tickers)} tickers, SQLite-first)…")
         daily_data = fetch_batch_interval(tickers, "1day", 500, ttl=86400, background=True)
         logger.info(f"[retrain_all] Daily data: {len(daily_data)}/{len(tickers)} tickers")
 

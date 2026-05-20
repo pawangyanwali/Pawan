@@ -66,7 +66,7 @@ def _cache_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
 _SQLITE_TRAIN_INTERVALS: frozenset[str] = frozenset(
     {"1min", "5min", "15min", "30min", "1h", "1day"}
 )
-_SQLITE_TTL_MULT = 4
+_SQLITE_TTL_MULT = 8   # retrain uses ttl=86400 → accepts SQLite data up to 8 days old
 
 
 def _sqlite_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
