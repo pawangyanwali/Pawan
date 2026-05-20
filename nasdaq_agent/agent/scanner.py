@@ -1398,10 +1398,10 @@ class Scanner:
              so bars closing at the same minute boundary are batched together).
           2. Analyse only the tickers that received new bars — not all 175.
           3. Merge results into self.signals and notify callbacks.
-          4. A 90s watchdog re-scans ALL tickers in case any missed bar events
-             (reconnect gaps, tickers not yet subscribed, etc.).
+          4. A 5-min watchdog re-scans ALL tickers in a background thread so
+             the event loop is never blocked (reconnect gaps, missed events, etc.).
 
-        Falls back to _loop() polling if the queue stays empty for 120s
+        Falls back to _loop() polling if the queue stays empty for 3 min
         (streamer disconnected or not yet authenticated).
         """
         from agent.broker.schwab_streamer import get_bar_close_queue
@@ -1409,12 +1409,13 @@ class Scanner:
 
         logger.info("[Scanner] Event-driven mode active — waiting for CHART_EQUITY bars…")
 
-        _dirty:       set[str] = set()   # tickers with new bars this burst
-        _burst_start: float    = time.time()
-        _last_full:   float    = 0.0     # timestamp of last full-universe scan
-        _BURST_WINDOW = 2.0              # collect events for 2s before analysing
-        _WATCHDOG     = 90.0             # full scan every 90s regardless
-        _QUEUE_TIMEOUT = 120.0           # fall back to polling if no events for 2 min
+        _dirty:       set[str]        = set()
+        _burst_start: float           = time.time()
+        _last_full:   float           = 0.0
+        _watchdog_running             = threading.Event()   # prevents overlapping watchdog scans
+        _BURST_WINDOW  = 2.0          # collect events for 2s before analysing
+        _WATCHDOG      = 300.0        # background full scan every 5 min
+        _QUEUE_TIMEOUT = 180.0        # fall back to polling if no events for 3 min
 
         _last_event_ts = time.time()
 
@@ -1439,22 +1440,28 @@ class Scanner:
 
             now = time.time()
 
-            # ── Fallback: if no events for 2 min, switch to polling ───────────
+            # ── Fallback: if no events for 3 min, switch to polling ───────────
             if now - _last_event_ts > _QUEUE_TIMEOUT:
-                logger.info("[Scanner] No bar events for 2 min — falling back to polling loop")
+                logger.info("[Scanner] No bar events for 3 min — falling back to polling loop")
                 self._loop()
                 return
 
-            # ── Watchdog: full scan every 90s ─────────────────────────────────
-            if now - _last_full >= _WATCHDOG:
-                try:
-                    results = self.run_once()
-                    self._scan_count += 1
-                    _dirty.clear()
-                    _last_full = now
-                except Exception as e:
-                    logger.warning(f"[Scanner] Watchdog scan error: {e}")
-                continue
+            # ── Watchdog: full scan in background thread every 5 min ──────────
+            # Never blocks the event loop — uses a guard Event to prevent overlap.
+            if now - _last_full >= _WATCHDOG and not _watchdog_running.is_set():
+                _last_full = now
+                _watchdog_running.set()
+                def _do_watchdog(guard=_watchdog_running):
+                    try:
+                        self.run_once()
+                        self._scan_count += 1
+                    except Exception as e:
+                        logger.warning(f"[Scanner] Watchdog scan error: {e}")
+                    finally:
+                        guard.clear()
+                threading.Thread(
+                    target=_do_watchdog, daemon=True, name="scan-watchdog"
+                ).start()
 
             # ── Burst scan: analyse only dirty tickers ────────────────────────
             if _dirty and (now - _burst_start) >= _BURST_WINDOW:
