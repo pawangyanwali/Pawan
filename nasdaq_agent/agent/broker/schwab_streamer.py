@@ -481,7 +481,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
     logger.info(f"[MDPoller] Thread started for {len(tickers)} tickers.")
 
 
-
+def start_streamer(tickers: list[str]) -> None:
     """
     Launch the Schwab WebSocket streamer in a background daemon thread.
     Safe to call multiple times — only starts once.
