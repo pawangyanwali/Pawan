@@ -105,8 +105,20 @@ class _TokenManager:
         req  = urllib.request.Request(TOKEN_URL, data=data, method="POST")
         req.add_header("Authorization", f"Basic {self._basic_auth()}")
         req.add_header("Content-Type",  "application/x-www-form-urlencoded")
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            # Log the full response body so we can see the actual Schwab error
+            # (e.g. "invalid_grant" = expired refresh token, "invalid_client" = wrong credentials)
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = "<unreadable>"
+            logger.error(
+                f"[Schwab/{self.name}] Token endpoint {e.code}: {body}"
+            )
+            raise
 
     # ── Token storage ─────────────────────────────────────────────────────────
 
@@ -132,6 +144,24 @@ class _TokenManager:
             self._schedule_refresh(data.get("expires_in", 1800))
             logger.info(f"[Schwab/{self.name}] Access token refreshed.")
             return True
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                # 400 = invalid_grant (expired refresh token) or invalid_client (wrong credentials).
+                # Clear stale tokens so the system stops retrying and prompts re-auth.
+                logger.error(
+                    f"[Schwab/{self.name}] Refresh token rejected (400) — "
+                    f"tokens cleared. Re-authenticate via /schwab/auth"
+                )
+                with self._lock:
+                    self._tokens.clear()
+                if self._token_path.exists():
+                    try:
+                        self._token_path.unlink()
+                    except Exception:
+                        pass
+            else:
+                logger.error(f"[Schwab/{self.name}] Token refresh failed: {e}")
+            return False
         except Exception as e:
             logger.error(f"[Schwab/{self.name}] Token refresh failed: {e}")
             return False
@@ -188,7 +218,6 @@ class _TokenManager:
         """Exchange auth code for tokens. Returns True on success."""
         with self._pending_lock:
             code_verifier = self._pending.pop(state, None)
-        # Tolerate missing state (e.g. when Schwab doesn't echo it back)
         try:
             payload = {
                 "grant_type":   "authorization_code",
@@ -198,6 +227,8 @@ class _TokenManager:
             if code_verifier:
                 payload["code_verifier"] = code_verifier
             data = self._post_token(payload)
+            # Store redirect_uri alongside tokens so refresh can reference it
+            data["_redirect_uri"] = redirect_uri
             self._store(data)
             self._schedule_refresh(data.get("expires_in", 1800))
             logger.info(f"[Schwab/{self.name}] Web OAuth complete.")
