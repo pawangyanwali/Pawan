@@ -1080,6 +1080,29 @@ async def market_movers(index: str = "$COMPX", sort: str = "PERCENT_CHANGE_UP", 
         return {"movers": [], "error": str(e)}
 
 
+@app.get("/api/universe")
+async def universe_status():
+    """Ticker universe status: total tracked, active this cycle, tier breakdown."""
+    try:
+        from agent.ticker_universe import get_universe_manager, TIER1, TIER2, TIER3, FULL_UNIVERSE
+        mgr = get_universe_manager()
+        active = mgr.get_active_tickers()
+        active_set = set(active)
+        return {
+            "universe_total":  len(FULL_UNIVERSE),
+            "active_this_cycle": len(active),
+            "tier1_count":     len(TIER1),
+            "tier2_count":     len(TIER2),
+            "tier3_count":     len(TIER3),
+            "tier1_in_active": sum(1 for t in TIER1 if t in active_set),
+            "tier2_in_active": sum(1 for t in TIER2 if t in active_set),
+            "tier3_in_active": sum(1 for t in TIER3 if t in active_set),
+            "active_tickers":  active,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/market/hours")
 async def market_hours_endpoint(market: str = "equity"):
     """Current market session status via Schwab."""

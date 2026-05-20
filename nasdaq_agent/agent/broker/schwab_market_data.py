@@ -7,11 +7,13 @@ Endpoints used:
   /movers/{index}            — top gainers/losers for NASDAQ / S&P 500
   /chains                    — option chain (IV, OI, Greeks)
   /markets                   — market session hours (open/closed check)
+  /instruments               — symbol search and fundamentals
 
 Schwab /pricehistory constraint:
   frequencyType=minute is ONLY valid with periodType=day (max period=10).
   All sub-daily intervals are therefore capped at 10 trading days.
-  periodType=month/year only supports daily/weekly/monthly frequencies.
+  Valid minute frequencies: 1, 5, 10, 15, 30 — NO 60.
+  1h and 4h are derived by fetching 30min and resampling up.
 """
 from __future__ import annotations
 
@@ -31,14 +33,18 @@ logger = logging.getLogger(__name__)
 MARKETDATA_BASE = "https://api.schwabapi.com/marketdata/v1"
 
 # Twelve Data interval → (frequencyType, frequency, periodType, period)
+# Valid Schwab minute frequencies: 1, 5, 10, 15, 30 only.
 _IV_MAP = {
     "1min":  ("minute",  1,  "day",  10),   # 10 days ≈ 3,900 bars
     "5min":  ("minute",  5,  "day",  10),   # 10 days ≈   780 bars
     "15min": ("minute", 15,  "day",  10),   # 10 days ≈   260 bars
     "30min": ("minute", 30,  "day",  10),   # 10 days ≈   130 bars
-    "1h":    ("minute", 60,  "day",  10),   # 10 days ≈    65 bars
-    "4h":    ("minute", 60,  "day",  10),   # same — no native 4h on Schwab
-    "1day":  ("daily",   1,  "year",  2),   # 2 years ≈   504 bars
+    "1day":  ("daily",   1,  "year",  2),   # 2 years  ≈   504 bars
+}
+# 1h and 4h have no native Schwab frequency — fetch 30min and resample
+_RESAMPLE_MAP = {
+    "1h": ("30min", "60min"),
+    "4h": ("30min", "240min"),
 }
 
 
@@ -110,9 +116,29 @@ def fetch_price_history(
     Returns a DataFrame with columns [Open, High, Low, Close, Volume]
     indexed by UTC datetime — identical to data_fetcher output.
     Returns empty DataFrame if not authorised or on any error.
+
+    1h and 4h are fetched as 30min bars and resampled up.
     """
     if not _is_authorised():
         return pd.DataFrame()
+
+    # Handle intervals that require resampling (1h, 4h)
+    if interval in _RESAMPLE_MAP:
+        src_interval, resample_freq = _RESAMPLE_MAP[interval]
+        df = fetch_price_history(ticker, src_interval, outputsize * 2, extended_hours)
+        if df.empty:
+            return df
+        resampled = df.resample(resample_freq).agg({
+            "Open":   "first",
+            "High":   "max",
+            "Low":    "min",
+            "Close":  "last",
+            "Volume": "sum",
+        }).dropna(subset=["Open", "Close"])
+        if outputsize and len(resampled) > outputsize:
+            resampled = resampled.iloc[-outputsize:]
+        logger.debug(f"[Schwab MD] {ticker}/{interval} (resampled from {src_interval}): {len(resampled)} bars")
+        return resampled
 
     mapping = _IV_MAP.get(interval)
     if not mapping:
@@ -235,6 +261,84 @@ def fetch_full_quotes(tickers: list[str]) -> dict[str, dict]:
         except Exception:
             pass
     return result
+
+
+# ── Bulk quotes (universe screener) ──────────────────────────────────────────
+
+_QUOTES_BULK_CHUNK = 500   # Schwab /quotes handles up to ~500 symbols per call
+
+
+def fetch_quotes_bulk(tickers: list[str]) -> dict[str, dict]:
+    """
+    Bulk quote for any number of tickers — batches into 500-symbol chunks.
+
+    Returns {ticker: {last, volume, pct_change, bid, ask}}.
+    Used by the universe screener to rank all ~500 tickers in 1-2 API calls
+    before deciding which ones get a full price-history fetch.
+    """
+    if not _is_authorised() or not tickers:
+        return {}
+
+    result: dict[str, dict] = {}
+    for i in range(0, len(tickers), _QUOTES_BULK_CHUNK):
+        batch = tickers[i:i + _QUOTES_BULK_CHUNK]
+        _rate_wait()
+        data = _get("/quotes", {"symbols": ",".join(batch), "fields": "quote"})
+        if not isinstance(data, dict):
+            continue
+        for sym, info in data.items():
+            try:
+                q = info.get("quote", {})
+                result[sym] = {
+                    "last":       float(q.get("lastPrice") or q.get("mark") or 0),
+                    "volume":     int(q.get("totalVolume") or 0),
+                    "pct_change": float(q.get("netPercentChangeInDouble") or 0),
+                    "bid":        float(q.get("bidPrice") or 0),
+                    "ask":        float(q.get("askPrice") or 0),
+                }
+            except Exception:
+                pass
+    logger.debug(f"[Schwab MD] bulk quotes: {len(result)}/{len(tickers)} symbols")
+    return result
+
+
+# ── Instruments / symbol search ───────────────────────────────────────────────
+
+def fetch_instruments_search(
+    query:      str,
+    projection: str = "symbol-search",   # symbol-search | desc-search | fundamental
+) -> list[dict]:
+    """
+    Search Schwab instruments.
+
+    projection="symbol-search"  → find tickers matching a symbol prefix
+    projection="desc-search"    → find by company name keywords
+    projection="fundamental"    → returns fundamentals (mktCap, avgVol10Days, exchange)
+
+    Returns list of dicts with keys: symbol, description, exchange, assetType,
+    plus fundamentals fields when projection="fundamental".
+    """
+    if not _is_authorised():
+        return []
+    data = _get("/instruments", {"symbol": query, "projection": projection})
+    items = []
+    raw = data.get("instruments", data) if isinstance(data, dict) else []
+    if isinstance(raw, dict):
+        raw = list(raw.values())
+    for item in (raw if isinstance(raw, list) else []):
+        try:
+            fund = item.get("fundamental", {})
+            items.append({
+                "symbol":      item.get("symbol", ""),
+                "description": item.get("description", ""),
+                "exchange":    item.get("exchange", ""),
+                "asset_type":  item.get("assetType", ""),
+                "avg_vol_10d": fund.get("avg10DaysVolume", 0),
+                "mkt_cap":     fund.get("marketCapFloat", 0),
+            })
+        except Exception:
+            pass
+    return items
 
 
 # ── Movers ────────────────────────────────────────────────────────────────────

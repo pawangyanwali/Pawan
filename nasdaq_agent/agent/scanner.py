@@ -1,9 +1,10 @@
 """
-Main scanning engine — optimised for Twelve Data Grow-377 plan.
+Main scanning engine — Schwab Market Data API (no per-symbol credit cost).
 
-3 calls per scan (50 tickers / 20 per batch = 3 batches × 0.20s ≈ 0.60s).
-5M and 1H data served from in-process cache (TTL 5 min / 1 h respectively),
-so additional timeframe data costs zero API calls on most scan cycles.
+Universe: ~500 NASDAQ tickers tracked via Schwab /quotes bulk screening.
+Active scan: Tier 1 (100 core) always + top 75 active from Tier 2/3 = ~175
+per cycle.  Price history cached per ticker (TTL 300 s) → ~35 new API calls
+per minute for history, well within the 90 req/min Schwab rate limit.
 """
 
 import logging

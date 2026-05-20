@@ -36,56 +36,29 @@ BUY_THRESHOLD         =  0.30
 SELL_THRESHOLD        = -0.30
 STRONG_SELL_THRESHOLD = -0.60
 
-# ── Ticker universe — ~165 liquid NASDAQ stocks in 3 ML clusters ──────────────
+# ── Ticker universe — ~500 liquid NASDAQ stocks across 3 tiers ───────────────
+# Tiers live in agent/ticker_universe.py; imported here so the rest of the
+# codebase can still use NASDAQ_TICKERS, CLUSTER_*_TICKERS from config.
 
-# Cluster A — Mega-cap liquid (tight spreads, highest institutional activity, index-correlated)
-CLUSTER_A_TICKERS = [
-    # Core mega-cap
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AVGO","NFLX","AMD",
-    # Large-cap semis / enterprise
-    "ADBE","QCOM","CSCO","INTU","AMAT","MU","PANW","CRWD","MRVL","KLAC",
-    "LRCX","ADI","SNPS","CDNS","ISRG","REGN","BKNG","ADP","SBUX","INTC",
-    # NASDAQ-100 completions
-    "COST","AMGN","WDAY","MELI","ARM","TTD","SMCI","TEAM","FTNT","PYPL",
-    "AXON","CEG","ABNB","DDOG","ZS","NET","ANET","OKTA","SNOW","APP",
-]
+from agent.ticker_universe import TIER1, TIER2, TIER3, FULL_UNIVERSE  # noqa: E402
 
-# Cluster B — Growth/SaaS/Fintech (medium liquidity, earnings-driven, sector-correlated)
-CLUSTER_B_TICKERS = [
-    # SaaS / cloud / fintech
-    "COIN","HOOD","PLTR","LULU","ENPH","CELH","SOUN","IONQ","GTLB","HUBS",
-    "DKNG","BILL","DOCU","MPWR","TWLO","CHWY","MSTR","MDB","SNAP","RBLX",
-    # NASDAQ-100 mid-cap
-    "ODFL","PAYX","FAST","IDXX","VRSK","EA","DLTR","ALGN","ILMN",
-    "TTWO","EXPE","CTSH","NTAP","SWKS","VRSN","CHKP","GEHC","ON","ROP",
-    # More established
-    "BIIB","GILD","MNST","PCAR","CPRT","ROST","MCHP","NXPI","CMCSA","PEP",
-    "HON","CTAS","ORLY","ADSK","DXCM","LOGI","NDAQ","MTCH","CYBR","SOFI",
-]
+# Cluster A = Tier 1 (NASDAQ-100 core, always scanned)
+CLUSTER_A_TICKERS: list[str] = list(TIER1)
 
-# Cluster C — High-volatility/Momentum (retail-driven, high-beta, wide spreads, meme/crypto/biotech adjacent)
-CLUSTER_C_TICKERS = [
-    # EV / space / quantum / deep-tech momentum
-    "MARA","RIVN","LCID","RGTI","QUBT","RKLB","ASTS","WOLF","FSLR","RUN",
-    "ARRY","LI","BIDU","NTES","JD","PDD","BILI","NVAX","MRNA","BNTX",
-    # Biotech
-    "VRTX","ALNY","BMRN","FATE","ACAD","CRSP","BEAM","EDIT","RXRX",
-    "ABCL",
-    # High-vol fintech / consumer / other
-    "UPST","AFRM","CVNA","LYFT","ROKU","PINS","ZM","PTON","OPEN","CART",
-    "TENB","VRNS","QLYS",
-]
+# Cluster B = Tier 2 (quality mid-caps, scanned when active)
+CLUSTER_B_TICKERS: list[str] = list(TIER2)
 
-# Deduplicated master list preserving cluster order (A first, then B additions, then C additions)
-NASDAQ_TICKERS: list[str] = list(dict.fromkeys(
-    CLUSTER_A_TICKERS + CLUSTER_B_TICKERS + CLUSTER_C_TICKERS
-))
+# Cluster C = Tier 3 (high-vol / momentum, scanned when in movers)
+CLUSTER_C_TICKERS: list[str] = list(TIER3)
+
+# Master deduplicated list (~500 tickers)
+NASDAQ_TICKERS: list[str] = list(FULL_UNIVERSE)
 
 # Cluster assignment map
 TICKER_CLUSTER: dict[str, str] = {}
 for t in CLUSTER_A_TICKERS: TICKER_CLUSTER[t] = "A"
-for t in CLUSTER_B_TICKERS: TICKER_CLUSTER[t] = "B"
-for t in CLUSTER_C_TICKERS: TICKER_CLUSTER[t] = "C"
+for t in CLUSTER_B_TICKERS: TICKER_CLUSTER.setdefault(t, "B")
+for t in CLUSTER_C_TICKERS: TICKER_CLUSTER.setdefault(t, "C")
 
 # Pipeline config
 PIPELINE_WORKERS = 8   # ThreadPoolExecutor workers for parallel scan
@@ -164,8 +137,16 @@ def save_watchlist(tickers: list) -> None:
     _WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     _WATCHLIST_PATH.write_text(_json.dumps(sorted(set(tickers))))
 
-# Active ticker universe = base NASDAQ_TICKERS + any user-added watchlist items
+# Active ticker universe — uses smart Schwab bulk-quote screening.
+# Returns Tier 1 always + top active from Tier 2/3 (ranked by volume×move)
+# + any user watchlist additions.  Falls back to full list if Schwab is down.
 def get_active_tickers() -> list:
+    try:
+        from agent.ticker_universe import get_active_tickers_universe
+        return get_active_tickers_universe()
+    except Exception:
+        pass
+    # Fallback: full static list + watchlist
     extra = [t for t in load_watchlist() if t not in NASDAQ_TICKERS]
     return NASDAQ_TICKERS + extra
 
