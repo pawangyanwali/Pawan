@@ -392,10 +392,9 @@ async def health():
 
 @app.get("/api/credit-usage")
 async def credit_usage():
-    """Rolling 60-second Twelve Data credit consumption."""
-    from agent.data_fetcher import get_credit_usage, CREDIT_LIMIT
-    usage = get_credit_usage()
-    return {**usage, "plan_limit": 377, "safe_limit": CREDIT_LIMIT}
+    """Schwab Market Data has no credit limits — returns zeros."""
+    from agent.data_fetcher import get_credit_usage
+    return get_credit_usage()
 
 
 @app.get("/api/regime")
