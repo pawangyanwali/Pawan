@@ -1452,9 +1452,11 @@ class Scanner:
                 _last_full = now
                 _watchdog_running.set()
                 def _do_watchdog(guard=_watchdog_running):
+                    logger.info("[Scanner] Watchdog: running background full scan…")
                     try:
                         self.run_once()
                         self._scan_count += 1
+                        logger.info("[Scanner] Watchdog: full scan complete.")
                     except Exception as e:
                         logger.warning(f"[Scanner] Watchdog scan error: {e}")
                     finally:

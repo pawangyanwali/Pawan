@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
+_PROCESS_START      = time.time()
+_STARTUP_GRACE_SECS = 300          # no feedback retrain for 5 min after process start
+
 import pandas as pd
 
 # ── Calibration persistence ───────────────────────────────────────────────────
@@ -87,13 +90,21 @@ def maybe_trigger_feedback_retrain(tickers: list) -> None:
     """
     global _last_feedback_count
 
-    # Gate: never retrain while the market is tradeable — scan gets full rate budget
+    # Gate 1: no retrain for 5 min after process start — let the scanner warm
+    # SQLite so the retrain fetches zero API calls when it does run.
+    if time.time() - _PROCESS_START < _STARTUP_GRACE_SECS:
+        return
+
+    # Gate 2: never retrain while the market is tradeable — scan gets full rate budget.
+    # Fail CLOSED: if session cannot be determined, skip (don't allow).
     try:
         from agent.market_hours import get_session as _get_sess
-        if _get_sess() not in ("CLOSED",):
+        sess = _get_sess()
+        if sess not in ("CLOSED",):
             return
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.warning(f"[BT Feedback] Session check failed ({_e}) — skipping retrain")
+        return
 
     outcomes_df = get_outcomes_for_ml(min_count=FEEDBACK_MIN_NEW)
     if outcomes_df is None:
