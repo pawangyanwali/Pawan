@@ -128,7 +128,7 @@ def fetch_price_history(
         "period":                period,
         "frequencyType":         freq_type,
         "frequency":             freq,
-        "needExtendedHoursData": extended_hours,
+        "needExtendedHoursData": "true" if extended_hours else "false",
     })
     candles = data.get("candles", []) if isinstance(data, dict) else []
     if not candles:
