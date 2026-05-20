@@ -404,12 +404,18 @@ async def position_size_endpoint(
 async def paper_trading_endpoint():
     """Return paper trading summary, open and recent closed trades."""
     from datetime import date
-    closed = get_closed_trades(limit=200)
-    today_str = date.today().isoformat()   # "2026-05-15"
 
-    # Separate today vs all-time so the two eras (100-share vs risk-based) don't mix
-    today_trades   = [t for t in closed if (t.get("closed_at") or "")[:10] == today_str]
-    all_trades     = closed
+    # Run all SQLite queries off the event loop to avoid blocking WebSocket handling
+    loop = asyncio.get_running_loop()
+    closed, summary, open_trades = await asyncio.gather(
+        loop.run_in_executor(None, get_closed_trades, 200),
+        loop.run_in_executor(None, pt_summary),
+        loop.run_in_executor(None, get_open_trades),
+    )
+
+    today_str    = date.today().isoformat()
+    today_trades = [t for t in closed if (t.get("closed_at") or "")[:10] == today_str]
+    all_trades   = closed
 
     def _stats(trades):
         total   = len(trades)
@@ -428,7 +434,6 @@ async def paper_trading_endpoint():
     today_stats = _stats(today_trades)
     all_stats   = _stats(all_trades)
 
-    summary = pt_summary()
     # Use TODAY stats when there are enough trades; fall back to all-time so the
     # dashboard doesn't show all zeros every morning before the first trade closes.
     display_stats  = today_stats if today_stats["closed"] >= 3 else all_stats
@@ -440,7 +445,7 @@ async def paper_trading_endpoint():
         "win_rate":         display_stats["win_rate"],
         "avg_pnl":          display_stats["avg_pnl"],
         "total_pnl":        display_stats["avg_pnl"],
-        "total_dollar_pnl": today_stats["total_dollar_pnl"],   # always today's P&L
+        "total_dollar_pnl": today_stats["total_dollar_pnl"],
         "all_time_dollar":  all_stats["total_dollar_pnl"],
         "all_time_closed":  all_stats["closed"],
         "today_closed":     today_stats["closed"],
@@ -448,7 +453,7 @@ async def paper_trading_endpoint():
     })
     return {
         "summary":       summary,
-        "open_trades":   get_open_trades(),
+        "open_trades":   open_trades,
         "closed_trades": closed[:30],
         "_debug_pnl":    {
             "n_trades":      len(all_trades),
@@ -686,13 +691,22 @@ async def paper_daily_pnl():
 @app.get("/api/paper-trading/performance")
 async def paper_performance():
     """Full P&L performance dashboard data."""
+    loop = asyncio.get_running_loop()
+    summary, today, daily, weekly, equity, ticker = await asyncio.gather(
+        loop.run_in_executor(None, pt_summary),
+        loop.run_in_executor(None, get_today_pnl),
+        loop.run_in_executor(None, get_daily_pnl, 30),
+        loop.run_in_executor(None, get_weekly_pnl),
+        loop.run_in_executor(None, get_equity_curve, 60),
+        loop.run_in_executor(None, get_ticker_pnl),
+    )
     return {
-        "summary":       pt_summary(),
-        "today":         get_today_pnl(),
-        "daily":         get_daily_pnl(days=30),
-        "weekly":        get_weekly_pnl(),
-        "equity_curve":  get_equity_curve(days=60),
-        "ticker_pnl":    get_ticker_pnl(),
+        "summary":      summary,
+        "today":        today,
+        "daily":        daily,
+        "weekly":       weekly,
+        "equity_curve": equity,
+        "ticker_pnl":   ticker,
     }
 
 
@@ -745,13 +759,16 @@ async def backtest_stats(lookback_days: int = 30):
 @app.get("/api/backtest/tracking")
 async def backtest_tracking():
     """Currently open (TRACKING) signals being monitored."""
-    return {"tracking": get_tracking_signals()}
+    loop = asyncio.get_running_loop()
+    tracking = await loop.run_in_executor(None, get_tracking_signals)
+    return {"tracking": tracking}
 
 
 @app.get("/api/backtest/recent")
 async def backtest_recent(limit: int = 50):
     """Recently resolved backtest signals."""
-    recent = get_recent_resolved(limit=limit)
+    loop   = asyncio.get_running_loop()
+    recent = await loop.run_in_executor(None, get_recent_resolved, limit)
     for r in recent:
         r["outcome_color"] = (
             "#00ff88" if r["status"] == "WIN" else
@@ -770,8 +787,10 @@ async def backtest_path(signal_id: str):
 @app.get("/api/learning-status")
 async def learning_status():
     """Adaptive filter state — blocked contexts, dynamic threshold, win rate progress."""
+    loop = asyncio.get_running_loop()
+    status = await loop.run_in_executor(None, af_get_status)
     return {
-        **af_get_status(),
+        **status,
         "engine":       learning_engine.get_status(),
         "observations": get_observation_summary(),
     }
@@ -1136,13 +1155,38 @@ async def ticker_clusters():
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
-_PING_INTERVAL = 20   # send app-level ping after this many seconds of client silence
-_PING_TIMEOUT  = 10   # if client doesn't respond within this many seconds → dead
+_PING_INTERVAL = 20   # server sends a keepalive ping every N seconds
+_PING_TIMEOUT  = 10   # if we can't write the ping within N seconds → dead socket
+
+
+async def _ws_keepalive(ws: WebSocket) -> None:
+    """
+    Background task: sends a server-side ping every _PING_INTERVAL seconds.
+    This resets the client's 45-second watchdog and keeps NAT/proxy sessions alive.
+
+    Runs as a sibling asyncio.Task alongside the receive loop — completely
+    separate from client messages, so there is NEVER a ping-pong feedback loop.
+    When the send fails (dead socket) this task exits quietly; the receive loop
+    will also error on the next read and close the connection.
+    """
+    try:
+        while True:
+            await asyncio.sleep(_PING_INTERVAL)
+            await asyncio.wait_for(
+                ws.send_json({"type": "ping"}),
+                timeout=float(_PING_TIMEOUT),
+            )
+    except Exception:
+        pass   # socket gone — receive loop will handle cleanup
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     logger.info(f"WebSocket client connected. Total: {len(manager.active)}")
+    # Keepalive task runs concurrently — sends pings on a timer, never in
+    # response to client messages (that was the ping-pong loop bug).
+    keepalive = asyncio.create_task(_ws_keepalive(ws))
     try:
         # Send current state immediately on connect so tab is live before first scan
         if scanner.signals:
@@ -1152,40 +1196,17 @@ async def websocket_endpoint(ws: WebSocket):
             })
             await ws.send_text(payload)
 
+        # Drain incoming client messages.  We don't respond here — keepalive task
+        # handles server→client pings on its own schedule.
         while True:
-            # Wait for a client message (pong/heartbeat) for up to _PING_INTERVAL seconds.
-            # If the client goes quiet for that long, send a ping to verify the
-            # connection is still alive.  This detects TCP connections silently
-            # killed by AWS ELB / nginx / NAT idle-timeout without a FIN/RST.
-            try:
-                msg = await asyncio.wait_for(ws.receive_text(), timeout=float(_PING_INTERVAL))
-                # Client is alive — echo a ping back so client's watchdog resets.
-                # Without this reply the client never gets a server message and its
-                # 45-second watchdog fires, causing the ~50s disconnect loop.
-                try:
-                    await asyncio.wait_for(
-                        ws.send_json({"type": "ping"}),
-                        timeout=float(_PING_TIMEOUT),
-                    )
-                except Exception:
-                    break
-            except asyncio.TimeoutError:
-                # No client heartbeat for _PING_INTERVAL seconds — probe the connection
-                try:
-                    await asyncio.wait_for(
-                        ws.send_json({"type": "ping"}),
-                        timeout=float(_PING_TIMEOUT),
-                    )
-                    # Ping sent successfully; wait for client pong on next iteration
-                except Exception:
-                    # Can't write to socket → connection is dead; remove and exit
-                    break
+            await ws.receive_text()
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
         logger.debug(f"WebSocket loop error: {e}")
     finally:
+        keepalive.cancel()
         manager.disconnect(ws)
         logger.info(f"WebSocket client disconnected. Total: {len(manager.active)}")
 
