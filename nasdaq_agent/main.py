@@ -961,13 +961,19 @@ async def broker_status():
             except Exception:
                 pass
         daily = get_daily_status()
+        streamer = get_streamer_status()
         return {
-            **ts,
-            "schwab_enabled":  SCHWAB_ENABLED,
-            "market_data_app": ts_md,
-            "account":         acct,
-            "daily":           daily,
-            "auto_trade":      _tos_auto_trade,
+            # Top-level "connected" reflects Market Data (the only app we use now)
+            "connected":               ts_md.get("connected", False),
+            "schwab_enabled":          SCHWAB_ENABLED,
+            "market_data_app":         ts_md,
+            "md_poller_running":       streamer.get("connected", False),
+            "md_live_quotes":          streamer.get("live_quotes", 0),
+            # Trader app kept for reference but clearly labelled as unused
+            "trader_app":              {**ts, "_note": "Accounts+Trading — not required for analytics"},
+            "account":                 acct,
+            "daily":                   daily,
+            "auto_trade":              _tos_auto_trade,
         }
     except Exception as e:
         return {"connected": False, "error": str(e)}
