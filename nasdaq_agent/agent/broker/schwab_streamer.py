@@ -528,7 +528,8 @@ def is_streamer_ready() -> bool:
         return bool(_ws_connected and _live_quotes)
 
 
-
+def get_streamer_status() -> dict:
+    """Return a health snapshot: connection state, quote/candle counts, futures bias."""
     sym_nq = _front_month("NQ")
     sym_es = _front_month("ES")
     with _lock:
