@@ -40,7 +40,11 @@
     .status-dot.live { background:var(--green-s); box-shadow:0 0 8px var(--green-s); }
     .header-right { display:flex; align-items:center; gap:16px; color:var(--muted); font-size:11px; }
 
-    /* ── Summary ── */
+    .ws-chip { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:5px; font-size:10px; font-family:inherit; cursor:pointer; border:1px solid var(--border); background:var(--surface2); color:var(--muted); transition:border-color .2s, color .2s, background .2s; user-select:none; }
+    .ws-chip.live    { border-color:var(--green-s); color:var(--green-s); background:rgba(0,255,136,.07); }
+    .ws-chip.reconnecting { border-color:#f59e0b; color:#f59e0b; background:rgba(245,158,11,.07); }
+    .ws-chip.dead    { border-color:var(--red); color:var(--red); background:rgba(239,68,68,.1); animation:ws-pulse .9s ease-in-out infinite alternate; cursor:pointer; }
+    @keyframes ws-pulse { from { opacity:.7; } to { opacity:1; } }
     .summary-bar { display:flex; gap:10px; padding:12px 20px; flex-wrap:wrap; }
     .pill { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:8px 14px; min-width:120px; }
     .pill-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; }
@@ -381,7 +385,8 @@
       /* Header collapses */
       header { padding:10px 14px; }
       .logo { font-size:13px; }
-      .header-right .ws-status-text, .header-right>span:not(:last-child) { display:none; }
+      .header-right>span:not(:last-child) { display:none; }
+      #ws-chip { display:inline-flex !important; }   /* always show WS status on mobile */
       .header-right { gap:6px; }
       /* Show hamburger, hide individual nav buttons */
       .hamburger { display:block; }
@@ -478,7 +483,11 @@
     NASDAQ<span>&nbsp;Scalping Agent</span>
   </div>
   <div class="header-right">
-    <span id="ws-status" class="ws-status-text">Connecting…</span>
+    <!-- WebSocket status chip — clickable to force-reconnect when down -->
+    <button id="ws-chip" class="ws-chip" onclick="wsChipClick()" title="WebSocket connection to backend">
+      <span id="dot" class="status-dot"></span>
+      <span id="ws-status">Connecting…</span>
+    </button>
     <span style="white-space:nowrap">Last scan: <span id="last-scan">—</span></span>
     <span id="api-credit-chip" title="Twelve Data API credits used in rolling 60s window" style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;display:none">API —/377</span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
@@ -489,7 +498,7 @@
     <button onclick="openWeekendLearning()" id="wl-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Weekend Learning — historical deep-train">📚 Weekend</button>
     <button onclick="openAfterHours()" id="ah-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🌙 After-Hours</button>
     <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
-    <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Schwab connections &amp; data sources">🏦 Schwab</button>
+    <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Schwab connections &amp; data sources">🏦 Schwab <span id="schwab-hdr-dot" style="font-size:9px;transition:color .3s">○</span></button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="openAlertModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Alert settings">🔔 Alerts</button>
     <button class="hamburger" onclick="toggleMobileNav()" title="Menu">☰</button>
@@ -1545,7 +1554,8 @@ const BACKEND_WS   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${locat
 //   5. Reconnect instantly when the tab becomes visible (e.g. after phone unlock)
 
 let ws;
-let _wsWatchdog = null;
+let _wsWatchdog  = null;
+let _wsDeadTimer = null;
 const _WS_RECONNECT_MS  = 1000;   // always reconnect after 1 second
 const _WS_WATCHDOG_MS   = 45000;  // reconnect if no server message for 45s
 const _WS_HEARTBEAT_MS  = 20000;  // send heartbeat to server every 20s
@@ -1573,9 +1583,11 @@ function connectWS() {
 
   ws.onopen = () => {
     document.getElementById('dot').classList.add('live');
-    document.getElementById('ws-status').textContent = 'Live ●';
+    document.getElementById('ws-status').textContent = 'Live';
+    const chip = document.getElementById('ws-chip');
+    if (chip) { chip.className = 'ws-chip live'; chip.title = 'WebSocket connected — real-time data active'; }
+    if (_wsDeadTimer) { clearTimeout(_wsDeadTimer); _wsDeadTimer = null; }
     _resetWatchdog();
-    // Announce ourselves so the server knows the connection is active
     _wsSend({ type: 'pong' });
   };
 
@@ -1784,12 +1796,52 @@ function connectWS() {
   ws.onclose = () => {
     document.getElementById('dot').classList.remove('live');
     document.getElementById('ws-status').textContent = 'Reconnecting…';
+    const chip = document.getElementById('ws-chip');
+    if (chip) { chip.className = 'ws-chip reconnecting'; chip.title = 'Reconnecting to backend…'; }
     if (_wsWatchdog) { clearTimeout(_wsWatchdog); _wsWatchdog = null; }
+    // After 4s with no reconnect, escalate chip to "dead" so user can click
+    _wsDeadTimer = setTimeout(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        document.getElementById('ws-status').textContent = '↺ Reconnect';
+        if (chip) { chip.className = 'ws-chip dead'; chip.title = 'Connection lost — click to reconnect'; }
+      }
+    }, 4000);
     setTimeout(connectWS, _WS_RECONNECT_MS);
   };
 
   ws.onerror = () => { try { ws.close(); } catch(_){} };
 }
+
+// ─── WS chip click — force immediate reconnect ─────────────────────────────
+function wsChipClick() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;   // already live, nothing to do
+  if (_wsDeadTimer) { clearTimeout(_wsDeadTimer); _wsDeadTimer = null; }
+  document.getElementById('ws-status').textContent = 'Reconnecting…';
+  const chip = document.getElementById('ws-chip');
+  if (chip) chip.className = 'ws-chip reconnecting';
+  if (ws) { try { ws.close(); } catch(_){} }
+  connectWS();
+}
+
+// ─── Schwab header dot — lightweight background poll ──────────────────────
+function _updateSchwabHeaderDot(connected) {
+  const dot  = document.getElementById('schwab-hdr-dot');
+  const btn  = document.getElementById('broker-header-btn');
+  if (!dot) return;
+  dot.textContent = connected ? '●' : '○';
+  dot.style.color = connected ? 'var(--green-s)' : 'var(--red)';
+  if (btn) btn.style.borderColor = connected ? 'var(--green-s)' : 'var(--border)';
+}
+
+async function _pollSchwabHeaderStatus() {
+  try {
+    const d = await (await fetch(`${BACKEND_HTTP}/api/broker/status`)).json();
+    _updateSchwabHeaderDot(!!d.connected);
+  } catch(_) { _updateSchwabHeaderDot(false); }
+}
+// Poll once on load, then every 30 s
+_pollSchwabHeaderStatus();
+setInterval(_pollSchwabHeaderStatus, 30000);
 
 // Heartbeat: send pong to server every 20s to keep proxy/NAT alive
 setInterval(() => _wsSend({ type: 'pong' }), _WS_HEARTBEAT_MS);
@@ -4963,6 +5015,7 @@ async function loadBrokerStatus() {
     // ① Accounts & Trading
     const connected = !!d.connected;
     _setBadge('broker-conn-badge', connected);
+    _updateSchwabHeaderDot(connected);   // keep header dot in sync
     const hBtn = document.getElementById('broker-header-btn');
     if (hBtn) hBtn.style.color = connected ? 'var(--green-s)' : 'var(--muted)';
     const acct = d.account || {};
@@ -5005,6 +5058,7 @@ async function loadBrokerStatus() {
     await loadBrokerPositions();
   } catch(e) {
     _setBadge('broker-conn-badge', false, 'ERROR');
+    _updateSchwabHeaderDot(false);
   }
 
   // ③ Twelve Data credits
