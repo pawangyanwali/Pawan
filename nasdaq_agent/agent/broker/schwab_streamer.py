@@ -436,20 +436,25 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
     Design: fire-and-stream — every batch broadcasts the instant it completes.
     No waiting, no merging.
 
-    Timeline per 1-second cycle (3 batches of ~159 tickers each):
+    Timeline per 1-second cycle (2 batches of ~239 tickers each):
 
-        t=0 ms   → all 3 Schwab API calls start simultaneously
-        t=150 ms → batch-1 returns → frontend renders those 159 tickers NOW
-        t=200 ms → batch-2 returns → frontend renders those 159 tickers NOW
-        t=250 ms → batch-3 returns → frontend renders those 159 tickers NOW
-        t=750 ms → sleep until next cycle
+        t=0 ms   → both Schwab API calls start simultaneously
+        t=200 ms → batch-1 returns → frontend renders those 239 tickers NOW
+        t=300 ms → batch-2 returns → frontend renders those 239 tickers NOW
+        t=700 ms → sleep until next cycle
 
-    Every ticker — regardless of tier — refreshes within 250 ms.
-    No ticker is delayed waiting for another batch to finish.
+    Every ticker — regardless of tier — refreshes within 300 ms.
+    No ticker is delayed waiting for the other batch to finish.
     The frontend `prices` handler already accepts partial updates so
     no frontend changes are needed.
 
-    If a batch hits a 429, its cycle is skipped; the others still broadcast.
+    Rate budget: 2 req/s = 120 req/min = exactly Schwab's documented limit.
+    Using 3 batches caused 180 req/min → 429 errors → cycles returning empty.
+
+    Thread pool: max(16, len(batches)*4) workers so in-flight requests from
+    the previous cycle never block new cycle's submit() calls.
+
+    If a batch hits a 429, its cycle is skipped; the other still broadcasts.
     Auth-failure sleep is 3 s (was 10 s) for fast recovery.
     """
     global _streamer_thread, _subscribed_tickers
@@ -555,9 +560,12 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             f"(~{batch_size}/batch) | {interval}s cycle"
         )
 
-        # One persistent worker per batch — avoids thread-spawn overhead each cycle
+        # Many more workers than batches so in-flight requests from the previous
+        # cycle never block new submissions.  At 2 batches/cycle each taking up
+        # to ~4 s, up to 8 requests can be simultaneously in-flight; 16 workers
+        # ensures new cycle submits immediately even in the worst case.
         _fetch_pool = _cf.ThreadPoolExecutor(
-            max_workers=len(batches), thread_name_prefix="md_fetch"
+            max_workers=max(16, len(batches) * 4), thread_name_prefix="md_fetch"
         )
 
         cycle       = 0
@@ -590,7 +598,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
                 # Wait only to know when the slowest batch finishes so we can
                 # calculate the correct sleep time for the next cycle.
-                done, pending = _cf.wait(futures, timeout=interval * 3)
+                done, pending = _cf.wait(futures, timeout=interval * 5)
 
                 n_ok = sum(
                     1 for f in done
