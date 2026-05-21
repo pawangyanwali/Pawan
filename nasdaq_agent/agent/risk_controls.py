@@ -35,6 +35,7 @@ from config import (
     PROFIT_PROTECT_MIN_CONF,
     PROFIT_PROTECT_SIZE_MULT,
     PROFIT_PROTECT_DRAWDOWN,
+    IS_PAPER_TRADING,
 )
 
 _lock = threading.Lock()
@@ -115,6 +116,21 @@ def record_trade_outcome(won: bool) -> None:
             _consecutive_losses += 1
             logger.info(f"[RiskControls] Consecutive losses: {_consecutive_losses}")
 
+            if IS_PAPER_TRADING:
+                # Paper mode: log streaks for observability but never block trading.
+                # Blocking reduces training data volume without protecting real capital.
+                if _consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+                    logger.warning(
+                        f"[RiskControls] {_consecutive_losses} consecutive losses "
+                        f"(would halt in live mode) — paper trading continues"
+                    )
+                elif _consecutive_losses >= COOLDOWN_AFTER_LOSSES:
+                    logger.warning(
+                        f"[RiskControls] {_consecutive_losses} consecutive losses "
+                        f"(would cooldown in live mode) — paper trading continues"
+                    )
+                return
+
             if _consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
                 _circuit_open        = True
                 _circuit_pnl_based   = False   # consecutive-loss halt, NOT P&L-based
@@ -187,8 +203,8 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
             if _circuit_open:
                 return True, _circuit_reason
 
-            # Active cooldown from consecutive losses
-            if _cooldown_until > 0 and _time.time() < _cooldown_until:
+            # Active cooldown from consecutive losses (live trading only)
+            if not IS_PAPER_TRADING and _cooldown_until > 0 and _time.time() < _cooldown_until:
                 remaining = int((_cooldown_until - _time.time()) / 60) + 1
                 return True, f"Cooldown active ({remaining} min remaining after consecutive losses)"
 

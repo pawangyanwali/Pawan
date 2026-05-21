@@ -201,6 +201,11 @@ PROFIT_PROTECT_MIN_CONF  = float(os.getenv("PROFIT_PROTECT_CONF",        "80.0")
 PROFIT_PROTECT_SIZE_MULT = float(os.getenv("PROFIT_PROTECT_SIZE",        "0.60"))
 PROFIT_PROTECT_DRAWDOWN  = float(os.getenv("PROFIT_PROTECT_DRAWDOWN",    "300"))
 
+# Set IS_PAPER_TRADING=false in .env when ready to switch to live order execution.
+# While True, consecutive-loss cooldowns and circuit breakers are disabled so
+# paper trades run without interruption and generate maximum training data.
+IS_PAPER_TRADING = os.getenv("IS_PAPER_TRADING", "true").lower() != "false"
+
 # ── PRD session rules ─────────────────────────────────────────────────────────
 # Hard session blocks that override all signals (non-configurable per PRD)
 SESSION_RESTRICTED_UNTIL = "09:45"   # no new entries until 9:45 AM ET (price discovery)
