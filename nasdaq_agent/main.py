@@ -473,13 +473,21 @@ async def paper_trading_endpoint():
     """Return paper trading summary, open and recent closed trades."""
     from datetime import date
 
-    # Run all SQLite queries off the event loop to avoid blocking WebSocket handling
-    loop = asyncio.get_running_loop()
-    closed, summary, open_trades = await asyncio.gather(
-        loop.run_in_executor(None, get_closed_trades, 200),
-        loop.run_in_executor(None, pt_summary),
-        loop.run_in_executor(None, get_open_trades),
-    )
+    try:
+        # Run all SQLite queries off the event loop to avoid blocking WebSocket handling
+        loop = asyncio.get_running_loop()
+        closed, summary, open_trades = await asyncio.gather(
+            loop.run_in_executor(None, get_closed_trades, 200),
+            loop.run_in_executor(None, pt_summary),
+            loop.run_in_executor(None, get_open_trades),
+        )
+    except Exception as _e:
+        logging.getLogger(__name__).error(f"[PT] paper-trading endpoint error: {_e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(_e), "summary": {
+            "open": 0, "closed": 0, "wins": 0, "losses": 0,
+            "win_rate": 0.0, "avg_pnl": 0.0, "total_dollar_pnl": 0.0,
+            "display_period": "all-time",
+        }, "open_trades": [], "closed_trades": []})
 
     today_str    = date.today().isoformat()
     today_trades = [t for t in closed if (t.get("closed_at") or "")[:10] == today_str]
