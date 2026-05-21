@@ -95,13 +95,28 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
             _on_429()
             return {}
         if r.status_code in (401, 403):
-            # Distinguish auth expiry from IP-level Akamai block after a 429 storm:
-            # if we're within 30s of the last 429 window this 403 is the CDN
-            # rejecting our IP — NOT an expired token. Skip the refresh.
-            if _backoff_until - time.time() > -30:
-                logger.warning(f"[Schwab MD] {r.status_code} on {path} during rate-limit window — will retry")
+            # Detect CDN/IP-level block — two signals:
+            # (a) within 30s of a recent 429 window (Akamai rate-limit), or
+            # (b) the local token still has a valid TTL (token is fine, IP is blocked).
+            # In both cases: apply back-off and skip; do NOT attempt a token refresh
+            # since the token endpoint will also return 403 when the IP is blocked.
+            is_cdn_block = (_backoff_until - time.time() > -30)
+            if not is_cdn_block and r.status_code == 403:
+                try:
+                    from agent.broker.schwab_auth import _market_data as _md_cdn
+                    ttl = _md_cdn.get_status().get("access_token_ttl_s", 0)
+                    if ttl > 60:
+                        is_cdn_block = True
+                except Exception:
+                    pass
+            if is_cdn_block:
+                _on_429()
+                logger.warning(
+                    f"[Schwab MD] {r.status_code} on {path} — CDN/IP block detected, "
+                    f"backing off (token is still valid)"
+                )
                 return {}
-            # Genuine auth failure — refresh and retry once
+            # Genuine auth failure (expired/revoked token) — refresh and retry once
             logger.info(f"[Schwab MD] {r.status_code} on {path} — refreshing token…")
             if _try_refresh_md_token():
                 headers = _auth_headers()
@@ -181,6 +196,10 @@ def _try_refresh_md_token() -> bool:
 
     _refresh_last is stamped BEFORE the attempt (not only on success) so that
     even a failed refresh prevents re-hammering the token endpoint for 30s.
+
+    If the refresh itself fails (e.g. the token endpoint is also blocked by
+    Akamai), _on_429() is called so that _get() skips subsequent API calls
+    for the same back-off window instead of looping every second.
     """
     global _refresh_last
     with _refresh_lock:
@@ -189,9 +208,14 @@ def _try_refresh_md_token() -> bool:
         _refresh_last = time.time()   # stamp before attempt — prevents storm on failure
         try:
             from agent.broker.schwab_auth import _market_data as _md_app
-            return _md_app.refresh()
+            ok = _md_app.refresh()
+            if not ok:
+                # Token endpoint blocked (CDN/IP block) — back off API calls too
+                _on_429()
+            return ok
         except Exception as e:
             logger.warning(f"[Schwab MD] Token refresh error: {e}")
+            _on_429()
             return False
 
 
