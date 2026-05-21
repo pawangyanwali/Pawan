@@ -527,7 +527,8 @@ def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
     Returns number of positions closed.
     """
     from agent.data_fetcher import fetch_batch_realtime
-    closed = 0
+
+    # Step 1: read open rows without holding the lock during the API call
     with _lock:
         with _conn() as c:
             rows = c.execute("""
@@ -537,16 +538,22 @@ def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
                        COALESCE(shares, 1) as shares_total
                 FROM paper_trades WHERE status='OPEN'
             """).fetchall()
+            rows = list(rows)
 
-            if not rows:
-                return 0
+    if not rows:
+        return 0
 
-            tickers = list({r["ticker"] for r in rows})
-            try:
-                prices = fetch_batch_realtime(tickers)
-            except Exception:
-                prices = {}
+    # Step 2: fetch prices outside the lock so reads are never blocked
+    tickers = list({r["ticker"] for r in rows})
+    try:
+        prices = fetch_batch_realtime(tickers)
+    except Exception:
+        prices = {}
 
+    # Step 3: write closes under the lock
+    closed = 0
+    with _lock:
+        with _conn() as c:
             for row in rows:
                 ticker = row["ticker"]
                 df = prices.get(ticker)
@@ -741,7 +748,7 @@ def smart_eod_review() -> int:
     if not is_closing_caution():
         return 0
 
-    acted = 0
+    # Step 1: read open rows without holding the lock during the API call
     with _lock:
         with _conn() as c:
             rows = c.execute("""
@@ -751,16 +758,22 @@ def smart_eod_review() -> int:
                        COALESCE(partial_pnl_dollar, 0) as partial_pnl
                 FROM paper_trades WHERE status='OPEN'
             """).fetchall()
+            rows = list(rows)
 
-            if not rows:
-                return 0
+    if not rows:
+        return 0
 
-            tickers = list({r["ticker"] for r in rows})
-            try:
-                prices = fetch_batch_realtime(tickers)
-            except Exception:
-                prices = {}
+    # Step 2: fetch prices outside the lock so reads are never blocked
+    tickers = list({r["ticker"] for r in rows})
+    try:
+        prices = fetch_batch_realtime(tickers)
+    except Exception:
+        prices = {}
 
+    # Step 3: apply EOD actions under the lock
+    acted = 0
+    with _lock:
+        with _conn() as c:
             for row in rows:
                 ticker     = row["ticker"]
                 direction  = row["direction"]

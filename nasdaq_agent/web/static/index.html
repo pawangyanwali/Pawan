@@ -3251,8 +3251,8 @@ async function openPaperTrading() {
   ptTab('open');
   try {
     const [d, ls] = await Promise.all([
-      fetch(`${BACKEND_HTTP}/api/paper-trading`).then(r=>r.json()),
-      fetch(`${BACKEND_HTTP}/api/learning-status`).then(r=>r.json()).catch(()=>({})),
+      fetch(`${BACKEND_HTTP}/api/paper-trading`, {signal: AbortSignal.timeout(15000)}).then(r=>r.json()),
+      fetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(10000)}).then(r=>r.json()).catch(()=>({})),
     ]);
     _ptData = d; _ptLearn = ls;
     const s = d.summary;
@@ -4972,7 +4972,7 @@ connectWS();
 // Load paper trading stats immediately on page load and refresh every 30s
 async function fetchPtStats() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/paper-trading`)).json();
+    const d = await (await fetch(`${BACKEND_HTTP}/api/paper-trading`, {signal: AbortSignal.timeout(12000)})).json();
     if (d.summary) {
       // Build open_trades map for the open count
       const openMap = {};
