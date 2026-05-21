@@ -66,7 +66,7 @@ import math
 # 2 threads is enough: get_closed_trades + get_summary + get_open_trades run
 # sequentially inside (they share _lock), but we never want them to wait for
 # an unrelated task to free a thread.
-_pt_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pt_db")
+_pt_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pt_db")
 
 
 def _sanitize(obj):
@@ -875,14 +875,15 @@ async def backtest_path(signal_id: str):
 async def learning_status():
     """Adaptive filter state — blocked contexts, dynamic threshold, win rate progress."""
     loop = asyncio.get_running_loop()
-    status, eng, obs = await asyncio.gather(
-        loop.run_in_executor(_pt_executor, af_get_status),
-        loop.run_in_executor(_pt_executor, learning_engine.get_status),
+    # af_get_status and learning_engine.get_status are pure in-memory (no DB) — run on
+    # default executor. get_observation_summary does a DB read — use _pt_executor.
+    status, obs = await asyncio.gather(
+        loop.run_in_executor(None, af_get_status),
         loop.run_in_executor(_pt_executor, get_observation_summary),
     )
     return {
         **status,
-        "engine":       eng,
+        "engine":       learning_engine.get_status(),
         "observations": obs,
     }
 
