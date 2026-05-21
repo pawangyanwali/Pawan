@@ -67,14 +67,24 @@ MAX_CANDLE_HISTORY = 300   # 5 hours of 1-min bars
 # ── Real-time tick callback registry ─────────────────────────────────────────
 # Registered functions are called on every LEVELONE_EQUITIES update.
 # Throttled per-ticker to _TICK_MIN_INTERVAL seconds to avoid flooding WebSocket.
-_tick_callbacks:    list          = []
-_last_tick_ts:      dict[str, float] = {}
-_TICK_MIN_INTERVAL: float         = 0.25   # max 4 price updates/s per ticker
+_tick_callbacks:      list          = []
+_bulk_price_callbacks: list         = []   # fn(prices: dict[str, dict]) — one call per poll cycle
+_last_tick_ts:        dict[str, float] = {}
+_TICK_MIN_INTERVAL:   float         = 0.25   # max 4 price updates/s per ticker
 
 
 def register_tick_callback(fn) -> None:
     """Register fn(ticker: str, quote: dict) — called on every throttled tick."""
     _tick_callbacks.append(fn)
+
+
+def register_bulk_price_callback(fn) -> None:
+    """
+    Register fn(prices: dict[str, dict]) — called ONCE per poll cycle with ALL
+    updated quotes.  Much more efficient than 477 individual tick callbacks.
+    Each value dict contains: last, bid, ask, volume, high, low, pct_change.
+    """
+    _bulk_price_callbacks.append(fn)
 
 
 # ── User Preferences (provides streamer URL + client IDs) ─────────────────────
@@ -456,6 +466,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
                 if quotes:
                     _ws_connected = True
                     _ws_error = None
+                    bulk_prices: dict[str, dict] = {}
                     updated: list[tuple[str, dict]] = []
                     with _lock:
                         for sym, q in quotes.items():
@@ -469,14 +480,31 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
                             quote["prev_close"]     = float(q.get("close") or 0)
                             quote["net_pct_change"] = float(q.get("pct_change") or 0)
                             quote["updated_at"]     = time.time()
-                            # Halt detection via zero last price
                             if quote["last"] <= 0:
                                 _halted.add(sym)
                             else:
                                 _halted.discard(sym)
                             updated.append((sym, dict(quote)))
+                            bulk_prices[sym] = {
+                                "last":       quote["last"],
+                                "bid":        quote["bid"],
+                                "ask":        quote["ask"],
+                                "volume":     quote["volume"],
+                                "high":       quote["high"],
+                                "low":        quote["low"],
+                                "pct_change": quote["net_pct_change"],
+                            }
 
-                    # Fire tick callbacks (same throttle as WebSocket path)
+                    # Bulk callback — ONE call per poll cycle with ALL prices.
+                    # This replaces 477 individual WS messages with a single batch.
+                    if bulk_prices and _bulk_price_callbacks:
+                        for fn in _bulk_price_callbacks:
+                            try:
+                                fn(bulk_prices)
+                            except Exception:
+                                pass
+
+                    # Individual tick callbacks (legacy — for backward compat)
                     if updated and _tick_callbacks:
                         now = time.time()
                         for sym, quote in updated:

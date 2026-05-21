@@ -454,32 +454,32 @@ def fetch_quotes(tickers: list[str]) -> dict[str, float]:
 
 def fetch_full_quotes(tickers: list[str]) -> dict[str, dict]:
     """
-    Full quote data (bid/ask/volume/52w high/low etc.) for each ticker.
-    Returns {ticker: {field: value}} — useful for richer signal features.
+    Real-time quote data for all tickers — single API call to /quotes.
+    Schwab accepts up to 500 symbols per request; 477-ticker universe fits in one call.
+    Returns {ticker: {last, bid, ask, volume, open, high, low, close, pct_change, ...}}.
+    Used by the 1-second MD poller for dashboard real-time price updates.
     """
     if not _is_authorised() or not tickers:
         return {}
-    data = _get("/quotes", {"symbols": ",".join(tickers), "fields": "quote,reference"})
+    # Single call — no chunking needed for ≤500 tickers
+    chunk = tickers[:500]
+    data = _get("/quotes", {"symbols": ",".join(chunk), "fields": "quote"}, timeout=8)
     if not isinstance(data, dict):
         return {}
     result = {}
     for ticker, info in data.items():
         try:
             q = info.get("quote", {})
-            ref = info.get("reference", {})
             result[ticker] = {
-                "last":        q.get("lastPrice") or q.get("mark", 0),
-                "bid":         q.get("bidPrice", 0),
-                "ask":         q.get("askPrice", 0),
-                "volume":      q.get("totalVolume", 0),
-                "open":        q.get("openPrice", 0),
-                "high":        q.get("highPrice", 0),
-                "low":         q.get("lowPrice", 0),
-                "close":       q.get("closePrice", 0),
-                "pct_change":  q.get("netPercentChangeInDouble", 0),
-                "52w_high":    q.get("52WkHigh", 0),
-                "52w_low":     q.get("52WkLow", 0),
-                "description": ref.get("description", ""),
+                "last":       float(q.get("lastPrice") or q.get("mark") or 0),
+                "bid":        float(q.get("bidPrice")  or 0),
+                "ask":        float(q.get("askPrice")  or 0),
+                "volume":     float(q.get("totalVolume") or 0),
+                "open":       float(q.get("openPrice")  or 0),
+                "high":       float(q.get("highPrice")  or 0),
+                "low":        float(q.get("lowPrice")   or 0),
+                "close":      float(q.get("closePrice") or 0),
+                "pct_change": float(q.get("netPercentChangeInDouble") or 0),
             }
         except Exception:
             pass
