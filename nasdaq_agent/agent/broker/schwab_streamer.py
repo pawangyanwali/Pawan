@@ -428,18 +428,21 @@ async def _streamer_main(tickers: list[str]) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
+def start_md_poller(tickers: list[str], interval: float = 1.0,
+                    secondary_tickers: list[str] | None = None,
+                    secondary_every: int = 5) -> None:
     """
     REST-based real-time quote poller — Market Data app only.
     No Accounts+Trading credentials required.
 
-    Polls /marketdata/v1/quotes every `interval` seconds for all tickers,
-    populates _live_quotes, and fires _tick_callbacks exactly like the
-    WebSocket streamer would.  All downstream consumers (RT monitor,
-    data_fetcher, dashboard tick broadcast) work unchanged.
+    Priority tickers (``tickers``) are polled on every cycle.
+    Optional ``secondary_tickers`` are polled every ``secondary_every`` cycles
+    (default every 5th cycle = 5 s at 1 s interval).
 
-    Trade-off vs WebSocket: ~1s latency instead of sub-100ms, which is
-    more than adequate for a scalping dashboard and RT position monitor.
+    This keeps the per-cycle API call small (fast response < 500 ms for ~100
+    priority tickers) so the effective dashboard update rate stays close to 1 s,
+    while secondary tickers still refresh every few seconds rather than waiting
+    for the 30-s scanner cycle.
     """
     global _streamer_thread, _subscribed_tickers
 
@@ -447,89 +450,105 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
         logger.debug("[MDPoller] Already running.")
         return
 
-    _subscribed_tickers = list(tickers)
+    _subscribed_tickers = list(tickers) + list(secondary_tickers or [])
+
+    def _process_quotes(quotes: dict) -> tuple[dict, list]:
+        """Update _live_quotes and return (bulk_prices, updated) for callbacks."""
+        bulk: dict[str, dict] = {}
+        upd:  list[tuple[str, dict]] = []
+        with _lock:
+            for sym, q in quotes.items():
+                quote = _live_quotes.setdefault(sym, {})
+                quote["last"]       = float(q.get("last") or 0)
+                quote["bid"]        = float(q.get("bid")  or 0)
+                quote["ask"]        = float(q.get("ask")  or 0)
+                quote["volume"]     = float(q.get("volume") or 0)
+                quote["open"]       = float(q.get("open")  or 0)
+                quote["high"]       = float(q.get("high")  or 0)
+                quote["low"]        = float(q.get("low")   or 0)
+                quote["prev_close"] = float(q.get("close") or 0)
+                raw_chg = float(q.get("pct_change") or 0)
+                if raw_chg == 0 and quote["last"] > 0 and quote["prev_close"] > 0:
+                    raw_chg = (quote["last"] - quote["prev_close"]) / quote["prev_close"] * 100
+                quote["net_pct_change"] = round(raw_chg, 3)
+                quote["updated_at"]    = time.time()
+                if quote["last"] <= 0:
+                    _halted.add(sym)
+                else:
+                    _halted.discard(sym)
+                upd.append((sym, dict(quote)))
+                bulk[sym] = {
+                    "last":       quote["last"],
+                    "open":       quote["open"],
+                    "bid":        quote["bid"],
+                    "ask":        quote["ask"],
+                    "volume":     quote["volume"],
+                    "high":       quote["high"],
+                    "low":        quote["low"],
+                    "pct_change": quote["net_pct_change"],
+                }
+        return bulk, upd
+
+    def _fire_callbacks(bulk_prices: dict, updated: list) -> None:
+        if bulk_prices and _bulk_price_callbacks:
+            for fn in _bulk_price_callbacks:
+                try:
+                    fn(bulk_prices)
+                except Exception:
+                    pass
+        if updated and _tick_callbacks:
+            now = time.time()
+            for sym, quote in updated:
+                if now - _last_tick_ts.get(sym, 0.0) >= _TICK_MIN_INTERVAL:
+                    _last_tick_ts[sym] = now
+                    for fn in _tick_callbacks:
+                        try:
+                            fn(sym, quote)
+                        except Exception:
+                            pass
 
     def _poll_loop() -> None:
         global _ws_connected, _ws_error
         from agent.broker.schwab_market_data import fetch_full_quotes, _is_authorised
 
-        logger.info(f"[MDPoller] Started — {len(tickers)} tickers @ {interval}s interval")
+        sec_tickers = list(secondary_tickers) if secondary_tickers else []
+        n_pri = len(tickers)
+        n_sec = len(sec_tickers)
+        logger.info(
+            f"[MDPoller] Started — {n_pri} priority tickers @ {interval}s, "
+            f"{n_sec} secondary tickers @ {interval * secondary_every}s"
+        )
+        cycle = 0
         while True:
             _cycle_start = time.time()
             try:
                 if not _is_authorised():
                     _ws_connected = False
                     _ws_error = "Schwab Market Data not authorized — visit /schwab/auth/md"
-                    time.sleep(10)
+                    time.sleep(3)   # retry quickly; 10s was too slow to recover
                     continue
 
-                quotes = fetch_full_quotes(list(tickers))
-                if quotes:
+                # Priority tickers — polled every cycle for ~1 s update rate
+                pri_quotes = fetch_full_quotes(list(tickers))
+                bulk, upd = _process_quotes(pri_quotes)
+                if bulk:
                     _ws_connected = True
                     _ws_error = None
-                    bulk_prices: dict[str, dict] = {}
-                    updated: list[tuple[str, dict]] = []
-                    with _lock:
-                        for sym, q in quotes.items():
-                            quote = _live_quotes.setdefault(sym, {})
-                            quote["last"]           = float(q.get("last") or 0)
-                            quote["bid"]            = float(q.get("bid")  or 0)
-                            quote["ask"]            = float(q.get("ask")  or 0)
-                            quote["volume"]         = float(q.get("volume") or 0)
-                            quote["open"]           = float(q.get("open")  or 0)
-                            quote["high"]           = float(q.get("high")  or 0)
-                            quote["low"]            = float(q.get("low")   or 0)
-                            quote["prev_close"]     = float(q.get("close") or 0)
-                            # Prefer Schwab's own pct_change; fall back to computing
-                            # from last vs prev_close so CHG% is never stuck at 0.
-                            raw_chg = float(q.get("pct_change") or 0)
-                            if raw_chg == 0 and quote["last"] > 0 and quote["prev_close"] > 0:
-                                raw_chg = (quote["last"] - quote["prev_close"]) / quote["prev_close"] * 100
-                            quote["net_pct_change"] = round(raw_chg, 3)
-                            quote["updated_at"]     = time.time()
-                            if quote["last"] <= 0:
-                                _halted.add(sym)
-                            else:
-                                _halted.discard(sym)
-                            updated.append((sym, dict(quote)))
-                            bulk_prices[sym] = {
-                                "last":       quote["last"],
-                                "open":       quote["open"],
-                                "bid":        quote["bid"],
-                                "ask":        quote["ask"],
-                                "volume":     quote["volume"],
-                                "high":       quote["high"],
-                                "low":        quote["low"],
-                                "pct_change": quote["net_pct_change"],
-                            }
+                    _fire_callbacks(bulk, upd)
 
-                    # Bulk callback — ONE call per poll cycle with ALL prices.
-                    # This replaces 477 individual WS messages with a single batch.
-                    if bulk_prices and _bulk_price_callbacks:
-                        for fn in _bulk_price_callbacks:
-                            try:
-                                fn(bulk_prices)
-                            except Exception:
-                                pass
-
-                    # Individual tick callbacks (legacy — for backward compat)
-                    if updated and _tick_callbacks:
-                        now = time.time()
-                        for sym, quote in updated:
-                            if now - _last_tick_ts.get(sym, 0.0) >= _TICK_MIN_INTERVAL:
-                                _last_tick_ts[sym] = now
-                                for fn in _tick_callbacks:
-                                    try:
-                                        fn(sym, quote)
-                                    except Exception:
-                                        pass
+                # Secondary tickers — polled every N cycles to stay fresh without
+                # adding a slow 477-ticker call to every 1 s cycle
+                if sec_tickers and cycle % secondary_every == 0:
+                    sec_quotes = fetch_full_quotes(sec_tickers)
+                    if sec_quotes:
+                        sec_bulk, sec_upd = _process_quotes(sec_quotes)
+                        _fire_callbacks(sec_bulk, sec_upd)
 
             except Exception as _e:
                 logger.warning(f"[MDPoller] poll error: {_e}")
 
-            # Sleep only the remaining time so the cycle fires precisely every
-            # `interval` seconds regardless of API latency.
-            elapsed = time.time() - _cycle_start
+            cycle += 1
+            elapsed   = time.time() - _cycle_start
             remaining = interval - elapsed
             if remaining > 0:
                 time.sleep(remaining)

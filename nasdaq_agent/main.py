@@ -366,10 +366,16 @@ async def lifespan(app: FastAPI):
                 ok_md = load_stored_md_tokens()
                 if ok_md:
                     logging.getLogger(__name__).info(
-                        "Schwab Market Data connected — starting 1s quote poller."
+                        "Schwab Market Data connected — starting tiered quote poller."
                     )
-                    from config import NASDAQ_TICKERS
-                    start_md_poller(list(NASDAQ_TICKERS), interval=1.0)
+                    from agent.ticker_universe import TIER1, TIER2, TIER3
+                    _t1  = list(TIER1)
+                    _t23 = [t for t in list(TIER2) + list(TIER3) if t not in set(_t1)]
+                    # Tier 1 (~100 tickers) polled every 1 s → fast API response → true 1 s updates.
+                    # Tier 2/3 (~377 tickers) polled every 5th cycle (5 s) to stay fresh
+                    # without slowing down the per-cycle API call with a massive ticker list.
+                    start_md_poller(_t1, interval=1.0,
+                                    secondary_tickers=_t23, secondary_every=5)
                     _ensure_tick_broadcast_registered()
                 else:
                     logging.getLogger(__name__).warning(
@@ -953,10 +959,13 @@ async def schwab_web_callback(request: Request, code: str = "", state: str = "",
     if success:
         # Start the MD poller and wire tick broadcasts if not already running
         try:
-            from config import NASDAQ_TICKERS
             from agent.broker.schwab_streamer import is_streamer_ready
             if not is_streamer_ready():
-                start_md_poller(list(NASDAQ_TICKERS), interval=1.0)
+                from agent.ticker_universe import TIER1, TIER2, TIER3
+                _t1  = list(TIER1)
+                _t23 = [t for t in list(TIER2) + list(TIER3) if t not in set(_t1)]
+                start_md_poller(_t1, interval=1.0,
+                                secondary_tickers=_t23, secondary_every=5)
             _ensure_tick_broadcast_registered()
         except Exception:
             pass
