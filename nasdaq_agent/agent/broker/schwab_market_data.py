@@ -51,12 +51,15 @@ _RESAMPLE_MAP = {
 
 
 def _is_authorised() -> bool:
-    """True only when the dedicated Market Data app has its own valid token.
-    Never falls back to the Accounts+Trading token — that app lacks
-    Market Data Production access and will 401."""
+    """True only when the dedicated Market Data app has its own valid (non-expired) token.
+    Returns False if the token has expired so callers skip the request entirely;
+    the next _get() call will refresh and retry automatically."""
     try:
         from agent.broker.schwab_auth import _market_data
-        return bool(_market_data.get_access_token())
+        if not _market_data.get_access_token():
+            return False
+        status = _market_data.get_status()
+        return status.get("access_token_ttl_s", 0) > 0
     except Exception:
         return False
 
@@ -83,6 +86,22 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
                          params=params, timeout=timeout)
         if r.status_code == 429:
             _on_429()
+            return {}
+        if r.status_code in (401, 403):
+            # Token expired or revoked — refresh and retry once
+            logger.info(f"[Schwab MD] {r.status_code} on {path} — refreshing token…")
+            if _try_refresh_md_token():
+                headers = _auth_headers()
+                if headers:
+                    r = requests.get(f"{MARKETDATA_BASE}{path}", headers=headers,
+                                     params=params, timeout=timeout)
+                    if r.status_code == 429:
+                        _on_429()
+                        return {}
+                    r.raise_for_status()
+                    _on_success()
+                    return r.json()
+            logger.warning("[Schwab MD] Auth refresh failed — re-authenticate at /schwab/auth/md")
             return {}
         r.raise_for_status()
         _on_success()
@@ -129,6 +148,32 @@ def _on_success() -> None:
     if _backoff_until > time.time():
         with _rate_lock:
             _backoff_until = 0.0
+
+
+# Prevent simultaneous refresh storms when many concurrent calls all get 401/403
+_refresh_lock = threading.Lock()
+_refresh_last: float = 0.0
+
+def _try_refresh_md_token() -> bool:
+    """
+    Refresh the Market Data access token.  Coalesces concurrent refresh attempts:
+    only one thread calls Schwab; others wait and then re-use the new token.
+    Returns True if a valid token is available after the call.
+    """
+    global _refresh_last
+    with _refresh_lock:
+        # If another thread refreshed within the last 10 s, the token is already fresh
+        if time.time() - _refresh_last < 10:
+            return bool(_auth_headers())
+        try:
+            from agent.broker.schwab_auth import _market_data as _md_app
+            ok = _md_app.refresh()
+            if ok:
+                _refresh_last = time.time()
+            return ok
+        except Exception as e:
+            logger.warning(f"[Schwab MD] Token refresh error: {e}")
+            return False
 
 
 # ── Async HTTP layer (aiohttp, concurrent, no pre-throttle) ──────────────────
@@ -381,14 +426,35 @@ async def _fetch_one_async(
         "needExtendedHoursData": "true" if extended_hours else "false",
     }
     url = f"{MARKETDATA_BASE}/pricehistory"
-    async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+    _to = aiohttp.ClientTimeout(total=15)
+    async with session.get(url, headers=headers, params=params, timeout=_to) as resp:
         if resp.status == 429:
             _on_429()
             return pd.DataFrame()
-        if resp.status != 200:
+        if resp.status in (401, 403):
+            # Run the blocking refresh in the executor so we don't block the event loop
+            import asyncio as _aio
+            loop = _aio.get_event_loop()
+            refreshed = await loop.run_in_executor(None, _try_refresh_md_token)
+            if refreshed:
+                from agent.broker.schwab_auth import _market_data as _md_app
+                new_token = _md_app.get_access_token()
+                if new_token:
+                    new_headers = {"Authorization": f"Bearer {new_token}", "Accept": "application/json"}
+                    async with session.get(url, headers=new_headers, params=params, timeout=_to) as retry:
+                        if retry.status != 200:
+                            return pd.DataFrame()
+                        _on_success()
+                        data = await retry.json(content_type=None)
+                else:
+                    return pd.DataFrame()
+            else:
+                return pd.DataFrame()
+        elif resp.status != 200:
             return pd.DataFrame()
-        _on_success()
-        data = await resp.json(content_type=None)
+        else:
+            _on_success()
+            data = await resp.json(content_type=None)
     candles = data.get("candles", []) if isinstance(data, dict) else []
     if not candles:
         return pd.DataFrame()
