@@ -119,7 +119,6 @@ class StockSignal:
     name:         str
     price:        float
     change_pct:   float
-    open_price:   float = 0.0   # today's opening price (updated live via WS)
 
     # ── Component scores [-1, +1] ─────────────────────────────────────────────
     technical:     float
@@ -153,6 +152,9 @@ class StockSignal:
     ml_deep_prob:     float = 0.5    # Deep BiLSTM (15-min, 1h ahead)
     ml_swing_trained: bool  = False
     ml_deep_trained:  bool  = False
+
+    # ── Today's open price (populated from first 1-min bar; updated live via WS) ─
+    open_price:   float = 0.0
 
     # ── Multi-timeframe analysis ───────────────────────────────────────────────
     mtf_score:      float = 0.0
