@@ -1746,7 +1746,26 @@ function connectWS() {
       if (m.session)  { _sessionInfo = m.session; updateSessionBanner(m.session); }
       if (m.regime)   { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
       if (m.macro)    updateMacroBanner(m.macro);
-      if (m.backtest) updateBtHeaderBtn(m.backtest);
+      if (m.backtest) {
+        updateBtHeaderBtn(m.backtest);
+        // Live-refresh KPI row if the modal is open (attribution reload is throttled)
+        if (document.getElementById('bt-modal')?.classList.contains('open') && m.backtest.total > 0) {
+          const kpiEl = document.getElementById('bt-kpis');
+          const o = m.backtest;
+          const wr = o.win_rate ?? 0;
+          const wrCol = wr >= 0.55 ? 'var(--green)' : wr >= 0.45 ? 'var(--yellow)' : 'var(--red)';
+          const kpiData = [
+            { label:'Win Rate', value: `${(wr*100).toFixed(1)}%`, color: wrCol },
+            { label:'Total Signals', value: o.total ?? 0, color: 'var(--text)' },
+            { label:'Tracking', value: o.tracking ?? 0, color: 'var(--blue)' },
+            { label:'Avg R', value: o.avg_r != null ? `${o.avg_r.toFixed(2)}R` : '—', color: (o.avg_r??0) > 0 ? 'var(--green)' : 'var(--red)' },
+            { label:'Expectancy', value: o.expectancy != null ? o.expectancy.toFixed(2) : '—', color: (o.expectancy??0) > 0 ? 'var(--green)' : 'var(--red)' },
+          ];
+          if (kpiEl) kpiEl.innerHTML = kpiData.map(k =>
+            `<div class="bt-kpi"><div class="bt-kpi-label">${k.label}</div><div class="bt-kpi-value" style="color:${k.color}">${k.value}</div></div>`
+          ).join('');
+        }
+      }
       if (m.learning) {
         updateLearnPill(m.learning);
         // If the full learning panel is open, refresh it with live data
@@ -3697,12 +3716,18 @@ function renderBtHeatmap(stats) {
 
 async function loadBacktestData() {
   const days = document.getElementById('bt-lookback').value;
+  const loadMsg = '<div style="color:var(--muted);font-size:11px;padding:8px">Loading backtest data…</div>';
+  const noDataMsg = '<div style="color:var(--muted);font-size:11px;padding:8px">No backtest data yet — signals are tracked as they fire.</div>';
+  document.getElementById('bt-kpis').innerHTML = loadMsg;
+  document.getElementById('bt-attr-grids').innerHTML = loadMsg;
   try {
     const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/stats?lookback_days=${days}`)).json();
+    if (!d || !d.stats) throw new Error('no stats');
     renderBtKpis(d.stats);
     renderBtAttribution(d.stats);
   } catch(e) {
-    document.getElementById('bt-kpis').innerHTML = `<div style="color:var(--muted);font-size:11px">No backtest data yet — signals are tracked as they fire.</div>`;
+    document.getElementById('bt-kpis').innerHTML = noDataMsg;
+    document.getElementById('bt-attr-grids').innerHTML = noDataMsg;
   }
   if (_btTab === 'tracking') loadBtTracking();
   if (_btTab === 'recent')   loadBtRecent();

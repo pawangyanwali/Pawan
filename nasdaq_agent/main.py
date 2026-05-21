@@ -821,7 +821,9 @@ async def remove_from_watchlist(ticker: str):
 @app.get("/api/backtest/stats")
 async def backtest_stats(lookback_days: int = 30):
     """Full backtest performance report with attribution breakdown."""
-    return get_full_report(lookback_days=lookback_days)
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, get_full_report, lookback_days)
+    return JSONResponse(content=_sanitize(data))
 
 
 @app.get("/api/backtest/tracking")

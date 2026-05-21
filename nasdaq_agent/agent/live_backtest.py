@@ -358,10 +358,14 @@ def get_tracking_signals() -> list[dict]:
                        COALESCE(p.r_val, 0.0) AS current_r,
                        COALESCE(p.price, s.entry_price) AS current_price
                 FROM bt_signals s
-                LEFT JOIN bt_price_path p ON p.signal_id = s.signal_id
-                    AND p.bar = (
-                        SELECT MAX(bar) FROM bt_price_path WHERE signal_id = s.signal_id
-                    )
+                LEFT JOIN (
+                    SELECT pp.signal_id, pp.r_val, pp.price
+                    FROM bt_price_path pp
+                    INNER JOIN (
+                        SELECT signal_id, MAX(bar) AS max_bar
+                        FROM bt_price_path GROUP BY signal_id
+                    ) mx ON pp.signal_id = mx.signal_id AND pp.bar = mx.max_bar
+                ) p ON p.signal_id = s.signal_id
                 WHERE s.status='TRACKING'
                 ORDER BY s.fired_at DESC
             """).fetchall()
@@ -409,10 +413,15 @@ def get_performance_stats(
                 AND fired_at >= datetime('now', ? || ' days')
                 ORDER BY fired_at DESC
             """, (f"-{lookback_days}",)).fetchall()
+            tracking_count = c.execute(
+                "SELECT COUNT(*) FROM bt_signals WHERE status='TRACKING'"
+            ).fetchone()[0]
 
     rows = [dict(r) for r in rows]
     if not rows:
-        return _empty_stats()
+        empty = _empty_stats()
+        empty["tracking_count"] = tracking_count
+        return empty
 
     # Context breakdowns (by_session, by_regime, etc.) should only include signals
     # where the model had at least some conviction.  Mixing 15%-confidence noise
@@ -478,7 +487,7 @@ def get_performance_stats(
         "overall":          _stats(rows),
         # quality_overall uses only 45%+ confidence (what drives context blocking)
         "quality_overall":  _stats(quality_rows),
-        "tracking_count":   len(get_tracking_signals()),
+        "tracking_count":   tracking_count,
         "lookback_days":    lookback_days,
         # context breakdowns: 45%+ confidence signals only
         "by_direction":     _breakdown("direction"),
