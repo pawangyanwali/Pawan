@@ -366,16 +366,13 @@ async def lifespan(app: FastAPI):
                 ok_md = load_stored_md_tokens()
                 if ok_md:
                     logging.getLogger(__name__).info(
-                        "Schwab Market Data connected — starting tiered quote poller."
+                        "Schwab Market Data connected — starting parallel quote poller."
                     )
-                    from agent.ticker_universe import TIER1, TIER2, TIER3
-                    _t1  = list(TIER1)
-                    _t23 = [t for t in list(TIER2) + list(TIER3) if t not in set(_t1)]
-                    # Tier 1 (~100 tickers) polled every 1 s → fast API response → true 1 s updates.
-                    # Tier 2/3 (~377 tickers) polled every 5th cycle (5 s) to stay fresh
-                    # without slowing down the per-cycle API call with a massive ticker list.
-                    start_md_poller(_t1, interval=1.0,
-                                    secondary_tickers=_t23, secondary_every=5)
+                    from config import NASDAQ_TICKERS
+                    # All 477 tickers split into 3 parallel batches (~159/batch).
+                    # Each batch is a separate concurrent API call so total latency
+                    # ≈ max(batch_latency) ≈ 300-500 ms — every ticker updates at ~1 s.
+                    start_md_poller(list(NASDAQ_TICKERS), interval=1.0, parallel_batches=3)
                     _ensure_tick_broadcast_registered()
                 else:
                     logging.getLogger(__name__).warning(
@@ -961,11 +958,8 @@ async def schwab_web_callback(request: Request, code: str = "", state: str = "",
         try:
             from agent.broker.schwab_streamer import is_streamer_ready
             if not is_streamer_ready():
-                from agent.ticker_universe import TIER1, TIER2, TIER3
-                _t1  = list(TIER1)
-                _t23 = [t for t in list(TIER2) + list(TIER3) if t not in set(_t1)]
-                start_md_poller(_t1, interval=1.0,
-                                secondary_tickers=_t23, secondary_every=5)
+                from config import NASDAQ_TICKERS
+                start_md_poller(list(NASDAQ_TICKERS), interval=1.0, parallel_batches=3)
             _ensure_tick_broadcast_registered()
         except Exception:
             pass
