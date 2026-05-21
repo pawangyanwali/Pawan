@@ -1234,22 +1234,17 @@ class Scanner:
         _is_extended = _sess.get("session", "") in ("AFTER_HOURS", "PRE_MARKET", "CLOSED")
 
         # ── Data fetch strategy ───────────────────────────────────────────────
-        # 1min gets the FULL rate budget (1.5 req/s) so it finishes in ~2 min max.
-        # Higher-TF intervals follow in parallel: in steady state they're 100%
-        # cached (TTL 10min/1h/24h) and return in milliseconds; on cold start
-        # they share the rate budget AFTER 1min is already done, so no contention.
+        # 1min fetched first (live/streaming-first with REST fallback).
+        # HTF intervals (5min, 1h, 1day) fetched sequentially after 1min is done:
+        # in steady state they are 100% cache hits (TTL 10min/1h/24h) and return
+        # in milliseconds so sequential costs nothing.  On cold start, running
+        # them in parallel caused 3×10 = 30 concurrent Schwab /pricehistory
+        # calls alongside the MD poller, exceeding the 120 req/min rate limit
+        # and triggering 429 storms.  Sequential keeps peak concurrency at ≤10.
         batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
-
-        import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=3, thread_name_prefix="htf") as _htf:
-            _f5m = _htf.submit(fetch_batch_interval, active_tickers, "5min", 500, CACHE_TTL_5M)
-            _f1h = _htf.submit(fetch_batch_interval, active_tickers, "1h",   500, CACHE_TTL_1H)
-            _f1d = _htf.submit(fetch_batch_interval, active_tickers, "1day", 500, CACHE_TTL_1D)
-            _cf.wait([_f5m, _f1h, _f1d], return_when=_cf.ALL_COMPLETED)
-
-        batch_5m = _f5m.result()
-        batch_1h = _f1h.result()
-        batch_1d = _f1d.result()
+        batch_5m = fetch_batch_interval(active_tickers, "5min", 500, CACHE_TTL_5M)
+        batch_1h = fetch_batch_interval(active_tickers, "1h",   500, CACHE_TTL_1H)
+        batch_1d = fetch_batch_interval(active_tickers, "1day", 500, CACHE_TTL_1D)
 
         # Fetch SPY/QQQ + sector ETFs for regime, RS and sector context
         etf_1m = fetch_batch_realtime(SECTOR_ETF_TICKERS, extended_hours=_is_extended)
