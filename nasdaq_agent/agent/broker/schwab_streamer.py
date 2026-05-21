@@ -482,6 +482,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             for sym, q in quotes.items():
                 quote = _live_quotes.setdefault(sym, {})
                 quote["last"]       = float(q.get("last") or 0)
+                quote["mark"]       = float(q.get("mark") or 0)
                 quote["bid"]        = float(q.get("bid")  or 0)
                 quote["ask"]        = float(q.get("ask")  or 0)
                 quote["volume"]     = float(q.get("volume") or 0)
@@ -501,6 +502,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                 upd.append((sym, dict(quote)))
                 bulk[sym] = {
                     "last":       quote["last"],
+                    "mark":       quote["mark"],   # bid/ask midpoint — more current in AH/PM
                     "open":       quote["open"],
                     "bid":        quote["bid"],
                     "ask":        quote["ask"],
@@ -558,14 +560,24 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             max_workers=len(batches), thread_name_prefix="md_fetch"
         )
 
+        cycle       = 0
+        auth_misses = 0
         while True:
             _cycle_start = time.time()
             try:
                 if not _is_authorised():
                     _ws_connected = False
                     _ws_error = "Schwab Market Data not authorized — visit /schwab/auth/md"
+                    auth_misses += 1
+                    if auth_misses % 10 == 1:   # log once per 30 s, not every 3 s
+                        logger.warning(
+                            f"[MDPoller] Not authorised (missed {auth_misses} cycles) — "
+                            "visit /schwab/auth/md to re-authenticate."
+                        )
                     time.sleep(3)   # fast retry; was 10 s which froze prices for 10+ s
                     continue
+
+                auth_misses = 0   # reset on success
 
                 # Submit all batches simultaneously.
                 # Each worker broadcasts the moment its API call returns — no merging,
@@ -578,19 +590,33 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
                 # Wait only to know when the slowest batch finishes so we can
                 # calculate the correct sleep time for the next cycle.
-                done, _ = _cf.wait(futures, timeout=interval * 3)
+                done, pending = _cf.wait(futures, timeout=interval * 3)
 
-                any_ok = any(
-                    not f.cancelled() and not f.exception() and f.result()
-                    for f in done
+                n_ok = sum(
+                    1 for f in done
+                    if not f.cancelled() and f.exception() is None and f.result()
                 )
-                if any_ok:
+                if n_ok:
                     _ws_connected = True
                     _ws_error = None
+                else:
+                    logger.warning(f"[MDPoller] Cycle {cycle}: all {len(batches)} batches returned empty")
+
+                if pending:
+                    logger.warning(f"[MDPoller] Cycle {cycle}: {len(pending)} batch(es) timed out")
+
+                # Periodic health log — one INFO per minute so ops can confirm it's alive
+                if cycle % 60 == 0:
+                    elapsed_ms = int((time.time() - _cycle_start) * 1000)
+                    logger.info(
+                        f"[MDPoller] ✓ Cycle {cycle} | {n_ok}/{len(batches)} batches OK "
+                        f"| {n} tickers | {elapsed_ms}ms"
+                    )
 
             except Exception as _e:
-                logger.warning(f"[MDPoller] poll error: {_e}")
+                logger.warning(f"[MDPoller] poll error (cycle {cycle}): {_e}")
 
+            cycle += 1
             # Sleep exactly the remaining time so the next cycle fires on schedule
             elapsed   = time.time() - _cycle_start
             remaining = interval - elapsed

@@ -581,8 +581,15 @@ def fetch_full_quotes(tickers: list[str]) -> dict[str, dict]:
     for ticker, info in data.items():
         try:
             q = info.get("quote", {})
+            _last = float(q.get("lastPrice") or 0)
+            _mark = float(q.get("mark")      or 0)
             result[ticker] = {
-                "last":       float(q.get("lastPrice") or q.get("mark") or 0),
+                # lastPrice = last executed trade; mark = (bid+ask)/2 midpoint.
+                # In extended hours lastPrice can be stale (last AH trade minutes ago)
+                # while mark reflects current market. We send both so the frontend
+                # can pick the most current value per session.
+                "last":       _last or _mark,   # fallback to mark if no trades
+                "mark":       _mark,
                 "bid":        float(q.get("bidPrice")  or 0),
                 "ask":        float(q.get("askPrice")  or 0),
                 "volume":     float(q.get("totalVolume") or 0),

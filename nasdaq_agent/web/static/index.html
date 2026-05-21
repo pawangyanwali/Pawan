@@ -1639,33 +1639,60 @@ function connectWS() {
       const prices = m.p;
       if (!prices) return;
 
+      // In extended sessions (AH / pre-market) the Schwab `lastPrice` is the last
+      // executed AH trade, which can be stale for minutes in thin markets.
+      // `mark` = (bid+ask)/2 midpoint and is always current.  Use it when available.
+      const _isExt = _sessionInfo && ['AFTER_HOURS','PRE_MARKET','CLOSED'].includes(_sessionInfo.session);
+      function _displayPrice(q) {
+        if (!q) return 0;
+        // Use mark in extended sessions when it's present and meaningfully different
+        if (_isExt && q.mark > 0) return q.mark;
+        return q.last || q.mark || 0;
+      }
+
       // Update in-memory signals
       for (const sig of allSignals) {
         const q = prices[sig.ticker];
-        if (!q || !(q.last > 0)) continue;
-        sig.price      = q.last;
-        sig.change_pct = q.pct_change ?? sig.change_pct;
+        if (!q) continue;
+        const dp = _displayPrice(q);
+        if (dp > 0) {
+          sig.price      = dp;
+          sig.change_pct = q.pct_change ?? sig.change_pct;
+          sig._tick_updated = true;
+        }
         if (q.open   > 0) sig.open_price = q.open;
         if (q.high   > 0) sig.high   = q.high;
         if (q.low    > 0) sig.low    = q.low;
         if (q.volume > 0) sig.volume = q.volume;
-        sig._tick_updated = true;
       }
 
-      // Surgically update every visible table row
+      // Surgically update every visible table row — no full re-render needed
       const rows = document.querySelectorAll('tr[data-ticker]');
       for (const row of rows) {
         const ticker = row.dataset.ticker;
         const q = prices[ticker];
-        if (!q || !(q.last > 0)) continue;
+        if (!q) continue;
+        const last = _displayPrice(q);
+        if (!(last > 0)) continue;
 
-        const chg      = q.pct_change ?? 0;
-        const last     = q.last;
-        const chgCell  = row.querySelector('.chg-cell');
+        const chg     = q.pct_change ?? 0;
+        const chgCell = row.querySelector('.chg-cell');
         if (chgCell) {
           chgCell.className = `chg-cell ${chg >= 0 ? 'pos' : 'neg'}`;
           const divs = chgCell.querySelectorAll('div');
-          if (divs[0]) divs[0].firstChild.textContent = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
+          // divs[0] = change% line, divs[1] = price line
+          // Use innerHTML to replace text without touching child badge spans
+          if (divs[0]) {
+            // Keep any badge spans that follow the text (e.g. AH session tag)
+            // by only updating the leading text node
+            const txtNode = divs[0].firstChild;
+            if (txtNode && txtNode.nodeType === Node.TEXT_NODE) {
+              txtNode.nodeValue = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
+            } else {
+              // No text node yet (shouldn't happen) — set the whole text portion
+              divs[0].textContent = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
+            }
+          }
           if (divs[1]) divs[1].textContent = `$${fmt(last)}`;
         }
 
@@ -1723,7 +1750,14 @@ function connectWS() {
           const chg = net_pct_change ?? (sig ? sig.change_pct : null);
           chgCell.className = `chg-cell ${(chg ?? 0) >= 0 ? 'pos' : 'neg'}`;
           const divs = chgCell.querySelectorAll('div');
-          if (divs[0] && chg != null) divs[0].firstChild.textContent = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
+          if (divs[0] && chg != null) {
+            const txtNode = divs[0].firstChild;
+            if (txtNode && txtNode.nodeType === Node.TEXT_NODE) {
+              txtNode.nodeValue = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
+            } else {
+              divs[0].textContent = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
+            }
+          }
           if (divs[1]) divs[1].textContent = `$${fmt(last)}`;
         }
         const trade = allOpenTrades[ticker];

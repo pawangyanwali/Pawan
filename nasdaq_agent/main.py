@@ -311,6 +311,24 @@ def _on_signals(signals: list[StockSignal]) -> None:
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
+    # Also send a standalone `prices` message with every ticker the scanner just
+    # priced.  This ensures the surgical DOM update path fires even when the MD
+    # poller is down (Schwab not authenticated, token expired, etc.) so prices
+    # never go more than one scan cycle (~30 s) stale regardless of poller state.
+    if manager.active:
+        _price_patch = {
+            s.ticker: {
+                "last":       s.price,
+                "open":       getattr(s, "open_price", 0) or 0,
+                "pct_change": getattr(s, "change_pct",  0) or 0,
+            }
+            for s in signals
+            if s.price > 0
+        }
+        if _price_patch:
+            _pp_payload = _dumps({"type": "prices", "p": _price_patch})
+            asyncio.run_coroutine_threadsafe(manager.broadcast(_pp_payload), _event_loop)
+
 
 def _on_ticker(sig: StockSignal, n_done: int, n_total: int) -> None:
     """Per-ticker callback — streams each result as it completes so the dashboard
