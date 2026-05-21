@@ -78,6 +78,13 @@ def _auth_headers() -> dict | None:
 
 def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
     """Authenticated GET to the Schwab Market Data API."""
+    # Honour 429 back-off: skip this cycle rather than piling on blocked requests.
+    backoff_rem = _backoff_until - time.time()
+    if backoff_rem > 5.0:
+        return {}   # too long to wait inline; caller retries next cycle
+    if backoff_rem > 0:
+        time.sleep(backoff_rem)
+
     headers = _auth_headers()
     if not headers:
         return {}
@@ -88,7 +95,13 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
             _on_429()
             return {}
         if r.status_code in (401, 403):
-            # Token expired or revoked — refresh and retry once
+            # Distinguish auth expiry from IP-level Akamai block after a 429 storm:
+            # if we're within 30s of the last 429 window this 403 is the CDN
+            # rejecting our IP — NOT an expired token. Skip the refresh.
+            if _backoff_until - time.time() > -30:
+                logger.warning(f"[Schwab MD] {r.status_code} on {path} during rate-limit window — will retry")
+                return {}
+            # Genuine auth failure — refresh and retry once
             logger.info(f"[Schwab MD] {r.status_code} on {path} — refreshing token…")
             if _try_refresh_md_token():
                 headers = _auth_headers()
@@ -132,14 +145,20 @@ _BG_GAP  = 1.0   # 1 s between background calls
 
 
 def _on_429() -> None:
-    """Called when Schwab returns HTTP 429. Sets a short back-off window."""
+    """Called when Schwab returns HTTP 429. Sets a short back-off window.
+
+    Concurrent requests often all 429 within the same millisecond.
+    Without a guard, 18 simultaneous 429s compound: 2→4→8→16→30s in <200ms.
+    Fix: only compound when NOT already in a backoff (remaining ≤ 1s).
+    """
     global _backoff_until
     with _rate_lock:
         remaining = _backoff_until - time.time()
-        # Double the back-off each consecutive 429 (exponential), cap at max.
+        if remaining > 1.0:
+            return  # concurrent 429 — already backed off, don't compound
         new_backoff = min(max(remaining * 2.0, _BACKOFF_BASE), _BACKOFF_MAX)
         _backoff_until = time.time() + new_backoff
-    logger.warning(f"[Schwab MD] 429 received — pausing {new_backoff:.1f}s")
+    logger.warning(f"[Schwab MD] 429 → back-off {new_backoff:.1f}s")
 
 
 def _on_success() -> None:
@@ -157,20 +176,20 @@ _refresh_last: float = 0.0
 def _try_refresh_md_token() -> bool:
     """
     Refresh the Market Data access token.  Coalesces concurrent refresh attempts:
-    only one thread calls Schwab; others wait and then re-use the new token.
-    Returns True if a valid token is available after the call.
+    only one thread calls Schwab at a time; others wait behind _refresh_lock
+    and hit the 30-second dedup check instead of hammering the token endpoint.
+
+    _refresh_last is stamped BEFORE the attempt (not only on success) so that
+    even a failed refresh prevents re-hammering the token endpoint for 30s.
     """
     global _refresh_last
     with _refresh_lock:
-        # If another thread refreshed within the last 10 s, the token is already fresh
-        if time.time() - _refresh_last < 10:
+        if time.time() - _refresh_last < 30:
             return bool(_auth_headers())
+        _refresh_last = time.time()   # stamp before attempt — prevents storm on failure
         try:
             from agent.broker.schwab_auth import _market_data as _md_app
-            ok = _md_app.refresh()
-            if ok:
-                _refresh_last = time.time()
-            return ok
+            return _md_app.refresh()
         except Exception as e:
             logger.warning(f"[Schwab MD] Token refresh error: {e}")
             return False
@@ -365,37 +384,39 @@ async def _fetch_batch_async_coro(
 
     result:    dict[str, pd.DataFrame] = {}
     aio_lock = asyncio.Lock()
+    sem      = asyncio.Semaphore(50)   # cap concurrent HTTP connections to prevent IP-level blocking
 
     async def _one(session: "aiohttp.ClientSession", ticker: str) -> None:
-        if background:
-            await _aio_bg_wait()      # throttle retrain tasks to 1 req/s
-        else:
-            await _aio_maybe_backoff()  # honour any active 429 back-off, else fire immediately
-        try:
-            token = _md_app.get_access_token()
-            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-
-            # Handle resample intervals
-            if interval in _RESAMPLE_MAP:
-                src_iv, resample_freq = _RESAMPLE_MAP[interval]
-                df = await _fetch_one_async(session, ticker, src_iv,
-                                             outputsize * 2, extended_hours, headers)
-                if not df.empty:
-                    df = df.resample(resample_freq).agg({
-                        "Open": "first", "High": "max",
-                        "Low": "min", "Close": "last", "Volume": "sum",
-                    }).dropna(subset=["Open", "Close"])
-                    if outputsize and len(df) > outputsize:
-                        df = df.iloc[-outputsize:]
+        async with sem:
+            if background:
+                await _aio_bg_wait()      # throttle retrain tasks to 1 req/s
             else:
-                df = await _fetch_one_async(session, ticker, interval,
-                                             outputsize, extended_hours, headers)
+                await _aio_maybe_backoff()  # honour any active 429 back-off, else fire immediately
+            try:
+                token = _md_app.get_access_token()
+                headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-            if not df.empty:
-                async with aio_lock:
-                    result[ticker] = df
-        except Exception as e:
-            logger.debug(f"[AioFetch] {ticker}/{interval}: {e}")
+                # Handle resample intervals
+                if interval in _RESAMPLE_MAP:
+                    src_iv, resample_freq = _RESAMPLE_MAP[interval]
+                    df = await _fetch_one_async(session, ticker, src_iv,
+                                                 outputsize * 2, extended_hours, headers)
+                    if not df.empty:
+                        df = df.resample(resample_freq).agg({
+                            "Open": "first", "High": "max",
+                            "Low": "min", "Close": "last", "Volume": "sum",
+                        }).dropna(subset=["Open", "Close"])
+                        if outputsize and len(df) > outputsize:
+                            df = df.iloc[-outputsize:]
+                else:
+                    df = await _fetch_one_async(session, ticker, interval,
+                                                 outputsize, extended_hours, headers)
+
+                if not df.empty:
+                    async with aio_lock:
+                        result[ticker] = df
+            except Exception as e:
+                logger.debug(f"[AioFetch] {ticker}/{interval}: {e}")
 
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(*[_one(session, t) for t in tickers])
