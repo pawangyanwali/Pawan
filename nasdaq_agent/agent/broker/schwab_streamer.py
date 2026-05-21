@@ -455,6 +455,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
 
         logger.info(f"[MDPoller] Started — {len(tickers)} tickers @ {interval}s interval")
         while True:
+            _cycle_start = time.time()
             try:
                 if not _is_authorised():
                     _ws_connected = False
@@ -519,7 +520,12 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
             except Exception as _e:
                 logger.warning(f"[MDPoller] poll error: {_e}")
 
-            time.sleep(interval)
+            # Sleep only the remaining time so the cycle fires precisely every
+            # `interval` seconds regardless of API latency.
+            elapsed = time.time() - _cycle_start
+            remaining = interval - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
     _streamer_thread = threading.Thread(
         target=_poll_loop, daemon=True, name="SchwabMDPoller"
