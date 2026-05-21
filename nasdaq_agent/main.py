@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Set
 
@@ -59,6 +60,13 @@ from config import (
 
 
 import math
+
+# Dedicated thread pool for paper-trading DB reads so they're never blocked by
+# the default asyncio executor being saturated with scanner/ML/broker tasks.
+# 2 threads is enough: get_closed_trades + get_summary + get_open_trades run
+# sequentially inside (they share _lock), but we never want them to wait for
+# an unrelated task to free a thread.
+_pt_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pt_db")
 
 
 def _sanitize(obj):
@@ -474,12 +482,13 @@ async def paper_trading_endpoint():
     from datetime import date
 
     try:
-        # Run all SQLite queries off the event loop to avoid blocking WebSocket handling
+        # Dedicated thread pool so these reads are never queued behind
+        # scanner/ML/broker tasks that saturate the default asyncio executor.
         loop = asyncio.get_running_loop()
         closed, summary, open_trades = await asyncio.gather(
-            loop.run_in_executor(None, get_closed_trades, 200),
-            loop.run_in_executor(None, pt_summary),
-            loop.run_in_executor(None, get_open_trades),
+            loop.run_in_executor(_pt_executor, get_closed_trades, 200),
+            loop.run_in_executor(_pt_executor, pt_summary),
+            loop.run_in_executor(_pt_executor, get_open_trades),
         )
     except Exception as _e:
         logging.getLogger(__name__).error(f"[PT] paper-trading endpoint error: {_e}", exc_info=True)
@@ -769,12 +778,12 @@ async def paper_performance():
     """Full P&L performance dashboard data."""
     loop = asyncio.get_running_loop()
     summary, today, daily, weekly, equity, ticker = await asyncio.gather(
-        loop.run_in_executor(None, pt_summary),
-        loop.run_in_executor(None, get_today_pnl),
-        loop.run_in_executor(None, get_daily_pnl, 30),
-        loop.run_in_executor(None, get_weekly_pnl),
-        loop.run_in_executor(None, get_equity_curve, 60),
-        loop.run_in_executor(None, get_ticker_pnl),
+        loop.run_in_executor(_pt_executor, pt_summary),
+        loop.run_in_executor(_pt_executor, get_today_pnl),
+        loop.run_in_executor(_pt_executor, get_daily_pnl, 30),
+        loop.run_in_executor(_pt_executor, get_weekly_pnl),
+        loop.run_in_executor(_pt_executor, get_equity_curve, 60),
+        loop.run_in_executor(_pt_executor, get_ticker_pnl),
     )
     return {
         "summary":      summary,
