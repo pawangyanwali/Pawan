@@ -408,7 +408,7 @@ async def _fetch_batch_async_coro(
 
     result:    dict[str, pd.DataFrame] = {}
     aio_lock = asyncio.Lock()
-    sem      = asyncio.Semaphore(50)   # cap concurrent HTTP connections to prevent IP-level blocking
+    sem      = asyncio.Semaphore(10)   # Schwab documents ~120 req/min; >10 concurrent triggers CDN blocks
 
     async def _one(session: "aiohttp.ClientSession", ticker: str) -> None:
         async with sem:
