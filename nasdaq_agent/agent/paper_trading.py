@@ -36,6 +36,16 @@ def _conn() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(_DB_PATH), timeout=10)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")   # concurrent readers + writer, no locking conflicts
+    return c
+
+def _conn_ro() -> sqlite3.Connection:
+    """Read-only connection — never blocked by writer threads holding _lock."""
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(str(_DB_PATH), timeout=5, check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA query_only=ON")
     return c
 
 
@@ -875,7 +885,7 @@ def _build_paper_stats() -> dict:
 # ── Query functions ───────────────────────────────────────────────────────────
 
 def get_daily_pnl(days: int = 14) -> list[dict]:
-    conn = _conn()
+    conn = _conn_ro()
     try:
         rows = conn.execute("""
             SELECT
@@ -899,7 +909,7 @@ def get_daily_pnl(days: int = 14) -> list[dict]:
 
 
 def get_today_pnl() -> dict:
-    conn = _conn()
+    conn = _conn_ro()
     try:
         row = conn.execute("""
             SELECT
@@ -998,33 +1008,30 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
 
 
 def get_open_trades() -> list[dict]:
-    with _lock:
-        with _conn() as c:
-            rows = c.execute(
-                "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY id DESC"
-            ).fetchall()
+    with _conn_ro() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY id DESC"
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_closed_trades(limit: int = 50) -> list[dict]:
-    with _lock:
-        with _conn() as c:
-            rows = c.execute(
-                "SELECT * FROM paper_trades WHERE status='CLOSED' ORDER BY id DESC LIMIT ?",
-                (limit,)
-            ).fetchall()
+    with _conn_ro() as c:
+        rows = c.execute(
+            "SELECT * FROM paper_trades WHERE status='CLOSED' ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_summary() -> dict:
-    with _lock:
-        with _conn() as c:
-            closed = c.execute(
-                "SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'"
-            ).fetchall()
-            open_count = c.execute(
-                "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
-            ).fetchone()[0]
+    with _conn_ro() as c:
+        closed = c.execute(
+            "SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'"
+        ).fetchall()
+        open_count = c.execute(
+            "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
+        ).fetchone()[0]
 
     total    = len(closed)
     # Win = positive dollar P&L (source of truth — not pnl_pct which can be inflated)
@@ -1049,7 +1056,7 @@ def get_summary() -> dict:
 
 
 def get_equity_curve(days: int = 30) -> list[dict]:
-    conn = _conn()
+    conn = _conn_ro()
     try:
         rows = conn.execute("""
             SELECT
@@ -1071,7 +1078,7 @@ def get_equity_curve(days: int = 30) -> list[dict]:
 
 
 def get_weekly_pnl() -> list[dict]:
-    conn = _conn()
+    conn = _conn_ro()
     try:
         rows = conn.execute("""
             SELECT
@@ -1091,7 +1098,7 @@ def get_weekly_pnl() -> list[dict]:
 
 
 def get_ticker_pnl() -> list[dict]:
-    conn = _conn()
+    conn = _conn_ro()
     try:
         rows = conn.execute("""
             SELECT
