@@ -634,6 +634,7 @@
         <th title="5-bar mini sparkline">Spark</th>
         <th>Name</th>
         <th>Chg %</th>
+        <th title="Today's opening price">Open</th>
         <th>Prediction</th>
         <th title="Trade status — open position P&L or watching">Status</th>
         <th title="Entry · Take Profit · Stop Loss">Levels</th>
@@ -1644,8 +1645,9 @@ function connectWS() {
         if (!q || !(q.last > 0)) continue;
         sig.price      = q.last;
         sig.change_pct = q.pct_change ?? sig.change_pct;
-        if (q.high  > 0) sig.high   = q.high;
-        if (q.low   > 0) sig.low    = q.low;
+        if (q.open   > 0) sig.open_price = q.open;
+        if (q.high   > 0) sig.high   = q.high;
+        if (q.low    > 0) sig.low    = q.low;
         if (q.volume > 0) sig.volume = q.volume;
         sig._tick_updated = true;
       }
@@ -1665,6 +1667,12 @@ function connectWS() {
           const divs = chgCell.querySelectorAll('div');
           if (divs[0]) divs[0].firstChild.textContent = `${chg >= 0 ? '+' : ''}${fmt(chg)}%`;
           if (divs[1]) divs[1].textContent = `$${fmt(last)}`;
+        }
+
+        // Live open price
+        if (q.open > 0) {
+          const openCell = row.querySelector('.open-cell');
+          if (openCell) openCell.textContent = `$${fmt(q.open)}`;
         }
 
         // Live P&L for open paper trades
@@ -2142,6 +2150,9 @@ function renderTable() {
       <td class="chg-cell ${chgC}" style="white-space:nowrap">
         <div style="font-size:13px;font-weight:700">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%${sessionTag}</div>
         <div style="font-size:11px;color:var(--text);font-weight:600;margin-top:1px">$${fmt(s.price)}</div>
+      </td>
+      <td class="open-cell" style="white-space:nowrap;color:var(--muted);font-size:11px;font-weight:600">
+        ${s.open_price > 0 ? `$${fmt(s.open_price)}` : '—'}
       </td>
       <td>
         <span class="signal-badge ${sigC}">${s.prediction}</span>

@@ -119,6 +119,7 @@ class StockSignal:
     name:         str
     price:        float
     change_pct:   float
+    open_price:   float = 0.0   # today's opening price (updated live via WS)
 
     # ── Component scores [-1, +1] ─────────────────────────────────────────────
     technical:     float
@@ -452,6 +453,17 @@ def analyse_ticker(
         if _prev_close <= 0:
             _prev_close = float(df_ind.iloc[0]["Open"]) or price
         change_pct = round((price - _prev_close) / _prev_close * 100, 3) if _prev_close else 0.0
+
+        # Today's opening price — first 1-min bar of the current session
+        _today_open = 0.0
+        try:
+            import zoneinfo as _zi2
+            _now_et = pd.Timestamp.now(tz=_zi2.ZoneInfo("America/New_York"))
+            _today_1m = df_1m[df_1m.index.date == _now_et.date()]
+            if not _today_1m.empty:
+                _today_open = float(_today_1m.iloc[0]["Open"])
+        except Exception:
+            pass
 
         tech            = score_technical(last)
         vol             = score_volume(df_ind)
@@ -915,6 +927,7 @@ def analyse_ticker(
             name              = info.get("name", ticker),
             price             = round(price, 4),
             change_pct        = change_pct,
+            open_price        = round(_today_open, 4),
             technical         = round(tech, 4),
             volume            = round(vol, 4),
             ml_prob           = ml_combined,

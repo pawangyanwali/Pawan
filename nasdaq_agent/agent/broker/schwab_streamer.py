@@ -476,10 +476,16 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
                             quote["bid"]            = float(q.get("bid")  or 0)
                             quote["ask"]            = float(q.get("ask")  or 0)
                             quote["volume"]         = float(q.get("volume") or 0)
+                            quote["open"]           = float(q.get("open")  or 0)
                             quote["high"]           = float(q.get("high")  or 0)
                             quote["low"]            = float(q.get("low")   or 0)
                             quote["prev_close"]     = float(q.get("close") or 0)
-                            quote["net_pct_change"] = float(q.get("pct_change") or 0)
+                            # Prefer Schwab's own pct_change; fall back to computing
+                            # from last vs prev_close so CHG% is never stuck at 0.
+                            raw_chg = float(q.get("pct_change") or 0)
+                            if raw_chg == 0 and quote["last"] > 0 and quote["prev_close"] > 0:
+                                raw_chg = (quote["last"] - quote["prev_close"]) / quote["prev_close"] * 100
+                            quote["net_pct_change"] = round(raw_chg, 3)
                             quote["updated_at"]     = time.time()
                             if quote["last"] <= 0:
                                 _halted.add(sym)
@@ -488,6 +494,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0) -> None:
                             updated.append((sym, dict(quote)))
                             bulk_prices[sym] = {
                                 "last":       quote["last"],
+                                "open":       quote["open"],
                                 "bid":        quote["bid"],
                                 "ask":        quote["ask"],
                                 "volume":     quote["volume"],
