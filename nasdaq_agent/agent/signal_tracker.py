@@ -43,6 +43,17 @@ def _conn() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(_DB_PATH), timeout=10)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
+
+
+def _conn_ro() -> sqlite3.Connection:
+    """Read-only connection — WAL allows concurrent reads without holding _lock."""
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(str(_DB_PATH), timeout=5, check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA query_only=ON")
     return c
 
 
@@ -295,17 +306,16 @@ def get_market_breakdown_stats(min_count: int = 5, lookback_days: int = 30) -> d
 
     Returns a dict compatible with adaptive_filter.update_filter().
     """
-    with _lock:
-        with _conn() as c:
-            rows = c.execute("""
-                SELECT direction, session, regime, trading_tier,
-                       vwap_event, rsi_zone, vol_bucket, trend,
-                       outcome, short_outcome
-                FROM signals
-                WHERE ts >= datetime('now', ?)
-                  AND is_suppressed = 0
-                  AND (outcome != 'PENDING' OR short_outcome != 'PENDING')
-            """, (f"-{lookback_days} days",)).fetchall()
+    with _conn_ro() as c:
+        rows = c.execute("""
+            SELECT direction, session, regime, trading_tier,
+                   vwap_event, rsi_zone, vol_bucket, trend,
+                   outcome, short_outcome
+            FROM signals
+            WHERE ts >= datetime('now', ?)
+              AND is_suppressed = 0
+              AND (outcome != 'PENDING' OR short_outcome != 'PENDING')
+        """, (f"-{lookback_days} days",)).fetchall()
 
     if not rows:
         return {"overall": {"total": 0, "wins": 0, "win_rate": 0.0}}
@@ -383,14 +393,13 @@ def get_market_breakdown_stats(min_count: int = 5, lookback_days: int = 30) -> d
 
 def get_stats(ticker: Optional[str] = None, limit: int = 200) -> dict:
     """Return accuracy statistics for a ticker or globally."""
-    with _lock:
-        with _conn() as c:
-            where  = "WHERE ticker=? AND (is_suppressed IS NULL OR is_suppressed=0)" if ticker else "WHERE (is_suppressed IS NULL OR is_suppressed=0)"
-            params = (ticker,) if ticker else ()
-            rows   = c.execute(
-                f"SELECT outcome, pnl_pct FROM signals {where} ORDER BY id DESC LIMIT ?",
-                (*params, limit)
-            ).fetchall()
+    with _conn_ro() as c:
+        where  = "WHERE ticker=? AND (is_suppressed IS NULL OR is_suppressed=0)" if ticker else "WHERE (is_suppressed IS NULL OR is_suppressed=0)"
+        params = (ticker,) if ticker else ()
+        rows   = c.execute(
+            f"SELECT outcome, pnl_pct FROM signals {where} ORDER BY id DESC LIMIT ?",
+            (*params, limit)
+        ).fetchall()
 
     total   = len(rows)
     wins    = sum(1 for r in rows if r["outcome"] == "WIN")
@@ -412,18 +421,17 @@ def get_stats(ticker: Optional[str] = None, limit: int = 200) -> dict:
 
 def get_observation_summary() -> dict:
     """Summary for the learning status API and live log."""
-    with _lock:
-        with _conn() as c:
-            row = c.execute("""
-                SELECT
-                  COUNT(*) as total,
-                  SUM(CASE WHEN outcome != 'PENDING' THEN 1 ELSE 0 END) as tp_sl_resolved,
-                  SUM(CASE WHEN short_outcome != 'PENDING' THEN 1 ELSE 0 END) as short_resolved,
-                  SUM(CASE WHEN outcome='WIN' OR short_outcome='WIN' THEN 1 ELSE 0 END) as wins
-                FROM signals
-                WHERE ts >= datetime('now', '-30 days')
-                  AND is_suppressed = 0
-            """).fetchone()
+    with _conn_ro() as c:
+        row = c.execute("""
+            SELECT
+              COUNT(*) as total,
+              SUM(CASE WHEN outcome != 'PENDING' THEN 1 ELSE 0 END) as tp_sl_resolved,
+              SUM(CASE WHEN short_outcome != 'PENDING' THEN 1 ELSE 0 END) as short_resolved,
+              SUM(CASE WHEN outcome='WIN' OR short_outcome='WIN' THEN 1 ELSE 0 END) as wins
+            FROM signals
+            WHERE ts >= datetime('now', '-30 days')
+              AND is_suppressed = 0
+        """).fetchone()
 
     total    = row["total"] or 0
     resolved = max(row["tp_sl_resolved"] or 0, row["short_resolved"] or 0)
@@ -443,14 +451,13 @@ def get_ticker_learning_scores(lookback_days: int = 30, min_count: int = 3) -> d
 
     Returns: { "NVDA": {"win_rate": 0.71, "count": 42}, ... }
     """
-    with _lock:
-        with _conn() as c:
-            rows = c.execute("""
-                SELECT ticker, outcome, short_outcome
-                FROM signals
-                WHERE ts >= datetime('now', ?)
-                  AND (outcome != 'PENDING' OR short_outcome != 'PENDING')
-            """, (f"-{lookback_days} days",)).fetchall()
+    with _conn_ro() as c:
+        rows = c.execute("""
+            SELECT ticker, outcome, short_outcome
+            FROM signals
+            WHERE ts >= datetime('now', ?)
+              AND (outcome != 'PENDING' OR short_outcome != 'PENDING')
+        """, (f"-{lookback_days} days",)).fetchall()
 
     from collections import defaultdict
     counts: dict = defaultdict(lambda: {"wins": 0, "total": 0})

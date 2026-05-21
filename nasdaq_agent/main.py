@@ -875,11 +875,15 @@ async def backtest_path(signal_id: str):
 async def learning_status():
     """Adaptive filter state — blocked contexts, dynamic threshold, win rate progress."""
     loop = asyncio.get_running_loop()
-    status = await loop.run_in_executor(None, af_get_status)
+    status, eng, obs = await asyncio.gather(
+        loop.run_in_executor(_pt_executor, af_get_status),
+        loop.run_in_executor(_pt_executor, learning_engine.get_status),
+        loop.run_in_executor(_pt_executor, get_observation_summary),
+    )
     return {
         **status,
-        "engine":       learning_engine.get_status(),
-        "observations": get_observation_summary(),
+        "engine":       eng,
+        "observations": obs,
     }
 
 

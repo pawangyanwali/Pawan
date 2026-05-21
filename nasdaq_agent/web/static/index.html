@@ -4260,10 +4260,12 @@ async function loadLearningLog() {
 
 async function loadLearningStatus() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/learning-status`)).json();
+    const r = await fetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(12000)});
+    const d = await r.json();
     renderLearningStatus(d);
   } catch(e) {
-    document.getElementById('learn-kpis').innerHTML = `<div style="color:var(--muted);font-size:11px">Error loading learning status: ${e.message}</div>`;
+    const msg = (e.name === 'TimeoutError' || e.name === 'AbortError') ? 'Request timed out — backend may be slow.' : (e.message || 'Unknown error');
+    document.getElementById('learn-kpis').innerHTML = `<div style="color:var(--muted);font-size:11px">⚠ ${msg}</div>`;
   }
 }
 
