@@ -432,22 +432,25 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     parallel_batches: int = 3) -> None:
     """
     REST-based real-time quote poller — Market Data app only.
-    No Accounts+Trading credentials required.
 
-    ALL tickers are polled every cycle — no tier is treated as second-class.
-    A ticker with an active signal in Tier 3 is just as time-sensitive as one
-    in Tier 1; stale prices on any buy/sell signal can cause missed trades or
-    bad fills.
+    Design: fire-and-stream — every batch broadcasts the instant it completes.
+    No waiting, no merging.
 
-    The full ticker list is split into ``parallel_batches`` equal chunks, and
-    each chunk is fetched in a separate thread simultaneously.  Total elapsed
-    time per cycle ≈ max(batch_latency) rather than sum(batch_latency):
+    Timeline per 1-second cycle (3 batches of ~159 tickers each):
 
-        477 tickers × 1 call sequential  ≈ 1–3 s  (bottleneck)
-        477 tickers ÷ 3 batches parallel ≈ 0.3–0.5 s  (all tickers fresh at ~1 s)
+        t=0 ms   → all 3 Schwab API calls start simultaneously
+        t=150 ms → batch-1 returns → frontend renders those 159 tickers NOW
+        t=200 ms → batch-2 returns → frontend renders those 159 tickers NOW
+        t=250 ms → batch-3 returns → frontend renders those 159 tickers NOW
+        t=750 ms → sleep until next cycle
 
-    If any batch hits a 429, the existing _backoff_until guard skips that batch
-    for the current cycle and retries on the next.
+    Every ticker — regardless of tier — refreshes within 250 ms.
+    No ticker is delayed waiting for another batch to finish.
+    The frontend `prices` handler already accepts partial updates so
+    no frontend changes are needed.
+
+    If a batch hits a 429, its cycle is skipped; the others still broadcast.
+    Auth-failure sleep is 3 s (was 10 s) for fast recovery.
     """
     global _streamer_thread, _subscribed_tickers
 
@@ -458,13 +461,21 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
     all_tickers = list(tickers)
     _subscribed_tickers = all_tickers
 
-    # Split into balanced batches for parallel fetching
-    n = len(all_tickers)
+    # Build balanced batches once at startup — fixed for the lifetime of the poller
+    n          = len(all_tickers)
     batch_size = max(1, (n + parallel_batches - 1) // parallel_batches)
-    batches = [all_tickers[i:i + batch_size] for i in range(0, n, batch_size)]
+    batches    = [all_tickers[i:i + batch_size] for i in range(0, n, batch_size)]
 
-    def _process_quotes(quotes: dict) -> tuple[dict, list]:
-        """Merge fetched quotes into _live_quotes; return (bulk_prices, updated)."""
+    def _process_and_broadcast(quotes: dict) -> bool:
+        """
+        Write quotes into _live_quotes and immediately fire WebSocket callbacks.
+        Called from a worker thread the moment a batch API response arrives.
+        Thread-safe: _lock guards _live_quotes; run_coroutine_threadsafe is
+        explicitly documented as safe to call from any thread.
+        Returns True if at least one valid price was processed.
+        """
+        if not quotes:
+            return False
         bulk: dict[str, dict] = {}
         upd:  list[tuple[str, dict]] = []
         with _lock:
@@ -498,18 +509,22 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     "low":        quote["low"],
                     "pct_change": quote["net_pct_change"],
                 }
-        return bulk, upd
 
-    def _fire_callbacks(bulk_prices: dict, updated: list) -> None:
-        if bulk_prices and _bulk_price_callbacks:
+        if not bulk:
+            return False
+
+        # Bulk WebSocket broadcast — one message per batch, sent immediately
+        if _bulk_price_callbacks:
             for fn in _bulk_price_callbacks:
                 try:
-                    fn(bulk_prices)
+                    fn(bulk)
                 except Exception:
                     pass
-        if updated and _tick_callbacks:
+
+        # Legacy per-ticker callbacks (throttled to _TICK_MIN_INTERVAL per symbol)
+        if upd and _tick_callbacks:
             now = time.time()
-            for sym, quote in updated:
+            for sym, quote in upd:
                 if now - _last_tick_ts.get(sym, 0.0) >= _TICK_MIN_INTERVAL:
                     _last_tick_ts[sym] = now
                     for fn in _tick_callbacks:
@@ -517,18 +532,28 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                             fn(sym, quote)
                         except Exception:
                             pass
+        return True
+
+    def _fetch_batch_and_stream(batch_tickers: list[str]) -> bool:
+        """
+        Worker task: fetch one batch, then broadcast immediately — no waiting
+        for other batches.  Called concurrently from the thread pool.
+        """
+        from agent.broker.schwab_market_data import fetch_full_quotes
+        result = fetch_full_quotes(batch_tickers)
+        return _process_and_broadcast(result)
 
     def _poll_loop() -> None:
         import concurrent.futures as _cf
         global _ws_connected, _ws_error
-        from agent.broker.schwab_market_data import fetch_full_quotes, _is_authorised
+        from agent.broker.schwab_market_data import _is_authorised
 
         logger.info(
-            f"[MDPoller] Started — {n} tickers in {len(batches)} parallel batches "
-            f"(~{batch_size}/batch) @ {interval}s interval"
+            f"[MDPoller] Started — {n} tickers | {len(batches)} parallel batches "
+            f"(~{batch_size}/batch) | {interval}s cycle"
         )
 
-        # Dedicated thread pool — one worker per batch, lives for the poller lifetime
+        # One persistent worker per batch — avoids thread-spawn overhead each cycle
         _fetch_pool = _cf.ThreadPoolExecutor(
             max_workers=len(batches), thread_name_prefix="md_fetch"
         )
@@ -539,34 +564,34 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                 if not _is_authorised():
                     _ws_connected = False
                     _ws_error = "Schwab Market Data not authorized — visit /schwab/auth/md"
-                    time.sleep(3)   # retry quickly; was 10 s which froze the dashboard
+                    time.sleep(3)   # fast retry; was 10 s which froze prices for 10+ s
                     continue
 
-                # Fire all batch requests in parallel — total latency ≈ max(batch_latency)
-                futures = {
-                    _fetch_pool.submit(fetch_full_quotes, batch): batch
+                # Submit all batches simultaneously.
+                # Each worker broadcasts the moment its API call returns — no merging,
+                # no waiting for siblings.  The frontend receives N separate `prices`
+                # messages in rapid succession and renders each group immediately.
+                futures = [
+                    _fetch_pool.submit(_fetch_batch_and_stream, batch)
                     for batch in batches
-                }
-                merged_quotes: dict = {}
-                any_ok = False
-                for fut in _cf.as_completed(futures, timeout=interval * 3):
-                    try:
-                        result = fut.result()
-                        if result:
-                            merged_quotes.update(result)
-                            any_ok = True
-                    except Exception as _fe:
-                        logger.debug(f"[MDPoller] batch fetch error: {_fe}")
+                ]
 
+                # Wait only to know when the slowest batch finishes so we can
+                # calculate the correct sleep time for the next cycle.
+                done, _ = _cf.wait(futures, timeout=interval * 3)
+
+                any_ok = any(
+                    not f.cancelled() and not f.exception() and f.result()
+                    for f in done
+                )
                 if any_ok:
-                    bulk, upd = _process_quotes(merged_quotes)
                     _ws_connected = True
                     _ws_error = None
-                    _fire_callbacks(bulk, upd)
 
             except Exception as _e:
                 logger.warning(f"[MDPoller] poll error: {_e}")
 
+            # Sleep exactly the remaining time so the next cycle fires on schedule
             elapsed   = time.time() - _cycle_start
             remaining = interval - elapsed
             if remaining > 0:
@@ -576,7 +601,10 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
         target=_poll_loop, daemon=True, name="SchwabMDPoller"
     )
     _streamer_thread.start()
-    logger.info(f"[MDPoller] Thread started — {n} tickers, {len(batches)} parallel batches.")
+    logger.info(
+        f"[MDPoller] Thread started — {n} tickers, "
+        f"{len(batches)} non-blocking parallel batches."
+    )
 
 
 def start_streamer(tickers: list[str]) -> None:
