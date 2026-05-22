@@ -1488,8 +1488,9 @@ async def ticker_clusters():
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
-_PING_INTERVAL = 20   # server sends a keepalive ping every N seconds
-_PING_TIMEOUT  = 10   # if we can't write the ping within N seconds → dead socket
+_PING_INTERVAL       = 20   # server sends a keepalive ping every N seconds
+_PING_TIMEOUT        = 10   # if we can't write the ping within N seconds → presumed busy
+_PING_RETRY_INTERVAL =  5   # after a timeout (event loop busy), retry after this many seconds
 
 
 async def _ws_keepalive(ws: WebSocket) -> None:
@@ -1515,7 +1516,11 @@ async def _ws_keepalive(ws: WebSocket) -> None:
                 timeout=float(_PING_TIMEOUT),
             )
         except asyncio.TimeoutError:
-            continue   # event loop was busy — skip this ping, retry next interval
+            # Event loop was briefly saturated (e.g. scanner broadcast storm).
+            # Sleep a SHORT interval so the next ping attempt arrives well within
+            # the browser's 45-second watchdog window rather than after the full
+            # 20-second PING_INTERVAL (which could miss the window).
+            await asyncio.sleep(_PING_RETRY_INTERVAL)
         except Exception:
             break      # socket gone — receive loop handles cleanup
 

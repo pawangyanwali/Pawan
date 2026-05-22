@@ -104,6 +104,23 @@ def init_db() -> None:
                 c.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
             except Exception:
                 pass   # column already exists (SQLite path)
+
+        # Repair columns that may have been created as NUMERIC(5,4) by an old
+        # schema migration — that type caps at 9.9999 and overflows for stock
+        # prices > $10 or confidence values stored as percentages (0-100).
+        # ALTER COLUMN to DOUBLE PRECISION is idempotent on already-correct types.
+        from agent.db import using_postgres
+        if using_postgres():
+            for _col in ["entry_price", "target", "stop", "confidence",
+                         "exit_price", "pnl_pct"]:
+                try:
+                    c.execute(
+                        f"ALTER TABLE signals ALTER COLUMN {_col} "
+                        f"TYPE DOUBLE PRECISION USING {_col}::double precision"
+                    )
+                except Exception:
+                    pass
+
         c.commit()
 
 

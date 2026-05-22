@@ -132,6 +132,20 @@ def init_db() -> None:
                 c.execute(f"ALTER TABLE bt_signals ADD COLUMN {col} {typedef}")
             except Exception:
                 pass
+
+        # Repair columns that may be NUMERIC(5,4) from an old schema migration.
+        from agent.db import using_postgres
+        if using_postgres():
+            for _col in ["entry_price", "target", "stop", "exit_price",
+                         "pnl_pct", "r_multiple", "max_favorable_r"]:
+                try:
+                    c.execute(
+                        f"ALTER TABLE bt_signals ALTER COLUMN {_col} "
+                        f"TYPE DOUBLE PRECISION USING {_col}::double precision"
+                    )
+                except Exception:
+                    pass
+
         c.commit()
 
 

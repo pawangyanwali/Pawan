@@ -1596,7 +1596,7 @@ let ws;
 let _wsWatchdog  = null;
 let _wsDeadTimer = null;
 const _WS_RECONNECT_MS  = 1000;   // always reconnect after 1 second
-const _WS_WATCHDOG_MS   = 45000;  // reconnect if no server message for 45s
+const _WS_WATCHDOG_MS   = 60000;  // reconnect if no server message for 60s
 const _WS_HEARTBEAT_MS  = 20000;  // send heartbeat to server every 20s
 
 function _wsSend(obj) {

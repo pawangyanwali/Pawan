@@ -123,6 +123,20 @@ def _migrate_columns(c) -> None:
             except Exception:
                 pass
 
+    # Repair columns that may have been stored as NUMERIC(5,4) by an old schema
+    # migration (max 9.9999 — overflows for prices > $10 or confidence 0-100).
+    if using_postgres():
+        for _col in ["entry_price", "target", "stop", "exit_price",
+                     "pnl_pct", "pnl_dollar", "rr_ratio",
+                     "t1_price", "t2_price", "partial_pnl_dollar", "size_mult"]:
+            try:
+                c.execute(
+                    f"ALTER TABLE paper_trades ALTER COLUMN {_col} "
+                    f"TYPE DOUBLE PRECISION USING {_col}::double precision"
+                )
+            except Exception:
+                pass
+
 
 def _get_min_confidence() -> float:
     """

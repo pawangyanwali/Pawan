@@ -633,8 +633,9 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             max_workers=max(16, len(batches) * 4), thread_name_prefix="md_fetch"
         )
 
-        cycle       = 0
-        auth_misses = 0
+        cycle            = 0
+        auth_misses      = 0
+        consecutive_miss = 0   # consecutive all-empty cycles (rate-limit indicator)
         while True:
             _cycle_start = time.time()
             try:
@@ -677,9 +678,16 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     _ws_error = None
                     _mdpoller_error = None
                     _mdpoller_last_ok = time.time()
+                    consecutive_miss = 0
                 else:
-                    logger.warning(f"[MDPoller] Cycle {cycle}: all {len(batches)} batches returned empty")
-                    _mdpoller_error = f"Cycle {cycle}: all batches empty"
+                    consecutive_miss += 1
+                    # Only log every 10 misses (once per ~backoff window) to avoid spam
+                    if consecutive_miss == 1 or consecutive_miss % 10 == 0:
+                        logger.warning(
+                            f"[MDPoller] Cycle {cycle}: all {len(batches)} batches empty "
+                            f"({consecutive_miss} consecutive — rate-limited)"
+                        )
+                    _mdpoller_error = f"rate-limited ({consecutive_miss} consecutive empty cycles)"
 
                 if pending:
                     logger.warning(f"[MDPoller] Cycle {cycle}: {len(pending)} batch(es) timed out")
@@ -695,12 +703,25 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             except Exception as _e:
                 logger.warning(f"[MDPoller] poll error (cycle {cycle}): {_e}")
                 _mdpoller_error = str(_e)
+                consecutive_miss += 1
 
             _mdpoller_cycle = cycle
             cycle += 1
-            # Sleep exactly the remaining time so the next cycle fires on schedule
+
+            # Adaptive sleep: back off when rate-limited so we stop hammering the
+            # same bucket and give the scanner's OHLCV fetches room to complete.
+            # Normal: 1 s   |  1–2 misses: 3 s   |  3–9 misses: 8 s   |  10+ misses: 15 s
+            if consecutive_miss == 0:
+                back_off = interval
+            elif consecutive_miss <= 2:
+                back_off = 3.0
+            elif consecutive_miss < 10:
+                back_off = 8.0
+            else:
+                back_off = 15.0
+
             elapsed   = time.time() - _cycle_start
-            remaining = interval - elapsed
+            remaining = back_off - elapsed
             if remaining > 0:
                 time.sleep(remaining)
 
