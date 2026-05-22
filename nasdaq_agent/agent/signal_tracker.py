@@ -80,6 +80,7 @@ def init_db() -> None:
         # On PostgreSQL these become ADD COLUMN IF NOT EXISTS (never fails).
         for col, typedef in [
             # Core columns (may be absent in old migrated schemas)
+            ("ts",            "TEXT DEFAULT ''"),
             ("entry_price",   "REAL"),
             ("target",        "REAL"),
             ("stop",          "REAL"),
