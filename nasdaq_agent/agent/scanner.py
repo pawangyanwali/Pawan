@@ -223,6 +223,10 @@ class StockSignal:
     orb_high:       float = 0.0   # Opening range breakout high (first 30-min)
     orb_low:        float = 0.0   # Opening range breakout low (first 30-min)
     orb_breakout:   str   = ""    # "BULL" | "BEAR" | "" — if price broke ORB
+    orb5_high:      float = 0.0   # ORB-5 high (first 5-min, 9:30–9:35)
+    orb5_low:       float = 0.0   # ORB-5 low (first 5-min, 9:30–9:35)
+    orb5_breakout:  str   = ""    # "BULL" | "BEAR" | "NONE"
+    orb5_score:     float = 0.0   # [-1, +1] directional score from ORB-5
     orb15_high:     float = 0.0   # ORB-15 high (first 15-min)
     orb15_low:      float = 0.0   # ORB-15 low (first 15-min)
     orb15_breakout: str   = ""    # "BULL" | "BEAR" | "NONE"
@@ -593,8 +597,10 @@ def analyse_ticker(
         )
 
         # Blend ORB signal into composite score (15% weight when OR is established)
-        _orb_signal = (orb_result.or15_score + orb_result.or30_score) / 2
-        _orb_weight = 0.15 if (orb_result.orh_15 > 0 or orb_result.orh_30 > 0) else 0.0
+        # Average whichever ORB levels have formed (weight 5m most since it's fastest)
+        _orb_scores = [s for s in [orb_result.or5_score, orb_result.or15_score, orb_result.or30_score] if s != 0.0]
+        _orb_signal = float(np.mean(_orb_scores)) if _orb_scores else 0.0
+        _orb_weight = 0.15 if (orb_result.orh_5 > 0 or orb_result.orh_15 > 0 or orb_result.orh_30 > 0) else 0.0
         _pred_comp  = float(np.clip(pred["composite_score"], -1, 1))
         _blended    = _pred_comp * (1.0 - _orb_weight) + _orb_signal * _orb_weight
 
@@ -1011,7 +1017,12 @@ def analyse_ticker(
             orb_high          = levels["orb_high"],
             orb_low           = levels["orb_low"],
             orb_breakout      = levels["orb_breakout"],
-            # ORB-15 (more precise opening range)
+            # ORB-5 (first 5-min opening range 9:30–9:35)
+            orb5_high         = orb_result.orh_5,
+            orb5_low          = orb_result.orl_5,
+            orb5_breakout     = orb_result.breakout_5,
+            orb5_score        = orb_result.or5_score,
+            # ORB-15 (first 15-min opening range)
             orb15_high        = orb_result.orh_15,
             orb15_low         = orb_result.orl_15,
             orb15_breakout    = orb_result.breakout_15,

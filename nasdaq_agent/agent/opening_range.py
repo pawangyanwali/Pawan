@@ -48,6 +48,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+_OR5_END  = ("09:30", "09:35")   # 5-min opening range
 _OR15_END = ("09:30", "09:45")   # 15-min opening range
 _OR30_END = ("09:30", "10:00")   # 30-min opening range
 
@@ -60,6 +61,12 @@ _INSIDE_BEAR    = -0.20   # inside OR but biased toward ORL
 
 @dataclass
 class OpeningRangeResult:
+    orh_5:            float = 0.0
+    orl_5:            float = 0.0
+    or_width_5_pct:   float = 0.0
+    position_vs_or5:  str   = "UNKNOWN"
+    breakout_5:       str   = "NONE"
+    or5_score:        float = 0.0
     orh_15:           float = 0.0
     orl_15:           float = 0.0
     orh_30:           float = 0.0
@@ -165,6 +172,20 @@ def compute_opening_range(df: pd.DataFrame) -> OpeningRangeResult:
 
         price = float(today_df["Close"].iloc[-1])
 
+        # ── ORB-5 ─────────────────────────────────────────────────────────────
+        or5 = _extract_or_bars(today_df, _OR5_END[0], _OR5_END[1])
+        if not or5.empty:
+            result.orh_5 = round(float(or5["High"].max()), 4)
+            result.orl_5 = round(float(or5["Low"].min()),  4)
+            mid_5 = (result.orh_5 + result.orl_5) / 2
+            result.or_width_5_pct = round(
+                (result.orh_5 - result.orl_5) / mid_5 * 100, 3
+            ) if mid_5 > 0 else 0.0
+            pos5, bo5, s5 = _or_score(price, result.orh_5, result.orl_5)
+            result.position_vs_or5 = pos5
+            result.breakout_5      = bo5
+            result.or5_score       = round(s5, 3)
+
         # ── ORB-15 ────────────────────────────────────────────────────────────
         or15 = _extract_or_bars(today_df, _OR15_END[0], _OR15_END[1])
         if not or15.empty:
@@ -195,6 +216,13 @@ def compute_opening_range(df: pd.DataFrame) -> OpeningRangeResult:
 
         # ── Human-readable description ────────────────────────────────────────
         desc_parts = []
+        if result.orh_5 > 0:
+            desc_parts.append(
+                f"ORB-5: ${result.orl_5:.2f}–${result.orh_5:.2f} "
+                f"({result.or_width_5_pct:.2f}%) — "
+                f"price {result.position_vs_or5.lower()}"
+                + (f" [{result.breakout_5}]" if result.breakout_5 != "NONE" else "")
+            )
         if result.orh_15 > 0:
             desc_parts.append(
                 f"ORB-15: ${result.orl_15:.2f}–${result.orh_15:.2f} "
@@ -210,7 +238,7 @@ def compute_opening_range(df: pd.DataFrame) -> OpeningRangeResult:
                 + (f" [{result.breakout_30}]" if result.breakout_30 != "NONE" else "")
             )
         if not desc_parts:
-            desc_parts = ["Opening range not yet established (pre-9:45 ET)"]
+            desc_parts = ["Opening range not yet established (pre-9:35 ET)"]
 
         result.description = " | ".join(desc_parts)
 
