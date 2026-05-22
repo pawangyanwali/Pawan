@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -23,7 +24,9 @@ logger = logging.getLogger(__name__)
 TRADER_BASE = "https://api.schwabapi.com/trader/v1"
 
 _cached_account_hash: str = ""   # populated on first successful /accounts call
-_hash_discovery_failed: bool = False  # set True after permanent failure; stops retrying
+_hash_discovery_failed: bool = False  # set True after failure; cleared after _HASH_RETRY_INTERVAL
+_hash_last_attempt: float = 0.0       # epoch seconds of last failed attempt
+_HASH_RETRY_INTERVAL = 300            # retry every 5 minutes
 
 
 def _account_number() -> str:
@@ -42,14 +45,17 @@ def _get_account_hash() -> str:
       2. GET /accounts                 (full account list — hashValue embedded)
     Results are cached for the session.  Raises RuntimeError if both fail.
     """
-    global _cached_account_hash, _hash_discovery_failed
+    global _cached_account_hash, _hash_discovery_failed, _hash_last_attempt
     if _cached_account_hash:
         return _cached_account_hash
     if _hash_discovery_failed:
-        raise RuntimeError(
-            "Account hash unavailable — Schwab account endpoints returned 400. "
-            "Verify SCHWAB_ACCOUNT_NUMBER and that your Accounts+Trading app is approved."
-        )
+        if time.time() - _hash_last_attempt < _HASH_RETRY_INTERVAL:
+            raise RuntimeError(
+                "Schwab account endpoints unavailable (retrying every 5 min). "
+                "App may still be pending approval in Schwab developer portal."
+            )
+        # Back-off expired — try again
+        _hash_discovery_failed = False
 
     configured = os.getenv("SCHWAB_ACCOUNT_NUMBER", "").strip()
 
@@ -71,6 +77,8 @@ def _get_account_hash() -> str:
                 return h
         return None
 
+    _hash_last_attempt = time.time()
+
     # ── Attempt 1: /accounts/accountNumbers ──────────────────────────────────
     try:
         data = _get_raw("/accounts/accountNumbers")
@@ -87,9 +95,9 @@ def _get_account_hash() -> str:
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             pass
-        logger.warning(f"[Schwab] /accounts/accountNumbers returned {e.code}: {body}")
+        logger.debug(f"[Schwab] /accounts/accountNumbers returned {e.code}: {body}")
     except Exception as e:
-        logger.warning(f"[Schwab] /accounts/accountNumbers error: {e}")
+        logger.debug(f"[Schwab] /accounts/accountNumbers error: {e}")
 
     # ── Attempt 2: GET /accounts (returns full account objects) ─────────────
     try:
@@ -107,14 +115,14 @@ def _get_account_hash() -> str:
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             pass
-        logger.warning(f"[Schwab] /accounts returned {e.code}: {body}")
+        logger.debug(f"[Schwab] /accounts returned {e.code}: {body}")
     except Exception as e:
-        logger.warning(f"[Schwab] /accounts error: {e}")
+        logger.debug(f"[Schwab] /accounts error: {e}")
 
     _hash_discovery_failed = True
     raise RuntimeError(
-        "Could not discover Schwab account hash from /accounts/accountNumbers or /accounts. "
-        "Check SCHWAB_ACCOUNT_NUMBER and that the Accounts+Trading app is approved."
+        "Schwab account API unavailable (pending app approval or temporary outage). "
+        "Will retry in 5 minutes."
     )
 
 
