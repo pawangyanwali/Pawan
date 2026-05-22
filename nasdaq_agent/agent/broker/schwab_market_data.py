@@ -252,6 +252,40 @@ def _run_async(coro, timeout: float = 60.0):
 # Async background-task rate state (plain globals — asyncio is single-threaded).
 _aio_bg_last: float = 0.0
 
+# ── Async token-bucket rate limiter ──────────────────────────────────────────
+# Enforces a global minimum gap between /pricehistory requests so we never
+# exceed ~15 req/s (67ms gap) under burst conditions.  This is the proactive
+# throttle that was described in the docstring but never implemented.
+#
+# Using a Lock + timestamp rather than a semaphore so the rate applies across
+# ALL concurrent _one() tasks, not just per-slot.  This prevents the startup
+# burst where 250 tasks queue up and fire as fast as the semaphore releases.
+_aio_rate_lock: "asyncio.Lock | None" = None   # created lazily (loop-bound)
+_aio_rate_last: float = 0.0
+_AIO_RATE_GAP: float  = 0.067   # 67ms → ≤15 req/s  (leaves headroom vs 120/min cap)
+
+
+def _get_aio_rate_lock() -> "asyncio.Lock":
+    global _aio_rate_lock
+    if _aio_rate_lock is None:
+        _aio_rate_lock = asyncio.Lock()
+    return _aio_rate_lock
+
+
+async def _aio_rate_wait() -> None:
+    """
+    Token-bucket gate for async /pricehistory calls.
+    Serialises the rate-limit check so only one task updates _aio_rate_last at
+    a time; others queue behind the lock and naturally space out their starts.
+    """
+    global _aio_rate_last
+    async with _get_aio_rate_lock():
+        now = time.monotonic()
+        next_ok = _aio_rate_last + _AIO_RATE_GAP
+        if now < next_ok:
+            await asyncio.sleep(next_ok - now)
+        _aio_rate_last = time.monotonic()
+
 
 async def _aio_maybe_backoff() -> None:
     """If a 429 back-off window is active, sleep until it expires."""
@@ -397,9 +431,10 @@ async def _fetch_batch_async_coro(
     background:     bool,
 ) -> dict[str, pd.DataFrame]:
     """
-    Async batch fetch using aiohttp.  All HTTP requests run concurrently;
-    the async token bucket (_aio_rate_wait) enforces ≤10 req/s (adaptive 429
-    backoff to 1.5 req/s minimum); background tasks capped at 1 req/s.
+    Async batch fetch using aiohttp.  Requests are paced by _aio_rate_wait()
+    (≤15 req/s token bucket) then limited to 5 in-flight via the semaphore.
+    429 back-off is applied on top.  Background tasks use a separate 1 req/s
+    throttle so they never starve live scans.
     """
     if not _is_authorised() or not tickers:
         return {}
@@ -411,11 +446,12 @@ async def _fetch_batch_async_coro(
     sem      = asyncio.Semaphore(5)    # 5 concurrent /pricehistory calls; MD poller uses 2 more → stays under 120/min
 
     async def _one(session: "aiohttp.ClientSession", ticker: str) -> None:
+        if background:
+            await _aio_bg_wait()        # retrain tasks: 1 req/s throttle
+        else:
+            await _aio_rate_wait()      # live scans: ≤15 req/s token bucket
+            await _aio_maybe_backoff()  # honour any active 429 back-off on top
         async with sem:
-            if background:
-                await _aio_bg_wait()      # throttle retrain tasks to 1 req/s
-            else:
-                await _aio_maybe_backoff()  # honour any active 429 back-off, else fire immediately
             try:
                 token = _md_app.get_access_token()
                 headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
