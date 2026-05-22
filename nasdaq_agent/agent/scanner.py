@@ -73,7 +73,7 @@ from agent.adaptive_filter import (
 )
 from agent.ensemble_model import get_meta_prediction
 from agent.deep_model import predict_deep
-from agent.risk_controls import check_circuit_breaker, check_sector_concentration
+from agent.risk_controls import check_circuit_breaker, check_sector_concentration, update_volatility_state
 from agent.order_flow import compute_order_flow, get_signal_strength
 from agent.after_hours_monitor import (
     init_db as ah_init_db,
@@ -281,6 +281,8 @@ class StockSignal:
     vwap_deviation:   float = 0.0
     vwap_description: str   = ""
     vwap_z_score:     float = 0.0    # z-score: (price - VWAP) / VWAP_std
+    vwap_upper_1:     float = 0.0    # VWAP +1σ band
+    vwap_lower_1:     float = 0.0    # VWAP −1σ band
     vwap_upper_2:     float = 0.0    # VWAP +2σ band
     vwap_lower_2:     float = 0.0    # VWAP −2σ band
 
@@ -975,6 +977,17 @@ def analyse_ticker(
         # Flag pattern detection (Algos 29 & 30)
         _flag = detect_flag(df_ind)
 
+        # Update volatility state for Phase 2.3 risk control (ATR spike detection)
+        try:
+            if levels["session_high"] > 0 and levels["session_low"] > 0 and len(df_1d) >= 5:
+                _sess_range_pct = (levels["session_high"] - levels["session_low"]) / levels["session_low"] * 100
+                _daily_ranges = (df_1d["High"] - df_1d["Low"]).iloc[-20:]
+                _avg_atr_abs  = float(_daily_ranges.mean()) if len(_daily_ranges) > 0 else 0.0
+                _avg_atr_pct  = (_avg_atr_abs / float(df_1d["Close"].iloc[-1]) * 100) if float(df_1d["Close"].iloc[-1]) > 0 else 0.0
+                update_volatility_state(_sess_range_pct, _avg_atr_pct)
+        except Exception:
+            pass
+
         _sig = StockSignal(
             ticker            = ticker,
             name              = info.get("name", ticker),
@@ -1117,6 +1130,8 @@ def analyse_ticker(
             vwap_deviation    = float(vwap_sig["deviation"]),
             vwap_description  = vwap_sig["description"],
             vwap_z_score      = float(vwap_sig.get("z_score",  0.0)),
+            vwap_upper_1      = float(vwap_sig.get("upper_1",  0.0)),
+            vwap_lower_1      = float(vwap_sig.get("lower_1",  0.0)),
             vwap_upper_2      = float(vwap_sig.get("upper_2",  0.0)),
             vwap_lower_2      = float(vwap_sig.get("lower_2",  0.0)),
             # Sector

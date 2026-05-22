@@ -36,6 +36,10 @@ from config import (
     PROFIT_PROTECT_SIZE_MULT,
     PROFIT_PROTECT_DRAWDOWN,
     IS_PAPER_TRADING,
+    MAX_DAILY_TRADES,
+    VOLATILITY_HALT_ATR_MULT,
+    DRAWDOWN_THROTTLE_1_PCT,
+    DRAWDOWN_THROTTLE_2_PCT,
 )
 
 _lock = threading.Lock()
@@ -50,21 +54,30 @@ _cooldown_until:      float = 0.0    # epoch — blocked until this time
 _consecutive_losses:  int   = 0
 _peak_daily_pnl:      float = 0.0    # tracks day's peak to measure drawdown in PPM
 
+# ── Phase 2 state ─────────────────────────────────────────────────────────────
+_volatility_halted:   bool  = False  # 2.3 — set True when ATR spike detected
+_volatility_reason:   str   = ""
+_volatility_atr_ratio: float = 0.0  # current session_range / avg_atr
+
 
 def _reset_if_new_day() -> None:
     global _circuit_open, _circuit_reason, _circuit_date, _circuit_pnl_based
     global _warning_issued, _cooldown_until, _consecutive_losses, _peak_daily_pnl
+    global _volatility_halted, _volatility_reason, _volatility_atr_ratio
     today = date.today()
     with _lock:
         if _circuit_date != today:
-            _circuit_open        = False
-            _circuit_reason      = ""
-            _circuit_date        = today
-            _circuit_pnl_based   = False
-            _warning_issued      = False
-            _cooldown_until      = 0.0
-            _consecutive_losses  = 0
-            _peak_daily_pnl      = 0.0
+            _circuit_open          = False
+            _circuit_reason        = ""
+            _circuit_date          = today
+            _circuit_pnl_based     = False
+            _warning_issued        = False
+            _cooldown_until        = 0.0
+            _consecutive_losses    = 0
+            _peak_daily_pnl        = 0.0
+            _volatility_halted     = False
+            _volatility_reason     = ""
+            _volatility_atr_ratio  = 0.0
 
 
 # ── Sector map ────────────────────────────────────────────────────────────────
@@ -419,6 +432,101 @@ def check_session_block(trading_tier: str = "REGULAR") -> tuple[bool, str, float
     return False, "", 1.0
 
 
+# ── 2.3 Volatility halt ──────────────────────────────────────────────────────
+
+def update_volatility_state(session_range_pct: float, avg_atr_pct: float) -> None:
+    """
+    Called by the scanner after each market cycle with:
+      session_range_pct : (session_high - session_low) / session_low * 100
+      avg_atr_pct       : average True Range of the past 20 days as % of price
+
+    Sets _volatility_halted when session range exceeds VOLATILITY_HALT_ATR_MULT × avg ATR.
+    """
+    global _volatility_halted, _volatility_reason, _volatility_atr_ratio
+    _reset_if_new_day()
+    if avg_atr_pct <= 0:
+        return
+    ratio = session_range_pct / avg_atr_pct
+    with _lock:
+        _volatility_atr_ratio = round(ratio, 2)
+        if ratio >= VOLATILITY_HALT_ATR_MULT:
+            _volatility_halted = True
+            _volatility_reason = (
+                f"Volatility halt: session range {session_range_pct:.2f}% is "
+                f"{ratio:.1f}× the 20-day ATR ({avg_atr_pct:.2f}%). "
+                f"Scalp entries suppressed."
+            )
+        else:
+            _volatility_halted = False
+            _volatility_reason = ""
+
+
+def check_volatility_halt() -> tuple[bool, str]:
+    """Returns (halted, reason). Only halts scalp-tier entries, not swing/daily."""
+    _reset_if_new_day()
+    with _lock:
+        return _volatility_halted, _volatility_reason
+
+
+# ── 2.4 Max trades per day ────────────────────────────────────────────────────
+
+def check_max_daily_trades() -> tuple[bool, str]:
+    """Returns (blocked, reason) when total closed+open trades today >= MAX_DAILY_TRADES."""
+    try:
+        from agent.paper_trading import get_today_pnl
+        today_stats = get_today_pnl()
+        total_today = int(today_stats.get("total", 0) or 0)
+        if total_today >= MAX_DAILY_TRADES:
+            reason = (
+                f"Max daily trades reached: {total_today}/{MAX_DAILY_TRADES}. "
+                "No new entries until tomorrow."
+            )
+            logger.info(f"[RiskControls] {reason}")
+            return True, reason
+    except Exception as e:
+        logger.debug(f"[RiskControls] max_daily_trades check error: {e}")
+    return False, ""
+
+
+# ── 2.6 Drawdown throttle ────────────────────────────────────────────────────
+
+def get_drawdown_throttle() -> dict:
+    """
+    Progressive size reduction based on intraday P&L drawdown from session open.
+
+    Thresholds (% of account):
+      0.5% drawdown → reduce size to 50%
+      1.0% drawdown → reduce size to 25%
+      Otherwise     → no throttle (1.0×)
+
+    Only applies when P&L is currently negative (losing day).
+    """
+    try:
+        from agent.paper_trading import get_today_pnl
+        today = get_today_pnl()
+        pnl_dollar = float(today.get("total_pnl_dollar", 0) or 0)
+        if pnl_dollar >= 0 or DEFAULT_ACCOUNT_SIZE <= 0:
+            return {"active": False, "size_mult": 1.0, "drawdown_pct": 0.0, "tier": "NONE"}
+        drawdown_pct = abs(pnl_dollar) / DEFAULT_ACCOUNT_SIZE * 100
+        if drawdown_pct >= DRAWDOWN_THROTTLE_2_PCT:
+            return {
+                "active": True, "size_mult": 0.25,
+                "drawdown_pct": round(drawdown_pct, 3),
+                "tier": "SEVERE",
+                "description": f"Drawdown {drawdown_pct:.2f}% — size reduced to 25%",
+            }
+        if drawdown_pct >= DRAWDOWN_THROTTLE_1_PCT:
+            return {
+                "active": True, "size_mult": 0.50,
+                "drawdown_pct": round(drawdown_pct, 3),
+                "tier": "MODERATE",
+                "description": f"Drawdown {drawdown_pct:.2f}% — size reduced to 50%",
+            }
+    except Exception as e:
+        logger.debug(f"[RiskControls] drawdown_throttle error: {e}")
+    return {"active": False, "size_mult": 1.0, "drawdown_pct": 0.0, "tier": "NONE"}
+
+
 # ── Master entry gate ─────────────────────────────────────────────────────────
 
 def can_open_trade(
@@ -433,11 +541,13 @@ def can_open_trade(
 
     Check order:
       1. Session block (market closed / hard-close window only)
-         — HIGH-tier AFTER_HOURS trades pass with 50% size cap
       2. Circuit breaker (daily loss / profit ceiling)
-      3. Profit Protect Mode (adjusts confidence threshold and size)
-      4. Portfolio heat / concurrent count
-      5. Sector concentration
+      3. Max daily trades (2.4)
+      4. Profit Protect Mode (adjusts confidence and size)
+      5. Portfolio heat / concurrent count
+      6. Sector concentration
+      7. Volatility halt (2.3) — size only, does not block
+      8. Drawdown throttle (2.6) — size only, does not block
     """
     # 1. Session
     blocked, reason, ah_size = check_session_block(trading_tier)
@@ -451,7 +561,12 @@ def can_open_trade(
     if blocked:
         return False, reason, 0.0
 
-    # 3. Profit Protect Mode
+    # 3. Max daily trades (Phase 2.4)
+    blocked, reason = check_max_daily_trades()
+    if blocked:
+        return False, reason, 0.0
+
+    # 4. Profit Protect Mode
     ppm = get_profit_protect_state()
     size_mult = ppm["size_mult"]   # 0.60 in PPM, 1.0 otherwise
     if ppm["active"] and confidence < ppm["min_conf"]:
@@ -460,12 +575,12 @@ def can_open_trade(
             f"{ppm['min_conf']:.0f}%. Signal skipped to protect ${ppm['pnl_today']:,.0f} gain."
         ), 0.0
 
-    # 4. Portfolio heat / concurrent count
+    # 5. Portfolio heat / concurrent count
     blocked, reason = check_portfolio_heat()
     if blocked:
         return False, reason, 0.0
 
-    # 5. Sector concentration
+    # 6. Sector concentration
     norm_dir = "BUY" if "BUY" in direction else "SELL" if "SELL" in direction else direction
     blocked, reason = check_sector_concentration(ticker, norm_dir)
     if blocked:
@@ -483,7 +598,17 @@ def can_open_trade(
         sess_size = position_size_multiplier()
         final_size = round(size_mult * sess_size, 2) if sess_size > 0 else size_mult
 
-    return True, "", final_size
+    # 7. Volatility throttle (2.3) — reduce size during ATR spikes, don't block
+    vhalt, _ = check_volatility_halt()
+    if vhalt:
+        final_size = round(final_size * 0.50, 2)
+
+    # 8. Drawdown throttle (2.6) — progressive size reduction on losing days
+    dthrottle = get_drawdown_throttle()
+    if dthrottle["active"]:
+        final_size = round(final_size * dthrottle["size_mult"], 2)
+
+    return True, "", max(final_size, 0.10)   # minimum 10% so trades still fire
 
 
 # ── Public status for dashboard ───────────────────────────────────────────────
@@ -496,10 +621,16 @@ def get_risk_status() -> dict:
     heat = get_portfolio_heat()
 
     with _lock:
-        circuit_open   = _circuit_open
-        circuit_reason = _circuit_reason
-        consec         = _consecutive_losses
-        cooldown_secs  = max(0, int(_cooldown_until - _time.time())) if _cooldown_until > 0 else 0
+        circuit_open      = _circuit_open
+        circuit_reason    = _circuit_reason
+        consec            = _consecutive_losses
+        cooldown_secs     = max(0, int(_cooldown_until - _time.time())) if _cooldown_until > 0 else 0
+        vol_halted        = _volatility_halted
+        vol_reason        = _volatility_reason
+        vol_atr_ratio     = _volatility_atr_ratio
+
+    dthrottle  = get_drawdown_throttle()
+    daily_cnt  = _get_trade_count()
 
     return {
         # Circuit breaker
@@ -518,11 +649,21 @@ def get_risk_status() -> dict:
         "consecutive_losses":     consec,
         "max_consecutive":        MAX_CONSECUTIVE_LOSSES,
         "cooldown_remaining_s":   cooldown_secs,
+        # Phase 2.3: Volatility halt
+        "volatility_halted":      vol_halted,
+        "volatility_reason":      vol_reason,
+        "volatility_atr_ratio":   round(vol_atr_ratio, 2),
+        "volatility_halt_mult":   VOLATILITY_HALT_ATR_MULT,
+        # Phase 2.4: Max daily trades
+        "daily_trade_count":      daily_cnt,
+        "max_daily_trades":       MAX_DAILY_TRADES,
+        # Phase 2.6: Drawdown throttle
+        "drawdown_throttle":      dthrottle,
         # Profit Protect Mode
         "profit_protect":         ppm,
         # Portfolio heat
         "portfolio_heat":         heat,
         # Session
         "session_blocked":        check_session_block()[0],
-        "session_block_reason":   check_session_block()[1],   # [2] is ah_size, not needed here
+        "session_block_reason":   check_session_block()[1],
     }

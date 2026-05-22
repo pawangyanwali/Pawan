@@ -213,6 +213,11 @@ COOLDOWN_AFTER_LOSSES    = int(os.getenv(  "COOLDOWN_LOSSES",            "3"))
 PROFIT_PROTECT_MIN_CONF  = float(os.getenv("PROFIT_PROTECT_CONF",        "80.0"))
 PROFIT_PROTECT_SIZE_MULT = float(os.getenv("PROFIT_PROTECT_SIZE",        "0.60"))
 PROFIT_PROTECT_DRAWDOWN  = float(os.getenv("PROFIT_PROTECT_DRAWDOWN",    "300"))
+# Phase 2 risk controls
+MAX_DAILY_TRADES         = int(os.getenv(  "MAX_DAILY_TRADES",           "30"))   # 2.4 — total trades per day
+VOLATILITY_HALT_ATR_MULT = float(os.getenv("VOLATILITY_HALT_ATR_MULT",  "2.5"))  # 2.3 — halt when range > N×ATR
+DRAWDOWN_THROTTLE_1_PCT  = float(os.getenv("DRAWDOWN_THROTTLE_1_PCT",   "0.5"))  # 2.6 — 50% size at 0.5% drawdown
+DRAWDOWN_THROTTLE_2_PCT  = float(os.getenv("DRAWDOWN_THROTTLE_2_PCT",   "1.0"))  # 2.6 — 25% size at 1.0% drawdown
 
 # Set IS_PAPER_TRADING=false in .env when ready to switch to live order execution.
 # While True, consecutive-loss cooldowns and circuit breakers are disabled so
