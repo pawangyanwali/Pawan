@@ -167,6 +167,19 @@ DEFAULT_ACCOUNT_SIZE = float(os.getenv("TRADING_ACCOUNT_SIZE",  "50000"))
 DEFAULT_RISK_PCT     = float(os.getenv("TRADING_RISK_PCT",      "1.5"))
 MAX_POSITION_PCT     = float(os.getenv("TRADING_MAX_POSITION_PCT", "10.0"))
 
+# ── Paper trading budget & capital management ─────────────────────────────────
+# Total capital pool for paper trading — every open position draws from this.
+# Available in .env: PAPER_BUDGET=50000
+PAPER_BUDGET             = float(os.getenv("PAPER_BUDGET",           str(DEFAULT_ACCOUNT_SIZE)))
+# Max % of budget a single trade can consume as position value (entry × shares)
+# e.g. 5% of $50k = $2,500 max per trade
+PAPER_MAX_TRADE_PCT      = float(os.getenv("PAPER_MAX_TRADE_PCT",    "5.0"))
+# Max % of budget in open positions simultaneously
+# e.g. 40% of $50k = $20,000 max allocated at once
+PAPER_MAX_ALLOCATED_PCT  = float(os.getenv("PAPER_MAX_ALLOCATED_PCT","40.0"))
+# Hard ceiling on concurrent open paper trades (overrides the 20 in paper_trading.py)
+PAPER_MAX_OPEN_TRADES    = int(os.getenv(  "PAPER_MAX_OPEN_TRADES",  "10"))
+
 # ── Alpha Strike Trader — PRD risk parameters ─────────────────────────────────
 # All configurable via .env — no code changes needed.
 #

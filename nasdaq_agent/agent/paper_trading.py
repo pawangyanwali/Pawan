@@ -29,7 +29,10 @@ _PAPER_MIN_CONF          = 25.0  # floor confidence for paper trade data collect
 _FALLBACK_MIN_CONFIDENCE = 25.0  # used if adaptive filter is unavailable
 _MAX_BARS_HELD_SCALP     = 20   # 20-min hard close for scalps (PRD 6.3)
 _MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
-_MAX_CONCURRENT_TRADES   = 20   # Paper sim: high cap so every signal gets a trade and generates learning data
+# Loaded from config at runtime so .env changes take effect without code edits
+def _max_concurrent() -> int:
+    from config import PAPER_MAX_OPEN_TRADES
+    return PAPER_MAX_OPEN_TRADES
 
 
 def _conn():
@@ -95,6 +98,30 @@ def init_db() -> None:
                 size_mult           REAL    DEFAULT 1.0
             )
         """)
+        # Account configuration table — stores budget and capital settings
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS account_config (
+                id                   INTEGER PRIMARY KEY,
+                total_budget         REAL    DEFAULT 50000,
+                max_trade_pct        REAL    DEFAULT 5.0,
+                max_allocated_pct    REAL    DEFAULT 40.0,
+                max_open_trades      INTEGER DEFAULT 10,
+                updated_at           TEXT
+            )
+        """)
+        # Balance snapshots — one row per trading day for equity curve
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS balance_snapshots (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date   TEXT    NOT NULL UNIQUE,
+                closing_equity  REAL    NOT NULL,
+                daily_pnl       REAL    DEFAULT 0,
+                trade_count     INTEGER DEFAULT 0,
+                wins            INTEGER DEFAULT 0,
+                losses          INTEGER DEFAULT 0,
+                starting_equity REAL    DEFAULT 0
+            )
+        """)
         # Safe migration: add any missing columns to existing DBs
         _migrate_columns(c)
         c.commit()
@@ -133,6 +160,7 @@ def _migrate_columns(c) -> None:
         ("shares_remaining",   "INTEGER DEFAULT 0"),
         ("order_flow_score",   "REAL DEFAULT 0"),
         ("size_mult",          "REAL DEFAULT 1.0"),
+        ("cost_basis",  "REAL DEFAULT 0"),   # entry_price × shares (allocated capital)
     ]
     for col, definition in additions:
         if col not in existing:
@@ -140,6 +168,20 @@ def _migrate_columns(c) -> None:
                 c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
             except Exception:
                 pass
+
+    # Ensure account_config has a default row
+    try:
+        row = c.execute("SELECT id FROM account_config WHERE id=1").fetchone()
+        if not row:
+            from config import PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES
+            from datetime import datetime, timezone
+            c.execute("""
+                INSERT INTO account_config (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?)
+            """, (PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES,
+                  datetime.now(timezone.utc).isoformat()))
+    except Exception:
+        pass
 
     # Repair columns that may have been stored as NUMERIC(5,4) by an old schema
     # migration (max 9.9999 — overflows for prices > $10 or confidence 0-100).
@@ -261,17 +303,53 @@ def maybe_open_trade(
             open_count = c.execute(
                 "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
             ).fetchone()["n"]
-            if open_count >= _MAX_CONCURRENT_TRADES:
-                logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_MAX_CONCURRENT_TRADES}) reached")
+            if open_count >= _max_concurrent():
+                logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_max_concurrent()}) reached")
                 return None
+
+            # ── Capital gate: check available capital before sizing ────────────
+            cfg = c.execute("SELECT total_budget, max_trade_pct, max_allocated_pct FROM account_config WHERE id=1").fetchone()
+            if cfg:
+                _budget       = float(cfg["total_budget"])
+                _max_trade_v  = _budget * float(cfg["max_trade_pct"])  / 100.0
+                _max_alloc_v  = _budget * float(cfg["max_allocated_pct"]) / 100.0
+            else:
+                from config import PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT
+                _budget      = PAPER_BUDGET
+                _max_trade_v = _budget * PAPER_MAX_TRADE_PCT  / 100.0
+                _max_alloc_v = _budget * PAPER_MAX_ALLOCATED_PCT / 100.0
+
+            realized_pnl_row = c.execute(
+                "SELECT COALESCE(SUM(pnl_dollar),0) AS rpnl FROM paper_trades WHERE status='CLOSED'"
+            ).fetchone()
+            realized_pnl = float(realized_pnl_row["rpnl"]) if realized_pnl_row else 0.0
+
+            allocated_row = c.execute(
+                "SELECT COALESCE(SUM(COALESCE(cost_basis, entry_price * shares)),0) AS alloc FROM paper_trades WHERE status='OPEN'"
+            ).fetchone()
+            allocated = float(allocated_row["alloc"]) if allocated_row else 0.0
+
+            available = _budget + realized_pnl - allocated
+            if available < price:
+                logger.debug(f"[PAPER] {ticker} skip: insufficient capital (avail ${available:.0f} < ${price:.2f})")
+                return None
+            if allocated >= _max_alloc_v:
+                logger.debug(f"[PAPER] {ticker} skip: max allocated capital reached (${allocated:.0f} >= ${_max_alloc_v:.0f})")
+                return None
+
+            # Refine shares within capital constraints
+            cost_basis_per_share = price
+            max_by_trade   = max(1, int(_max_trade_v / cost_basis_per_share))
+            max_by_capital = max(1, int(available    / cost_basis_per_share))
+            shares = min(shares, max_by_trade, max_by_capital)
 
             cur = c.execute("""
                 INSERT INTO paper_trades
                   (opened_at, ticker, direction, entry_price, target, stop,
                    confidence, rr_ratio, rr_qualifies, shares, shares_remaining,
                    session, regime, vwap_event, rsi_zone, entry_type,
-                   t1_price, t2_price, order_flow_score, size_mult)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   t1_price, t2_price, order_flow_score, size_mult, cost_basis)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
@@ -281,6 +359,7 @@ def maybe_open_trade(
                 session, regime, vwap_event, rsi_zone, entry_type,
                 t1_price, t2_price,
                 round(order_flow_score, 4), round(effective_size_mult, 2),
+                round(price * shares, 2),
             ))
             c.commit()
             logger.info(
@@ -935,47 +1014,76 @@ def _build_paper_stats() -> dict:
 
 # ── Query functions ───────────────────────────────────────────────────────────
 
-def get_daily_pnl(days: int = 14) -> list[dict]:
-    conn = _conn_ro()
-    try:
-        rows = conn.execute("""
+def get_daily_pnl(days: int = 30) -> list[dict]:
+    """
+    Per-day P&L breakdown for the last N days.
+    Includes profit_factor, avg_win, avg_loss, and running equity.
+    """
+    with _conn_ro() as c:
+        rows = c.execute("""
             SELECT
-                date(closed_at) as trade_date,
-                COUNT(*)        as total,
-                SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses,
-                ROUND(SUM(pnl_pct), 2)  as total_pnl_pct,
-                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2) as total_pnl_dollar,
-                ROUND(AVG(pnl_pct), 2)  as avg_pnl_pct,
-                ROUND(MAX(pnl_pct), 2)  as best_trade,
-                ROUND(MIN(pnl_pct), 2)  as worst_trade
+                date(closed_at)   as trade_date,
+                COUNT(*)          as total,
+                SUM(CASE WHEN pnl_dollar > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl_dollar <= 0 THEN 1 ELSE 0 END) as losses,
+                ROUND(SUM(COALESCE(pnl_dollar,0)), 2)  as total_pnl_dollar,
+                ROUND(SUM(CASE WHEN pnl_dollar > 0 THEN pnl_dollar ELSE 0 END), 2) as gross_wins,
+                ROUND(SUM(CASE WHEN pnl_dollar <= 0 THEN pnl_dollar ELSE 0 END), 2) as gross_losses,
+                ROUND(AVG(CASE WHEN pnl_dollar > 0 THEN pnl_dollar END), 2)  as avg_win,
+                ROUND(AVG(CASE WHEN pnl_dollar <= 0 THEN pnl_dollar END), 2) as avg_loss,
+                ROUND(MAX(pnl_dollar), 2) as best_trade,
+                ROUND(MIN(pnl_dollar), 2) as worst_trade
             FROM paper_trades
             WHERE status='CLOSED' AND closed_at >= date('now', ?)
             GROUP BY date(closed_at)
-            ORDER BY trade_date DESC
+            ORDER BY trade_date ASC
         """, (f'-{days} days',)).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+        cfg_row = c.execute("SELECT total_budget FROM account_config WHERE id=1").fetchone()
+
+    budget = float(cfg_row["total_budget"]) if cfg_row else 50000.0
+    result = []
+    running_equity = budget
+    for r in rows:
+        d = dict(r)
+        gw = float(d.get("gross_wins")   or 0)
+        gl = float(d.get("gross_losses") or 0)
+        day_pnl = float(d.get("total_pnl_dollar") or 0)
+        d["profit_factor"]   = round(abs(gw / gl), 3) if gl != 0 else 0.0
+        d["day_start_equity"] = round(running_equity, 2)
+        running_equity       += day_pnl
+        d["day_end_equity"]   = round(running_equity, 2)
+        d["day_pnl_pct"]      = round(day_pnl / d["day_start_equity"] * 100, 3) if d["day_start_equity"] else 0.0
+        # Remove the old total_pnl_pct (sum of pct — meaningless)
+        d.pop("total_pnl_pct", None)
+        result.append(d)
+    # Return most-recent-first for display
+    result.reverse()
+    return result
 
 
 def get_today_pnl() -> dict:
-    conn = _conn_ro()
-    try:
-        row = conn.execute("""
+    """Today's closed-trade P&L plus open unrealized P&L."""
+    with _conn_ro() as c:
+        row = c.execute("""
             SELECT
-                COUNT(*)        as total,
-                SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins,
-                ROUND(SUM(pnl_pct), 2)  as total_pnl_pct,
-                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2) as total_pnl_dollar,
-                ROUND(MAX(pnl_pct), 2)  as best_trade,
-                ROUND(MIN(pnl_pct), 2)  as worst_trade
+                COUNT(*)   as total,
+                SUM(CASE WHEN pnl_dollar > 0 THEN 1 ELSE 0 END) as wins,
+                ROUND(SUM(COALESCE(pnl_dollar, 0)), 2)           as total_pnl_dollar,
+                ROUND(SUM(CASE WHEN pnl_dollar > 0 THEN pnl_dollar ELSE 0 END), 2) as gross_wins,
+                ROUND(SUM(CASE WHEN pnl_dollar <= 0 THEN pnl_dollar ELSE 0 END), 2) as gross_losses,
+                ROUND(MAX(pnl_dollar), 2) as best_trade,
+                ROUND(MIN(pnl_dollar), 2) as worst_trade
             FROM paper_trades
             WHERE status='CLOSED' AND date(closed_at) = date('now')
         """).fetchone()
-        return dict(row) if row else {}
-    finally:
-        conn.close()
+        cfg_row = c.execute("SELECT total_budget FROM account_config WHERE id=1").fetchone()
+
+    budget = float(cfg_row["total_budget"]) if cfg_row else 50000.0
+    d = dict(row) if row else {}
+    total_dollar = float(d.get("total_pnl_dollar") or 0)
+    d["total_pnl_pct"] = round(total_dollar / budget * 100, 3) if budget > 0 else 0.0
+    d["budget"] = budget
+    return d
 
 
 def rt_check_positions(ticker: str, last_price: float) -> list[str]:
@@ -1076,33 +1184,233 @@ def get_closed_trades(limit: int = 50) -> list[dict]:
 
 
 def get_summary() -> dict:
+    """Unified paper trade summary including capital state."""
     with _conn_ro() as c:
         closed = c.execute(
             "SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'"
         ).fetchall()
-        open_count = c.execute(
-            "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
-        ).fetchone()["n"]
+        open_rows = c.execute(
+            "SELECT entry_price, shares, COALESCE(cost_basis, entry_price*shares) as cb "
+            "FROM paper_trades WHERE status='OPEN'"
+        ).fetchall()
+        cfg_row = c.execute(
+            "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades "
+            "FROM account_config WHERE id=1"
+        ).fetchone()
 
-    total    = len(closed)
-    # Win = positive dollar P&L (source of truth — not pnl_pct which can be inflated)
-    wins     = sum(1 for r in closed if (r["pnl_dollar"] or 0) > 0)
-    losses   = total - wins
-    dollars  = [r["pnl_dollar"] for r in closed if r["pnl_dollar"] is not None]
-    pnls     = [r["pnl_pct"]    for r in closed if r["pnl_pct"]    is not None]
-    total_dollar_pnl = round(sum(dollars), 2) if dollars else 0.0
-    avg_pnl_pct      = round(sum(pnls) / len(pnls), 3) if pnls else 0.0
+    budget = float(cfg_row["total_budget"]) if cfg_row else 50000.0
+    open_count  = len(open_rows)
+    total       = len(closed)
+    wins        = sum(1 for r in closed if (r["pnl_dollar"] or 0) > 0)
+    losses      = total - wins
+    dollars     = [r["pnl_dollar"] for r in closed if r["pnl_dollar"] is not None]
+    win_dollars = [d for d in dollars if d > 0]
+    los_dollars = [d for d in dollars if d <= 0]
+
+    realized_pnl     = round(sum(dollars), 2) if dollars else 0.0
+    gross_wins       = round(sum(win_dollars), 2) if win_dollars else 0.0
+    gross_losses     = round(sum(los_dollars), 2) if los_dollars else 0.0
+    avg_win          = round(gross_wins  / len(win_dollars), 2) if win_dollars else 0.0
+    avg_loss         = round(gross_losses / len(los_dollars), 2) if los_dollars else 0.0
+    profit_factor    = round(abs(gross_wins / gross_losses), 3) if gross_losses != 0 else 0.0
+    win_rate_dec     = wins / total if total > 0 else 0.0
+    loss_rate_dec    = losses / total if total > 0 else 0.0
+    expectancy       = round(win_rate_dec * avg_win + loss_rate_dec * avg_loss, 2)
+
+    allocated        = round(sum(float(r["cb"]) for r in open_rows), 2)
+    available        = round(budget + realized_pnl - allocated, 2)
+    cap_util_pct     = round(allocated / budget * 100, 1) if budget > 0 else 0.0
 
     return {
-        "open":             open_count,
-        "closed":           total,
-        "wins":             wins,
-        "losses":           losses,
-        "win_rate":         round(wins / total * 100, 1) if total > 0 else 0.0,
-        "avg_pnl":          avg_pnl_pct,       # avg % per trade (display metric)
-        "total_pnl":        avg_pnl_pct,       # keep key for compat — now equals avg, not sum
-        "total_dollar_pnl": total_dollar_pnl,  # actual net dollar P&L
-        "max_concurrent":   _MAX_CONCURRENT_TRADES,
+        # Capital state
+        "starting_balance":   budget,
+        "realized_pnl":       realized_pnl,
+        "allocated_capital":  allocated,
+        "available_capital":  available,
+        "capital_util_pct":   cap_util_pct,
+        # Trade counts
+        "open":               open_count,
+        "closed":             total,
+        "wins":               wins,
+        "losses":             losses,
+        "win_rate":           round(win_rate_dec * 100, 1),
+        "max_concurrent":     _max_concurrent(),
+        # P&L metrics
+        "total_dollar_pnl":   realized_pnl,
+        "gross_wins":         gross_wins,
+        "gross_losses":       gross_losses,
+        "avg_win":            avg_win,
+        "avg_loss":           avg_loss,
+        "profit_factor":      profit_factor,
+        "expectancy":         expectancy,
+        # Legacy compat
+        "avg_pnl":            round(sum(r["pnl_pct"] or 0 for r in closed) / total, 3) if total > 0 else 0.0,
+        "total_pnl":          realized_pnl,
+    }
+
+
+def get_account_state(open_prices: dict | None = None) -> dict:
+    """
+    Full account state: capital, realized + unrealized P&L, risk metrics.
+
+    open_prices: optional {ticker: current_price} dict for unrealized P&L.
+    """
+    with _conn_ro() as c:
+        closed = c.execute(
+            "SELECT pnl_dollar FROM paper_trades WHERE status='CLOSED' AND pnl_dollar IS NOT NULL"
+        ).fetchall()
+        open_rows = c.execute(
+            "SELECT ticker, direction, entry_price, shares, "
+            "COALESCE(shares_remaining, shares) as shares_rem, "
+            "COALESCE(cost_basis, entry_price*shares) as cb "
+            "FROM paper_trades WHERE status='OPEN'"
+        ).fetchall()
+        cfg_row = c.execute(
+            "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades "
+            "FROM account_config WHERE id=1"
+        ).fetchone()
+        today_row = c.execute("""
+            SELECT ROUND(SUM(COALESCE(pnl_dollar,0)),2) as today_pnl
+            FROM paper_trades
+            WHERE status='CLOSED' AND date(closed_at) = date('now')
+        """).fetchone()
+
+    budget        = float(cfg_row["total_budget"]) if cfg_row else 50000.0
+    max_trade_pct = float(cfg_row["max_trade_pct"]) if cfg_row else 5.0
+    max_alloc_pct = float(cfg_row["max_allocated_pct"]) if cfg_row else 40.0
+    max_open      = int(cfg_row["max_open_trades"]) if cfg_row else 10
+
+    dollars      = [float(r["pnl_dollar"]) for r in closed]
+    realized_pnl = round(sum(dollars), 2) if dollars else 0.0
+    wins         = [d for d in dollars if d > 0]
+    losses_d     = [d for d in dollars if d <= 0]
+    gross_wins   = round(sum(wins), 2)
+    gross_losses = round(sum(losses_d), 2)
+    avg_win      = round(gross_wins  / len(wins),     2) if wins     else 0.0
+    avg_loss     = round(gross_losses / len(losses_d), 2) if losses_d else 0.0
+    profit_factor = round(abs(gross_wins / gross_losses), 3) if gross_losses != 0 else 0.0
+    n            = len(dollars)
+    win_rate_dec = len(wins) / n if n > 0 else 0.0
+    loss_rate_dec = len(losses_d) / n if n > 0 else 0.0
+    expectancy   = round(win_rate_dec * avg_win + loss_rate_dec * avg_loss, 2)
+
+    allocated    = round(sum(float(r["cb"]) for r in open_rows), 2)
+
+    # Unrealized P&L using provided prices
+    unrealized = 0.0
+    if open_prices:
+        for r in open_rows:
+            cp = open_prices.get(r["ticker"])
+            if cp:
+                ep  = float(r["entry_price"])
+                sh  = int(r["shares_rem"])
+                d   = r["direction"]
+                unrealized += ((cp - ep) * sh) if d == "BUY" else ((ep - cp) * sh)
+    unrealized = round(unrealized, 2)
+
+    available      = round(budget + realized_pnl - allocated, 2)
+    account_equity = round(budget + realized_pnl + unrealized, 2)
+    today_pnl      = float(today_row["today_pnl"]) if today_row and today_row["today_pnl"] else 0.0
+
+    # Max drawdown from daily snapshots (approximate from closed trades)
+    peak = budget
+    trough = budget
+    running = budget
+    max_dd = 0.0
+    max_dd_pct = 0.0
+    for d in dollars:
+        running += d
+        if running > peak:
+            peak = running
+        dd = peak - running
+        if dd > max_dd:
+            max_dd = dd
+            max_dd_pct = dd / peak * 100 if peak > 0 else 0.0
+    trough = running  # noqa
+
+    # Build per-trade unrealized breakdown for UI
+    open_positions = []
+    for r in open_rows:
+        ep  = float(r["entry_price"])
+        sh  = int(r["shares_rem"])
+        cb  = float(r["cb"])
+        cp  = open_prices.get(r["ticker"]) if open_prices else None
+        upnl = None
+        if cp:
+            upnl = round(((cp - ep) * sh) if r["direction"] == "BUY" else ((ep - cp) * sh), 2)
+        open_positions.append({
+            "ticker":        r["ticker"],
+            "direction":     r["direction"],
+            "entry_price":   ep,
+            "shares":        sh,
+            "cost_basis":    cb,
+            "unrealized_pnl": upnl,
+        })
+
+    return {
+        # Capital
+        "starting_balance":   budget,
+        "account_equity":     account_equity,
+        "available_capital":  available,
+        "allocated_capital":  allocated,
+        "unrealized_pnl":     unrealized,
+        "capital_util_pct":   round(allocated / budget * 100, 1) if budget > 0 else 0.0,
+        # P&L
+        "realized_pnl":       realized_pnl,
+        "gross_wins":         gross_wins,
+        "gross_losses":       gross_losses,
+        "today_pnl":          round(today_pnl, 2),
+        "today_pnl_pct":      round(today_pnl / budget * 100, 3) if budget > 0 else 0.0,
+        # Trade stats
+        "total_trades":       n,
+        "wins":               len(wins),
+        "losses":             len(losses_d),
+        "win_rate":           round(win_rate_dec * 100, 1),
+        "avg_win":            avg_win,
+        "avg_loss":           avg_loss,
+        "profit_factor":      profit_factor,
+        "expectancy":         expectancy,
+        # Risk
+        "max_drawdown_dollar": round(-max_dd, 2),
+        "max_drawdown_pct":    round(-max_dd_pct, 2),
+        # Open positions detail
+        "open_positions":     open_positions,
+        # Config
+        "open_trades":        len(open_rows),
+        "max_open_trades":    max_open,
+        "max_trade_pct":      max_trade_pct,
+        "max_allocated_pct":  max_alloc_pct,
+    }
+
+
+def update_account_config(
+    total_budget:      float | None = None,
+    max_trade_pct:     float | None = None,
+    max_allocated_pct: float | None = None,
+    max_open_trades:   int   | None = None,
+) -> dict:
+    """Update account configuration. Returns new config."""
+    from datetime import datetime, timezone
+    with _lock:
+        with _conn() as c:
+            row = c.execute("SELECT * FROM account_config WHERE id=1").fetchone()
+            cur = dict(row) if row else {}
+            new_budget    = total_budget      if total_budget      is not None else cur.get("total_budget", 50000)
+            new_trade_pct = max_trade_pct     if max_trade_pct     is not None else cur.get("max_trade_pct", 5.0)
+            new_alloc_pct = max_allocated_pct if max_allocated_pct is not None else cur.get("max_allocated_pct", 40.0)
+            new_max_open  = max_open_trades   if max_open_trades   is not None else cur.get("max_open_trades", 10)
+            c.execute("""
+                INSERT OR REPLACE INTO account_config
+                (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?)
+            """, (new_budget, new_trade_pct, new_alloc_pct, new_max_open,
+                  datetime.now(timezone.utc).isoformat()))
+            c.commit()
+    return {
+        "total_budget":      new_budget,
+        "max_trade_pct":     new_trade_pct,
+        "max_allocated_pct": new_alloc_pct,
+        "max_open_trades":   new_max_open,
     }
 
 

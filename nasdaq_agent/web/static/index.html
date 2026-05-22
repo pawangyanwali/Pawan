@@ -858,15 +858,19 @@
     <div id="paper-stats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px"></div>
 
     <!-- Tab bar -->
-    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px">
-      <button id="pt-tab-open"   onclick="ptTab('open')"   class="pt-tab pt-tab-active">Open Trades</button>
-      <button id="pt-tab-closed" onclick="ptTab('closed')" class="pt-tab">Closed Trades</button>
-      <button id="pt-tab-learn"  onclick="ptTab('learn')"  class="pt-tab">What We're Learning</button>
+    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap">
+      <button id="pt-tab-open"    onclick="ptTab('open')"    class="pt-tab pt-tab-active">Open Trades</button>
+      <button id="pt-tab-closed"  onclick="ptTab('closed')"  class="pt-tab">Closed Trades</button>
+      <button id="pt-tab-account" onclick="ptTab('account')" class="pt-tab">Account</button>
+      <button id="pt-tab-budget"  onclick="ptTab('budget')"  class="pt-tab">Budget Config</button>
+      <button id="pt-tab-learn"   onclick="ptTab('learn')"   class="pt-tab">What We're Learning</button>
     </div>
 
-    <div id="pt-panel-open"   style="display:block"></div>
-    <div id="pt-panel-closed" style="display:none"></div>
-    <div id="pt-panel-learn"  style="display:none"></div>
+    <div id="pt-panel-open"    style="display:block"></div>
+    <div id="pt-panel-closed"  style="display:none"></div>
+    <div id="pt-panel-account" style="display:none"></div>
+    <div id="pt-panel-budget"  style="display:none"></div>
+    <div id="pt-panel-learn"   style="display:none"></div>
   </div>
 </div>
 
@@ -3388,10 +3392,12 @@ function populateMacroSection(s) {
 let _ptData = null, _ptLearn = null;
 
 function ptTab(name) {
-  ['open','closed','learn'].forEach(t => {
+  ['open','closed','account','budget','learn'].forEach(t => {
     document.getElementById('pt-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('pt-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
+  if (name === 'account') ptLoadAccountTab();
+  if (name === 'budget')  ptLoadBudgetTab();
 }
 
 function _ptExitBadge(reason) {
@@ -3666,6 +3672,242 @@ function _ptRenderLearning(ls, summary) {
 }
 
 function closePaperTrading() { document.getElementById('paper-modal').classList.remove('open'); }
+
+// ─── Paper Trading — Account tab ───────────────────────────────────────────────
+async function ptLoadAccountTab() {
+  const el = document.getElementById('pt-panel-account');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading account state…</div>';
+  try {
+    const a = await (await fetch(`${BACKEND_HTTP}/api/account-state`, {signal: AbortSignal.timeout(12000)})).json();
+
+    const fmt$   = v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
+    const fmtPct = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+    const col    = v => v >= 0 ? 'var(--green)' : 'var(--red)';
+
+    const budget   = a.starting_balance  ?? 0;
+    const equity   = a.account_equity    ?? budget;
+    const avail    = a.available_capital ?? budget;
+    const alloc    = a.allocated_capital ?? 0;
+    const util     = a.capital_util_pct  ?? 0;
+    const realized = a.realized_pnl      ?? 0;
+    const unreal   = a.unrealized_pnl    ?? 0;
+    const tPnl     = a.today_pnl         ?? 0;
+    const tPct     = a.today_pnl_pct     ?? 0;
+    const pf       = a.profit_factor     ?? 0;
+    const exp      = a.expectancy        ?? 0;
+    const dd$      = a.max_drawdown_dollar ?? 0;
+    const ddPct    = a.max_drawdown_pct    ?? 0;
+    const wr       = (a.win_rate ?? 0) * 100;
+    const wins     = a.wins   ?? 0;
+    const losses   = a.losses ?? 0;
+    const total    = a.total_trades ?? 0;
+    const avgW     = a.avg_win  ?? 0;
+    const avgL     = a.avg_loss ?? 0;
+
+    const utilCol  = util > 80 ? 'var(--red)' : util > 50 ? 'var(--yellow)' : 'var(--green)';
+    const equityChg = equity - budget;
+
+    el.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:16px">
+
+      <!-- Balance card -->
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:9px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Account Equity</div>
+        <div style="font-size:22px;font-weight:700;color:var(--text)">$${equity.toFixed(2)}</div>
+        <div style="font-size:11px;margin-top:2px;color:${col(equityChg)}">${fmt$(equityChg)} vs starting</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Starting: $${budget.toFixed(2)}</div>
+      </div>
+
+      <!-- Today P&L -->
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:9px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Today's P&L</div>
+        <div style="font-size:22px;font-weight:700;color:${col(tPnl)}">${fmt$(tPnl)}</div>
+        <div style="font-size:11px;color:${col(tPct)};margin-top:2px">${fmtPct(tPct)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Realized: ${fmt$(realized)} · Unrealized: ${fmt$(unreal)}</div>
+      </div>
+
+      <!-- Capital usage -->
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:9px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Capital Usage</div>
+        <div style="font-size:22px;font-weight:700;color:${utilCol}">${util.toFixed(1)}%</div>
+        <div style="height:5px;background:var(--surface);border-radius:3px;margin:6px 0">
+          <div style="width:${Math.min(util,100)}%;height:100%;background:${utilCol};border-radius:3px;transition:width .4s"></div>
+        </div>
+        <div style="font-size:10px;color:var(--muted)">Allocated: $${alloc.toFixed(0)} · Available: $${avail.toFixed(0)}</div>
+      </div>
+
+      <!-- Trade stats -->
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="font-size:9px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Trade Stats</div>
+        <div style="font-size:22px;font-weight:700;color:${wr>=62?'var(--green)':wr>=50?'var(--yellow)':'var(--red)'}">${wr.toFixed(1)}% WR</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">W: <span style="color:var(--green)">${wins}</span> · L: <span style="color:var(--red)">${losses}</span> · Total: ${total}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">Open: ${a.open_trades ?? 0} / ${a.max_open_trades ?? '—'}</div>
+      </div>
+
+    </div>
+
+    <!-- Metrics row -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:16px">
+      ${[
+        ['Profit Factor', pf > 0 ? pf.toFixed(2) : '—', pf >= 2 ? 'var(--green)' : pf >= 1 ? 'var(--yellow)' : 'var(--red)'],
+        ['Expectancy',   exp !== 0 ? fmt$(exp) : '—',   col(exp)],
+        ['Avg Win',      avgW > 0 ? fmt$(avgW) : '—',   'var(--green)'],
+        ['Avg Loss',     avgL < 0 ? fmt$(avgL) : '—',   'var(--red)'],
+        ['Max Drawdown', dd$ < 0 ? fmt$(dd$) : '$0.00', 'var(--red)'],
+        ['DD %',         ddPct < 0 ? fmtPct(ddPct) : '0.00%', 'var(--red)'],
+      ].map(([l,v,c]) => `
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px">
+          <div style="font-size:9px;color:var(--muted);margin-bottom:3px">${l}</div>
+          <div style="font-size:15px;font-weight:700;color:${c}">${v}</div>
+        </div>`).join('')}
+    </div>
+
+    <!-- Open trades capital breakdown -->
+    ${(a.open_positions && a.open_positions.length > 0) ? `
+    <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">Open Positions — Capital Breakdown</div>
+    <table class="pt-table" style="margin-bottom:12px">
+      <thead><tr><th>Ticker</th><th>Side</th><th>Shares</th><th>Entry</th><th>Cost Basis</th><th>Unreal P&L</th></tr></thead>
+      <tbody>${a.open_positions.map(p => {
+        const cb = p.cost_basis ?? 0;
+        const up = p.unrealized_pnl ?? null;
+        const upCol = up !== null ? col(up) : 'var(--muted)';
+        return `<tr>
+          <td style="font-weight:700">${p.ticker}</td>
+          <td><span class="signal-badge badge-${p.direction}" style="font-size:9px">${p.direction}</span></td>
+          <td>${p.shares ?? 0}</td>
+          <td>$${(p.entry_price??0).toFixed(2)}</td>
+          <td>$${cb.toFixed(2)}</td>
+          <td style="color:${upCol}">${up !== null ? fmt$(up) : '—'}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>` : ''}
+    `;
+  } catch(e) {
+    document.getElementById('pt-panel-account').innerHTML =
+      `<div style="color:var(--red);font-size:11px;padding:12px 0">Error loading account state: ${e.message}</div>`;
+  }
+}
+
+// ─── Paper Trading — Budget Config tab ────────────────────────────────────────
+async function ptLoadBudgetTab() {
+  const el = document.getElementById('pt-panel-budget');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
+  try {
+    const a = await (await fetch(`${BACKEND_HTTP}/api/account-state`, {signal: AbortSignal.timeout(12000)})).json();
+    const budget   = a.starting_balance ?? 100000;
+    const maxTrade = a.max_trade_pct    ?? 5;
+    const maxAlloc = a.max_allocated_pct ?? 40;
+    const maxOpen  = a.max_open_trades  ?? 10;
+
+    el.innerHTML = `
+    <div style="max-width:520px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Paper Trading Budget Configuration</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+        These settings control how capital is allocated across paper trades.
+        Changes apply immediately to future trade sizing.
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:14px">
+
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
+            TOTAL BUDGET ($)
+          </label>
+          <input id="pt-cfg-budget" type="number" min="1000" step="1000" value="${budget}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Total simulated capital pool. All sizing and utilisation percentages are relative to this.</div>
+        </div>
+
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
+            MAX TRADE SIZE (% of budget)
+          </label>
+          <input id="pt-cfg-trade-pct" type="number" min="0.5" max="25" step="0.5" value="${maxTrade}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max capital committed to a single trade. At $${budget.toFixed(0)}: <span id="pt-cfg-trade-dollar">${(budget * maxTrade / 100).toFixed(0)}</span> per trade.</div>
+        </div>
+
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
+            MAX ALLOCATED (% of budget)
+          </label>
+          <input id="pt-cfg-alloc-pct" type="number" min="10" max="100" step="5" value="${maxAlloc}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max total capital that can be allocated across all open trades simultaneously.</div>
+        </div>
+
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
+            MAX OPEN TRADES
+          </label>
+          <input id="pt-cfg-max-open" type="number" min="1" max="50" step="1" value="${maxOpen}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Hard cap on concurrent open positions. New trades are blocked when this is reached.</div>
+        </div>
+
+      </div>
+
+      <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+        <button onclick="ptSaveBudgetConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
+          Save Changes
+        </button>
+        <span id="pt-cfg-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+
+      <div style="margin-top:16px;padding:10px 12px;background:#f59e0b11;border:1px solid #f59e0b33;border-radius:6px">
+        <div style="font-size:10px;font-weight:700;color:#f59e0b;margin-bottom:4px">How capital gates work</div>
+        <div style="font-size:10px;color:var(--muted)">
+          Before opening a new position the system checks:<br>
+          1. Open trades &lt; max open trades<br>
+          2. Allocated capital + new cost_basis ≤ budget × max_allocated%<br>
+          3. New position size ≤ budget × max_trade%<br>
+          If any gate fails, the trade is skipped for that cycle.
+        </div>
+      </div>
+    </div>`;
+
+    // Live-update the per-trade dollar hint when inputs change
+    const budgetEl = document.getElementById('pt-cfg-budget');
+    const tradePctEl = document.getElementById('pt-cfg-trade-pct');
+    const dollarEl = document.getElementById('pt-cfg-trade-dollar');
+    function _updateHint() {
+      const b = parseFloat(budgetEl.value) || 0;
+      const p = parseFloat(tradePctEl.value) || 0;
+      if (dollarEl) dollarEl.textContent = (b * p / 100).toFixed(0);
+    }
+    if (budgetEl)   budgetEl.oninput   = _updateHint;
+    if (tradePctEl) tradePctEl.oninput = _updateHint;
+
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px 0">Error loading config: ${e.message}</div>`;
+  }
+}
+
+async function ptSaveBudgetConfig(btn) {
+  const budget   = parseFloat(document.getElementById('pt-cfg-budget')?.value)     || null;
+  const tradePct = parseFloat(document.getElementById('pt-cfg-trade-pct')?.value)  || null;
+  const allocPct = parseFloat(document.getElementById('pt-cfg-alloc-pct')?.value)  || null;
+  const maxOpen  = parseInt(  document.getElementById('pt-cfg-max-open')?.value, 10) || null;
+  const status   = document.getElementById('pt-cfg-status');
+  if (!budget || !tradePct || !allocPct || !maxOpen) {
+    if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  btn.disabled = true;
+  const params = new URLSearchParams({ total_budget: budget, max_trade_pct: tradePct, max_allocated_pct: allocPct, max_open_trades: maxOpen });
+  try {
+    const r = await fetch(`${BACKEND_HTTP}/api/account-config?${params}`, {method:'POST', signal: AbortSignal.timeout(8000)});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 // ─── Watchlist ─────────────────────────────────────────────────────────────────
 async function openWatchlist() {

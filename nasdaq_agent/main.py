@@ -32,7 +32,7 @@ from agent.market_hours import get_session_info
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals, get_observation_summary
 from agent.position_sizing import calculate as calc_position
-from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl, get_equity_curve, get_weekly_pnl, get_ticker_pnl
+from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl, get_equity_curve, get_weekly_pnl, get_ticker_pnl, get_account_state, update_account_config
 from agent.macro_calendar import check_macro_event, get_upcoming_events
 from agent.live_backtest import get_performance_stats, get_tracking_signals, get_recent_resolved, get_price_path
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
@@ -732,6 +732,42 @@ async def paper_trading_endpoint():
             "per_trade":     [(t["ticker"], t.get("pnl_dollar") or 0, (t.get("closed_at") or "")[:10]) for t in all_trades],
         },
     }
+
+
+@app.get("/api/account-state")
+async def api_account_state():
+    """Full account state: capital, P&L, drawdown, config."""
+    try:
+        loop = asyncio.get_running_loop()
+        # Pass current live prices for unrealized P&L
+        try:
+            from agent.broker.schwab_market_data import get_live_quotes
+            prices = {t: q.get("last", 0) for t, q in get_live_quotes().items() if q.get("last")}
+        except Exception:
+            prices = {}
+        state = await loop.run_in_executor(None, lambda: get_account_state(prices))
+        return state
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/account-config")
+async def api_update_account_config(
+    total_budget:      float | None = None,
+    max_trade_pct:     float | None = None,
+    max_allocated_pct: float | None = None,
+    max_open_trades:   int   | None = None,
+):
+    """Update paper trading budget and position limits."""
+    try:
+        loop = asyncio.get_running_loop()
+        cfg = await loop.run_in_executor(
+            None,
+            lambda: update_account_config(total_budget, max_trade_pct, max_allocated_pct, max_open_trades)
+        )
+        return {"success": True, "config": cfg}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @app.get("/api/deep-model/status")
