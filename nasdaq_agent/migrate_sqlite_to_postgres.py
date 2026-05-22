@@ -1,24 +1,34 @@
 #!/usr/bin/env python3
 """
-NASDAQ Agent — SQLite → PostgreSQL full migration
-==================================================
+NASDAQ Agent — SQLite → PostgreSQL full migration  (v2 — schema-corrected)
+===========================================================================
 
-BEFORE YOU RUN THIS SCRIPT
----------------------------
-1. Run the DDL additions on PostgreSQL (paste into psql/pgAdmin):
+Actual PostgreSQL column layout (discovered from live DB):
 
-    -- Add missing columns & table that weren't in the v1 schema
-    ALTER TABLE signals ADD COLUMN IF NOT EXISTS is_suppressed BOOLEAN DEFAULT FALSE;
-    ALTER TABLE signals ADD COLUMN IF NOT EXISTS short_outcome  TEXT    DEFAULT 'PENDING';
-    ALTER TABLE signals ADD COLUMN IF NOT EXISTS vol_bucket     TEXT    DEFAULT 'NORMAL';
-    ALTER TABLE signals ADD COLUMN IF NOT EXISTS trend          TEXT    DEFAULT '';
+  signals            : ticker, direction, confidence, price, tier, regime, session,
+                       vol_bucket, trend, is_suppressed, short_outcome, indicators(JSONB), created_at
+  trades             : trade_type, ticker, direction, status, entry_price, entry_at,
+                       shares, entry_value, stop_loss, take_profit, exit_price, exit_at,
+                       exit_reason, gross_pnl, commission, net_pnl, pnl_pct,
+                       hold_minutes, created_at, updated_at, metadata(JSONB)
+  signal_observations: signal_id, ticker, direction, entry_price, entry_at,
+                       exit_price, exit_at, outcome, pnl_pct, hold_minutes,
+                       resolved, created_at, source
+  ticker_stats       : ticker, obs_count, win_count, loss_count, scratch_count,
+                       win_rate, avg_pnl_pct, avg_hold_min, last_signal_at, updated_at
+  backtest_summary   : run_dt, timeframe, ticker, total, wins, win_rate,
+                       avg_pnl_r, expectancy, max_dd_r, sharpe, created_at
 
-    ALTER TABLE trades  ADD COLUMN IF NOT EXISTS metadata       JSONB;
+PREREQUISITE DDL (run once in pgAdmin / psql before running this script):
+--------------------------------------------------------------------------
+    -- Ensure source column exists on signal_observations
+    ALTER TABLE signal_observations ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'LIVE';
 
-    ALTER TABLE signal_observations
-        ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'LIVE'
-        CHECK (source IN ('LIVE','BACKTEST','WEEKEND'));
+    -- Unique constraint so re-runs are idempotent
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_signal_obs_signal_id
+        ON signal_observations (signal_id);
 
+    -- backtest_summary (may already exist)
     CREATE TABLE IF NOT EXISTS backtest_summary (
         id          BIGSERIAL PRIMARY KEY,
         run_dt      TIMESTAMPTZ NOT NULL,
@@ -35,67 +45,20 @@ BEFORE YOU RUN THIS SCRIPT
         UNIQUE (run_dt, timeframe, ticker)
     );
 
-    INSERT INTO schema_migrations (version, description)
-    VALUES (2, 'source on signal_observations, backtest_summary table')
-    ON CONFLICT DO NOTHING;
-
-2. Copy SQLite files from Lightsail → your machine → bastion:
-
-    # On Lightsail (via SSH):
-    tar -czf /tmp/sqlite_bak.tar.gz \\
-        /opt/nasdaq-agent/nasdaq_agent/data/signal_history.db \\
-        /opt/nasdaq-agent/nasdaq_agent/data/paper_trades.db \\
-        /opt/nasdaq-agent/nasdaq_agent/data/live_backtest.db \\
-        /opt/nasdaq-agent/nasdaq_agent/data/weekend_learning.db \\
-        /opt/nasdaq-agent/nasdaq_agent/data/backtest_mtf.db
-
-    # Copy to bastion (from your local machine):
-    scp -i lightsail-key.pem ubuntu@LIGHTSAIL_IP:/tmp/sqlite_bak.tar.gz /tmp/
-    scp -i bastion-key.pem /tmp/sqlite_bak.tar.gz ec2-user@3.234.216.250:/tmp/
-
-    # On bastion:
-    mkdir -p /tmp/sqlite && cd /tmp/sqlite
-    tar -xzf /tmp/sqlite_bak.tar.gz --strip-components=5
-
-3. Install psycopg2 on bastion:
-    pip3 install psycopg2-binary --user
-
 USAGE
 -----
-Dry run (reads SQLite, shows counts, NEVER writes to Postgres):
+Dry run:
     python3 migrate_sqlite_to_postgres.py --dry-run \\
-        --pg-host trading.xxxxxx.us-east-1.rds.amazonaws.com \\
-        --pg-pass YOUR_PASSWORD
+        --pg-host nasdaq-agent.cozs0qe840sb.us-east-1.rds.amazonaws.com \\
+        --pg-pass YOUR_PASSWORD --sqlite-dir /tmp/sqlite
 
-Real migration:
+Real run:
     python3 migrate_sqlite_to_postgres.py \\
-        --pg-host trading.xxxxxx.us-east-1.rds.amazonaws.com \\
-        --pg-pass YOUR_PASSWORD
-
-Sync open trades only (re-run after first migration to refresh status of 14 open trades):
-    python3 migrate_sqlite_to_postgres.py --sync-open-trades \\
-        --pg-host trading.xxxxxx.us-east-1.rds.amazonaws.com \\
-        --pg-pass YOUR_PASSWORD
-
-OPEN TRADE STRATEGY (read this!)
----------------------------------
-The 14 open paper trades are actively being managed by the live Lightsail service.
-Their state (bars_held, t1_hit, partial_pnl_dollar, shares_remaining, etc.)
-changes every minute. This script:
-
-  Phase 1 — run NOW:
-    • Migrates all CLOSED trades (they won't change)
-    • Also migrates the 14 OPEN trades as a snapshot (status='OPEN')
-    • Tags them with metadata->>'sqlite_id' so you can resync later
-
-  Phase 2 — run just before app code cutover to Postgres:
-    • --sync-open-trades re-reads paper_trades.db and UPSERTs OPEN rows
-    • Run this immediately before deploying the PostgreSQL-native app version
-    • After cutover the app writes to PostgreSQL directly; SQLite is retired
+        --pg-host nasdaq-agent.cozs0qe840sb.us-east-1.rds.amazonaws.com \\
+        --pg-pass YOUR_PASSWORD --sqlite-dir /tmp/sqlite
 """
 
 from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -117,7 +80,7 @@ try:
     import psycopg2
     import psycopg2.extras
 except ImportError:
-    log.error("psycopg2 not installed.  Run: pip3 install psycopg2-binary --user")
+    log.error("psycopg2 not installed.  Run: pip3 install psycopg2-binary")
     sys.exit(1)
 
 
@@ -125,7 +88,6 @@ except ImportError:
 
 @contextmanager
 def sqlite_ro(path: Path):
-    """Open SQLite read-only (URI mode) — never writes lock files."""
     uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -135,7 +97,7 @@ def sqlite_ro(path: Path):
         conn.close()
 
 
-def make_pg_conn(host: str, port: int, db: str, user: str, password: str):
+def make_pg_conn(host, port, db, user, password):
     return psycopg2.connect(
         host=host, port=port, dbname=db, user=user, password=password,
         connect_timeout=15,
@@ -143,42 +105,86 @@ def make_pg_conn(host: str, port: int, db: str, user: str, password: str):
     )
 
 
-# ─── Type-safe helpers ────────────────────────────────────────────────────────
+# ─── Type helpers ─────────────────────────────────────────────────────────────
 
-def _f(val: Any) -> Optional[float]:
+def _f(v: Any) -> Optional[float]:
     try:
-        return float(val) if val is not None else None
+        return float(v) if v is not None else None
     except (TypeError, ValueError):
         return None
 
-
-def _i(val: Any) -> Optional[int]:
+def _i(v: Any) -> Optional[int]:
     try:
-        return int(val) if val is not None else None
+        return int(v) if v is not None else None
     except (TypeError, ValueError):
         return None
 
-
-def _b(val: Any) -> bool:
-    if val is None:
+def _b(v: Any) -> bool:
+    if v is None:
         return False
-    if isinstance(val, bool):
-        return val
-    return bool(int(val))
+    return bool(int(v)) if isinstance(v, (int, float)) else str(v).lower() in ('1','true','t','yes')
 
-
-def _ts(val: Any) -> Optional[str]:
-    """Return a TIMESTAMPTZ-compatible string or None."""
-    if val is None:
+def _ts(v: Any) -> Optional[str]:
+    if v is None:
         return None
-    s = str(val).strip()
-    if not s:
-        return None
-    # Already ISO — PostgreSQL will accept it
-    return s
+    s = str(v).strip()
+    return s if s else None
+
+def _status_to_outcome(status: str) -> Optional[str]:
+    """Map live_backtest status → signal_observations outcome."""
+    m = {'WIN': 'WIN', 'LOSS': 'LOSS', 'STOPPED': 'LOSS',
+         'TARGET': 'WIN', 'EXPIRED': 'LOSS', 'SCRATCH': 'SCRATCH'}
+    return m.get((status or '').upper())
 
 
-# ─── 1. signal_history.db  →  signals ────────────────────────────────────────
+# ─── Pre-flight ───────────────────────────────────────────────────────────────
+
+def preflight(pg, sqlite_dir: Path) -> bool:
+    ok = True
+    log.info("=== Pre-flight checks ===")
+    with pg.cursor() as cur:
+        cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
+        existing = {r[0] for r in cur.fetchall()}
+    for t in ['signals','trades','signal_observations','ticker_stats']:
+        if t in existing:
+            log.info(f"  [OK] table '{t}' exists")
+        else:
+            log.error(f"  [MISSING] table '{t}'")
+            ok = False
+    for fname in ["signal_history.db","paper_trades.db","live_backtest.db",
+                  "weekend_learning.db","backtest_mtf.db"]:
+        p = sqlite_dir / fname
+        if p.exists():
+            log.info(f"  [OK] {fname}  ({p.stat().st_size/1_048_576:.1f} MB)")
+        else:
+            log.warning(f"  [MISSING] {fname} — will be skipped")
+    return ok
+
+
+def _table_count(pg, table: str) -> int:
+    with pg.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        return cur.fetchone()[0]
+
+
+# ─── 1. signal_history.db → signals ──────────────────────────────────────────
+#
+#  SQLite           PostgreSQL
+#  ───────────────  ─────────────────────────────────────────────────────────
+#  ts               created_at
+#  ticker           ticker
+#  direction        direction
+#  entry_price      price
+#  confidence       confidence
+#  trading_tier     tier
+#  regime           regime
+#  session          session
+#  vol_bucket       vol_bucket
+#  trend            trend
+#  is_suppressed    is_suppressed
+#  short_outcome    short_outcome
+#  target/stop/vwap_event/rsi_zone/outcome/exit_price/pnl_pct/bars_held
+#                   → indicators JSONB
 
 def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
     db_path = sqlite_dir / "signal_history.db"
@@ -194,55 +200,55 @@ def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
                    rsi_zone, vol_bucket, trend,
                    outcome, short_outcome, exit_price, pnl_pct,
                    bars_held, is_suppressed
-            FROM signals
-            ORDER BY id
+            FROM signals ORDER BY id
         """).fetchall()
 
     log.info(f"signal_history.db: {len(rows):,} rows")
+
+    existing = _table_count(pg, "signals")
+    if existing > 0:
+        log.warning(f"  signals table already has {existing:,} rows — skipping to avoid duplicates")
+        log.warning("  To re-migrate: TRUNCATE signals CASCADE; then re-run.")
+        return {"skipped_existing": existing}
+
     if dry_run:
         return {"total": len(rows), "dry_run": True}
 
-    inserted = updated = 0
     with pg.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur,
-            """
+        psycopg2.extras.execute_batch(cur, """
             INSERT INTO signals (
-                fired_at, ticker, direction,
-                entry_price, target_price, stop_price, confidence,
-                session, regime, trading_tier, vwap_event,
-                rsi_zone, vol_bucket, trend,
-                outcome, short_outcome, exit_price, pnl_pct,
-                bars_held, is_suppressed
-            ) VALUES (
-                %s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s
+                ticker, direction, confidence, price, tier,
+                regime, session, vol_bucket, trend,
+                is_suppressed, short_outcome, indicators, created_at
+            ) VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s)
+        """, [
+            (
+                r["ticker"], r["direction"],
+                _f(r["confidence"]) or 0.0,
+                _f(r["entry_price"]),
+                r["trading_tier"] or "REGULAR",
+                r["regime"] or "", r["session"] or "",
+                r["vol_bucket"] or "NORMAL", r["trend"] or "",
+                _b(r["is_suppressed"]),
+                r["short_outcome"] or "PENDING",
+                json.dumps({
+                    "target":      _f(r["target"]),
+                    "stop":        _f(r["stop"]),
+                    "vwap_event":  r["vwap_event"] or "",
+                    "rsi_zone":    r["rsi_zone"] or "",
+                    "outcome":     r["outcome"] or "PENDING",
+                    "exit_price":  _f(r["exit_price"]),
+                    "pnl_pct":     _f(r["pnl_pct"]),
+                    "bars_held":   _i(r["bars_held"]) or 0,
+                    "sqlite_id":   _i(r["id"]),
+                }),
+                _ts(r["ts"]),
             )
-            ON CONFLICT DO NOTHING
-            """,
-            [
-                (
-                    _ts(r["ts"]), r["ticker"], r["direction"],
-                    _f(r["entry_price"]), _f(r["target"]), _f(r["stop"]), _f(r["confidence"]),
-                    r["session"] or "", r["regime"] or "", r["trading_tier"] or "REGULAR",
-                    r["vwap_event"] or "", r["rsi_zone"] or "", r["vol_bucket"] or "NORMAL",
-                    r["trend"] or "",
-                    r["outcome"] or "PENDING", r["short_outcome"] or "PENDING",
-                    _f(r["exit_price"]), _f(r["pnl_pct"]),
-                    _i(r["bars_held"]) or 0, _b(r["is_suppressed"]),
-                )
-                for r in rows
-            ],
-            page_size=500,
-        )
-        inserted = cur.rowcount
+            for r in rows
+        ], page_size=500)
     pg.commit()
 
-    # Rebuild ticker_stats from signals
+    # Rebuild ticker_stats from the migrated signals
     _rebuild_ticker_stats(pg)
 
     log.info(f"  ↳ signals inserted: {len(rows):,}")
@@ -250,125 +256,71 @@ def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
 
 
 def _rebuild_ticker_stats(pg) -> None:
-    """Recompute ticker_stats from the signals table."""
     log.info("Rebuilding ticker_stats …")
     with pg.cursor() as cur:
         cur.execute("""
-            INSERT INTO ticker_stats (ticker, total_signals, total_wins, win_rate, avg_pnl_r, last_updated)
+            INSERT INTO ticker_stats (
+                ticker, obs_count, win_count, loss_count, scratch_count,
+                win_rate, avg_pnl_pct, avg_hold_min, last_signal_at, updated_at
+            )
             SELECT
                 ticker,
-                COUNT(*)                                                        AS total_signals,
-                COUNT(*) FILTER (WHERE outcome = 'WIN')                         AS total_wins,
+                COUNT(*)                                                              AS obs_count,
+                COUNT(*) FILTER (WHERE indicators->>'outcome' = 'WIN')                AS win_count,
+                COUNT(*) FILTER (WHERE indicators->>'outcome' = 'LOSS')               AS loss_count,
+                COUNT(*) FILTER (WHERE indicators->>'outcome' NOT IN ('WIN','LOSS')
+                                   AND indicators->>'outcome' IS NOT NULL)             AS scratch_count,
                 ROUND(
-                    COUNT(*) FILTER (WHERE outcome = 'WIN')::NUMERIC
-                    / NULLIF(COUNT(*) FILTER (WHERE outcome IN ('WIN','LOSS')),0),
-                    4
-                )                                                               AS win_rate,
-                ROUND(AVG(pnl_pct) FILTER (WHERE outcome IN ('WIN','LOSS')), 4) AS avg_pnl_r,
+                    COUNT(*) FILTER (WHERE indicators->>'outcome' = 'WIN')::NUMERIC
+                    / NULLIF(
+                        COUNT(*) FILTER (WHERE indicators->>'outcome' IN ('WIN','LOSS')),
+                        0),
+                    4)                                                                AS win_rate,
+                ROUND(AVG((indicators->>'pnl_pct')::NUMERIC)
+                      FILTER (WHERE indicators->>'outcome' IN ('WIN','LOSS')), 4)     AS avg_pnl_pct,
+                0                                                                     AS avg_hold_min,
+                MAX(created_at)                                                       AS last_signal_at,
                 NOW()
             FROM signals
             GROUP BY ticker
             ON CONFLICT (ticker) DO UPDATE SET
-                total_signals = EXCLUDED.total_signals,
-                total_wins    = EXCLUDED.total_wins,
-                win_rate      = EXCLUDED.win_rate,
-                avg_pnl_r     = EXCLUDED.avg_pnl_r,
-                last_updated  = NOW()
+                obs_count      = EXCLUDED.obs_count,
+                win_count      = EXCLUDED.win_count,
+                loss_count     = EXCLUDED.loss_count,
+                scratch_count  = EXCLUDED.scratch_count,
+                win_rate       = EXCLUDED.win_rate,
+                avg_pnl_pct    = EXCLUDED.avg_pnl_pct,
+                last_signal_at = EXCLUDED.last_signal_at,
+                updated_at     = NOW()
         """)
     pg.commit()
     log.info("  ↳ ticker_stats rebuilt")
 
 
-# ─── 2. paper_trades.db  →  trades ───────────────────────────────────────────
+# ─── 2. paper_trades.db → trades ─────────────────────────────────────────────
+#
+#  SQLite           PostgreSQL
+#  ───────────────  ─────────────────────────────────────────────────────────
+#  opened_at        entry_at, created_at
+#  closed_at        exit_at, updated_at
+#  ticker           ticker
+#  direction        direction
+#  status           status
+#  entry_price      entry_price
+#  target           take_profit
+#  stop             stop_loss
+#  exit_price       exit_price
+#  exit_reason      exit_reason
+#  pnl_pct          pnl_pct
+#  pnl_dollar       gross_pnl, net_pnl
+#  shares           shares
+#  bars_held        hold_minutes (1 bar ≈ 1 min)
+#  trade_type       'PAPER' (constant)
+#  commission       0 (paper)
+#  entry_value      entry_price * shares
+#  all others       → metadata JSONB
 
-def migrate_trades(sqlite_dir: Path, pg, dry_run: bool, open_only: bool = False) -> dict:
-    db_path = sqlite_dir / "paper_trades.db"
-    if not db_path.exists():
-        log.warning("paper_trades.db not found — skipping")
-        return {"skipped": True}
-
-    status_filter = "WHERE status = 'OPEN'" if open_only else ""
-    with sqlite_ro(db_path) as sc:
-        rows = sc.execute(f"""
-            SELECT
-                id, opened_at, closed_at, ticker, direction,
-                entry_price, target, stop, confidence,
-                rr_ratio, rr_qualifies, bars_held, status,
-                exit_price, exit_reason, pnl_pct, pnl_dollar,
-                shares, session, regime, vwap_event, rsi_zone, entry_type,
-                t1_hit, t1_price, t2_price, breakeven_set,
-                partial_pnl_dollar, shares_remaining,
-                order_flow_score, size_mult
-            FROM paper_trades
-            {status_filter}
-            ORDER BY id
-        """).fetchall()
-
-    open_count   = sum(1 for r in rows if r["status"] == "OPEN")
-    closed_count = len(rows) - open_count
-    label = "OPEN-only sync" if open_only else "full"
-    log.info(f"paper_trades.db ({label}): {len(rows):,} rows  "
-             f"({open_count} OPEN · {closed_count} CLOSED)")
-
-    if dry_run:
-        return {"total": len(rows), "open": open_count, "closed": closed_count, "dry_run": True}
-
-    with pg.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur,
-            """
-            INSERT INTO trades (
-                opened_at, closed_at, ticker, direction,
-                entry_price, target_price, stop_price, confidence,
-                rr_ratio, rr_qualifies, bars_held, status,
-                exit_price, exit_reason, pnl_pct, pnl_dollar,
-                shares, session, regime, vwap_event, rsi_zone, entry_type,
-                t1_hit, t1_price, t2_price, breakeven_set,
-                partial_pnl_dollar, shares_remaining,
-                order_flow_score, size_mult, metadata
-            ) VALUES (
-                %s,%s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,%s,%s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,
-                %s,%s,%s
-            )
-            ON CONFLICT DO NOTHING
-            """,
-            [
-                (
-                    _ts(r["opened_at"]), _ts(r["closed_at"]),
-                    r["ticker"], r["direction"],
-                    _f(r["entry_price"]), _f(r["target"]), _f(r["stop"]),
-                    _f(r["confidence"]),
-                    _f(r["rr_ratio"]) or 0.0, _b(r["rr_qualifies"]),
-                    _i(r["bars_held"]) or 0, r["status"] or "OPEN",
-                    _f(r["exit_price"]), r["exit_reason"],
-                    _f(r["pnl_pct"]), _f(r["pnl_dollar"]),
-                    _i(r["shares"]) or 1,
-                    r["session"] or "", r["regime"] or "",
-                    r["vwap_event"] or "", r["rsi_zone"] or "", r["entry_type"] or "",
-                    _b(r["t1_hit"]), _f(r["t1_price"]) or 0.0, _f(r["t2_price"]) or 0.0,
-                    _b(r["breakeven_set"]),
-                    _f(r["partial_pnl_dollar"]) or 0.0, _i(r["shares_remaining"]) or 0,
-                    _f(r["order_flow_score"]) or 0.0, _f(r["size_mult"]) or 1.0,
-                    json.dumps({"sqlite_id": _i(r["id"])}),
-                )
-                for r in rows
-            ],
-            page_size=500,
-        )
-    pg.commit()
-    log.info(f"  ↳ trades inserted/refreshed: {len(rows):,}")
-    return {"total": len(rows), "open": open_count, "closed": closed_count}
-
-
-def sync_open_trades(sqlite_dir: Path, pg, dry_run: bool) -> dict:
-    """Re-sync the live OPEN trades — call this just before app-code cutover."""
-    log.info("=== SYNC OPEN TRADES (pre-cutover refresh) ===")
+def migrate_trades(sqlite_dir: Path, pg, dry_run: bool) -> dict:
     db_path = sqlite_dir / "paper_trades.db"
     if not db_path.exists():
         log.warning("paper_trades.db not found — skipping")
@@ -376,68 +328,105 @@ def sync_open_trades(sqlite_dir: Path, pg, dry_run: bool) -> dict:
 
     with sqlite_ro(db_path) as sc:
         rows = sc.execute("""
-            SELECT
-                id, opened_at, closed_at, ticker, direction,
-                entry_price, target, stop, confidence,
-                rr_ratio, rr_qualifies, bars_held, status,
-                exit_price, exit_reason, pnl_pct, pnl_dollar,
-                shares, session, regime, vwap_event, rsi_zone, entry_type,
-                t1_hit, t1_price, t2_price, breakeven_set,
-                partial_pnl_dollar, shares_remaining,
-                order_flow_score, size_mult
-            FROM paper_trades
-            WHERE status = 'OPEN'
-            ORDER BY id
+            SELECT id, opened_at, closed_at, ticker, direction,
+                   entry_price, target, stop, confidence,
+                   rr_ratio, rr_qualifies, bars_held, status,
+                   exit_price, exit_reason, pnl_pct, pnl_dollar,
+                   shares, session, regime, vwap_event, rsi_zone, entry_type,
+                   t1_hit, t1_price, t2_price, breakeven_set,
+                   partial_pnl_dollar, shares_remaining,
+                   order_flow_score, size_mult
+            FROM paper_trades ORDER BY id
         """).fetchall()
 
-    log.info(f"  Found {len(rows)} OPEN trades in SQLite to sync")
+    open_count   = sum(1 for r in rows if r["status"] == "OPEN")
+    closed_count = len(rows) - open_count
+    log.info(f"paper_trades.db: {len(rows):,} rows  ({open_count} OPEN · {closed_count} CLOSED)")
+
+    existing = _table_count(pg, "trades")
+    if existing > 0:
+        log.warning(f"  trades table already has {existing:,} rows — skipping to avoid duplicates")
+        log.warning("  To re-migrate: TRUNCATE trades CASCADE; then re-run.")
+        return {"skipped_existing": existing}
+
     if dry_run:
-        for r in rows:
-            log.info(f"    [DRY] would upsert: #{r['id']} {r['ticker']} {r['direction']} @ {r['entry_price']}")
-        return {"open": len(rows), "dry_run": True}
+        return {"total": len(rows), "open": open_count, "closed": closed_count, "dry_run": True}
 
-    upserted = 0
     with pg.cursor() as cur:
-        for r in rows:
-            cur.execute("""
-                UPDATE trades
-                SET
-                    bars_held          = %s,
-                    status             = %s,
-                    exit_price         = %s,
-                    exit_reason        = %s,
-                    pnl_pct            = %s,
-                    pnl_dollar         = %s,
-                    closed_at          = %s,
-                    t1_hit             = %s,
-                    partial_pnl_dollar = %s,
-                    shares_remaining   = %s,
-                    breakeven_set      = %s,
-                    metadata           = metadata || %s::jsonb
-                WHERE
-                    metadata->>'sqlite_id' = %s
-                    AND status = 'OPEN'
-            """, (
+        psycopg2.extras.execute_batch(cur, """
+            INSERT INTO trades (
+                trade_type, ticker, direction, status,
+                entry_price, entry_at, shares, entry_value,
+                stop_loss, take_profit,
+                exit_price, exit_at, exit_reason,
+                gross_pnl, commission, net_pnl, pnl_pct,
+                hold_minutes, created_at, updated_at, metadata
+            ) VALUES (
+                'PAPER',%s,%s,%s,
+                %s,%s,%s,%s,
+                %s,%s,
+                %s,%s,%s,
+                %s,0,%s,%s,
+                %s,%s,%s,%s
+            )
+        """, [
+            (
+                r["ticker"], r["direction"], r["status"] or "CLOSED",
+                _f(r["entry_price"]),
+                _ts(r["opened_at"]),
+                _i(r["shares"]) or 1,
+                (_f(r["entry_price"]) or 0) * (_i(r["shares"]) or 1),
+                _f(r["stop"]),   _f(r["target"]),
+                _f(r["exit_price"]), _ts(r["closed_at"]), r["exit_reason"],
+                _f(r["pnl_dollar"]),
+                _f(r["pnl_dollar"]),
+                _f(r["pnl_pct"]),
                 _i(r["bars_held"]) or 0,
-                r["status"] or "OPEN",
-                _f(r["exit_price"]), r["exit_reason"],
-                _f(r["pnl_pct"]), _f(r["pnl_dollar"]),
-                _ts(r["closed_at"]),
-                _b(r["t1_hit"]),
-                _f(r["partial_pnl_dollar"]) or 0.0,
-                _i(r["shares_remaining"]) or 0,
-                _b(r["breakeven_set"]),
-                json.dumps({"last_synced": datetime.now(timezone.utc).isoformat()}),
-                str(_i(r["id"])),
-            ))
-            upserted += cur.rowcount
-
+                _ts(r["opened_at"]),
+                _ts(r["closed_at"]) or _ts(r["opened_at"]),
+                json.dumps({
+                    "sqlite_id":        _i(r["id"]),
+                    "confidence":       _f(r["confidence"]),
+                    "rr_ratio":         _f(r["rr_ratio"]),
+                    "rr_qualifies":     _b(r["rr_qualifies"]),
+                    "session":          r["session"] or "",
+                    "regime":           r["regime"] or "",
+                    "vwap_event":       r["vwap_event"] or "",
+                    "rsi_zone":         r["rsi_zone"] or "",
+                    "entry_type":       r["entry_type"] or "",
+                    "t1_hit":           _b(r["t1_hit"]),
+                    "t1_price":         _f(r["t1_price"]),
+                    "t2_price":         _f(r["t2_price"]),
+                    "breakeven_set":    _b(r["breakeven_set"]),
+                    "partial_pnl_dollar": _f(r["partial_pnl_dollar"]),
+                    "shares_remaining": _i(r["shares_remaining"]),
+                    "order_flow_score": _f(r["order_flow_score"]),
+                    "size_mult":        _f(r["size_mult"]),
+                }),
+            )
+            for r in rows
+        ], page_size=500)
     pg.commit()
-    log.info(f"  ↳ open trades synced: {upserted}")
-    return {"open": len(rows), "synced": upserted}
+    log.info(f"  ↳ trades inserted: {len(rows):,}")
+    return {"total": len(rows), "open": open_count, "closed": closed_count}
 
 
-# ─── 3. live_backtest.db  →  signal_observations (source=LIVE) ───────────────
+# ─── 3. live_backtest.db → signal_observations (LIVE) ────────────────────────
+#
+#  SQLite           PostgreSQL
+#  ───────────────  ─────────────────────────────────────────────────────────
+#  signal_id        signal_id  (already unique string)
+#  fired_at         entry_at, created_at
+#  ticker           ticker
+#  direction        direction
+#  entry_price      entry_price
+#  exit_price       exit_price
+#  resolved_at      exit_at
+#  status→outcome   outcome  (WIN/LOSS/SCRATCH/PENDING)
+#  pnl_pct          pnl_pct
+#  bars_tracked     hold_minutes
+#  resolved_at!=NULL resolved (bool)
+#  source           'LIVE'
 
 def migrate_live_backtest(sqlite_dir: Path, pg, dry_run: bool) -> dict:
     db_path = sqlite_dir / "live_backtest.db"
@@ -447,15 +436,10 @@ def migrate_live_backtest(sqlite_dir: Path, pg, dry_run: bool) -> dict:
 
     with sqlite_ro(db_path) as sc:
         rows = sc.execute("""
-            SELECT
-                signal_id, fired_at, ticker, direction,
-                entry_price, target, stop, rr_ratio, confidence,
-                session, regime, vwap_event, rsi_zone, rsi_value,
-                sector_etf, sector_trend, entry_type, mtf_alignment,
-                status, resolved_at, exit_price, exit_reason,
-                bars_tracked, max_favorable_r, pnl_pct, r_multiple
-            FROM bt_signals
-            ORDER BY id
+            SELECT signal_id, fired_at, ticker, direction,
+                   entry_price, exit_price, resolved_at,
+                   status, pnl_pct, bars_tracked
+            FROM bt_signals ORDER BY id
         """).fetchall()
 
     log.info(f"live_backtest.db: {len(rows):,} rows")
@@ -463,50 +447,34 @@ def migrate_live_backtest(sqlite_dir: Path, pg, dry_run: bool) -> dict:
         return {"total": len(rows), "dry_run": True}
 
     with pg.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur,
-            """
+        psycopg2.extras.execute_batch(cur, """
             INSERT INTO signal_observations (
-                source, signal_id, fired_at, ticker, direction,
-                entry_price, target_price, stop_price, rr_ratio, confidence,
-                session, regime, vwap_event, rsi_zone, rsi_value,
-                sector_etf, sector_trend, entry_type, mtf_alignment,
-                status, resolved_at, exit_price, exit_reason,
-                bars_tracked, max_favorable_r, pnl_pct, r_multiple
-            ) VALUES (
-                'LIVE',%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,
-                %s,%s,%s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,%s,%s,
-                %s,%s,%s,%s
-            )
+                signal_id, ticker, direction,
+                entry_price, entry_at,
+                exit_price, exit_at,
+                outcome, pnl_pct, hold_minutes,
+                resolved, created_at, source
+            ) VALUES (%s,%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'LIVE')
             ON CONFLICT (signal_id) DO NOTHING
-            """,
-            [
-                (
-                    r["signal_id"], _ts(r["fired_at"]), r["ticker"], r["direction"],
-                    _f(r["entry_price"]), _f(r["target"]), _f(r["stop"]),
-                    _f(r["rr_ratio"]) or 0.0, _f(r["confidence"]) or 0.0,
-                    r["session"] or "", r["regime"] or "", r["vwap_event"] or "",
-                    r["rsi_zone"] or "", _f(r["rsi_value"]) or 50.0,
-                    r["sector_etf"] or "", r["sector_trend"] or "",
-                    r["entry_type"] or "IMMEDIATE", r["mtf_alignment"] or "",
-                    r["status"] or "TRACKING", _ts(r["resolved_at"]),
-                    _f(r["exit_price"]), r["exit_reason"],
-                    _i(r["bars_tracked"]) or 0, _f(r["max_favorable_r"]) or 0.0,
-                    _f(r["pnl_pct"]), _f(r["r_multiple"]),
-                )
-                for r in rows
-            ],
-            page_size=500,
-        )
+        """, [
+            (
+                r["signal_id"], r["ticker"], r["direction"],
+                _f(r["entry_price"]), _ts(r["fired_at"]),
+                _f(r["exit_price"]), _ts(r["resolved_at"]),
+                _status_to_outcome(r["status"]),
+                _f(r["pnl_pct"]),
+                _i(r["bars_tracked"]) or 0,
+                r["resolved_at"] is not None,
+                _ts(r["fired_at"]),
+            )
+            for r in rows
+        ], page_size=500)
     pg.commit()
     log.info(f"  ↳ signal_observations (LIVE) inserted: {len(rows):,}")
     return {"total": len(rows)}
 
 
-# ─── 4. weekend_learning.db  →  signal_observations (source=WEEKEND) ─────────
+# ─── 4. weekend_learning.db → signal_observations (WEEKEND) ──────────────────
 
 def migrate_weekend_learning(sqlite_dir: Path, pg, dry_run: bool) -> dict:
     db_path = sqlite_dir / "weekend_learning.db"
@@ -516,57 +484,49 @@ def migrate_weekend_learning(sqlite_dir: Path, pg, dry_run: bool) -> dict:
 
     with sqlite_ro(db_path) as sc:
         rows = sc.execute("""
-            SELECT
-                id, weekend_dt, ticker, bar_dt, direction,
-                entry_price, target, stop,
-                exit_price, outcome, pnl_r, bars_held, won
-            FROM signal_records
-            ORDER BY id
+            SELECT id, weekend_dt, ticker, bar_dt, direction,
+                   entry_price, exit_price, outcome, pnl_r, bars_held, won
+            FROM signal_records ORDER BY id
         """).fetchall()
 
     log.info(f"weekend_learning.db: {len(rows):,} rows")
+    if not rows:
+        return {"total": 0}
     if dry_run:
         return {"total": len(rows), "dry_run": True}
 
     with pg.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur,
-            """
+        psycopg2.extras.execute_batch(cur, """
             INSERT INTO signal_observations (
-                source, signal_id, fired_at, ticker, direction,
-                entry_price, target_price, stop_price,
-                exit_price, status, r_multiple, bars_tracked, metadata
-            ) VALUES (
-                'WEEKEND',
-                'WKND_' || %s || '_' || %s,
-                %s, %s, %s,
-                %s, %s, %s,
-                %s, %s, %s, %s, %s::jsonb
-            )
+                signal_id, ticker, direction,
+                entry_price, entry_at,
+                exit_price, exit_at,
+                outcome, pnl_pct, hold_minutes,
+                resolved, created_at, source
+            ) VALUES (%s,%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'WEEKEND')
             ON CONFLICT (signal_id) DO NOTHING
-            """,
-            [
-                (
-                    str(_i(r["id"])), r["ticker"] or "UNK",
-                    _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
-                    r["ticker"], r["direction"],
-                    _f(r["entry_price"]), _f(r["target"]), _f(r["stop"]),
-                    _f(r["exit_price"]),
-                    r["outcome"] or ("WIN" if _b(r["won"]) else "LOSS"),
-                    _f(r["pnl_r"]),
-                    _i(r["bars_held"]) or 0,
-                    json.dumps({"weekend_dt": r["weekend_dt"], "sqlite_id": _i(r["id"])}),
-                )
-                for r in rows
-            ],
-            page_size=500,
-        )
+        """, [
+            (
+                f"WKND_{_i(r['id'])}_{r['ticker']}",
+                r["ticker"], r["direction"],
+                _f(r["entry_price"]),
+                _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
+                _f(r["exit_price"]),
+                _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
+                r["outcome"] or ("WIN" if _b(r["won"]) else "LOSS"),
+                _f(r["pnl_r"]),
+                _i(r["bars_held"]) or 0,
+                True,
+                _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
+            )
+            for r in rows
+        ], page_size=500)
     pg.commit()
     log.info(f"  ↳ signal_observations (WEEKEND) inserted: {len(rows):,}")
     return {"total": len(rows)}
 
 
-# ─── 5. backtest_mtf.db  →  signal_observations (BACKTEST) + backtest_summary ─
+# ─── 5. backtest_mtf.db → signal_observations (BACKTEST) + backtest_summary ──
 
 def migrate_backtest_mtf(sqlite_dir: Path, pg, dry_run: bool) -> dict:
     db_path = sqlite_dir / "backtest_mtf.db"
@@ -576,83 +536,65 @@ def migrate_backtest_mtf(sqlite_dir: Path, pg, dry_run: bool) -> dict:
 
     with sqlite_ro(db_path) as sc:
         trades = sc.execute("""
-            SELECT
-                id, run_dt, timeframe, ticker, bar_dt, direction,
-                entry_price, target, stop,
-                exit_price, outcome, pnl_r, bars_held, won
-            FROM bt_mtf_trades
-            ORDER BY id
+            SELECT id, run_dt, timeframe, ticker, bar_dt, direction,
+                   entry_price, exit_price, outcome, pnl_r, bars_held, won
+            FROM bt_mtf_trades ORDER BY id
         """).fetchall()
-
         summaries = sc.execute("""
-            SELECT run_dt, timeframe, ticker,
-                   total, wins, win_rate, avg_pnl_r,
-                   expectancy, max_dd_r, sharpe
-            FROM bt_mtf_summary
-            ORDER BY run_dt, timeframe, ticker
+            SELECT run_dt, timeframe, ticker, total, wins,
+                   win_rate, avg_pnl_r, expectancy, max_dd_r, sharpe
+            FROM bt_mtf_summary ORDER BY run_dt, timeframe, ticker
         """).fetchall()
 
     log.info(f"backtest_mtf.db: {len(trades):,} trades, {len(summaries):,} summaries")
+    if not trades and not summaries:
+        return {"trades": 0, "summaries": 0}
     if dry_run:
         return {"trades": len(trades), "summaries": len(summaries), "dry_run": True}
 
-    # Migrate trades → signal_observations
     with pg.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur,
-            """
-            INSERT INTO signal_observations (
-                source, signal_id, fired_at, ticker, direction,
-                entry_price, target_price, stop_price,
-                exit_price, status, r_multiple, bars_tracked, metadata
-            ) VALUES (
-                'BACKTEST',
-                'BTF_' || %s || '_' || %s,
-                %s, %s, %s,
-                %s, %s, %s,
-                %s, %s, %s, %s, %s::jsonb
-            )
-            ON CONFLICT (signal_id) DO NOTHING
-            """,
-            [
+        if trades:
+            psycopg2.extras.execute_batch(cur, """
+                INSERT INTO signal_observations (
+                    signal_id, ticker, direction,
+                    entry_price, entry_at,
+                    exit_price, exit_at,
+                    outcome, pnl_pct, hold_minutes,
+                    resolved, created_at, source
+                ) VALUES (%s,%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'BACKTEST')
+                ON CONFLICT (signal_id) DO NOTHING
+            """, [
                 (
-                    str(_i(r["id"])), r["ticker"] or "UNK",
-                    _ts(r["bar_dt"]) or _ts(r["run_dt"]),
+                    f"BTF_{_i(r['id'])}_{r['ticker']}",
                     r["ticker"], r["direction"],
-                    _f(r["entry_price"]), _f(r["target"]), _f(r["stop"]),
+                    _f(r["entry_price"]),
+                    _ts(r["bar_dt"]) or _ts(r["run_dt"]),
                     _f(r["exit_price"]),
+                    _ts(r["bar_dt"]) or _ts(r["run_dt"]),
                     r["outcome"] or ("WIN" if _b(r["won"]) else "LOSS"),
                     _f(r["pnl_r"]),
                     _i(r["bars_held"]) or 0,
-                    json.dumps({
-                        "run_dt": r["run_dt"],
-                        "timeframe": r["timeframe"],
-                        "sqlite_id": _i(r["id"]),
-                    }),
+                    True,
+                    _ts(r["bar_dt"]) or _ts(r["run_dt"]),
                 )
                 for r in trades
-            ],
-            page_size=500,
-        )
+            ], page_size=500)
 
-        # Migrate summaries → backtest_summary
-        psycopg2.extras.execute_batch(
-            cur,
-            """
-            INSERT INTO backtest_summary (
-                run_dt, timeframe, ticker,
-                total, wins, win_rate, avg_pnl_r, expectancy, max_dd_r, sharpe
-            ) VALUES (%s,%s,%s, %s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (run_dt, timeframe, ticker) DO UPDATE SET
-                total      = EXCLUDED.total,
-                wins       = EXCLUDED.wins,
-                win_rate   = EXCLUDED.win_rate,
-                avg_pnl_r  = EXCLUDED.avg_pnl_r,
-                expectancy = EXCLUDED.expectancy,
-                max_dd_r   = EXCLUDED.max_dd_r,
-                sharpe     = EXCLUDED.sharpe
-            """,
-            [
+        if summaries:
+            psycopg2.extras.execute_batch(cur, """
+                INSERT INTO backtest_summary (
+                    run_dt, timeframe, ticker, total, wins,
+                    win_rate, avg_pnl_r, expectancy, max_dd_r, sharpe
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (run_dt, timeframe, ticker) DO UPDATE SET
+                    total      = EXCLUDED.total,
+                    wins       = EXCLUDED.wins,
+                    win_rate   = EXCLUDED.win_rate,
+                    avg_pnl_r  = EXCLUDED.avg_pnl_r,
+                    expectancy = EXCLUDED.expectancy,
+                    max_dd_r   = EXCLUDED.max_dd_r,
+                    sharpe     = EXCLUDED.sharpe
+            """, [
                 (
                     _ts(s["run_dt"]), s["timeframe"], s["ticker"],
                     _i(s["total"]) or 0, _i(s["wins"]) or 0,
@@ -660,9 +602,7 @@ def migrate_backtest_mtf(sqlite_dir: Path, pg, dry_run: bool) -> dict:
                     _f(s["expectancy"]), _f(s["max_dd_r"]), _f(s["sharpe"]),
                 )
                 for s in summaries
-            ],
-            page_size=200,
-        )
+            ], page_size=200)
 
     pg.commit()
     log.info(f"  ↳ signal_observations (BACKTEST): {len(trades):,}")
@@ -670,84 +610,19 @@ def migrate_backtest_mtf(sqlite_dir: Path, pg, dry_run: bool) -> dict:
     return {"trades": len(trades), "summaries": len(summaries)}
 
 
-# ─── Pre-flight checks ────────────────────────────────────────────────────────
-
-REQUIRED_TABLES = [
-    "signals", "trades", "signal_observations",
-    "ticker_stats", "backtest_summary",
-]
-
-def preflight(pg, sqlite_dir: Path) -> bool:
-    ok = True
-    log.info("=== Pre-flight checks ===")
-
-    # Check PostgreSQL tables exist
-    with pg.cursor() as cur:
-        cur.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_schema = 'public'
-        """)
-        existing_tables = {r[0] for r in cur.fetchall()}
-
-    for t in REQUIRED_TABLES:
-        if t in existing_tables:
-            log.info(f"  [OK] PostgreSQL table '{t}' exists")
-        else:
-            log.error(f"  [MISSING] PostgreSQL table '{t}' — run DDL additions first")
-            ok = False
-
-    # Check signal_observations.source column
-    with pg.cursor() as cur:
-        cur.execute("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'signal_observations' AND column_name = 'source'
-        """)
-        if cur.fetchone():
-            log.info("  [OK] signal_observations.source column exists")
-        else:
-            log.error("  [MISSING] signal_observations.source — run DDL additions first")
-            ok = False
-
-    # Check trades.metadata column
-    with pg.cursor() as cur:
-        cur.execute("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'trades' AND column_name = 'metadata'
-        """)
-        if cur.fetchone():
-            log.info("  [OK] trades.metadata column exists")
-        else:
-            log.error("  [MISSING] trades.metadata — run DDL additions first")
-            ok = False
-
-    # Check SQLite files
-    for fname in ["signal_history.db", "paper_trades.db", "live_backtest.db",
-                  "weekend_learning.db", "backtest_mtf.db"]:
-        p = sqlite_dir / fname
-        if p.exists():
-            size_mb = p.stat().st_size / 1_048_576
-            log.info(f"  [OK] {fname}  ({size_mb:.1f} MB)")
-        else:
-            log.warning(f"  [MISSING] {fname} (will be skipped)")
-
-    return ok
-
-
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate NASDAQ Agent SQLite → PostgreSQL")
-    parser.add_argument("--pg-host",     default="localhost",     help="RDS endpoint")
-    parser.add_argument("--pg-port",     type=int, default=5432,  help="PostgreSQL port")
-    parser.add_argument("--pg-db",       default="trading",       help="Database name")
-    parser.add_argument("--pg-user",     default="trading_admin", help="Database user")
-    parser.add_argument("--pg-pass",     required=True,           help="Database password")
-    parser.add_argument("--sqlite-dir",  default="/tmp/sqlite",   help="Directory with SQLite files")
-    parser.add_argument("--dry-run",     action="store_true",     help="Read SQLite, print counts, no writes")
-    parser.add_argument("--sync-open-trades", action="store_true",
-                        help="Only re-sync the OPEN trades (pre-cutover refresh)")
-    parser.add_argument("--skip-preflight", action="store_true",  help="Skip pre-flight table checks")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Migrate NASDAQ Agent SQLite → PostgreSQL")
+    ap.add_argument("--pg-host",     default="localhost")
+    ap.add_argument("--pg-port",     type=int, default=5432)
+    ap.add_argument("--pg-db",       default="trading")
+    ap.add_argument("--pg-user",     default="trading_admin")
+    ap.add_argument("--pg-pass",     required=True)
+    ap.add_argument("--sqlite-dir",  default="/tmp/sqlite")
+    ap.add_argument("--dry-run",     action="store_true")
+    ap.add_argument("--skip-preflight", action="store_true")
+    args = ap.parse_args()
 
     sqlite_dir = Path(args.sqlite_dir)
     if not sqlite_dir.exists():
@@ -759,44 +634,35 @@ def main():
         pg = make_pg_conn(args.pg_host, args.pg_port, args.pg_db, args.pg_user, args.pg_pass)
         pg.autocommit = False
     except Exception as e:
-        log.error(f"Cannot connect to PostgreSQL: {e}")
+        log.error(f"Cannot connect: {e}")
         sys.exit(1)
     log.info("  ↳ connected")
 
     try:
-        if not args.skip_preflight:
-            if not preflight(pg, sqlite_dir):
-                log.error("Pre-flight failed — fix errors above before running migration")
-                sys.exit(1)
+        if not args.skip_preflight and not preflight(pg, sqlite_dir):
+            sys.exit(1)
 
         if args.dry_run:
-            log.info("\n=== DRY RUN — no data will be written to PostgreSQL ===\n")
+            log.info("\n=== DRY RUN — no data will be written ===\n")
 
-        if args.sync_open_trades:
-            # Only re-sync OPEN trades; nothing else
-            result = sync_open_trades(sqlite_dir, pg, args.dry_run)
-            log.info(f"\nSync complete: {result}")
-            return
-
-        # Full migration
         log.info("\n=== Phase 1: Signals ===")
         r1 = migrate_signals(sqlite_dir, pg, args.dry_run)
 
-        log.info("\n=== Phase 2: Paper Trades (closed + open snapshot) ===")
+        log.info("\n=== Phase 2: Paper Trades ===")
         r2 = migrate_trades(sqlite_dir, pg, args.dry_run)
 
         log.info("\n=== Phase 3: Live Backtest Observations ===")
         r3 = migrate_live_backtest(sqlite_dir, pg, args.dry_run)
 
-        log.info("\n=== Phase 4: Weekend Learning Observations ===")
+        log.info("\n=== Phase 4: Weekend Learning ===")
         r4 = migrate_weekend_learning(sqlite_dir, pg, args.dry_run)
 
-        log.info("\n=== Phase 5: Multi-TF Backtest Observations + Summary ===")
+        log.info("\n=== Phase 5: Multi-TF Backtest ===")
         r5 = migrate_backtest_mtf(sqlite_dir, pg, args.dry_run)
 
-        log.info("\n" + "=" * 60)
+        log.info("\n" + "="*60)
         log.info("MIGRATION COMPLETE")
-        log.info("=" * 60)
+        log.info("="*60)
         log.info(f"  signals              : {r1}")
         log.info(f"  trades               : {r2}")
         log.info(f"  observations (LIVE)  : {r3}")
@@ -805,32 +671,17 @@ def main():
 
         if not args.dry_run:
             log.info("""
-NEXT STEPS
-----------
-1. Verify row counts in PostgreSQL:
-     SELECT 'signals',             COUNT(*) FROM signals
-     UNION ALL SELECT 'trades',    COUNT(*) FROM trades
-     UNION ALL SELECT 'obs_live',  COUNT(*) FROM signal_observations WHERE source='LIVE'
-     UNION ALL SELECT 'obs_wknd',  COUNT(*) FROM signal_observations WHERE source='WEEKEND'
-     UNION ALL SELECT 'obs_btf',   COUNT(*) FROM signal_observations WHERE source='BACKTEST'
-     UNION ALL SELECT 'bt_summ',   COUNT(*) FROM backtest_summary
-     UNION ALL SELECT 'tickers',   COUNT(*) FROM ticker_stats;
-
-2. Check the 14 open trades were migrated:
-     SELECT id, ticker, direction, status, opened_at, metadata->>'sqlite_id' AS sqlite_id
-     FROM trades WHERE status = 'OPEN' ORDER BY opened_at;
-
-3. When ready to cut the app over to PostgreSQL:
-     a. Deploy new app version with PostgreSQL connection
-     b. Immediately before deploying, run:
-            python3 migrate_sqlite_to_postgres.py --sync-open-trades \\
-                --pg-host <HOST> --pg-pass <PASS>
-     c. This final sync captures the last-known state of the 14 open trades
-     d. The new app version takes over from PostgreSQL
+Verify in PostgreSQL:
+  SELECT 'signals',  COUNT(*) FROM signals
+  UNION ALL SELECT 'trades',         COUNT(*) FROM trades
+  UNION ALL SELECT 'obs_live',       COUNT(*) FROM signal_observations WHERE source='LIVE'
+  UNION ALL SELECT 'obs_weekend',    COUNT(*) FROM signal_observations WHERE source='WEEKEND'
+  UNION ALL SELECT 'obs_backtest',   COUNT(*) FROM signal_observations WHERE source='BACKTEST'
+  UNION ALL SELECT 'ticker_stats',   COUNT(*) FROM ticker_stats;
 """)
 
     except KeyboardInterrupt:
-        log.warning("Interrupted — rolling back …")
+        log.warning("Interrupted — rolling back")
         pg.rollback()
     except Exception as e:
         log.exception(f"Migration failed: {e}")
