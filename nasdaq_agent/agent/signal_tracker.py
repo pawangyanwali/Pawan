@@ -109,6 +109,8 @@ def init_db() -> None:
         # schema migration — that type caps at 9.9999 and overflows for stock
         # prices > $10 or confidence values stored as percentages (0-100).
         # ALTER COLUMN to DOUBLE PRECISION is idempotent on already-correct types.
+        # Also drop NOT NULL from 'price' — legacy column from original schema
+        # migration that our INSERT doesn't populate (entry_price covers it).
         from agent.db import using_postgres
         if using_postgres():
             for _col in ["entry_price", "target", "stop", "confidence",
@@ -120,6 +122,10 @@ def init_db() -> None:
                     )
                 except Exception:
                     pass
+            try:
+                c.execute("ALTER TABLE signals ALTER COLUMN price DROP NOT NULL")
+            except Exception:
+                pass   # column absent (new schema) or already nullable
 
         c.commit()
 
