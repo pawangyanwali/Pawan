@@ -216,10 +216,15 @@ class StockSignal:
     premarket_high:   float = 0.0
     premarket_low:    float = 0.0
 
+    gap_score:        float = 0.0   # [-1,+1] directional score from gap size/type
+    today_open:       float = 0.0   # Regular-session open price (9:30 ET first bar)
+
     # ── PDH / PDL / ORB levels ────────────────────────────────────────────────
-    prev_day_high:  float = 0.0   # Previous day high
-    prev_day_low:   float = 0.0   # Previous day low
-    prev_day_close: float = 0.0   # Previous day close
+    prev_day_high:      float = 0.0   # Previous day high
+    prev_day_low:       float = 0.0   # Previous day low
+    prev_day_close:     float = 0.0   # Previous day close
+    price_vs_pdh_pct:   float = 0.0   # (price - PDH) / PDH * 100 (+ve = above PDH)
+    price_vs_pdl_pct:   float = 0.0   # (price - PDL) / PDL * 100 (-ve = below PDL)
     orb_high:       float = 0.0   # Opening range breakout high (first 30-min)
     orb_low:        float = 0.0   # Opening range breakout low (first 30-min)
     orb_breakout:   str   = ""    # "BULL" | "BEAR" | "" — if price broke ORB
@@ -1006,14 +1011,20 @@ def analyse_ticker(
             # Gap analysis
             gap_type          = gap["gap_type"],
             gap_pct           = float(gap["gap_pct"]),
+            gap_score         = float(gap["gap_score"]),
             gap_filled        = bool(gap["gap_filled"]),
             gap_fill_prob     = float(gap["fill_probability"]),
+            today_open        = float(gap["today_open"]),
             premarket_high    = float(gap["premarket_high"]),
             premarket_low     = float(gap["premarket_low"]),
             # PDH / PDL / ORB levels (30-min)
             prev_day_high     = levels["prev_day_high"],
             prev_day_low      = levels["prev_day_low"],
             prev_day_close    = levels["prev_day_close"],
+            price_vs_pdh_pct  = round((price - levels["prev_day_high"]) / levels["prev_day_high"] * 100, 3)
+                                if levels["prev_day_high"] > 0 else 0.0,
+            price_vs_pdl_pct  = round((price - levels["prev_day_low"]) / levels["prev_day_low"] * 100, 3)
+                                if levels["prev_day_low"] > 0 else 0.0,
             orb_high          = levels["orb_high"],
             orb_low           = levels["orb_low"],
             orb_breakout      = levels["orb_breakout"],

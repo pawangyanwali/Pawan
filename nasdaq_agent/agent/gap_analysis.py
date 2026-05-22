@@ -73,6 +73,7 @@ def analyse_gap(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
     result = {
         "gap_type":         "FLAT",
         "gap_pct":          0.0,
+        "gap_score":        0.0,
         "prior_close":      0.0,
         "today_open":       0.0,
         "fill_probability": 0.0,
@@ -144,9 +145,28 @@ def analyse_gap(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
         else:
             desc = f"Flat open (gap {gap_pct:+.2f}%)."
 
+        abs_gap = abs(gap_pct)
+        if gap_type == "GAP_UP":
+            if abs_gap >= 3.0:
+                gap_score = 0.80
+            elif abs_gap >= 1.0:
+                gap_score = 0.50
+            else:
+                gap_score = 0.25
+        elif gap_type == "GAP_DOWN":
+            if abs_gap >= 3.0:
+                gap_score = -0.80
+            elif abs_gap >= 1.0:
+                gap_score = -0.50
+            else:
+                gap_score = -0.25
+        else:
+            gap_score = 0.0
+
         result.update({
             "gap_type":         gap_type,
             "gap_pct":          round(gap_pct, 3),
+            "gap_score":        round(gap_score, 3),
             "prior_close":      round(prior_close, 4),
             "today_open":       round(today_open, 4),
             "fill_probability": round(fill_prob, 2),
