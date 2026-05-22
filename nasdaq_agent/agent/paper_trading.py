@@ -127,52 +127,63 @@ def init_db() -> None:
         c.commit()
 
 
+_COLUMN_ADDITIONS = [
+    # Core columns that may be absent in old migrated RDS schemas
+    ("target",             "REAL DEFAULT 0"),
+    ("stop",               "REAL DEFAULT 0"),
+    ("bars_held",          "INTEGER DEFAULT 0"),
+    ("status",             "TEXT DEFAULT 'OPEN'"),
+    ("exit_price",         "REAL"),
+    ("exit_reason",        "TEXT"),
+    ("pnl_pct",            "REAL"),
+    ("pnl_dollar",         "REAL"),
+    # Later additions
+    ("rr_ratio",           "REAL DEFAULT 0"),
+    ("rr_qualifies",       "INTEGER DEFAULT 0"),
+    ("session",            "TEXT DEFAULT ''"),
+    ("regime",             "TEXT DEFAULT ''"),
+    ("vwap_event",         "TEXT DEFAULT ''"),
+    ("rsi_zone",           "TEXT DEFAULT ''"),
+    ("entry_type",         "TEXT DEFAULT ''"),
+    ("shares",             "INTEGER DEFAULT 1"),
+    ("t1_hit",             "INTEGER DEFAULT 0"),
+    ("t1_price",           "REAL DEFAULT 0"),
+    ("t2_price",           "REAL DEFAULT 0"),
+    ("breakeven_set",      "INTEGER DEFAULT 0"),
+    ("partial_pnl_dollar", "REAL DEFAULT 0"),
+    ("shares_remaining",   "INTEGER DEFAULT 0"),
+    ("order_flow_score",   "REAL DEFAULT 0"),
+    ("size_mult",          "REAL DEFAULT 1.0"),
+    ("cost_basis",         "REAL DEFAULT 0"),   # entry_price × shares (allocated capital)
+]
+
+
 def _migrate_columns(c) -> None:
     from agent.db import using_postgres
     pg = using_postgres()
     if pg:
-        existing: set[str] = set()   # unused for PG — we use IF NOT EXISTS instead
+        # Run each ALTER TABLE on a DEDICATED autocommit connection so that DDL
+        # commits are independent of the caller's transaction — a rollback in
+        # init_db()'s outer transaction cannot undo these schema changes.
+        from agent.db import _get_pool
+        pool = _get_pool()
+        raw = pool.getconn()
+        try:
+            raw.autocommit = True
+            with raw.cursor() as cur:
+                for col, definition in _COLUMN_ADDITIONS:
+                    try:
+                        cur.execute(
+                            f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {definition}"
+                        )
+                        logger.debug(f"[DB] schema patch: ensured column paper_trades.{col}")
+                    except Exception as e:
+                        logger.warning(f"[DB] schema patch failed for {col}: {e}")
+        finally:
+            pool.putconn(raw)
     else:
         existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
-    additions = [
-        # Core columns that may be absent in old migrated RDS schemas
-        ("target",             "REAL DEFAULT 0"),
-        ("stop",               "REAL DEFAULT 0"),
-        ("bars_held",          "INTEGER DEFAULT 0"),
-        ("status",             "TEXT DEFAULT 'OPEN'"),
-        ("exit_price",         "REAL"),
-        ("exit_reason",        "TEXT"),
-        ("pnl_pct",            "REAL"),
-        ("pnl_dollar",         "REAL"),
-        # Later additions
-        ("rr_ratio",           "REAL DEFAULT 0"),
-        ("rr_qualifies",       "INTEGER DEFAULT 0"),
-        ("session",            "TEXT DEFAULT ''"),
-        ("regime",             "TEXT DEFAULT ''"),
-        ("vwap_event",         "TEXT DEFAULT ''"),
-        ("rsi_zone",           "TEXT DEFAULT ''"),
-        ("entry_type",         "TEXT DEFAULT ''"),
-        ("shares",             "INTEGER DEFAULT 1"),
-        ("t1_hit",             "INTEGER DEFAULT 0"),
-        ("t1_price",           "REAL DEFAULT 0"),
-        ("t2_price",           "REAL DEFAULT 0"),
-        ("breakeven_set",      "INTEGER DEFAULT 0"),
-        ("partial_pnl_dollar", "REAL DEFAULT 0"),
-        ("shares_remaining",   "INTEGER DEFAULT 0"),
-        ("order_flow_score",   "REAL DEFAULT 0"),
-        ("size_mult",          "REAL DEFAULT 1.0"),
-        ("cost_basis",         "REAL DEFAULT 0"),   # entry_price × shares (allocated capital)
-    ]
-    for col, definition in additions:
-        if pg:
-            # Use IF NOT EXISTS so the statement is always a no-op for existing
-            # columns — this prevents a failed ALTER from aborting the transaction
-            # and blocking subsequent migrations.
-            try:
-                c.execute(f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {definition}")
-            except Exception:
-                pass
-        else:
+        for col, definition in _COLUMN_ADDITIONS:
             if col not in existing:
                 try:
                     c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
@@ -334,9 +345,14 @@ def maybe_open_trade(
             ).fetchone()
             realized_pnl = float(realized_pnl_row["rpnl"]) if realized_pnl_row else 0.0
 
-            allocated_row = c.execute(
-                "SELECT COALESCE(SUM(COALESCE(cost_basis, entry_price * shares)),0) AS alloc FROM paper_trades WHERE status='OPEN'"
-            ).fetchone()
+            try:
+                allocated_row = c.execute(
+                    "SELECT COALESCE(SUM(COALESCE(cost_basis, entry_price * shares)),0) AS alloc FROM paper_trades WHERE status='OPEN'"
+                ).fetchone()
+            except Exception:
+                allocated_row = c.execute(
+                    "SELECT COALESCE(SUM(entry_price * shares),0) AS alloc FROM paper_trades WHERE status='OPEN'"
+                ).fetchone()
             allocated = float(allocated_row["alloc"]) if allocated_row else 0.0
 
             available = _budget + realized_pnl - allocated
@@ -1199,10 +1215,16 @@ def get_summary() -> dict:
         closed = c.execute(
             "SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'"
         ).fetchall()
-        open_rows = c.execute(
-            "SELECT entry_price, shares, COALESCE(cost_basis, entry_price*shares) as cb "
-            "FROM paper_trades WHERE status='OPEN'"
-        ).fetchall()
+        try:
+            open_rows = c.execute(
+                "SELECT entry_price, shares, COALESCE(cost_basis, entry_price*shares) as cb "
+                "FROM paper_trades WHERE status='OPEN'"
+            ).fetchall()
+        except Exception:
+            open_rows = c.execute(
+                "SELECT entry_price, shares, entry_price*shares as cb "
+                "FROM paper_trades WHERE status='OPEN'"
+            ).fetchall()
         cfg_row = c.execute(
             "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades "
             "FROM account_config WHERE id=1"
@@ -1269,12 +1291,20 @@ def get_account_state(open_prices: dict | None = None) -> dict:
         closed = c.execute(
             "SELECT pnl_dollar FROM paper_trades WHERE status='CLOSED' AND pnl_dollar IS NOT NULL"
         ).fetchall()
-        open_rows = c.execute(
-            "SELECT ticker, direction, entry_price, shares, "
-            "COALESCE(shares_remaining, shares) as shares_rem, "
-            "COALESCE(cost_basis, entry_price*shares) as cb "
-            "FROM paper_trades WHERE status='OPEN'"
-        ).fetchall()
+        try:
+            open_rows = c.execute(
+                "SELECT ticker, direction, entry_price, shares, "
+                "COALESCE(shares_remaining, shares) as shares_rem, "
+                "COALESCE(cost_basis, entry_price*shares) as cb "
+                "FROM paper_trades WHERE status='OPEN'"
+            ).fetchall()
+        except Exception:
+            open_rows = c.execute(
+                "SELECT ticker, direction, entry_price, shares, "
+                "COALESCE(shares_remaining, shares) as shares_rem, "
+                "entry_price*shares as cb "
+                "FROM paper_trades WHERE status='OPEN'"
+            ).fetchall()
         cfg_row = c.execute(
             "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades "
             "FROM account_config WHERE id=1"
