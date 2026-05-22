@@ -60,57 +60,127 @@ def _fire_trade_event(event: str, ticker: str) -> None:
             pass
 
 
+def _run_ddl_autocommit(statements: list[str]) -> None:
+    """Run DDL statements each in their own autocommit connection so they are
+    committed independently of any surrounding transaction."""
+    from agent.db import using_postgres, _get_pool
+    if using_postgres():
+        pool = _get_pool()
+        raw = pool.getconn()
+        try:
+            raw.autocommit = True
+            with raw.cursor() as cur:
+                for sql in statements:
+                    try:
+                        cur.execute(sql)
+                    except Exception as e:
+                        logger.warning(f"[DB] DDL warning: {e}")
+        finally:
+            pool.putconn(raw)
+
+
 def init_db() -> None:
-    with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS paper_trades (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                opened_at           TEXT    NOT NULL,
-                closed_at           TEXT,
-                ticker              TEXT    NOT NULL,
-                direction           TEXT    NOT NULL,
-                entry_price         REAL    NOT NULL,
-                target              REAL    NOT NULL,
-                stop                REAL    NOT NULL,
-                confidence          REAL    NOT NULL,
-                rr_ratio            REAL    DEFAULT 0,
-                rr_qualifies        INTEGER DEFAULT 0,
-                bars_held           INTEGER DEFAULT 0,
-                status              TEXT    DEFAULT 'OPEN',
-                exit_price          REAL,
-                exit_reason         TEXT,
-                pnl_pct             REAL,
-                pnl_dollar          REAL,
-                shares              INTEGER DEFAULT 1,
-                session             TEXT    DEFAULT '',
-                regime              TEXT    DEFAULT '',
-                vwap_event          TEXT    DEFAULT '',
-                rsi_zone            TEXT    DEFAULT '',
-                entry_type          TEXT    DEFAULT '',
-                -- T1/T2 partial exit tracking (PRD 6.3)
-                t1_hit              INTEGER DEFAULT 0,
-                t1_price            REAL    DEFAULT 0,
-                t2_price            REAL    DEFAULT 0,
-                breakeven_set       INTEGER DEFAULT 0,
-                partial_pnl_dollar  REAL    DEFAULT 0,
-                shares_remaining    INTEGER DEFAULT 0,
-                order_flow_score    REAL    DEFAULT 0,
-                size_mult           REAL    DEFAULT 1.0
+    from agent.db import using_postgres
+
+    # ── DDL statements (always idempotent) ──────────────────────────────────
+    create_paper_trades = """
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id                  SERIAL PRIMARY KEY,
+            opened_at           TEXT    NOT NULL,
+            closed_at           TEXT,
+            ticker              TEXT    NOT NULL,
+            direction           TEXT    NOT NULL,
+            entry_price         DOUBLE PRECISION NOT NULL,
+            target              DOUBLE PRECISION NOT NULL DEFAULT 0,
+            stop                DOUBLE PRECISION NOT NULL DEFAULT 0,
+            confidence          DOUBLE PRECISION NOT NULL,
+            rr_ratio            DOUBLE PRECISION DEFAULT 0,
+            rr_qualifies        INTEGER DEFAULT 0,
+            bars_held           INTEGER DEFAULT 0,
+            status              TEXT    DEFAULT 'OPEN',
+            exit_price          DOUBLE PRECISION,
+            exit_reason         TEXT,
+            pnl_pct             DOUBLE PRECISION,
+            pnl_dollar          DOUBLE PRECISION,
+            shares              INTEGER DEFAULT 1,
+            session             TEXT    DEFAULT '',
+            regime              TEXT    DEFAULT '',
+            vwap_event          TEXT    DEFAULT '',
+            rsi_zone            TEXT    DEFAULT '',
+            entry_type          TEXT    DEFAULT '',
+            t1_hit              INTEGER DEFAULT 0,
+            t1_price            DOUBLE PRECISION DEFAULT 0,
+            t2_price            DOUBLE PRECISION DEFAULT 0,
+            breakeven_set       INTEGER DEFAULT 0,
+            partial_pnl_dollar  DOUBLE PRECISION DEFAULT 0,
+            shares_remaining    INTEGER DEFAULT 0,
+            order_flow_score    DOUBLE PRECISION DEFAULT 0,
+            size_mult           DOUBLE PRECISION DEFAULT 1.0,
+            cost_basis          DOUBLE PRECISION DEFAULT 0
+        )
+    """ if using_postgres() else """
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            opened_at           TEXT    NOT NULL,
+            closed_at           TEXT,
+            ticker              TEXT    NOT NULL,
+            direction           TEXT    NOT NULL,
+            entry_price         REAL    NOT NULL,
+            target              REAL    NOT NULL DEFAULT 0,
+            stop                REAL    NOT NULL DEFAULT 0,
+            confidence          REAL    NOT NULL,
+            rr_ratio            REAL    DEFAULT 0,
+            rr_qualifies        INTEGER DEFAULT 0,
+            bars_held           INTEGER DEFAULT 0,
+            status              TEXT    DEFAULT 'OPEN',
+            exit_price          REAL,
+            exit_reason         TEXT,
+            pnl_pct             REAL,
+            pnl_dollar          REAL,
+            shares              INTEGER DEFAULT 1,
+            session             TEXT    DEFAULT '',
+            regime              TEXT    DEFAULT '',
+            vwap_event          TEXT    DEFAULT '',
+            rsi_zone            TEXT    DEFAULT '',
+            entry_type          TEXT    DEFAULT '',
+            t1_hit              INTEGER DEFAULT 0,
+            t1_price            REAL    DEFAULT 0,
+            t2_price            REAL    DEFAULT 0,
+            breakeven_set       INTEGER DEFAULT 0,
+            partial_pnl_dollar  REAL    DEFAULT 0,
+            shares_remaining    INTEGER DEFAULT 0,
+            order_flow_score    REAL    DEFAULT 0,
+            size_mult           REAL    DEFAULT 1.0,
+            cost_basis          REAL    DEFAULT 0
+        )
+    """
+
+    create_account_config = """
+        CREATE TABLE IF NOT EXISTS account_config (
+            id                   INTEGER PRIMARY KEY,
+            total_budget         REAL    DEFAULT 50000,
+            max_trade_pct        REAL    DEFAULT 5.0,
+            max_allocated_pct    REAL    DEFAULT 40.0,
+            max_open_trades      INTEGER DEFAULT 10,
+            updated_at           TEXT
+        )
+    """
+
+    if using_postgres():
+        create_balance_snapshots = """
+            CREATE TABLE IF NOT EXISTS balance_snapshots (
+                id              SERIAL PRIMARY KEY,
+                snapshot_date   TEXT    NOT NULL UNIQUE,
+                closing_equity  REAL    NOT NULL,
+                daily_pnl       REAL    DEFAULT 0,
+                trade_count     INTEGER DEFAULT 0,
+                wins            INTEGER DEFAULT 0,
+                losses          INTEGER DEFAULT 0,
+                starting_equity REAL    DEFAULT 0
             )
-        """)
-        # Account configuration table — stores budget and capital settings
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS account_config (
-                id                   INTEGER PRIMARY KEY,
-                total_budget         REAL    DEFAULT 50000,
-                max_trade_pct        REAL    DEFAULT 5.0,
-                max_allocated_pct    REAL    DEFAULT 40.0,
-                max_open_trades      INTEGER DEFAULT 10,
-                updated_at           TEXT
-            )
-        """)
-        # Balance snapshots — one row per trading day for equity curve
-        c.execute("""
+        """
+    else:
+        create_balance_snapshots = """
             CREATE TABLE IF NOT EXISTS balance_snapshots (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 snapshot_date   TEXT    NOT NULL UNIQUE,
@@ -121,10 +191,67 @@ def init_db() -> None:
                 losses          INTEGER DEFAULT 0,
                 starting_equity REAL    DEFAULT 0
             )
-        """)
-        # Safe migration: add any missing columns to existing DBs
-        _migrate_columns(c)
-        c.commit()
+        """
+
+    # NUMERIC(5,4) repair — convert old narrow columns to DOUBLE PRECISION
+    _PG_TYPE_REPAIRS = [
+        f"ALTER TABLE paper_trades ALTER COLUMN {c} TYPE DOUBLE PRECISION USING {c}::double precision"
+        for c in ["entry_price", "target", "stop", "exit_price", "pnl_pct",
+                  "pnl_dollar", "rr_ratio", "t1_price", "t2_price",
+                  "partial_pnl_dollar", "size_mult"]
+    ] + [
+        f"ALTER TABLE paper_trades DROP CONSTRAINT IF EXISTS {con}"
+        for con in [
+            "paper_trades_confidence_check", "paper_trades_entry_price_check",
+            "paper_trades_target_check",     "paper_trades_stop_check",
+            "paper_trades_exit_price_check", "paper_trades_pnl_pct_check",
+            "paper_trades_pnl_dollar_check", "paper_trades_rr_ratio_check",
+        ]
+    ]
+
+    if using_postgres():
+        # Run all DDL via autocommit so each statement commits independently.
+        # This prevents a transaction rollback anywhere from wiping the schema.
+        _run_ddl_autocommit(
+            [create_paper_trades, create_account_config, create_balance_snapshots]
+            + [f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {defn}"
+               for col, defn in _COLUMN_ADDITIONS]
+            + _PG_TYPE_REPAIRS
+        )
+        # Ensure account_config default row (DML — can run in normal transaction)
+        with _conn() as c:
+            try:
+                row = c.execute("SELECT id FROM account_config WHERE id=1").fetchone()
+                if not row:
+                    from config import PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES
+                    from datetime import datetime, timezone
+                    c.execute(
+                        "INSERT INTO account_config (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at) VALUES (1, %s, %s, %s, %s, %s)",
+                        (PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES,
+                         datetime.now(timezone.utc).isoformat()),
+                    )
+            except Exception:
+                pass
+    else:
+        # SQLite: single transaction is fine
+        with _conn() as c:
+            c.execute(create_paper_trades)
+            c.execute(create_account_config)
+            c.execute(create_balance_snapshots)
+            _migrate_columns(c)
+            # Ensure default config row
+            try:
+                row = c.execute("SELECT id FROM account_config WHERE id=1").fetchone()
+                if not row:
+                    from config import PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES
+                    from datetime import datetime, timezone
+                    c.execute(
+                        "INSERT INTO account_config (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at) VALUES (1, ?, ?, ?, ?, ?)",
+                        (PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES,
+                         datetime.now(timezone.utc).isoformat()),
+                    )
+            except Exception:
+                pass
 
 
 _COLUMN_ADDITIONS = [
@@ -159,73 +286,12 @@ _COLUMN_ADDITIONS = [
 
 
 def _migrate_columns(c) -> None:
-    from agent.db import using_postgres
-    pg = using_postgres()
-    if pg:
-        # Run each ALTER TABLE on a DEDICATED autocommit connection so that DDL
-        # commits are independent of the caller's transaction — a rollback in
-        # init_db()'s outer transaction cannot undo these schema changes.
-        from agent.db import _get_pool
-        pool = _get_pool()
-        raw = pool.getconn()
-        try:
-            raw.autocommit = True
-            with raw.cursor() as cur:
-                for col, definition in _COLUMN_ADDITIONS:
-                    try:
-                        cur.execute(
-                            f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {definition}"
-                        )
-                        logger.debug(f"[DB] schema patch: ensured column paper_trades.{col}")
-                    except Exception as e:
-                        logger.warning(f"[DB] schema patch failed for {col}: {e}")
-        finally:
-            pool.putconn(raw)
-    else:
-        existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
-        for col, definition in _COLUMN_ADDITIONS:
-            if col not in existing:
-                try:
-                    c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
-                except Exception:
-                    pass
-
-    # Ensure account_config has a default row
-    try:
-        row = c.execute("SELECT id FROM account_config WHERE id=1").fetchone()
-        if not row:
-            from config import PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES
-            from datetime import datetime, timezone
-            c.execute("""
-                INSERT INTO account_config (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?)
-            """, (PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT, PAPER_MAX_OPEN_TRADES,
-                  datetime.now(timezone.utc).isoformat()))
-    except Exception:
-        pass
-
-    # Repair columns that may have been stored as NUMERIC(5,4) by an old schema
-    # migration (max 9.9999 — overflows for prices > $10 or confidence 0-100).
-    if using_postgres():
-        for _col in ["entry_price", "target", "stop", "exit_price",
-                     "pnl_pct", "pnl_dollar", "rr_ratio",
-                     "t1_price", "t2_price", "partial_pnl_dollar", "size_mult"]:
+    """SQLite-only: add missing columns to an existing paper_trades table."""
+    existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
+    for col, definition in _COLUMN_ADDITIONS:
+        if col not in existing:
             try:
-                c.execute(
-                    f"ALTER TABLE paper_trades ALTER COLUMN {_col} "
-                    f"TYPE DOUBLE PRECISION USING {_col}::double precision"
-                )
-            except Exception:
-                pass
-        # Drop legacy CHECK constraints that accompanied NUMERIC(5,4) columns
-        for _constraint in [
-            "paper_trades_confidence_check", "paper_trades_entry_price_check",
-            "paper_trades_target_check",     "paper_trades_stop_check",
-            "paper_trades_exit_price_check", "paper_trades_pnl_pct_check",
-            "paper_trades_pnl_dollar_check", "paper_trades_rr_ratio_check",
-        ]:
-            try:
-                c.execute(f"ALTER TABLE paper_trades DROP CONSTRAINT {_constraint}")
+                c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
             except Exception:
                 pass
 
