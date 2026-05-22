@@ -126,10 +126,23 @@ def init_db() -> None:
                 c.execute("ALTER TABLE signals ALTER COLUMN price DROP NOT NULL")
             except Exception:
                 pass   # column absent (new schema) or already nullable
-            try:
-                c.execute("ALTER TABLE signals DROP CONSTRAINT signals_confidence_check")
-            except Exception:
-                pass   # constraint already dropped or never existed
+            for _constraint in [
+                "signals_confidence_check",
+                "signals_session_check",
+                "signals_direction_check",
+                "signals_regime_check",
+                "signals_outcome_check",
+                "signals_trading_tier_check",
+                "signals_vwap_event_check",
+                "signals_rsi_zone_check",
+                "signals_vol_bucket_check",
+                "signals_trend_check",
+                "signals_short_outcome_check",
+            ]:
+                try:
+                    c.execute(f"ALTER TABLE signals DROP CONSTRAINT {_constraint}")
+                except Exception:
+                    pass   # already dropped or never existed
 
         c.commit()
 
