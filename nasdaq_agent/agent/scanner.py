@@ -228,6 +228,8 @@ class StockSignal:
     prev_day_close:     float = 0.0   # Previous day close
     price_vs_pdh_pct:   float = 0.0   # (price - PDH) / PDH * 100 (+ve = above PDH)
     price_vs_pdl_pct:   float = 0.0   # (price - PDL) / PDL * 100 (-ve = below PDL)
+    session_high:       float = 0.0   # Today's intraday HOD (regular session)
+    session_low:        float = 0.0   # Today's intraday LOD (regular session)
 
     # ── Red-to-Green / Green-to-Red ───────────────────────────────────────────
     color_vs_prev_close: str  = "FLAT"  # "GREEN" | "RED" | "FLAT"
@@ -396,10 +398,11 @@ def _build_candles(df: pd.DataFrame, n: int = 80) -> list:
 
 
 def _compute_levels(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
-    """Compute PDH, PDL, PDC, and ORB (first 30-min high/low) from market data."""
+    """Compute PDH, PDL, PDC, ORB, and today's session HOD/LOD from market data."""
     import pytz
     result = {"prev_day_high": 0.0, "prev_day_low": 0.0, "prev_day_close": 0.0,
-              "orb_high": 0.0, "orb_low": 0.0, "orb_breakout": ""}
+              "orb_high": 0.0, "orb_low": 0.0, "orb_breakout": "",
+              "session_high": 0.0, "session_low": 0.0}
     try:
         if not df_1d.empty and len(df_1d) >= 2:
             prev = df_1d.iloc[-2]
@@ -433,6 +436,15 @@ def _compute_levels(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
                         result["orb_breakout"] = "BULL"
                     elif last_price < result["orb_low"]:
                         result["orb_breakout"] = "BEAR"
+
+            # Today's session HOD / LOD (regular session only)
+            today_sess = df_et[
+                (df_et.index.date == today) &
+                (df_et.index.time >= pd.Timestamp("09:30").time())
+            ]
+            if not today_sess.empty:
+                result["session_high"] = round(float(today_sess["High"].max()), 4)
+                result["session_low"]  = round(float(today_sess["Low"].min()),  4)
     except Exception:
         pass
     return result
@@ -1045,6 +1057,8 @@ def analyse_ticker(
                                 if levels["prev_day_high"] > 0 else 0.0,
             price_vs_pdl_pct  = round((price - levels["prev_day_low"]) / levels["prev_day_low"] * 100, 3)
                                 if levels["prev_day_low"] > 0 else 0.0,
+            session_high      = levels["session_high"],
+            session_low       = levels["session_low"],
             # R2G / G2R
             color_vs_prev_close = color_flip["color"],
             r2g_event           = bool(color_flip["r2g_event"]),
