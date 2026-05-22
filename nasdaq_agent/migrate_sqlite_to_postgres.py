@@ -107,46 +107,6 @@ def make_pg_conn(host, port, db, user, password):
 
 # ─── Type helpers ─────────────────────────────────────────────────────────────
 
-_TIER_MAP = {"HIGH": 1, "REGULAR": 2, "LOW": 3, "TIER1": 1, "TIER2": 2, "TIER3": 3}
-
-def _confidence(v: Any) -> float:
-    """SQLite stores confidence as 0-100; PostgreSQL NUMERIC(5,4) expects 0-1."""
-    f = _f(v) or 0.0
-    return round(f / 100.0, 4) if f > 1.0 else round(f, 4)
-
-# session values allowed by signals_session_check
-_SESSION_MAP = {
-    'OPEN':        'REGULAR',
-    'MARKET':      'REGULAR',
-    'REGULAR':     'REGULAR',
-    'PRE_MARKET':  'PRE_MARKET',
-    'PRE':         'PRE_MARKET',
-    'PREMARKET':   'PRE_MARKET',
-    'AFTER_HOURS': 'AFTER_HOURS',
-    'AFTERHOURS':  'AFTER_HOURS',
-    'AH':          'AFTER_HOURS',
-    'EXTENDED':    'AFTER_HOURS',
-    'CLOSED':      'CLOSED',
-}
-
-def _session(v: Any) -> str:
-    return _SESSION_MAP.get(str(v).upper().strip() if v else '', 'REGULAR')
-
-# direction: only BUY/SELL allowed
-_DIR_MAP = {'BUY': 'BUY', 'LONG': 'BUY', 'SELL': 'SELL', 'SHORT': 'SELL'}
-
-def _direction(v: Any) -> Optional[str]:
-    return _DIR_MAP.get(str(v).upper().strip() if v else '', None)
-
-def _tier(v: Any) -> int:
-    """Convert text tier ('HIGH'/'REGULAR'/'LOW') or numeric string to SMALLINT."""
-    if v is None:
-        return 2
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return _TIER_MAP.get(str(v).upper().strip(), 2)
-
 def _f(v: Any) -> Optional[float]:
     try:
         return float(v) if v is not None else None
@@ -170,11 +130,70 @@ def _ts(v: Any) -> Optional[str]:
     s = str(v).strip()
     return s if s else None
 
-def _status_to_outcome(status: str) -> Optional[str]:
-    """Map live_backtest status → signal_observations outcome."""
-    m = {'WIN': 'WIN', 'LOSS': 'LOSS', 'STOPPED': 'LOSS',
-         'TARGET': 'WIN', 'EXPIRED': 'LOSS', 'SCRATCH': 'SCRATCH'}
-    return m.get((status or '').upper())
+def _confidence(v: Any) -> float:
+    """SQLite 0-100 → PostgreSQL NUMERIC(5,4) 0-1."""
+    f = _f(v) or 0.0
+    return round(f / 100.0, 4) if f > 1.0 else round(f, 4)
+
+_SESSION_MAP = {
+    'OPEN': 'REGULAR', 'MARKET': 'REGULAR', 'REGULAR': 'REGULAR',
+    'PRE_MARKET': 'PRE_MARKET', 'PRE': 'PRE_MARKET', 'PREMARKET': 'PRE_MARKET',
+    'AFTER_HOURS': 'AFTER_HOURS', 'AFTERHOURS': 'AFTER_HOURS',
+    'AH': 'AFTER_HOURS', 'EXTENDED': 'AFTER_HOURS',
+    'CLOSED': 'CLOSED',
+}
+def _session(v: Any) -> str:
+    return _SESSION_MAP.get(str(v).upper().strip() if v else '', 'REGULAR')
+
+_DIR_MAP = {'BUY': 'BUY', 'LONG': 'BUY', 'SELL': 'SELL', 'SHORT': 'SELL'}
+def _direction(v: Any) -> Optional[str]:
+    return _DIR_MAP.get(str(v).upper().strip() if v else '', None)
+
+_TIER_MAP = {"HIGH": 1, "REGULAR": 2, "LOW": 3, "TIER1": 1, "TIER2": 2, "TIER3": 3}
+def _tier(v: Any) -> int:
+    if v is None:
+        return 2
+    try:
+        t = int(v)
+        return max(1, min(5, t))   # clamp to 1-5
+    except (TypeError, ValueError):
+        return _TIER_MAP.get(str(v).upper().strip(), 2)
+
+# trades.exit_reason: only STOP_LOSS, TAKE_PROFIT, SIGNAL, EOD, MANUAL, TIMEOUT
+_EXIT_MAP = {
+    'TARGET_HIT': 'TAKE_PROFIT', 'T1_HIT': 'TAKE_PROFIT', 'T2_HIT': 'TAKE_PROFIT',
+    'TP': 'TAKE_PROFIT', 'TAKE_PROFIT': 'TAKE_PROFIT', 'TARGET': 'TAKE_PROFIT',
+    'STOP': 'STOP_LOSS', 'STOP_HIT': 'STOP_LOSS', 'SL': 'STOP_LOSS',
+    'STOP_LOSS': 'STOP_LOSS', 'BREAKEVEN_STOP': 'STOP_LOSS', 'BE_STOP': 'STOP_LOSS',
+    'STOPLOSS': 'STOP_LOSS',
+    'TIME_STOP': 'TIMEOUT', 'TIME_EXIT': 'TIMEOUT', 'BARS_EXCEEDED': 'TIMEOUT',
+    'TIMEOUT': 'TIMEOUT', 'TIME': 'TIMEOUT',
+    'EOD': 'EOD', 'EOD_CLOSE': 'EOD', 'END_OF_DAY': 'EOD', 'HARD_CLOSE': 'EOD',
+    'MANUAL': 'MANUAL', 'SIGNAL': 'SIGNAL',
+}
+def _exit_reason(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    return _EXIT_MAP.get(str(v).upper().strip(), 'MANUAL')
+
+# signal_observations.outcome: only WIN, LOSS, SCRATCH (or NULL)
+_OUTCOME_MAP = {
+    'WIN': 'WIN', 'PROFIT': 'WIN', 'TARGET': 'WIN', 'TARGET_HIT': 'WIN',
+    'LOSS': 'LOSS', 'STOPPED': 'LOSS', 'STOP': 'LOSS',
+    'SCRATCH': 'SCRATCH', 'BREAKEVEN': 'SCRATCH', 'BE': 'SCRATCH',
+}
+def _outcome(v: Any) -> Optional[str]:
+    """Returns WIN/LOSS/SCRATCH or None — TRACKING/PENDING become NULL."""
+    if v is None:
+        return None
+    return _OUTCOME_MAP.get(str(v).upper().strip(), None)
+
+def _exit_after_entry(entry_ts: Optional[str], exit_ts: Optional[str]) -> Optional[str]:
+    """Return exit_ts only if strictly after entry_ts, else NULL (satisfies chk_exit_after_entry)."""
+    if not exit_ts or not entry_ts:
+        return exit_ts
+    return exit_ts if exit_ts > entry_ts else None
+
 
 
 # ─── Pre-flight ───────────────────────────────────────────────────────────────
@@ -418,17 +437,21 @@ def migrate_trades(sqlite_dir: Path, pg, dry_run: bool) -> dict:
             )
         """, [
             (
-                r["ticker"], _direction(r["direction"]) or r["direction"], r["status"] or "CLOSED",
+                r["ticker"],
+                _direction(r["direction"]) or "BUY",
+                r["status"] or "CLOSED",
                 _f(r["entry_price"]),
                 _ts(r["opened_at"]),
-                _i(r["shares"]) or 1,
-                (_f(r["entry_price"]) or 0) * (_i(r["shares"]) or 1),
-                _f(r["stop"]),   _f(r["target"]),
-                _f(r["exit_price"]), _ts(r["closed_at"]), r["exit_reason"],
+                max(_i(r["shares"]) or 1, 1),
+                (_f(r["entry_price"]) or 0) * max(_i(r["shares"]) or 1, 1),
+                _f(r["stop"]), _f(r["target"]),
+                _f(r["exit_price"]),
+                _exit_after_entry(_ts(r["opened_at"]), _ts(r["closed_at"])),
+                _exit_reason(r["exit_reason"]),
                 _f(r["pnl_dollar"]),
                 _f(r["pnl_dollar"]),
                 _f(r["pnl_pct"]),
-                _i(r["bars_held"]) or 0,
+                max(_i(r["bars_held"]) or 0, 0),
                 _ts(r["opened_at"]),
                 _ts(r["closed_at"]) or _ts(r["opened_at"]),
                 json.dumps({
@@ -490,31 +513,48 @@ def migrate_live_backtest(sqlite_dir: Path, pg, dry_run: bool) -> dict:
         """).fetchall()
 
     log.info(f"live_backtest.db: {len(rows):,} rows")
+
+    existing = _table_count(pg, "signal_observations")
+    if existing > 0:
+        log.warning(f"  signal_observations already has {existing:,} rows — skipping")
+        log.warning("  To re-migrate: TRUNCATE signal_observations; then re-run.")
+        return {"skipped_existing": existing}
+
     if dry_run:
         return {"total": len(rows), "dry_run": True}
+
+    # signal_id is a FK→signals.id (INTEGER) — we have no matching PG signal IDs,
+    # so insert with signal_id=NULL. Filter rows violating NOT NULL / CHECK constraints.
+    valid = [r for r in rows
+             if _f(r["entry_price"]) and _f(r["entry_price"]) > 0
+             and _direction(r["direction"])
+             and _ts(r["fired_at"])]
+    skipped = len(rows) - len(valid)
+    if skipped:
+        log.warning(f"  Skipping {skipped} rows with null price/direction/entry_at")
 
     with pg.cursor() as cur:
         psycopg2.extras.execute_batch(cur, """
             INSERT INTO signal_observations (
-                signal_id, ticker, direction,
+                ticker, direction,
                 entry_price, entry_at,
                 exit_price, exit_at,
                 outcome, pnl_pct, hold_minutes,
                 resolved, created_at, source
-            ) VALUES (%s,%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'LIVE')
-            ON CONFLICT (signal_id) DO NOTHING
+            ) VALUES (%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'LIVE')
         """, [
             (
-                r["signal_id"], r["ticker"], r["direction"],
+                r["ticker"], _direction(r["direction"]),
                 _f(r["entry_price"]), _ts(r["fired_at"]),
-                _f(r["exit_price"]), _ts(r["resolved_at"]),
-                _status_to_outcome(r["status"]),
+                _f(r["exit_price"]),
+                _exit_after_entry(_ts(r["fired_at"]), _ts(r["resolved_at"])),
+                _outcome(r["status"]),
                 _f(r["pnl_pct"]),
-                _i(r["bars_tracked"]) or 0,
+                max(_i(r["bars_tracked"]) or 0, 0),
                 r["resolved_at"] is not None,
                 _ts(r["fired_at"]),
             )
-            for r in rows
+            for r in valid
         ], page_size=500)
     pg.commit()
     log.info(f"  ↳ signal_observations (LIVE) inserted: {len(rows):,}")
@@ -545,24 +585,25 @@ def migrate_weekend_learning(sqlite_dir: Path, pg, dry_run: bool) -> dict:
     with pg.cursor() as cur:
         psycopg2.extras.execute_batch(cur, """
             INSERT INTO signal_observations (
-                signal_id, ticker, direction,
+                ticker, direction,
                 entry_price, entry_at,
                 exit_price, exit_at,
                 outcome, pnl_pct, hold_minutes,
                 resolved, created_at, source
-            ) VALUES (%s,%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'WEEKEND')
-            ON CONFLICT (signal_id) DO NOTHING
+            ) VALUES (%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'WEEKEND')
         """, [
             (
-                f"WKND_{_i(r['id'])}_{r['ticker']}",
-                r["ticker"], r["direction"],
+                r["ticker"], _direction(r["direction"]) or "BUY",
                 _f(r["entry_price"]),
                 _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
                 _f(r["exit_price"]),
-                _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
-                r["outcome"] or ("WIN" if _b(r["won"]) else "LOSS"),
+                _exit_after_entry(
+                    _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
+                    _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
+                ),
+                _outcome(r["outcome"]) or ("WIN" if _b(r["won"]) else "LOSS"),
                 _f(r["pnl_r"]),
-                _i(r["bars_held"]) or 0,
+                max(_i(r["bars_held"]) or 0, 0),
                 True,
                 _ts(r["bar_dt"]) or _ts(r["weekend_dt"]),
             )
@@ -603,24 +644,25 @@ def migrate_backtest_mtf(sqlite_dir: Path, pg, dry_run: bool) -> dict:
         if trades:
             psycopg2.extras.execute_batch(cur, """
                 INSERT INTO signal_observations (
-                    signal_id, ticker, direction,
+                    ticker, direction,
                     entry_price, entry_at,
                     exit_price, exit_at,
                     outcome, pnl_pct, hold_minutes,
                     resolved, created_at, source
-                ) VALUES (%s,%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'BACKTEST')
-                ON CONFLICT (signal_id) DO NOTHING
+                ) VALUES (%s,%s, %s,%s, %s,%s, %s,%s,%s, %s,%s,'BACKTEST')
             """, [
                 (
-                    f"BTF_{_i(r['id'])}_{r['ticker']}",
-                    r["ticker"], r["direction"],
+                    r["ticker"], _direction(r["direction"]) or "BUY",
                     _f(r["entry_price"]),
                     _ts(r["bar_dt"]) or _ts(r["run_dt"]),
                     _f(r["exit_price"]),
-                    _ts(r["bar_dt"]) or _ts(r["run_dt"]),
-                    r["outcome"] or ("WIN" if _b(r["won"]) else "LOSS"),
+                    _exit_after_entry(
+                        _ts(r["bar_dt"]) or _ts(r["run_dt"]),
+                        _ts(r["bar_dt"]) or _ts(r["run_dt"]),
+                    ),
+                    _outcome(r["outcome"]) or ("WIN" if _b(r["won"]) else "LOSS"),
                     _f(r["pnl_r"]),
-                    _i(r["bars_held"]) or 0,
+                    max(_i(r["bars_held"]) or 0, 0),
                     True,
                     _ts(r["bar_dt"]) or _ts(r["run_dt"]),
                 )
