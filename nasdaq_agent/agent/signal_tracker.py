@@ -75,8 +75,22 @@ def init_db() -> None:
                 is_suppressed INTEGER DEFAULT 0
             )
         """)
-        # Add new columns to existing DBs that predate this schema
+        # Ensure all columns exist — covers both schema upgrades and RDS tables
+        # that were migrated from an older SQLite schema missing some columns.
+        # On PostgreSQL these become ADD COLUMN IF NOT EXISTS (never fails).
         for col, typedef in [
+            # Core columns (may be absent in old migrated schemas)
+            ("entry_price",   "REAL"),
+            ("target",        "REAL"),
+            ("stop",          "REAL"),
+            ("confidence",    "REAL"),
+            ("session",       "TEXT DEFAULT ''"),
+            ("regime",        "TEXT DEFAULT ''"),
+            ("outcome",       "TEXT DEFAULT 'PENDING'"),
+            ("exit_price",    "REAL"),
+            ("pnl_pct",       "REAL"),
+            ("bars_held",     "INTEGER DEFAULT 0"),
+            # Later additions
             ("trading_tier",  "TEXT DEFAULT 'REGULAR'"),
             ("vwap_event",    "TEXT DEFAULT ''"),
             ("rsi_zone",      "TEXT DEFAULT ''"),
@@ -88,7 +102,7 @@ def init_db() -> None:
             try:
                 c.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
             except Exception:
-                pass   # column already exists
+                pass   # column already exists (SQLite path)
         c.commit()
 
 

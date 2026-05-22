@@ -85,12 +85,20 @@ def init_db() -> None:
 def _migrate_columns(c) -> None:
     from agent.db import using_postgres
     if using_postgres():
-        # On PostgreSQL the PRAGMA is a no-op; attempt every ALTER TABLE —
-        # existing columns raise an error that is silently caught below.
-        existing: set[str] = set()
+        existing: set[str] = set()   # IF NOT EXISTS handles duplicates on PG
     else:
         existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
     additions = [
+        # Core columns that may be absent in old migrated RDS schemas
+        ("target",             "REAL DEFAULT 0"),
+        ("stop",               "REAL DEFAULT 0"),
+        ("bars_held",          "INTEGER DEFAULT 0"),
+        ("status",             "TEXT DEFAULT 'OPEN'"),
+        ("exit_price",         "REAL"),
+        ("exit_reason",        "TEXT"),
+        ("pnl_pct",            "REAL"),
+        ("pnl_dollar",         "REAL"),
+        # Later additions
         ("rr_ratio",           "REAL DEFAULT 0"),
         ("rr_qualifies",       "INTEGER DEFAULT 0"),
         ("session",            "TEXT DEFAULT ''"),
@@ -204,7 +212,7 @@ def maybe_open_trade(
                 "SELECT id FROM paper_trades WHERE ticker=? AND status='OPEN'", (ticker,)
             ).fetchone()
             if existing:
-                logger.debug(f"[PAPER] {ticker} skip: already has open trade #{existing[0]}")
+                logger.debug(f"[PAPER] {ticker} skip: already has open trade #{existing['id']}")
                 return None
 
             open_count = c.execute(

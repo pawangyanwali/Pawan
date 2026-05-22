@@ -106,6 +106,32 @@ def init_db() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_bt_status  ON bt_signals(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_bt_fired   ON bt_signals(fired_at)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_path_sid   ON bt_price_path(signal_id)")
+        # Ensure all bt_signals columns exist (covers old migrated RDS schemas)
+        for col, typedef in [
+            ("rr_ratio",       "REAL DEFAULT 0"),
+            ("confidence",     "REAL DEFAULT 0"),
+            ("session",        "TEXT DEFAULT ''"),
+            ("regime",         "TEXT DEFAULT ''"),
+            ("vwap_event",     "TEXT DEFAULT ''"),
+            ("rsi_zone",       "TEXT DEFAULT ''"),
+            ("rsi_value",      "REAL DEFAULT 50"),
+            ("sector_etf",     "TEXT DEFAULT ''"),
+            ("sector_trend",   "TEXT DEFAULT ''"),
+            ("entry_type",     "TEXT DEFAULT 'IMMEDIATE'"),
+            ("mtf_alignment",  "TEXT DEFAULT ''"),
+            ("status",         "TEXT DEFAULT 'TRACKING'"),
+            ("resolved_at",    "TEXT"),
+            ("exit_price",     "REAL"),
+            ("exit_reason",    "TEXT"),
+            ("bars_tracked",   "INTEGER DEFAULT 0"),
+            ("max_favorable_r","REAL DEFAULT 0"),
+            ("pnl_pct",        "REAL"),
+            ("r_multiple",     "REAL"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE bt_signals ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
         c.commit()
 
 

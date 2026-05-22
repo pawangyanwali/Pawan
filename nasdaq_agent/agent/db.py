@@ -91,11 +91,72 @@ _AUTOINCREMENT_RE = re.compile(
     r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT", re.IGNORECASE
 )
 
+# SQLite date/time function patterns — converted to PostgreSQL equivalents.
+# Timestamps in the DB are Python ISO strings like '2026-05-22T05:43:04.657000+00:00'.
+# to_char with 'YYYY-MM-DD"T"HH24:MI:SS' produces the same prefix so >= comparisons work.
+_TS_FMT = "to_char(NOW() AT TIME ZONE 'UTC' + INTERVAL '%s', 'YYYY-MM-DD\"T\"HH24:MI:SS')"
+
+# datetime('now', '-30 days')  or  datetime('now', '-10 minutes')  [fixed modifier]
+_DT_FIXED_RE = re.compile(r"datetime\('now'\s*,\s*'([^']+)'\)", re.IGNORECASE)
+# datetime('now', ? || ' days')  [parameterised concat — param is like '-7']
+_DT_PARAM_CONCAT_RE = re.compile(
+    r"datetime\('now'\s*,\s*\?\s*\|\|\s*'\s*days\s*'\)", re.IGNORECASE
+)
+# datetime('now', ?)  [parameterised — param is like '-30 days']
+_DT_PARAM_RE = re.compile(r"datetime\('now'\s*,\s*\?\)", re.IGNORECASE)
+# date('now')  e.g.  closed_at >= date('now', '-84 days')  or  = date('now')
+_DATE_FIXED_RE = re.compile(r"date\('now'\s*,\s*'([^']+)'\)", re.IGNORECASE)
+_DATE_NOW_RE   = re.compile(r"date\('now'\)", re.IGNORECASE)
+# date(col_name)  e.g.  date(closed_at) = ...
+_DATE_COL_RE   = re.compile(r"\bdate\((\w+)\)", re.IGNORECASE)
+# strftime('%Y-W%W', col)  →  TO_CHAR(col::timestamptz, 'IYYY-IW')
+_STRFTIME_WEEK_RE = re.compile(r"strftime\('%Y-W%W'\s*,\s*(\w+)\)", re.IGNORECASE)
+
 
 def _to_pg(sql: str) -> str:
     """Convert SQLite SQL to PostgreSQL SQL."""
-    sql = _PH_RE.sub("%s", sql)
     sql = _AUTOINCREMENT_RE.sub("SERIAL PRIMARY KEY", sql)
+
+    # Date/time conversions (process most-specific patterns first, before ? → %s)
+    sql = _DT_FIXED_RE.sub(
+        lambda m: _TS_FMT % m.group(1),
+        sql,
+    )
+    # datetime('now', ? || ' days') — param is e.g. '-7'; becomes '-7 days' interval
+    sql = _DT_PARAM_CONCAT_RE.sub(
+        "to_char(NOW() AT TIME ZONE 'UTC' + (? || ' days')::interval,"
+        " 'YYYY-MM-DD\"T\"HH24:MI:SS')",
+        sql,
+    )
+    # datetime('now', ?) — param is already a full interval string e.g. '-30 days'
+    sql = _DT_PARAM_RE.sub(
+        "to_char(NOW() AT TIME ZONE 'UTC' + ?::interval,"
+        " 'YYYY-MM-DD\"T\"HH24:MI:SS')",
+        sql,
+    )
+    # date('now', '-84 days') — fixed date modifier
+    sql = _DATE_FIXED_RE.sub(
+        lambda m: f"(CURRENT_DATE + INTERVAL '{m.group(1)}')::text",
+        sql,
+    )
+    # date('now') standalone — today's date as text for comparison with TEXT col
+    sql = _DATE_NOW_RE.sub("CURRENT_DATE::text", sql)
+    # date(col) — extract date portion from a TEXT timestamp column
+    sql = _DATE_COL_RE.sub(lambda m: f"({m.group(1)}::timestamptz::date::text)", sql)
+    # strftime('%Y-W%W', col) — ISO week label for grouping
+    sql = _STRFTIME_WEEK_RE.sub(
+        lambda m: f"TO_CHAR({m.group(1)}::timestamptz, 'IYYY-IW')", sql
+    )
+
+    # ALTER TABLE ADD COLUMN → ADD COLUMN IF NOT EXISTS (idempotent; no abort on dup)
+    sql = re.sub(
+        r'\bADD\s+COLUMN\b(?!\s+IF\s+NOT\s+EXISTS)',
+        'ADD COLUMN IF NOT EXISTS',
+        sql, flags=re.IGNORECASE,
+    )
+
+    # SQLite ? placeholders → PostgreSQL %s  (must be last)
+    sql = _PH_RE.sub("%s", sql)
     return sql
 
 
