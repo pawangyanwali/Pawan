@@ -109,6 +109,11 @@ def make_pg_conn(host, port, db, user, password):
 
 _TIER_MAP = {"HIGH": 1, "REGULAR": 2, "LOW": 3, "TIER1": 1, "TIER2": 2, "TIER3": 3}
 
+def _confidence(v: Any) -> float:
+    """SQLite stores confidence as 0-100; PostgreSQL NUMERIC(5,4) expects 0-1."""
+    f = _f(v) or 0.0
+    return round(f / 100.0, 4) if f > 1.0 else round(f, 4)
+
 def _tier(v: Any) -> int:
     """Convert text tier ('HIGH'/'REGULAR'/'LOW') or numeric string to SMALLINT."""
     if v is None:
@@ -235,7 +240,7 @@ def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
         """, [
             (
                 r["ticker"], r["direction"],
-                _f(r["confidence"]) or 0.0,
+                _confidence(r["confidence"]),
                 _f(r["entry_price"]),
                 _tier(r["trading_tier"]),
                 r["regime"] or "", r["session"] or "",
@@ -397,7 +402,7 @@ def migrate_trades(sqlite_dir: Path, pg, dry_run: bool) -> dict:
                 _ts(r["closed_at"]) or _ts(r["opened_at"]),
                 json.dumps({
                     "sqlite_id":        _i(r["id"]),
-                    "confidence":       _f(r["confidence"]),
+                    "confidence":       _confidence(r["confidence"]),
                     "rr_ratio":         _f(r["rr_ratio"]),
                     "rr_qualifies":     _b(r["rr_qualifies"]),
                     "session":          r["session"] or "",
