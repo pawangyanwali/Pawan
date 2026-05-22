@@ -23,12 +23,13 @@ This makes the learning system sensitive to:
 """
 from __future__ import annotations
 import logging
-import sqlite3
 import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from agent.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -39,22 +40,12 @@ SHORT_WIN_PCT = 0.35   # price move % needed for a short-term win at next scan
 SLIPPAGE_PCT  = 0.05   # realistic bid-ask + fill slippage per side
 
 
-def _conn() -> sqlite3.Connection:
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(_DB_PATH), timeout=10)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
+def _conn():
+    return get_conn(_DB_PATH)
 
 
-def _conn_ro() -> sqlite3.Connection:
-    """Read-only connection — WAL allows concurrent reads without holding _lock."""
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(_DB_PATH), timeout=5, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA query_only=ON")
-    return c
+def _conn_ro():
+    return get_conn(_DB_PATH, read_only=True)
 
 
 def init_db() -> None:
@@ -96,7 +87,7 @@ def init_db() -> None:
         ]:
             try:
                 c.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
-            except sqlite3.OperationalError:
+            except Exception:
                 pass   # column already exists
         c.commit()
 

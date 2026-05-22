@@ -1364,48 +1364,82 @@ class Scanner:
 
     def _rt_monitor_loop(self) -> None:
         """
-        Real-time Schwab price monitor — 5-second check cycle, zero API credits.
-        Resolves open paper trades and backtest signals using live last-price from
-        the Schwab WebSocket stream without waiting for the next 60-second scan.
+        Real-time price monitor — 5-second check cycle, zero API credits.
+        Price source priority:
+          1. Valkey hash (md:prices) — updated every ~300 ms by MD Poller
+          2. Schwab WebSocket _live_quotes — fallback if Valkey unavailable
+        Runs even when the Schwab streamer is disconnected, as long as Valkey has data.
         """
-        from config import SCHWAB_ENABLED
-        if not SCHWAB_ENABLED:
-            logger.debug("[RT-Monitor] Schwab not enabled — RT monitor inactive")
-            return
+        try:
+            from agent.valkey_client import get_price as _vk_get_price
+            _valkey_available = True
+        except ImportError:
+            _valkey_available = False
+
         try:
             from agent.broker.schwab_streamer import is_streamer_ready, get_live_quote
+            _streamer_available = True
         except ImportError:
-            logger.debug("[RT-Monitor] schwab_streamer not available — RT monitor inactive")
+            _streamer_available = False
+
+        if not _valkey_available and not _streamer_available:
+            logger.debug("[RT-Monitor] Neither Valkey nor streamer available — RT monitor inactive")
             return
 
-        logger.info("[RT-Monitor] Real-time Schwab price monitor started (5s cycle)")
+        logger.info("[RT-Monitor] Real-time price monitor started (5s cycle, Valkey+streamer)")
         while self.is_running:
             try:
-                if is_streamer_ready():
-                    from agent.paper_trading import get_open_trades as _get_open
-                    open_trades = _get_open()
-                    tickers = list({t["ticker"] for t in open_trades})
-                    for ticker in tickers:
-                        quote = get_live_quote(ticker)
-                        if not quote:
-                            continue
-                        last_price = float(quote.get("last") or quote.get("close") or 0)
-                        if last_price <= 0:
-                            continue
+                from agent.paper_trading import get_open_trades as _get_open
+                open_trades = _get_open()
+                tickers = list({t["ticker"] for t in open_trades})
+                if not tickers:
+                    time.sleep(5)
+                    continue
+
+                _streamer_ready = _streamer_available and is_streamer_ready()
+
+                for ticker in tickers:
+                    last_price = 0.0
+
+                    # 1. Try Valkey first — freshest price (~300 ms lag from MD Poller)
+                    if _valkey_available:
                         try:
-                            resolved_bt = bt_rt_check(ticker, last_price)
-                            if resolved_bt:
-                                for r in resolved_bt:
-                                    logger.info(f"[RT-Monitor] BT {ticker}: {r}")
-                        except Exception as _e:
-                            logger.debug(f"[RT-Monitor] bt_rt_check {ticker}: {_e}")
+                            vk_quote = _vk_get_price(ticker)
+                            if vk_quote:
+                                last_price = float(
+                                    vk_quote.get("last") or vk_quote.get("close") or 0
+                                )
+                        except Exception:
+                            pass
+
+                    # 2. Fallback to in-process WebSocket cache
+                    if last_price <= 0 and _streamer_ready:
                         try:
-                            resolved_pt = pt_rt_check(ticker, last_price)
-                            if resolved_pt:
-                                for r in resolved_pt:
-                                    logger.info(f"[RT-Monitor] PT {ticker}: {r}")
-                        except Exception as _e:
-                            logger.debug(f"[RT-Monitor] pt_rt_check {ticker}: {_e}")
+                            ws_quote = get_live_quote(ticker)
+                            if ws_quote:
+                                last_price = float(
+                                    ws_quote.get("last") or ws_quote.get("close") or 0
+                                )
+                        except Exception:
+                            pass
+
+                    if last_price <= 0:
+                        continue
+
+                    try:
+                        resolved_bt = bt_rt_check(ticker, last_price)
+                        if resolved_bt:
+                            for r in resolved_bt:
+                                logger.info(f"[RT-Monitor] BT {ticker}: {r}")
+                    except Exception as _e:
+                        logger.debug(f"[RT-Monitor] bt_rt_check {ticker}: {_e}")
+                    try:
+                        resolved_pt = pt_rt_check(ticker, last_price)
+                        if resolved_pt:
+                            for r in resolved_pt:
+                                logger.info(f"[RT-Monitor] PT {ticker}: {r}")
+                    except Exception as _e:
+                        logger.debug(f"[RT-Monitor] pt_rt_check {ticker}: {_e}")
             except Exception as _loop_e:
                 logger.debug(f"[RT-Monitor] loop error: {_loop_e}")
             time.sleep(5)

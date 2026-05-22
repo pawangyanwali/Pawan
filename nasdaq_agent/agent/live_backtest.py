@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -36,6 +35,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+from agent.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +53,8 @@ MIN_MOVE_TO_RECORD = 0.0   # record all signals (no minimum)
 
 # ── Database setup ─────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(_DB_PATH), timeout=10)
-    c.row_factory = sqlite3.Row
-    return c
+def _conn():
+    return get_conn(_DB_PATH)
 
 
 def init_db() -> None:

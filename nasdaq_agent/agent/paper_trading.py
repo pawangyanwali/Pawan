@@ -12,13 +12,13 @@ PRD Section 6.3 rules implemented here:
 """
 from __future__ import annotations
 import logging
-import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from agent.exit_signals import analyse_exits, ExitAnalysis
+from agent.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -32,21 +32,11 @@ _MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
 _MAX_CONCURRENT_TRADES   = 20   # Paper sim: high cap so every signal gets a trade and generates learning data
 
 
-def _conn() -> sqlite3.Connection:
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(_DB_PATH), timeout=10)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")   # concurrent readers + writer, no locking conflicts
-    return c
+def _conn():
+    return get_conn(_DB_PATH)
 
-def _conn_ro() -> sqlite3.Connection:
-    """Read-only connection — never blocked by writer threads holding _lock."""
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(_DB_PATH), timeout=5, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA query_only=ON")
-    return c
+def _conn_ro():
+    return get_conn(_DB_PATH, read_only=True)
 
 
 def init_db() -> None:
@@ -92,8 +82,14 @@ def init_db() -> None:
         c.commit()
 
 
-def _migrate_columns(c: sqlite3.Connection) -> None:
-    existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
+def _migrate_columns(c) -> None:
+    from agent.db import using_postgres
+    if using_postgres():
+        # On PostgreSQL the PRAGMA is a no-op; attempt every ALTER TABLE —
+        # existing columns raise an error that is silently caught below.
+        existing: set[str] = set()
+    else:
+        existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
     additions = [
         ("rr_ratio",           "REAL DEFAULT 0"),
         ("rr_qualifies",       "INTEGER DEFAULT 0"),
@@ -490,7 +486,7 @@ def update_open_trades(ticker: str, df, current_price: float,
 
 
 def _record_close(
-    c: sqlite3.Connection,
+    c,
     trade_id:     int,
     exit_price:   float,
     exit_reason:  str,
