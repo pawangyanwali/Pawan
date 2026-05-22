@@ -20,3 +20,5 @@ torch>=2.0.0
 # RL entry timer uses only stdlib + numpy (no extra dep needed)
 # PostgreSQL driver (used by migrate_sqlite_to_postgres.py)
 psycopg2-binary>=2.9.9
+# Valkey/Redis client for price pub/sub and session cache
+redis>=5.0.0
