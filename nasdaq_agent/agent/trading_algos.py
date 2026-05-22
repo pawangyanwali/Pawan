@@ -6,8 +6,14 @@ object) and returns an AlgoResult or None.  evaluate_all() runs every registered
 algo and returns a list of all fired AlgoResult objects.
 
 Algorithm catalogue (this file):
-  1  — 5-min ORB  (ORB5_BULL / ORB5_BEAR)
-  2  — 15-min ORB (ORB15_BULL / ORB15_BEAR)
+  1  — 5-min ORB        (ORB5_BULL / ORB5_BEAR)
+  2  — 15-min ORB       (ORB15_BULL / ORB15_BEAR)
+  6  — Gap-and-Go       (GAP_AND_GO_BULL / BEAR)
+  7  — Gap Fade         (GAP_FADE_BULL / BEAR)
+  8  — PDH/PDL Breakout (PDH_BREAKOUT_BULL / PDL_BREAKDOWN_BEAR)
+  12 — HOD/LOD Break    (HOD_BREAK_BULL / LOD_BREAK_BEAR)
+  29 — Bull Flag        (BULL_FLAG)
+  30 — Bear Flag        (BEAR_FLAG)
 """
 from __future__ import annotations
 
@@ -442,6 +448,180 @@ def eval_hod_lod_break(sig) -> Optional[AlgoResult]:
     return None
 
 
+# ── Flag pattern detection (used by Algos 29 & 30) ───────────────────────────
+
+def detect_flag(df_1m) -> dict:
+    """
+    Detect bull/bear flag patterns in recent 1-min bars.
+
+    Methodology:
+      1. Pole  — last 5 bars before the most recent 5: total move > 0.8%, slope clear.
+      2. Flag  — most recent 5 bars: range < 60% of pole range, counter-trend drift.
+      3. Breakout — current close outside the flag range.
+
+    Returns:
+      bull_flag  : bool
+      bear_flag  : bool
+      flag_high  : float   — top of the flag consolidation zone
+      flag_low   : float   — bottom of the flag consolidation zone
+      pole_pct   : float   — % move of the pole (+ = up, - = down)
+    """
+    out = {"bull_flag": False, "bear_flag": False,
+           "flag_high": 0.0, "flag_low": 0.0, "pole_pct": 0.0}
+    try:
+        import numpy as np
+        import pandas as pd
+
+        if df_1m is None or len(df_1m) < 12:
+            return out
+
+        closes = df_1m["Close"].values
+        highs  = df_1m["High"].values
+        lows   = df_1m["Low"].values
+        n = len(closes)
+
+        # Pole: bars [n-11 .. n-6] (5 bars), Flag: bars [n-5 .. n-1] (5 bars)
+        pole_closes  = closes[n - 11 : n - 5]
+        flag_closes  = closes[n - 6 : n]
+        flag_highs   = highs[n - 6 : n]
+        flag_lows    = lows[n - 6 : n]
+
+        if len(pole_closes) < 5 or len(flag_closes) < 5:
+            return out
+
+        pole_start = float(pole_closes[0])
+        pole_end   = float(pole_closes[-1])
+        pole_pct   = (pole_end - pole_start) / pole_start * 100 if pole_start > 0 else 0.0
+        pole_range = abs(pole_end - pole_start)
+
+        flag_high  = float(np.max(flag_highs))
+        flag_low   = float(np.min(flag_lows))
+        flag_range = flag_high - flag_low
+        current    = float(closes[-1])
+
+        # Flag range must be tighter than pole; slight counter-trend or flat drift
+        if pole_range <= 0 or flag_range <= 0:
+            return out
+
+        tight = flag_range < pole_range * 0.60
+
+        # Bull flag: strong up pole, then slight downward/flat flag, breakout above flag_high
+        if pole_pct >= 0.8 and tight:
+            flag_slope = float(np.polyfit(range(len(flag_closes)), flag_closes, 1)[0])
+            # Slope slightly negative or flat (counter-trend pullback)
+            if flag_slope <= pole_range * 0.05 and current >= flag_high * 0.998:
+                out["bull_flag"] = True
+                out["flag_high"] = round(flag_high, 4)
+                out["flag_low"]  = round(flag_low,  4)
+                out["pole_pct"]  = round(pole_pct, 3)
+                return out
+
+        # Bear flag: strong down pole, then slight upward/flat flag, breakdown below flag_low
+        if pole_pct <= -0.8 and tight:
+            flag_slope = float(np.polyfit(range(len(flag_closes)), flag_closes, 1)[0])
+            if flag_slope >= -pole_range * 0.05 and current <= flag_low * 1.002:
+                out["bear_flag"] = True
+                out["flag_high"] = round(flag_high, 4)
+                out["flag_low"]  = round(flag_low,  4)
+                out["pole_pct"]  = round(pole_pct, 3)
+                return out
+    except Exception as exc:
+        logger.debug("detect_flag error: %s", exc)
+    return out
+
+
+# ── Algo 29: Bull Flag Continuation ──────────────────────────────────────────
+
+def eval_bull_flag(sig) -> Optional[AlgoResult]:
+    """
+    Bull Flag Continuation (Algo 29).
+
+    Pre-computed by detect_flag() → stored in sig.bull_flag / sig.flag_high / etc.
+
+    Entry  = current price (breakout above flag_high confirmed on close).
+    Stop   = flag_low.
+    Target = entry + pole_range * 1.0 (measured move = repeat the pole).
+    """
+    try:
+        if not bool(getattr(sig, "bull_flag", False)):
+            return None
+        flag_high = float(getattr(sig, "flag_high", 0.0))
+        flag_low  = float(getattr(sig, "flag_low",  0.0))
+        pole_pct  = float(getattr(sig, "pole_pct",  0.0))
+        rvol      = float(getattr(sig, "rel_volume", 1.0))
+        gate      = getattr(sig, "short_tf_alignment", "MIXED")
+        price     = float(sig.price)
+
+        if flag_high <= 0 or flag_low <= 0:
+            return None
+        if gate == "BEAR":
+            return None
+
+        pole_pts  = price * abs(pole_pct) / 100
+        entry  = price
+        stop   = flag_low
+        target = entry + pole_pts
+        conf   = min(90, 55 + abs(pole_pct) * 3 + (rvol - 1.0) * 5 + (10 if gate == "BULL" else 0))
+        reason = (
+            f"Bull flag breakout: pole {pole_pct:+.1f}%, flag {flag_low:.2f}–{flag_high:.2f}, "
+            f"RVOL {rvol:.1f}x, TF {gate}"
+        )
+        return AlgoResult(
+            algo="BULL_FLAG", direction="BUY",
+            confidence=round(conf, 1),
+            entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+            rr=_rr(entry, stop, target), reason=reason,
+        )
+    except Exception as exc:
+        logger.debug("eval_bull_flag error: %s", exc)
+    return None
+
+
+# ── Algo 30: Bear Flag Continuation ──────────────────────────────────────────
+
+def eval_bear_flag(sig) -> Optional[AlgoResult]:
+    """
+    Bear Flag Continuation (Algo 30).
+
+    Entry  = current price (breakdown below flag_low confirmed on close).
+    Stop   = flag_high.
+    Target = entry - pole_range * 1.0.
+    """
+    try:
+        if not bool(getattr(sig, "bear_flag", False)):
+            return None
+        flag_high = float(getattr(sig, "flag_high", 0.0))
+        flag_low  = float(getattr(sig, "flag_low",  0.0))
+        pole_pct  = float(getattr(sig, "pole_pct",  0.0))
+        rvol      = float(getattr(sig, "rel_volume", 1.0))
+        gate      = getattr(sig, "short_tf_alignment", "MIXED")
+        price     = float(sig.price)
+
+        if flag_high <= 0 or flag_low <= 0:
+            return None
+        if gate == "BULL":
+            return None
+
+        pole_pts  = price * abs(pole_pct) / 100
+        entry  = price
+        stop   = flag_high
+        target = entry - pole_pts
+        conf   = min(90, 55 + abs(pole_pct) * 3 + (rvol - 1.0) * 5 + (10 if gate == "BEAR" else 0))
+        reason = (
+            f"Bear flag breakdown: pole {pole_pct:+.1f}%, flag {flag_low:.2f}–{flag_high:.2f}, "
+            f"RVOL {rvol:.1f}x, TF {gate}"
+        )
+        return AlgoResult(
+            algo="BEAR_FLAG", direction="SELL",
+            confidence=round(conf, 1),
+            entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+            rr=_rr(entry, stop, target), reason=reason,
+        )
+    except Exception as exc:
+        logger.debug("eval_bear_flag error: %s", exc)
+    return None
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _ALGO_REGISTRY = [
@@ -451,6 +631,8 @@ _ALGO_REGISTRY = [
     eval_gap_fade,
     eval_pdh_pdl_breakout,
     eval_hod_lod_break,
+    eval_bull_flag,
+    eval_bear_flag,
 ]
 
 

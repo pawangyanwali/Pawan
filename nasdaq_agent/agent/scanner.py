@@ -57,7 +57,7 @@ from agent.trade_management import build_trade_plan
 from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
 from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
-from agent.trading_algos import evaluate_all as evaluate_trading_algos
+from agent.trading_algos import evaluate_all as evaluate_trading_algos, detect_flag
 from agent.exit_signals import analyse_exits
 from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades, rt_check_positions as pt_rt_check
 from agent.macro_calendar import check_macro_event
@@ -230,6 +230,13 @@ class StockSignal:
     price_vs_pdl_pct:   float = 0.0   # (price - PDL) / PDL * 100 (-ve = below PDL)
     session_high:       float = 0.0   # Today's intraday HOD (regular session)
     session_low:        float = 0.0   # Today's intraday LOD (regular session)
+
+    # ── Flag patterns (Algos 29 & 30) ────────────────────────────────────────
+    bull_flag:  bool  = False  # Bull flag breakout setup detected
+    bear_flag:  bool  = False  # Bear flag breakdown setup detected
+    flag_high:  float = 0.0    # Top of flag consolidation zone
+    flag_low:   float = 0.0    # Bottom of flag consolidation zone
+    pole_pct:   float = 0.0    # % move of the flag pole (+/- direction)
 
     # ── Red-to-Green / Green-to-Red ───────────────────────────────────────────
     color_vs_prev_close: str  = "FLAT"  # "GREEN" | "RED" | "FLAT"
@@ -965,6 +972,9 @@ def analyse_ticker(
         candles = _build_candles(df_1m)
         info    = _get_info(ticker)
 
+        # Flag pattern detection (Algos 29 & 30)
+        _flag = detect_flag(df_ind)
+
         _sig = StockSignal(
             ticker            = ticker,
             name              = info.get("name", ticker),
@@ -1059,6 +1069,12 @@ def analyse_ticker(
                                 if levels["prev_day_low"] > 0 else 0.0,
             session_high      = levels["session_high"],
             session_low       = levels["session_low"],
+            # Flag patterns
+            bull_flag  = bool(_flag["bull_flag"]),
+            bear_flag  = bool(_flag["bear_flag"]),
+            flag_high  = float(_flag["flag_high"]),
+            flag_low   = float(_flag["flag_low"]),
+            pole_pct   = float(_flag["pole_pct"]),
             # R2G / G2R
             color_vs_prev_close = color_flip["color"],
             r2g_event           = bool(color_flip["r2g_event"]),
