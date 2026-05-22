@@ -571,9 +571,16 @@
     <div id="pt-pnl-val" style="font-size:16px;font-weight:700;margin-top:2px;color:var(--muted)">—</div>
     <div id="pt-pnl-pct" style="font-size:10px;color:var(--muted);margin-top:1px">—</div>
   </div>
-  <div class="pill" id="streak-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:96px" title="Today's win/loss streak">
-    <div class="pill-label">🎯 Streak</div>
-    <div id="streak-dots" style="display:flex;gap:3px;margin-top:4px;flex-wrap:wrap;max-width:80px"></div>
+  <div class="pill" id="streak-pill" onclick="openPaperTrading()" style="cursor:pointer;width:100px;min-width:100px;max-width:100px" title="Today's win/loss breakdown">
+    <div class="pill-label">🎯 W / L</div>
+    <div style="display:flex;align-items:baseline;gap:4px;margin-top:3px">
+      <span id="streak-wins"  style="font-size:15px;font-weight:700;color:var(--green)">—</span>
+      <span style="font-size:10px;color:var(--muted)">/</span>
+      <span id="streak-losses" style="font-size:15px;font-weight:700;color:var(--red)">—</span>
+    </div>
+    <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px;overflow:hidden">
+      <div id="streak-bar" style="height:100%;border-radius:2px;background:var(--green);width:0%;transition:width .4s"></div>
+    </div>
     <div id="streak-label" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
   </div>
   <div class="pill" id="breadth-pill" style="min-width:120px">
@@ -5097,18 +5104,22 @@ function updatePtPills(s, openTradesMap) {
     elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
   }
 
-  // Streak pill — W/L dots for today's trades
-  const dotsEl  = document.getElementById('streak-dots');
+  // Streak pill — compact W/L counter + win-rate bar (no per-trade dots)
+  const wEl    = document.getElementById('streak-wins');
+  const lEl    = document.getElementById('streak-losses');
+  const barEl  = document.getElementById('streak-bar');
   const labelEl = document.getElementById('streak-label');
-  if (dotsEl && closed >= 0) {
-    const wDots = Array(wins).fill('<span style="width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block" title="WIN"></span>').join('');
-    const lDots = Array(Math.max(0, losses)).fill('<span style="width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block" title="LOSS"></span>').join('');
-    dotsEl.innerHTML = wDots + lDots || '<span style="color:var(--muted);font-size:9px">No trades yet</span>';
-    if (labelEl) {
-      labelEl.textContent = closed > 0 ? `${wins}W ${losses}L today` : 'No trades yet';
-      const wrToday = closed > 0 ? wins / closed : null;
-      labelEl.style.color = wrToday === null ? 'var(--muted)' : wrToday >= 0.6 ? 'var(--green)' : wrToday >= 0.45 ? 'var(--yellow)' : 'var(--red)';
-    }
+  if (wEl) wEl.textContent = wins;
+  if (lEl) lEl.textContent = Math.max(0, losses);
+  if (barEl) {
+    const wrPct = closed > 0 ? Math.round(wins / closed * 100) : 0;
+    barEl.style.width = wrPct + '%';
+    barEl.style.background = wrPct >= 60 ? 'var(--green)' : wrPct >= 45 ? 'var(--yellow)' : 'var(--red)';
+  }
+  if (labelEl) {
+    const wrToday = closed > 0 ? wins / closed : null;
+    labelEl.textContent = wrToday !== null ? `${Math.round(wrToday * 100)}% WR` : 'No trades';
+    labelEl.style.color  = wrToday === null ? 'var(--muted)' : wrToday >= 0.6 ? 'var(--green)' : wrToday >= 0.45 ? 'var(--yellow)' : 'var(--red)';
   }
 }
 
