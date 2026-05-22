@@ -408,6 +408,31 @@ async def lifespan(app: FastAPI):
                 manager.broadcast(json.dumps(payload)), _event_loop
             )
     weekend_learner.register_broadcast(_wl_broadcast)
+
+    # Paper-trade instant push — broadcast lightweight pt_update immediately on
+    # every open or close so the dashboard pills (TRADES TODAY / P&L / W/L)
+    # reflect the change in real-time without waiting for the next scan cycle.
+    def _on_trade_event(event: str, ticker: str) -> None:
+        if not _event_loop:
+            return
+        try:
+            from agent.paper_trading import get_summary as _pt_sum, get_open_trades as _pt_open
+            pt_stats   = _pt_sum()
+            open_trades = {t["ticker"]: t for t in _pt_open()}
+            payload = _dumps({
+                "type":        "pt_update",
+                "event":       event,
+                "ticker":      ticker,
+                "pt_stats":    pt_stats,
+                "open_trades": open_trades,
+            })
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast(payload), _event_loop
+            )
+        except Exception:
+            pass
+    from agent.paper_trading import register_trade_callback as _reg_trade_cb
+    _reg_trade_cb(_on_trade_event)
     weekend_learner.maybe_start()
     # Sweep any trades that were left open from a previous session
     try:

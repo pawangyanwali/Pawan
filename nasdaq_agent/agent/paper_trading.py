@@ -39,6 +39,24 @@ def _conn_ro():
     return get_conn(_DB_PATH, read_only=True)
 
 
+# ── Trade-event callbacks ─────────────────────────────────────────────────────
+# Register with register_trade_callback(fn).  Called with ("open"|"close", ticker)
+# from a background thread — callbacks must be non-blocking.
+
+_trade_callbacks: list = []
+
+def register_trade_callback(fn) -> None:
+    """Register a function(event, ticker) called immediately on open/close."""
+    _trade_callbacks.append(fn)
+
+def _fire_trade_event(event: str, ticker: str) -> None:
+    for fn in _trade_callbacks:
+        try:
+            fn(event, ticker)
+        except Exception:
+            pass
+
+
 def init_db() -> None:
     with _conn() as c:
         c.execute("""
@@ -271,6 +289,7 @@ def maybe_open_trade(
                 f"conf:{confidence:.0f}%  shares:{shares}  OF:{order_flow_score:+.2f}  "
                 f"sess:{session}  regime:{regime}"
             )
+            _fire_trade_event("open", ticker)
             return cur.lastrowid
 
 
@@ -451,7 +470,7 @@ def update_open_trades(ticker: str, df, current_price: float,
                             close_shares = 0   # all shares already accounted for
                             # Record closed trade
                             _record_close(c, row["id"], ep, exit_reason, entry, direction,
-                                          shares_total, partial_pnl, shares_total)
+                                          shares_total, partial_pnl, shares_total, ticker=ticker)
                             closed_any = True
                             won_any    = partial_pnl > 0
                             continue
@@ -496,7 +515,7 @@ def update_open_trades(ticker: str, df, current_price: float,
                 # ── Close trade ────────────────────────────────────────────────
                 if exit_reason and close_shares > 0:
                     _record_close(c, row["id"], ep, exit_reason, entry, direction,
-                                  close_shares, partial_pnl, shares_total)
+                                  close_shares, partial_pnl, shares_total, ticker=ticker)
                     closed_any = True
                     # Calculate net P&L for consecutive loss tracking
                     final_pnl = (
@@ -528,6 +547,7 @@ def _record_close(
     close_shares: int,
     partial_pnl:  float = 0.0,
     total_shares: int   = 0,      # original position size for correct pnl_pct
+    ticker:       str   = "",
 ) -> None:
     """Write the final closed state for a trade record."""
     ep = exit_price
@@ -554,9 +574,11 @@ def _record_close(
         trade_id,
     ))
     logger.info(
-        f"[PAPER] Closed {direction} @ ${ep:.2f} | "
+        f"[PAPER] Closed {ticker} {direction} @ ${ep:.2f} | "
         f"{outcome} ${pnl_dollar:+.2f} ({pnl_pct:+.2f}%) | Reason: {exit_reason}"
     )
+    if ticker:
+        _fire_trade_event("close", ticker)
 
 
 def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
@@ -601,7 +623,7 @@ def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
                     c, row["id"], ep, reason,
                     float(row["entry_price"]), row["direction"],
                     int(row["shares_rem"]), float(row["partial_pnl"]),
-                    int(row["shares_total"]),
+                    int(row["shares_total"]), ticker=ticker,
                 )
                 closed += 1
             c.commit()
@@ -709,7 +731,7 @@ def _apply_eod_action(
         else:
             # Momentum reversing — take the profit before it evaporates
             _record_close(c, row_id, ep, "EOD_LOCK_PROFIT_REVERSAL",
-                          entry, direction, shares_rem, partial, shares_tot)
+                          entry, direction, shares_rem, partial, shares_tot, ticker=ticker)
             logger.info(
                 f"[PAPER] EOD_LOCK_PROFIT_REVERSAL {direction} {ticker} @ ${ep:.2f} "
                 f"gain={pnl_pct:+.2f}% mom=✗ — taking profit on reversal"
@@ -719,7 +741,7 @@ def _apply_eod_action(
     elif pnl_pct >= 0.1:
         # Small winner — lock it in regardless of momentum (not worth overnight risk)
         _record_close(c, row_id, ep, "EOD_LOCK_PROFIT",
-                      entry, direction, shares_rem, partial, shares_tot)
+                      entry, direction, shares_rem, partial, shares_tot, ticker=ticker)
         logger.info(
             f"[PAPER] EOD_LOCK_PROFIT {direction} {ticker} @ ${ep:.2f} gain={pnl_pct:+.2f}%"
         )
@@ -728,7 +750,7 @@ def _apply_eod_action(
     elif pnl_pct >= -0.3:
         # Breakeven zone — exit, no edge left this close to market end
         _record_close(c, row_id, ep, "EOD_BREAKEVEN_EXIT",
-                      entry, direction, shares_rem, partial, shares_tot)
+                      entry, direction, shares_rem, partial, shares_tot, ticker=ticker)
         logger.info(
             f"[PAPER] EOD_BREAKEVEN_EXIT {direction} {ticker} @ ${ep:.2f} pnl={pnl_pct:+.2f}%"
         )
@@ -756,7 +778,7 @@ def _apply_eod_action(
             else:
                 # Stop already tight enough — force close to limit further damage
                 _record_close(c, row_id, ep, "EOD_CUT_LOSS",
-                              entry, direction, shares_rem, partial, shares_tot)
+                              entry, direction, shares_rem, partial, shares_tot, ticker=ticker)
                 logger.info(
                     f"[PAPER] EOD_CUT_LOSS {direction} {ticker} @ ${ep:.2f} pnl={pnl_pct:+.2f}%"
                 )
@@ -764,7 +786,7 @@ def _apply_eod_action(
         else:
             # Momentum against us — cut the loss immediately
             _record_close(c, row_id, ep, "EOD_CUT_LOSS",
-                          entry, direction, shares_rem, partial, shares_tot)
+                          entry, direction, shares_rem, partial, shares_tot, ticker=ticker)
             logger.info(
                 f"[PAPER] EOD_CUT_LOSS {direction} {ticker} @ ${ep:.2f} "
                 f"pnl={pnl_pct:+.2f}% mom=✗"
@@ -993,7 +1015,7 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
                 if (d == "BUY" and last_price <= stp) or (d == "SELL" and last_price >= stp):
                     exit_reason = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"
                     _record_close(c, row["id"], last_price, exit_reason, entry, d,
-                                  int(row["shares"]), partial, shares_r)
+                                  int(row["shares"]), partial, shares_r, ticker=ticker)
                     actions.append(exit_reason)
                     logger.info(
                         f"[PAPER-RT] {exit_reason} {d} {ticker} @ ${last_price:.2f} "
@@ -1005,7 +1027,7 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
                 if t1_hit and t2 > 0:
                     if (d == "BUY" and last_price >= t2) or (d == "SELL" and last_price <= t2):
                         _record_close(c, row["id"], t2, "TARGET_T2", entry, d,
-                                      int(row["shares"]), partial, shares_r)
+                                      int(row["shares"]), partial, shares_r, ticker=ticker)
                         actions.append("TARGET_T2")
                         logger.info(
                             f"[PAPER-RT] TARGET_T2 {d} {ticker} @ ${t2:.2f} (real-time)"

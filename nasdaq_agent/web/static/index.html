@@ -1859,6 +1859,14 @@ function connectWS() {
       return;
     }
 
+    if (m.type === 'pt_update') {
+      // Instant paper-trade push (open or close) — update pills immediately
+      _wsLastMsgAt = Date.now();
+      if (m.open_trades) allOpenTrades = m.open_trades;
+      if (m.pt_stats !== undefined) updatePtPills(m.pt_stats, m.open_trades);
+      return;
+    }
+
     if (m.type === 'update') {
       _wsLastMsgAt = Date.now();
       // Merge tick-updated prices/change_pct into fresh scan signals so
