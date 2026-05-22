@@ -398,9 +398,7 @@ async def lifespan(app: FastAPI):
     _event_loop = asyncio.get_running_loop()
     scanner.register_callback(_on_signals)
     scanner.register_per_ticker_callback(_on_ticker)
-    # Run start_background() in a thread so DB init (CREATE TABLE, ALTER TABLE)
-    # doesn't block the async event loop — the app serves requests immediately.
-    await asyncio.get_running_loop().run_in_executor(None, scanner.start_background)
+    scanner.start_background()
     learning_engine.start()
 
     # Weekend learner — give it a broadcast handle, then auto-start if it's a weekend
