@@ -143,14 +143,27 @@ class _PgConnection:
         self._conn = pool.getconn()
         self._conn.autocommit = False
 
-    def execute(self, sql: str, params=None) -> _PgCursor | _NullCursor:
+    def execute(self, sql: str, params=None) -> "_PgCursor | _NullCursor":
         stripped = sql.strip().upper()
         if stripped.startswith("PRAGMA"):
             return _NullCursor()
 
         pg_sql = _to_pg(sql)
         cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(pg_sql, params or [])
+
+        # Savepoint guard: a failing DDL/DML statement inside a multi-statement
+        # transaction aborts the whole PostgreSQL transaction (unlike SQLite which
+        # handles per-statement errors independently). Rolling back to a savepoint
+        # lets callers catch the error and continue — exactly what _migrate_columns
+        # does when it tries to ADD COLUMN for columns that already exist.
+        sp = self._conn.cursor()
+        sp.execute("SAVEPOINT _dbsp")
+        try:
+            cur.execute(pg_sql, params or [])
+            sp.execute("RELEASE SAVEPOINT _dbsp")
+        except Exception:
+            sp.execute("ROLLBACK TO SAVEPOINT _dbsp")
+            raise
 
         lastrowid = None
         if stripped.startswith("INSERT"):
