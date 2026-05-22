@@ -438,7 +438,12 @@ async def lifespan(app: FastAPI):
                     logging.getLogger(__name__).info(
                         "Schwab Market Data connected — starting parallel quote poller."
                     )
-                    start_md_poller(list(_nq_tickers), interval=1.0, parallel_batches=2)
+                    # Delay 90 s so the scanner's cold-cache OHLCV fetch can
+                    # complete before MDPoller starts consuming rate-limit budget.
+                    # On a warm restart the OHLCV cache is already hot and the
+                    # scanner finishes in < 10 s, so the delay is nearly free.
+                    start_md_poller(list(_nq_tickers), interval=1.0,
+                                    parallel_batches=2, startup_delay_s=90)
                     _ensure_tick_broadcast_registered()
                 else:
                     logging.getLogger(__name__).warning(

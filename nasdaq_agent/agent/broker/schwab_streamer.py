@@ -486,33 +486,20 @@ def is_md_poller_running() -> bool:
 
 
 def start_md_poller(tickers: list[str], interval: float = 1.0,
-                    parallel_batches: int = 3) -> None:
+                    parallel_batches: int = 3,
+                    startup_delay_s: float = 0.0) -> None:
     """
     REST-based real-time quote poller — Market Data app only.
 
-    Design: fire-and-stream — every batch broadcasts the instant it completes.
-    No waiting, no merging.
-
-    Timeline per 1-second cycle (2 batches of ~239 tickers each):
-
-        t=0 ms   → both Schwab API calls start simultaneously
-        t=200 ms → batch-1 returns → frontend renders those 239 tickers NOW
-        t=300 ms → batch-2 returns → frontend renders those 239 tickers NOW
-        t=700 ms → sleep until next cycle
-
-    Every ticker — regardless of tier — refreshes within 300 ms.
-    No ticker is delayed waiting for the other batch to finish.
-    The frontend `prices` handler already accepts partial updates so
-    no frontend changes are needed.
+    startup_delay_s: seconds to wait before the first poll cycle.
+    Set this to ~90 s on app startup so the scanner's cold-cache OHLCV fetch
+    (181 tickers × 4 timeframes) can complete before the MDPoller starts
+    consuming the same rate-limit budget.  After a warm restart the OHLCV
+    cache is already populated, so the fetch completes in < 10 s and the delay
+    is largely free.
 
     Rate budget: 2 req/s = 120 req/min = exactly Schwab's documented limit.
     Using 3 batches caused 180 req/min → 429 errors → cycles returning empty.
-
-    Thread pool: max(16, len(batches)*4) workers so in-flight requests from
-    the previous cycle never block new cycle's submit() calls.
-
-    If a batch hits a 429, its cycle is skipped; the other still broadcasts.
-    Auth-failure sleep is 3 s (was 10 s) for fast recovery.
     """
     global _mdpoller_thread, _subscribed_tickers
 
@@ -632,6 +619,14 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
         _fetch_pool = _cf.ThreadPoolExecutor(
             max_workers=max(16, len(batches) * 4), thread_name_prefix="md_fetch"
         )
+
+        if startup_delay_s > 0:
+            logger.info(
+                f"[MDPoller] Waiting {startup_delay_s:.0f}s for scanner to warm "
+                f"OHLCV cache before first poll…"
+            )
+            time.sleep(startup_delay_s)
+            logger.info("[MDPoller] Startup delay complete — beginning polling.")
 
         cycle            = 0
         auth_misses      = 0
