@@ -136,6 +136,17 @@ def _migrate_columns(c) -> None:
                 )
             except Exception:
                 pass
+        # Drop legacy CHECK constraints that accompanied NUMERIC(5,4) columns
+        for _constraint in [
+            "paper_trades_confidence_check", "paper_trades_entry_price_check",
+            "paper_trades_target_check",     "paper_trades_stop_check",
+            "paper_trades_exit_price_check", "paper_trades_pnl_pct_check",
+            "paper_trades_pnl_dollar_check", "paper_trades_rr_ratio_check",
+        ]:
+            try:
+                c.execute(f"ALTER TABLE paper_trades DROP CONSTRAINT {_constraint}")
+            except Exception:
+                pass
 
 
 def _get_min_confidence() -> float:

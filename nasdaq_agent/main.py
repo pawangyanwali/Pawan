@@ -53,6 +53,7 @@ from agent.broker.schwab_streamer import (
 )
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
+from agent.notifier import notify_signal as _notify_signal, get_config as _notify_cfg, configure as _notify_configure, send_telegram as _send_telegram
 from config import (
     DEFAULT_ACCOUNT_SIZE, DEFAULT_RISK_PCT, MAX_POSITION_PCT,
     load_watchlist, save_watchlist, NASDAQ_TICKERS,
@@ -336,6 +337,22 @@ def _on_signals(signals: list[StockSignal]) -> None:
         "scanned_count": len(signals),
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
+
+    # Telegram notifications for qualifying signals (rate-limited per ticker)
+    for _s in signals:
+        if (_s.prediction in ("BUY", "STRONG BUY", "SELL", "STRONG SELL")
+                and getattr(_s, "rr_qualifies", False)
+                and not getattr(_s, "earnings_blocked", False)):
+            try:
+                _notify_signal(
+                    _s.ticker, _s.prediction, _s.confidence, _s.price,
+                    getattr(_s, "target_price", 0.0),
+                    getattr(_s, "stop_loss",    0.0),
+                    getattr(_s, "session", ""),
+                    getattr(_s, "regime",  ""),
+                )
+            except Exception:
+                pass
 
     # Also send a standalone `prices` message with every ticker the scanner just
     # priced.  This ensures the surgical DOM update path fires even when the MD
@@ -1476,6 +1493,36 @@ async def run_backtest(background_tasks: BackgroundTasks):
         return {"status": "started"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── Telegram notifier ────────────────────────────────────────────────────────
+
+@app.get("/api/notify/config")
+async def notify_config():
+    """Return current Telegram notifier configuration (token is never returned)."""
+    return _notify_cfg()
+
+
+@app.post("/api/notify/config")
+async def notify_set_config(body: dict):
+    """Save Telegram bot token + chat ID. Persisted to disk across restarts."""
+    token   = str(body.get("token",          "")).strip()
+    chat_id = str(body.get("chat_id",        "")).strip()
+    min_conf = float(body.get("min_confidence", 75.0))
+    _notify_configure(token=token, chat_id=chat_id, min_confidence=min_conf)
+    return {"ok": True, **_notify_cfg()}
+
+
+@app.post("/api/notify/test")
+async def notify_test():
+    """Send a test Telegram message to verify the config is working."""
+    if not _notify_cfg().get("configured"):
+        return {"ok": False, "error": "Not configured — set token and chat_id first"}
+    ok, err = _send_telegram(
+        "✅ <b>NASDAQ Agent</b> — Telegram notifications are working!\n"
+        "You will receive alerts for high-confidence signals."
+    )
+    return {"ok": ok, "error": err if not ok else None}
 
 
 # ── Ticker clusters ──────────────────────────────────────────────────────────

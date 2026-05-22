@@ -23,6 +23,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -61,8 +62,8 @@ def _get_pool():
             return None
         try:
             _pg_pool = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=8,
+                minconn=2,
+                maxconn=20,
                 host=os.environ["PGHOST"],
                 port=int(os.getenv("PGPORT", "5432")),
                 dbname=os.getenv("PGDATABASE", "nasdaq_agent"),
@@ -201,7 +202,30 @@ class _PgConnection:
         pool = _get_pool()
         if pool is None:
             raise RuntimeError("PostgreSQL pool unavailable")
-        self._conn = pool.getconn()
+        # Retry up to 3 times if pool is temporarily exhausted under burst load
+        last_exc: Exception | None = None
+        for _attempt in range(3):
+            try:
+                self._conn = pool.getconn()
+                break
+            except psycopg2.pool.PoolError as exc:
+                last_exc = exc
+                if _attempt < 2:
+                    time.sleep(0.05 * (2 ** _attempt))   # 50ms, 100ms
+        else:
+            raise RuntimeError(f"DB pool exhausted after 3 retries: {last_exc}")
+        # Health-check: if the connection is stale (RDS idle timeout, network blip)
+        # swap it out before any real query fails mid-transaction.
+        try:
+            _hc = self._conn.cursor()
+            _hc.execute("SELECT 1")
+            _hc.close()
+        except Exception:
+            try:
+                pool.putconn(self._conn, close=True)
+            except Exception:
+                pass
+            self._conn = pool.getconn()
         self._conn.autocommit = False
 
     def execute(self, sql: str, params=None) -> "_PgCursor | _NullCursor":

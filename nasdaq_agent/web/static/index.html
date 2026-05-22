@@ -571,6 +571,11 @@
     <div id="pt-pnl-val" style="font-size:16px;font-weight:700;margin-top:2px;color:var(--muted)">—</div>
     <div id="pt-pnl-pct" style="font-size:10px;color:var(--muted);margin-top:1px">—</div>
   </div>
+  <div class="pill" id="streak-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:96px" title="Today's win/loss streak">
+    <div class="pill-label">🎯 Streak</div>
+    <div id="streak-dots" style="display:flex;gap:3px;margin-top:4px;flex-wrap:wrap;max-width:80px"></div>
+    <div id="streak-label" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
+  </div>
   <div class="pill" id="breadth-pill" style="min-width:120px">
     <div class="pill-label">Breadth</div>
     <div class="pill-value" id="breadth-bias" style="font-size:13px">—</div>
@@ -1077,6 +1082,36 @@
         <a href="https://ifttt.com" target="_blank" style="color:var(--blue)">IFTTT</a>, or
         <a href="https://ntfy.sh" target="_blank" style="color:var(--blue)">ntfy.sh</a> (free push)
         as the webhook receiver.
+      </div>
+    </div>
+
+    <!-- Telegram -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:12px;font-weight:700">📱 Telegram Alerts</span>
+        <span id="tg-status-badge" style="font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(100,116,139,.2);color:var(--muted)">NOT SET</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">
+        Get signal alerts on your phone via Telegram.
+        1) Message <a href="https://t.me/BotFather" target="_blank" style="color:var(--blue)">@BotFather</a> → /newbot → copy token.
+        2) Message <a href="https://t.me/userinfobot" target="_blank" style="color:var(--blue)">@userinfobot</a> → copy your Chat ID.
+      </div>
+      <div style="display:grid;gap:6px">
+        <input id="tg-token-input" type="password" placeholder="Bot Token  (from @BotFather)"
+               style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:6px 10px;font-family:inherit;font-size:11px;outline:none;box-sizing:border-box">
+        <input id="tg-chatid-input" type="text" placeholder="Chat ID  (from @userinfobot)"
+               style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:6px 10px;font-family:inherit;font-size:11px;outline:none;box-sizing:border-box">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:10px;color:var(--muted)">Min confidence:</span>
+          <input id="tg-conf-input" type="number" min="50" max="95" value="75" step="5"
+                 style="width:60px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 8px;font-family:inherit;font-size:11px;outline:none">
+          <span style="font-size:10px;color:var(--muted)">%</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button onclick="saveTelegramConfig()" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:5px 14px;cursor:pointer;font-family:inherit;font-size:11px">Save</button>
+        <button onclick="testTelegram()" style="background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:5px 14px;cursor:pointer;font-family:inherit;font-size:11px">Send Test</button>
+        <span id="tg-test-result" style="font-size:10px;color:var(--muted);align-self:center"></span>
       </div>
     </div>
 
@@ -2971,8 +3006,67 @@ function openAlertModal() {
   document.getElementById('alert-type-sell').checked    = _alertSettings.types.sell;
   document.getElementById('alert-webhook-url').value    = _alertSettings.webhookUrl;
   document.getElementById('alert-push-label').textContent = _alertSettings.browserPush ? 'ON' : 'OFF';
+  _loadTelegramConfig();
   const m = document.getElementById('alert-modal');
   m.style.display = 'flex';
+}
+
+async function _loadTelegramConfig() {
+  try {
+    const d = await fetch('/api/notify/config').then(r => r.json());
+    const badge = document.getElementById('tg-status-badge');
+    if (!badge) return;
+    if (d.configured) {
+      badge.textContent = 'ACTIVE';
+      badge.style.background = 'rgba(34,197,94,.2)';
+      badge.style.color = 'var(--green)';
+      if (d.chat_id) document.getElementById('tg-chatid-input').value = d.chat_id;
+      const confEl = document.getElementById('tg-conf-input');
+      if (confEl && d.min_confidence) confEl.value = d.min_confidence;
+    } else {
+      badge.textContent = 'NOT SET';
+      badge.style.background = 'rgba(100,116,139,.2)';
+      badge.style.color = 'var(--muted)';
+    }
+  } catch(_) {}
+}
+
+async function saveTelegramConfig() {
+  const token   = document.getElementById('tg-token-input').value.trim();
+  const chatId  = document.getElementById('tg-chatid-input').value.trim();
+  const minConf = parseFloat(document.getElementById('tg-conf-input').value) || 75;
+  const res     = await fetch('/api/notify/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token, chat_id: chatId, min_confidence: minConf}),
+  });
+  const d = await res.json();
+  const badge  = document.getElementById('tg-status-badge');
+  const result = document.getElementById('tg-test-result');
+  if (d.configured) {
+    badge.textContent = 'ACTIVE';
+    badge.style.background = 'rgba(34,197,94,.2)';
+    badge.style.color = 'var(--green)';
+    result.textContent = '✓ Saved';
+    result.style.color = 'var(--green)';
+  } else {
+    result.textContent = 'Saved (token/chat_id not set yet)';
+    result.style.color = 'var(--yellow)';
+  }
+}
+
+async function testTelegram() {
+  const result = document.getElementById('tg-test-result');
+  result.textContent = 'Sending…';
+  result.style.color = 'var(--muted)';
+  try {
+    const d = await fetch('/api/notify/test', {method: 'POST'}).then(r => r.json());
+    result.textContent = d.ok ? '✓ Message sent!' : `✗ ${d.error || 'Failed'}`;
+    result.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    result.textContent = '✗ Network error';
+    result.style.color = 'var(--red)';
+  }
 }
 function closeAlertModal() {
   document.getElementById('alert-modal').style.display = 'none';
@@ -5001,6 +5095,20 @@ function updatePtPills(s, openTradesMap) {
     const pos = pnlPct >= 0;
     elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% avg/trade';
     elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
+  }
+
+  // Streak pill — W/L dots for today's trades
+  const dotsEl  = document.getElementById('streak-dots');
+  const labelEl = document.getElementById('streak-label');
+  if (dotsEl && closed >= 0) {
+    const wDots = Array(wins).fill('<span style="width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block" title="WIN"></span>').join('');
+    const lDots = Array(Math.max(0, losses)).fill('<span style="width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block" title="LOSS"></span>').join('');
+    dotsEl.innerHTML = wDots + lDots || '<span style="color:var(--muted);font-size:9px">No trades yet</span>';
+    if (labelEl) {
+      labelEl.textContent = closed > 0 ? `${wins}W ${losses}L today` : 'No trades yet';
+      const wrToday = closed > 0 ? wins / closed : null;
+      labelEl.style.color = wrToday === null ? 'var(--muted)' : wrToday >= 0.6 ? 'var(--green)' : wrToday >= 0.45 ? 'var(--yellow)' : 'var(--red)';
+    }
   }
 }
 

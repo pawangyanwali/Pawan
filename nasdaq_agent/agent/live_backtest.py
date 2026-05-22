@@ -145,6 +145,18 @@ def init_db() -> None:
                     )
                 except Exception:
                     pass
+            # Drop legacy CHECK constraints that accompanied NUMERIC(5,4) columns
+            for _constraint in [
+                "bt_signals_confidence_check",    "bt_signals_entry_price_check",
+                "bt_signals_target_check",        "bt_signals_stop_check",
+                "bt_signals_exit_price_check",    "bt_signals_pnl_pct_check",
+                "bt_signals_r_multiple_check",    "bt_signals_max_favorable_r_check",
+                "bt_signals_rr_ratio_check",
+            ]:
+                try:
+                    c.execute(f"ALTER TABLE bt_signals DROP CONSTRAINT {_constraint}")
+                except Exception:
+                    pass
 
         c.commit()
 
