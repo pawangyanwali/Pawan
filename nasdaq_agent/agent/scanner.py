@@ -51,7 +51,7 @@ from agent.market_hours import get_session_info, confidence_multiplier
 from agent.market_regime import update_regime, get_regime, apply_regime, classify_day_type
 from agent.opening_range import compute_opening_range
 from agent.earnings import earnings_blackout
-from agent.gap_analysis import analyse_gap
+from agent.gap_analysis import analyse_gap, detect_color_flip
 from agent.relative_strength import compute_relative_strength
 from agent.trade_management import build_trade_plan
 from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
@@ -225,6 +225,14 @@ class StockSignal:
     prev_day_close:     float = 0.0   # Previous day close
     price_vs_pdh_pct:   float = 0.0   # (price - PDH) / PDH * 100 (+ve = above PDH)
     price_vs_pdl_pct:   float = 0.0   # (price - PDL) / PDL * 100 (-ve = below PDL)
+
+    # ── Red-to-Green / Green-to-Red ───────────────────────────────────────────
+    color_vs_prev_close: str  = "FLAT"  # "GREEN" | "RED" | "FLAT"
+    r2g_event:           bool = False   # crossed above prev_close this bar
+    g2r_event:           bool = False   # crossed below prev_close this bar
+    r2g_bars_ago:        int  = -1      # bars since last R2G crossing today
+    g2r_bars_ago:        int  = -1      # bars since last G2R crossing today
+
     orb_high:       float = 0.0   # Opening range breakout high (first 30-min)
     orb_low:        float = 0.0   # Opening range breakout low (first 30-min)
     orb_breakout:   str   = ""    # "BULL" | "BEAR" | "" — if price broke ORB
@@ -552,6 +560,10 @@ def analyse_ticker(
 
         # Gap analysis
         gap = analyse_gap(df_1m, df_1d)
+
+        # Red-to-Green / Green-to-Red detection vs prior close
+        # gap["prior_close"] is the same as PDC but already extracted above
+        color_flip = detect_color_flip(df_1m, gap.get("prior_close", 0.0))
 
         # PDH / PDL / ORB levels
         levels = _compute_levels(df_1m, df_1d)
@@ -1025,6 +1037,12 @@ def analyse_ticker(
                                 if levels["prev_day_high"] > 0 else 0.0,
             price_vs_pdl_pct  = round((price - levels["prev_day_low"]) / levels["prev_day_low"] * 100, 3)
                                 if levels["prev_day_low"] > 0 else 0.0,
+            # R2G / G2R
+            color_vs_prev_close = color_flip["color"],
+            r2g_event           = bool(color_flip["r2g_event"]),
+            g2r_event           = bool(color_flip["g2r_event"]),
+            r2g_bars_ago        = int(color_flip["r2g_bars_ago"]),
+            g2r_bars_ago        = int(color_flip["g2r_bars_ago"]),
             orb_high          = levels["orb_high"],
             orb_low           = levels["orb_low"],
             orb_breakout      = levels["orb_breakout"],

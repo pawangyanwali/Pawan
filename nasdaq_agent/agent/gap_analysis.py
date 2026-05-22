@@ -177,3 +177,74 @@ def analyse_gap(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
         logger.debug(f"gap_analysis error: {e}")
 
     return result
+
+
+def detect_color_flip(df_1m: pd.DataFrame, prev_close: float) -> dict:
+    """
+    Detect Red-to-Green (R2G) and Green-to-Red (G2R) crossings vs prior close.
+
+    R2G fires when the current 1m bar closes above prev_close after the previous
+    bar closed below it.  G2R is the mirror.  Only today's bars are considered.
+
+    Returns:
+      color        : "GREEN" | "RED" | "FLAT"
+      r2g_event    : bool  — R2G crossed on the most recent bar
+      g2r_event    : bool  — G2R crossed on the most recent bar
+      r2g_bars_ago : int   — bars since last R2G crossing today (-1 = none today)
+      g2r_bars_ago : int   — bars since last G2R crossing today (-1 = none today)
+    """
+    out = {
+        "color":        "FLAT",
+        "r2g_event":    False,
+        "g2r_event":    False,
+        "r2g_bars_ago": -1,
+        "g2r_bars_ago": -1,
+    }
+    try:
+        if df_1m is None or df_1m.empty or prev_close <= 0:
+            return out
+
+        import pytz
+        et = pytz.timezone("America/New_York")
+        idx = df_1m.index
+        if idx.tzinfo is None:
+            idx_et = idx.tz_localize("UTC").tz_convert(et)
+        else:
+            idx_et = idx.tz_convert(et)
+
+        today = idx_et[-1].date()
+        today_mask = idx_et.date == today
+        today_closes = df_1m["Close"][today_mask].values
+
+        if len(today_closes) == 0:
+            return out
+
+        last_close = float(today_closes[-1])
+        if last_close > prev_close * 1.0001:
+            out["color"] = "GREEN"
+        elif last_close < prev_close * 0.9999:
+            out["color"] = "RED"
+
+        n = len(today_closes)
+        for i in range(n - 1, 0, -1):
+            cur  = float(today_closes[i])
+            prev = float(today_closes[i - 1])
+            if cur > prev_close and prev <= prev_close:
+                out["r2g_bars_ago"] = (n - 1) - i
+                if out["r2g_bars_ago"] == 0:
+                    out["r2g_event"] = True
+                break
+
+        for i in range(n - 1, 0, -1):
+            cur  = float(today_closes[i])
+            prev = float(today_closes[i - 1])
+            if cur < prev_close and prev >= prev_close:
+                out["g2r_bars_ago"] = (n - 1) - i
+                if out["g2r_bars_ago"] == 0:
+                    out["g2r_event"] = True
+                break
+
+    except Exception as e:
+        logger.debug(f"detect_color_flip error: {e}")
+
+    return out
