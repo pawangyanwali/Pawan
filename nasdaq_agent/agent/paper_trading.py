@@ -193,31 +193,27 @@ def init_db() -> None:
             )
         """
 
-    # NUMERIC(5,4) repair — convert old narrow columns to DOUBLE PRECISION
-    _PG_TYPE_REPAIRS = [
-        f"ALTER TABLE paper_trades ALTER COLUMN {c} TYPE DOUBLE PRECISION USING {c}::double precision"
-        for c in ["entry_price", "target", "stop", "exit_price", "pnl_pct",
-                  "pnl_dollar", "rr_ratio", "t1_price", "t2_price",
-                  "partial_pnl_dollar", "size_mult"]
-    ] + [
-        f"ALTER TABLE paper_trades DROP CONSTRAINT IF EXISTS {con}"
-        for con in [
-            "paper_trades_confidence_check", "paper_trades_entry_price_check",
-            "paper_trades_target_check",     "paper_trades_stop_check",
-            "paper_trades_exit_price_check", "paper_trades_pnl_pct_check",
-            "paper_trades_pnl_dollar_check", "paper_trades_rr_ratio_check",
-        ]
-    ]
-
     if using_postgres():
         # Run all DDL via autocommit so each statement commits independently.
         # This prevents a transaction rollback anywhere from wiping the schema.
-        _run_ddl_autocommit(
+        # NOTE: ALTER COLUMN TYPE (table rewrites) are intentionally excluded
+        # from the boot path — they block the event loop on large tables.
+        # The new CREATE TABLE already uses DOUBLE PRECISION; ADD COLUMN also
+        # uses DOUBLE PRECISION, so only stale columns need the cast repair.
+        # Drop the legacy CHECK constraints that caused NUMERIC(5,4) overflows.
+        _ddl = (
             [create_paper_trades, create_account_config, create_balance_snapshots]
             + [f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {defn}"
                for col, defn in _COLUMN_ADDITIONS]
-            + _PG_TYPE_REPAIRS
+            + [f"ALTER TABLE paper_trades DROP CONSTRAINT IF EXISTS {con}"
+               for con in [
+                   "paper_trades_confidence_check", "paper_trades_entry_price_check",
+                   "paper_trades_target_check",     "paper_trades_stop_check",
+                   "paper_trades_exit_price_check", "paper_trades_pnl_pct_check",
+                   "paper_trades_pnl_dollar_check", "paper_trades_rr_ratio_check",
+               ]]
         )
+        _run_ddl_autocommit(_ddl)
         # Ensure account_config default row (DML — can run in normal transaction)
         with _conn() as c:
             try:
