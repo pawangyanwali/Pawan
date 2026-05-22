@@ -1391,16 +1391,23 @@ async def _ws_keepalive(ws: WebSocket) -> None:
     separate from client messages, so there is NEVER a ping-pong feedback loop.
     When the send fails (dead socket) this task exits quietly; the receive loop
     will also error on the next read and close the connection.
+
+    TimeoutError is caught separately and retried — the event loop can be
+    briefly saturated during a scanner cycle (477 ticker_update broadcasts)
+    which delays the ping write beyond _PING_TIMEOUT.  Retrying keeps the
+    keepalive task alive so the next ping succeeds once the burst clears.
     """
-    try:
-        while True:
+    while True:
+        try:
             await asyncio.sleep(_PING_INTERVAL)
             await asyncio.wait_for(
                 ws.send_json({"type": "ping"}),
                 timeout=float(_PING_TIMEOUT),
             )
-    except Exception:
-        pass   # socket gone — receive loop will handle cleanup
+        except asyncio.TimeoutError:
+            continue   # event loop was busy — skip this ping, retry next interval
+        except Exception:
+            break      # socket gone — receive loop handles cleanup
 
 
 @app.websocket("/ws")

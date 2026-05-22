@@ -229,15 +229,17 @@ def resolve_pending(ticker: str, current_price: float) -> None:
                 exit_p  = current_price
                 d       = row["direction"]
 
+                tgt = row["target"]
+                stp = row["stop"]
                 if d in ("BUY", "STRONG BUY"):
-                    if current_price >= row["target"]:
+                    if tgt is not None and current_price >= float(tgt):
                         outcome = "WIN"
-                    elif current_price <= row["stop"]:
+                    elif stp is not None and current_price <= float(stp):
                         outcome = "LOSS"
                 elif d in ("SELL", "STRONG SELL"):
-                    if current_price <= row["target"]:
+                    if tgt is not None and current_price <= float(tgt):
                         outcome = "WIN"
-                    elif current_price >= row["stop"]:
+                    elif stp is not None and current_price >= float(stp):
                         outcome = "LOSS"
 
                 if outcome:
