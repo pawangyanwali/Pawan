@@ -399,8 +399,14 @@ async def _streamer_main(tickers: list[str]) -> None:
                     await ws.send(json.dumps(subs_msg))
 
                 # ── 3. CHART_EQUITY — real-time 1-min candles ─────────────────
-                for i in range(0, len(tickers), batch_size):
-                    batch = tickers[i: i + batch_size]
+                # Schwab hard-caps CHART_EQUITY at 300 symbols per streamer session.
+                # Subscribe only the first 300 — these are Tier 1/2 tickers since
+                # the ticker list is ordered by priority. LEVELONE_EQUITIES already
+                # covers all 477 tickers for live bid/ask/last quotes.
+                _CHART_MAX = 300
+                chart_tickers = tickers[:_CHART_MAX]
+                for i in range(0, len(chart_tickers), batch_size):
+                    batch = chart_tickers[i: i + batch_size]
                     cmd = "SUBS" if i == 0 else "ADD"
                     chart_msg = {"requests": [_req(
                         "CHART_EQUITY", cmd, 200 + i, {
@@ -409,6 +415,7 @@ async def _streamer_main(tickers: list[str]) -> None:
                         }, customer_id, correl_id,
                     )]}
                     await ws.send(json.dumps(chart_msg))
+                logger.info(f"[Streamer] CHART_EQUITY subscribed for {len(chart_tickers)}/{len(tickers)} tickers (Schwab 300-symbol cap).")
 
                 # ── 4. SCREENER_EQUITY — NASDAQ top movers ────────────────────
                 screener_keys = (
