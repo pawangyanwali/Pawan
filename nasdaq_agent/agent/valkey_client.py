@@ -223,9 +223,9 @@ def _subscriber_loop() -> None:
     global _sub_running
     retry_delay = 2.0
     while _sub_running:
+        host, port, ssl = _cfg()
         try:
             import redis as _redis_lib
-            host, port, ssl = _cfg()
             sub_client = _redis_lib.Redis(
                 host=host,
                 port=port,
@@ -258,7 +258,9 @@ def _subscriber_loop() -> None:
 
         except Exception as exc:
             logger.warning(
-                f"[Valkey] Subscriber error: {exc} — retrying in {retry_delay:.0f}s"
+                f"[Valkey] Subscriber error ({host}:{port}): {exc} — "
+                f"retrying in {retry_delay:.0f}s. "
+                f"If this repeats, check VALKEY_HOST env var and VPC peering."
             )
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 30)

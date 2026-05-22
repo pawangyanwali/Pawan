@@ -572,9 +572,16 @@ def fetch_full_quotes(tickers: list[str]) -> dict[str, dict]:
     """
     if not _is_authorised() or not tickers:
         return {}
+    # Skip this cycle if a 429 back-off is active. Sleeping inside a thread-pool
+    # worker blocks the MDPoller's _cf.wait deadline and causes false "timed out"
+    # warnings. Let the next cycle retry once the back-off expires.
+    if _backoff_until > time.time():
+        return {}
     # Single call — no chunking needed for ≤500 tickers
+    # timeout=4 keeps well within the MDPoller's _cf.wait(timeout=interval*5=5s)
+    # window so workers never appear "timed out" from a slow-but-valid response.
     chunk = tickers[:500]
-    data = _get("/quotes", {"symbols": ",".join(chunk), "fields": "quote"}, timeout=8)
+    data = _get("/quotes", {"symbols": ",".join(chunk), "fields": "quote"}, timeout=4)
     if not isinstance(data, dict):
         return {}
     result = {}

@@ -605,7 +605,10 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
                 # Wait only to know when the slowest batch finishes so we can
                 # calculate the correct sleep time for the next cycle.
-                done, pending = _cf.wait(futures, timeout=interval * 5)
+                # timeout = interval*6 gives a 2s cushion over the 4s request
+                # timeout so futures never appear "timed out" for a slow-but-valid
+                # HTTPS round-trip (SSL handshake + large JSON payload).
+                done, pending = _cf.wait(futures, timeout=interval * 6)
 
                 n_ok = sum(
                     1 for f in done
