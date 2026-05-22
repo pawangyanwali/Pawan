@@ -147,7 +147,7 @@ class UniverseManager:
     """
 
     HOT_CACHE_TTL    = 300   # refresh bulk quotes every 5 min
-    N_TIER2_ACTIVE   = 75    # how many Tier 2/3 tickers to include when active
+    N_TIER2_ACTIVE   = 150   # how many Tier 2/3 tickers to include when active
 
     def __init__(self) -> None:
         self._hot:      list[str] = []
