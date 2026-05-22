@@ -45,31 +45,44 @@ if _USE_PG:
 
 _pg_pool: Optional[object] = None
 _pool_lock = threading.Lock()
+_pg_failed = False   # set True on first connection error so we stop retrying
 
 
 def _get_pool():
-    global _pg_pool
+    global _pg_pool, _pg_failed, _USE_PG
+    if _pg_failed:
+        return None
     if _pg_pool is not None:
         return _pg_pool
     with _pool_lock:
         if _pg_pool is not None:
             return _pg_pool
-        _pg_pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=8,
-            host=os.environ["PGHOST"],
-            port=int(os.getenv("PGPORT", "5432")),
-            dbname=os.getenv("PGDATABASE", "nasdaq_agent"),
-            user=os.getenv("PGUSER", "nasdaq"),
-            password=os.getenv("PGPASSWORD", ""),
-            connect_timeout=5,
-            sslmode=os.getenv("PGSSLMODE", "require"),
-        )
-        logger.info(
-            f"[DB] PostgreSQL pool created → "
-            f"{os.environ['PGHOST']}:{os.getenv('PGPORT','5432')}"
-            f"/{os.getenv('PGDATABASE','nasdaq_agent')}"
-        )
+        if _pg_failed:
+            return None
+        try:
+            _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=8,
+                host=os.environ["PGHOST"],
+                port=int(os.getenv("PGPORT", "5432")),
+                dbname=os.getenv("PGDATABASE", "nasdaq_agent"),
+                user=os.getenv("PGUSER", "nasdaq"),
+                password=os.getenv("PGPASSWORD", ""),
+                connect_timeout=5,
+                sslmode=os.getenv("PGSSLMODE", "require"),
+            )
+            logger.info(
+                f"[DB] PostgreSQL pool created → "
+                f"{os.environ['PGHOST']}:{os.getenv('PGPORT','5432')}"
+                f"/{os.getenv('PGDATABASE','nasdaq_agent')}"
+            )
+        except Exception as exc:
+            _pg_failed = True
+            _USE_PG = False
+            logger.warning(
+                f"[DB] PostgreSQL unavailable ({exc}) — falling back to SQLite. "
+                f"Set PGHOST correctly in .env and restart to enable RDS."
+            )
         return _pg_pool
 
 
@@ -125,6 +138,8 @@ class _PgConnection:
 
     def __init__(self):
         pool = _get_pool()
+        if pool is None:
+            raise RuntimeError("PostgreSQL pool unavailable")
         self._conn = pool.getconn()
         self._conn.autocommit = False
 
@@ -237,7 +252,10 @@ def get_conn(db_path: Path, read_only: bool = False) -> _PgConnection | _SqliteC
             c.commit()
     """
     if _USE_PG:
-        return _PgConnection()
+        pool = _get_pool()
+        if pool is not None:
+            return _PgConnection()
+        # Pool creation failed — _USE_PG was set False inside _get_pool(); use SQLite
     return _SqliteConnection(db_path, read_only=read_only)
 
 
