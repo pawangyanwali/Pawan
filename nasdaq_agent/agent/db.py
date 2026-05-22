@@ -214,19 +214,35 @@ class _PgConnection:
                     time.sleep(0.05 * (2 ** _attempt))   # 50ms, 100ms
         else:
             raise RuntimeError(f"DB pool exhausted after 3 retries: {last_exc}")
+
+        # A pooled connection may have a leftover implicit transaction from its
+        # previous use.  set_session (autocommit=False) raises ProgrammingError
+        # if called inside a transaction, so we rollback first to get a clean
+        # slate, then set autocommit, then run the health check.
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+        self._conn.autocommit = False
+
         # Health-check: if the connection is stale (RDS idle timeout, network blip)
         # swap it out before any real query fails mid-transaction.
         try:
             _hc = self._conn.cursor()
             _hc.execute("SELECT 1")
             _hc.close()
+            self._conn.rollback()   # clean up the implicit txn opened by SELECT 1
         except Exception:
             try:
                 pool.putconn(self._conn, close=True)
             except Exception:
                 pass
             self._conn = pool.getconn()
-        self._conn.autocommit = False
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            self._conn.autocommit = False
 
     def execute(self, sql: str, params=None) -> "_PgCursor | _NullCursor":
         stripped = sql.strip().upper()
