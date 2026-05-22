@@ -1158,7 +1158,7 @@
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <div>
           <span style="font-size:12px;font-weight:700;color:var(--text)">④ Infrastructure</span>
-          <span style="font-size:10px;color:var(--muted);margin-left:8px">Valkey · RDS · MD Poller</span>
+          <span style="font-size:10px;color:var(--muted);margin-left:8px">Valkey · RDS · Streamer · MDPoller</span>
         </div>
         <button onclick="refreshInfraStatus()" style="background:var(--surface);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">Refresh</button>
       </div>
@@ -1174,14 +1174,19 @@
           <div id="infra-rds-detail" style="font-size:10px;color:var(--muted);margin-top:4px">—</div>
         </div>
         <div>
-          <span style="color:var(--muted)">MD Poller:</span><br>
+          <span style="color:var(--muted)">WS Streamer <span style="font-size:9px">(A+T)</span>:</span><br>
+          <span id="infra-wss-badge" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(100,116,139,.2);color:var(--muted)">CHECKING…</span>
+          <div id="infra-wss-detail" style="font-size:10px;color:var(--muted);margin-top:4px">—</div>
+        </div>
+        <div>
+          <span style="color:var(--muted)">MD Poller <span style="font-size:9px">(REST)</span>:</span><br>
           <span id="infra-mdp-badge" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(100,116,139,.2);color:var(--muted)">CHECKING…</span>
           <div id="infra-mdp-detail" style="font-size:10px;color:var(--muted);margin-top:4px">—</div>
         </div>
-        <div>
+        <div style="grid-column:1/-1">
           <span style="color:var(--muted)">Scanner:</span><br>
           <span id="infra-scanner-badge" style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(100,116,139,.2);color:var(--muted)">CHECKING…</span>
-          <div id="infra-scanner-detail" style="font-size:10px;color:var(--muted);margin-top:4px">—</div>
+          <span id="infra-scanner-detail" style="font-size:10px;color:var(--muted);margin-left:8px">—</span>
         </div>
       </div>
     </div>
@@ -5222,18 +5227,38 @@ async function refreshInfraStatus() {
     setInfraBadge('infra-rds-badge', !!rds.connected);
     setInfraDetail('infra-rds-detail', rds.connected ? 'PostgreSQL reachable' : (rds.error || 'unavailable'));
 
-    // MD Poller
+    // WS Streamer
+    const wss = d.ws_streamer || {};
+    const wssOk = !!wss.running && !!wss.connected;
+    const wssRunning = !!wss.running;
+    setInfraBadge('infra-wss-badge', wssOk, wssOk ? 'STREAMING' : (wssRunning ? 'CONNECTING' : 'OFFLINE'));
+    if (!wss.running) {
+      setInfraDetail('infra-wss-detail', `<a href="/schwab/auth/at" style="color:var(--blue)">Auth A+T app →</a>`);
+      document.getElementById('infra-wss-detail').innerHTML = `<a href="/schwab/auth/at" style="color:var(--blue);font-size:10px">Auth Accounts+Trading →</a>`;
+    } else {
+      setInfraDetail('infra-wss-detail', wssOk
+        ? `${(wss.live_quotes||0).toLocaleString()} quotes · NQ bias ${wss.nq_bias >= 0 ? '+' : ''}${(wss.nq_bias||0).toFixed(2)}`
+        : (wss.error || 'connecting…'));
+    }
+
+    // MD Poller (REST fallback)
     const mdp = d.md_poller || {};
-    const mdpOk = !!mdp.connected || (mdp.live_quotes > 0);
-    setInfraBadge('infra-mdp-badge', mdpOk, mdpOk ? 'ACTIVE' : 'OFFLINE');
-    setInfraDetail('infra-mdp-detail', mdpOk ? `${(mdp.live_quotes||0).toLocaleString()} live quotes` : (mdp.error || 'not connected'));
+    const mdpOk = !!mdp.running;
+    const mdpLabel = mdpOk ? (wssOk ? 'FALLBACK' : 'ACTIVE') : 'OFFLINE';
+    setInfraBadge('infra-mdp-badge', mdpOk, mdpLabel);
+    if (mdpOk) {
+      const ago = mdp.last_ok_ago_s != null ? `${mdp.last_ok_ago_s}s ago` : '—';
+      setInfraDetail('infra-mdp-detail', `cycle ${(mdp.cycle||0).toLocaleString()} · last OK ${ago}`);
+    } else {
+      setInfraDetail('infra-mdp-detail', mdp.error || 'not connected');
+    }
 
     // Scanner
     const sc = d.scanner || {};
     setInfraBadge('infra-scanner-badge', !!sc.running, sc.running ? 'RUNNING' : 'STOPPED');
     setInfraDetail('infra-scanner-detail', sc.running ? `${(sc.tickers||0)} tickers · ${sc.last_scan||'—'}` : 'idle');
   } catch(e) {
-    ['infra-valkey-badge','infra-rds-badge','infra-mdp-badge','infra-scanner-badge'].forEach(id => {
+    ['infra-valkey-badge','infra-rds-badge','infra-wss-badge','infra-mdp-badge','infra-scanner-badge'].forEach(id => {
       setInfraBadge(id, false, 'ERROR');
     });
   }

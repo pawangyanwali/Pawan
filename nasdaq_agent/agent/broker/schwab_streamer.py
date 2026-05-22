@@ -55,12 +55,22 @@ import queue as _q
 _bar_close_queue: _q.Queue = _q.Queue(maxsize=20000)
 _bar_close_callbacks: list = []
 
-# Streamer lifecycle
-_streamer_thread:  Optional[threading.Thread] = None
+# ── WebSocket streamer lifecycle ───────────────────────────────────────────────
+_streamer_thread:  Optional[threading.Thread] = None   # WS streamer thread
 _event_loop:       Optional[asyncio.AbstractEventLoop] = None
 _ws_connected:     bool = False
 _ws_error:         Optional[str] = None
 _subscribed_tickers: list[str] = []
+
+# Prices accumulated from WS stream — flushed to Valkey every 500 ms
+_pending_ws_prices: dict[str, dict] = {}
+
+# ── MDPoller lifecycle (separate from WS streamer) ────────────────────────────
+_mdpoller_thread:    Optional[threading.Thread] = None
+_mdpoller_running:   bool = False
+_mdpoller_cycle:     int  = 0
+_mdpoller_last_ok:   float = 0.0   # epoch of last successful cycle
+_mdpoller_error:     Optional[str] = None
 
 MAX_CANDLE_HISTORY = 300   # 5 hours of 1-min bars
 
@@ -197,6 +207,18 @@ def _process_levelone_equities(content: list) -> None:
                 _halted.discard(sym)
 
             updated.append((sym, dict(quote)))   # snapshot for callbacks (outside lock)
+
+            # Accumulate compact quote for the 500ms Valkey flush
+            _pending_ws_prices[sym] = {
+                "last":       float(quote.get("last") or 0),
+                "mark":       float(quote.get("mark") or 0),
+                "bid":        float(quote.get("bid")  or 0),
+                "ask":        float(quote.get("ask")  or 0),
+                "volume":     float(quote.get("volume") or 0),
+                "high":       float(quote.get("high") or 0),
+                "low":        float(quote.get("low")  or 0),
+                "pct_change": float(quote.get("net_pct_change") or 0),
+            }
 
     # Fire tick callbacks outside the lock — 250ms throttle per ticker
     if updated and _tick_callbacks:
@@ -414,9 +436,39 @@ async def _streamer_main(tickers: list[str]) -> None:
                 logger.info(f"[Streamer] Subscribed to {len(tickers)} equities, "
                             f"{len(FUTURES_SYMBOLS)} futures, screener.")
 
-                # ── 6. Message loop ───────────────────────────────────────────
-                async for raw in ws:
-                    _process_message(raw)
+                # ── 6. Price flush task — batch WS prices to Valkey + dashboard ──
+                # Accumulates individual tick updates and publishes a single bulk
+                # message every 500ms.  This keeps Valkey fresh (scanner reads it)
+                # and fires the same _bulk_price_callbacks the MDPoller uses, so
+                # the dashboard gets one price update per 500ms instead of 477
+                # individual tick messages.
+                async def _flush_prices():
+                    while True:
+                        await asyncio.sleep(0.5)
+                        with _lock:
+                            if not _pending_ws_prices:
+                                continue
+                            batch = dict(_pending_ws_prices)
+                            _pending_ws_prices.clear()
+                        try:
+                            from agent.valkey_client import publish_prices as _vk_pub
+                            _vk_pub(batch)
+                        except Exception:
+                            pass
+                        for _fn in _bulk_price_callbacks:
+                            try:
+                                _fn(batch)
+                            except Exception:
+                                pass
+
+                flush_task = asyncio.create_task(_flush_prices())
+
+                # ── 7. Message loop ───────────────────────────────────────────
+                try:
+                    async for raw in ws:
+                        _process_message(raw)
+                finally:
+                    flush_task.cancel()
 
         except Exception as e:
             _ws_connected = False
@@ -427,6 +479,11 @@ async def _streamer_main(tickers: list[str]) -> None:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def is_md_poller_running() -> bool:
+    """True when the REST MDPoller thread is alive."""
+    return bool(_mdpoller_thread and _mdpoller_thread.is_alive())
+
 
 def start_md_poller(tickers: list[str], interval: float = 1.0,
                     parallel_batches: int = 3) -> None:
@@ -457,9 +514,9 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
     If a batch hits a 429, its cycle is skipped; the other still broadcasts.
     Auth-failure sleep is 3 s (was 10 s) for fast recovery.
     """
-    global _streamer_thread, _subscribed_tickers
+    global _mdpoller_thread, _subscribed_tickers
 
-    if _streamer_thread and _streamer_thread.is_alive():
+    if _mdpoller_thread and _mdpoller_thread.is_alive():
         logger.debug("[MDPoller] Already running.")
         return
 
@@ -559,8 +616,9 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
     def _poll_loop() -> None:
         import concurrent.futures as _cf
-        global _ws_connected, _ws_error
+        global _ws_connected, _ws_error, _mdpoller_running, _mdpoller_cycle, _mdpoller_last_ok, _mdpoller_error
         from agent.broker.schwab_market_data import _is_authorised
+        _mdpoller_running = True
 
         logger.info(
             f"[MDPoller] Started — {n} tickers | {len(batches)} parallel batches "
@@ -617,8 +675,11 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                 if n_ok:
                     _ws_connected = True
                     _ws_error = None
+                    _mdpoller_error = None
+                    _mdpoller_last_ok = time.time()
                 else:
                     logger.warning(f"[MDPoller] Cycle {cycle}: all {len(batches)} batches returned empty")
+                    _mdpoller_error = f"Cycle {cycle}: all batches empty"
 
                 if pending:
                     logger.warning(f"[MDPoller] Cycle {cycle}: {len(pending)} batch(es) timed out")
@@ -633,7 +694,9 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
             except Exception as _e:
                 logger.warning(f"[MDPoller] poll error (cycle {cycle}): {_e}")
+                _mdpoller_error = str(_e)
 
+            _mdpoller_cycle = cycle
             cycle += 1
             # Sleep exactly the remaining time so the next cycle fires on schedule
             elapsed   = time.time() - _cycle_start
@@ -641,10 +704,10 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             if remaining > 0:
                 time.sleep(remaining)
 
-    _streamer_thread = threading.Thread(
+    _mdpoller_thread = threading.Thread(
         target=_poll_loop, daemon=True, name="SchwabMDPoller"
     )
-    _streamer_thread.start()
+    _mdpoller_thread.start()
     logger.info(
         f"[MDPoller] Thread started — {n} tickers, "
         f"{len(batches)} non-blocking parallel batches."
@@ -655,6 +718,7 @@ def start_streamer(tickers: list[str]) -> None:
     """
     Launch the Schwab WebSocket streamer in a background daemon thread.
     Safe to call multiple times — only starts once.
+    Can run alongside the MDPoller (they use separate threads).
     """
     global _streamer_thread, _event_loop, _subscribed_tickers
 
@@ -666,11 +730,11 @@ def start_streamer(tickers: list[str]) -> None:
     if not ts.get("connected"):
         ttl = ts.get("refresh_token_ttl_s", 0)
         logger.warning(
-            f"[Streamer] Schwab not connected (refresh_token_ttl={ttl}s) — "
-            f"visit /schwab/auth to re-authenticate."
+            f"[Streamer] Schwab A+T not connected (refresh_token_ttl={ttl}s) — "
+            f"visit /schwab/auth/at to re-authenticate."
         )
         global _ws_error
-        _ws_error = "Schwab not authenticated — visit /schwab/auth"
+        _ws_error = "Schwab A+T not authenticated — visit /schwab/auth/at"
         return
 
     _subscribed_tickers = list(tickers)
@@ -684,7 +748,7 @@ def start_streamer(tickers: list[str]) -> None:
 
     _streamer_thread = threading.Thread(target=_run, daemon=True, name="SchwabStreamer")
     _streamer_thread.start()
-    logger.info(f"[Streamer] Started for {len(tickers)} tickers.")
+    logger.info(f"[Streamer] WS streamer started for {len(tickers)} tickers.")
 
 
 def stop_streamer() -> None:
@@ -819,32 +883,54 @@ def get_live_1m_df(ticker: str) -> "Optional[object]":
 
 
 def is_streamer_ready() -> bool:
-    """True when the streamer is connected and has live quote data."""
-    with _lock:
-        return bool(_ws_connected and _live_quotes)
+    """True when the WS streamer is connected and has live quote data."""
+    return bool(
+        _streamer_thread and _streamer_thread.is_alive()
+        and _ws_connected and _live_quotes
+    )
 
 
 def get_streamer_status() -> dict:
-    """Return a health snapshot: connection state, quote/candle counts, futures bias."""
+    """
+    Return a health snapshot for both the WS streamer and the REST MDPoller.
+    Callers can read ws_streamer.* and md_poller.* independently.
+    """
     sym_nq = _front_month("NQ")
     sym_es = _front_month("ES")
     with _lock:
         nq = dict(_futures.get(sym_nq, {}))
         es = dict(_futures.get(sym_es, {}))
-        live_count = len(_live_quotes)
+        live_count   = len(_live_quotes)
         candle_count = len(_live_candles)
         halted_count = len(_halted)
 
+    mdpoller_ago = round(time.time() - _mdpoller_last_ok, 1) if _mdpoller_last_ok else None
+
     return {
+        # Legacy flat keys — kept for backward compat
         "connected":      _ws_connected,
         "error":          _ws_error,
         "live_quotes":    live_count,
         "live_candles":   candle_count,
         "halted_tickers": halted_count,
-        "futures": {
-            sym_nq: nq,
-            sym_es: es,
+        "futures":        {sym_nq: nq, sym_es: es},
+        "nq_bias":        get_nq_futures_bias(),
+        "es_bias":        get_es_futures_bias(),
+        # New structured keys — used by /api/services
+        "ws_streamer": {
+            "running":   bool(_streamer_thread and _streamer_thread.is_alive()),
+            "connected": _ws_connected and bool(_streamer_thread and _streamer_thread.is_alive()),
+            "live_quotes":    live_count if (_streamer_thread and _streamer_thread.is_alive()) else 0,
+            "live_candles":   candle_count,
+            "halted_tickers": halted_count,
+            "nq_bias":   get_nq_futures_bias(),
+            "error":     _ws_error if (_streamer_thread and _streamer_thread.is_alive()) else None,
         },
-        "nq_bias": get_nq_futures_bias(),
-        "es_bias": get_es_futures_bias(),
+        "md_poller": {
+            "running":      _mdpoller_running and bool(_mdpoller_thread and _mdpoller_thread.is_alive()),
+            "cycle":        _mdpoller_cycle,
+            "last_ok_ago_s": mdpoller_ago,
+            "live_quotes":  live_count if not (_streamer_thread and _streamer_thread.is_alive()) else 0,
+            "error":        _mdpoller_error,
+        },
     }
