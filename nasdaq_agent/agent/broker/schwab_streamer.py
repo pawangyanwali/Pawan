@@ -520,6 +520,13 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
         if not bulk:
             return False
 
+        # Publish to Valkey price bus (non-blocking — fire and forget)
+        try:
+            from agent.valkey_client import publish_prices as _vk_publish
+            _vk_publish(bulk)
+        except Exception:
+            pass
+
         # Bulk WebSocket broadcast — one message per batch, sent immediately
         if _bulk_price_callbacks:
             for fn in _bulk_price_callbacks:

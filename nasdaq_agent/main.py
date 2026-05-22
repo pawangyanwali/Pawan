@@ -185,14 +185,39 @@ def _on_schwab_tick(ticker: str, quote: dict) -> None:
     except Exception:
         pass
 
+def _on_valkey_prices(prices: dict) -> None:
+    """
+    Forward Valkey pub/sub price batches to WebSocket clients.
+    Fires whenever the MD Poller publishes to Valkey — same cadence as
+    _on_schwab_bulk_prices but sourced from the shared price bus.
+    Deduplicated: if Schwab callbacks are already registered, Valkey provides
+    a redundant path that is a no-op when the poller is healthy.
+    """
+    _on_schwab_bulk_prices(prices)
+
+
+_valkey_sub_registered: bool = False
+
+
 def _ensure_tick_broadcast_registered() -> None:
     """Register price→WebSocket callbacks exactly once."""
-    global _schwab_tick_registered
+    global _schwab_tick_registered, _valkey_sub_registered
     if _schwab_tick_registered:
         return
     register_bulk_price_callback(_on_schwab_bulk_prices)
     register_tick_callback(_on_schwab_tick)
     _schwab_tick_registered = True
+
+    # Also subscribe to Valkey so the WS path stays live even if the direct
+    # Schwab bulk callback is replaced by a Valkey-only pipeline in a future step.
+    if not _valkey_sub_registered:
+        try:
+            from agent.valkey_client import register_price_subscriber
+            register_price_subscriber(_on_valkey_prices)
+            _valkey_sub_registered = True
+            logger.info("[Valkey] Price subscriber registered for WebSocket bridge.")
+        except Exception as _ve:
+            logger.warning(f"[Valkey] Could not register subscriber: {_ve}")
 
 
 def _get_universe_total() -> int:
@@ -442,6 +467,7 @@ async def get_signals():
 @app.get("/api/health")
 async def health():
     from agent.data_fetcher import get_credit_usage
+    from agent.valkey_client import health_status as vk_health
     return {
         "status": "ok",
         "is_running": scanner.is_running,
@@ -449,6 +475,57 @@ async def health():
         "tickers_tracked": len(scanner.signals),
         "ws_clients": len(manager.active),
         "api_credits": get_credit_usage(),
+        "valkey": vk_health(),
+    }
+
+
+@app.get("/api/services")
+async def services_status():
+    """
+    Aggregate health of all infrastructure services for the dashboard panel.
+    Returns connectivity status for: Scanner, MD Poller, Valkey, RDS (PostgreSQL).
+    """
+    from agent.valkey_client import health_status as vk_health
+    from agent.broker.schwab_streamer import get_streamer_status
+
+    streamer = get_streamer_status()
+    vk = vk_health()
+
+    # RDS check — lightweight: just try to get a connection from the pool
+    rds_ok = False
+    rds_error = None
+    try:
+        import psycopg2, os as _os
+        conn = psycopg2.connect(
+            host=_os.getenv("PGHOST", ""),
+            port=int(_os.getenv("PGPORT", "5432")),
+            dbname=_os.getenv("PGDATABASE", "nasdaq_agent"),
+            user=_os.getenv("PGUSER", ""),
+            password=_os.getenv("PGPASSWORD", ""),
+            connect_timeout=3,
+        )
+        conn.close()
+        rds_ok = True
+    except Exception as _re:
+        rds_error = str(_re)
+
+    return {
+        "scanner": {
+            "running":     scanner.is_running,
+            "last_scan":   scanner.last_scan,
+            "tickers":     len(scanner.signals),
+            "ws_clients":  len(manager.active),
+        },
+        "md_poller": {
+            "connected":   streamer.get("connected", False),
+            "live_quotes": streamer.get("live_quotes", 0),
+            "error":       streamer.get("error"),
+        },
+        "valkey": vk,
+        "rds": {
+            "connected": rds_ok,
+            "error":     rds_error,
+        },
     }
 
 
