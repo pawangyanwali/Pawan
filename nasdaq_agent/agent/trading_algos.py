@@ -1,19 +1,26 @@
 """
-Intraday trading algorithm signal evaluators — Phase 1 signals.
+Intraday trading algorithm signal evaluators — Phase 1 & 2 signals.
 
 Each eval_*() function receives a StockSignal (as a plain namespace/dict-like
 object) and returns an AlgoResult or None.  evaluate_all() runs every registered
 algo and returns a list of all fired AlgoResult objects.
 
 Algorithm catalogue (this file):
-  1  — 5-min ORB        (ORB5_BULL / ORB5_BEAR)
-  2  — 15-min ORB       (ORB15_BULL / ORB15_BEAR)
-  6  — Gap-and-Go       (GAP_AND_GO_BULL / BEAR)
-  7  — Gap Fade         (GAP_FADE_BULL / BEAR)
-  8  — PDH/PDL Breakout (PDH_BREAKOUT_BULL / PDL_BREAKDOWN_BEAR)
-  12 — HOD/LOD Break    (HOD_BREAK_BULL / LOD_BREAK_BEAR)
-  29 — Bull Flag        (BULL_FLAG)
-  30 — Bear Flag        (BEAR_FLAG)
+  Phase 1:
+    1  — 5-min ORB        (ORB5_BULL / ORB5_BEAR)
+    2  — 15-min ORB       (ORB15_BULL / ORB15_BEAR)
+    6  — Gap-and-Go       (GAP_AND_GO_BULL / BEAR)
+    7  — Gap Fade         (GAP_FADE_BULL / BEAR)
+    8  — PDH/PDL Breakout (PDH_BREAKOUT_BULL / PDL_BREAKDOWN_BEAR)
+    12 — HOD/LOD Break    (HOD_BREAK_BULL / LOD_BREAK_BEAR)
+    29 — Bull Flag        (BULL_FLAG)
+    30 — Bear Flag        (BEAR_FLAG)
+  Phase 2 scalps:
+    3  — VWAP Touch Scalp      (VWAP_TOUCH_SCALP_BULL / BEAR)
+    4  — VWAP HOD Scalp        (VWAP_HOD_SCALP)
+    5  — VWAP LOD Scalp        (VWAP_LOD_SCALP)
+    9  — Level Rejection Scalp (LEVEL_REJECTION_SCALP_BULL / BEAR)
+    11 — Micro Pullback Scalp  (MICRO_PULLBACK_SCALP_BULL / BEAR)
 """
 from __future__ import annotations
 
@@ -622,9 +629,357 @@ def eval_bear_flag(sig) -> Optional[AlgoResult]:
     return None
 
 
+# ── Algo 3: VWAP Touch Scalp (Reclaim / Rejection) ───────────────────────────
+
+def eval_vwap_touch_scalp(sig) -> Optional[AlgoResult]:
+    """
+    VWAP Touch Scalp (Algo 3 / Phase 2.7).
+
+    Fires on a VWAP RECLAIM (price crosses above from below) or REJECTION
+    (price crosses below from above) with RVOL ≥ 1.3 confirming institutional
+    participation.  Target is the first sigma band in the direction of the cross.
+
+    Entry  = current price.
+    Stop   = VWAP ∓ 40% of the σ-band half-width.
+    Target = vwap_upper_1 (RECLAIM) / vwap_lower_1 (REJECTION).
+    """
+    try:
+        event   = getattr(sig, "vwap_event", "FLAT")
+        vwap    = float(getattr(sig, "vwap_price", 0.0))
+        upper_1 = float(getattr(sig, "vwap_upper_1", 0.0))
+        lower_1 = float(getattr(sig, "vwap_lower_1", 0.0))
+        rvol    = float(getattr(sig, "rel_volume", 1.0))
+        gate    = getattr(sig, "short_tf_alignment", "MIXED")
+        price   = float(sig.price)
+
+        if vwap <= 0 or rvol < 1.3:
+            return None
+
+        half_band = (upper_1 - lower_1) / 2 if upper_1 > lower_1 else vwap * 0.003
+        stop_buf  = half_band * 0.4
+
+        if event == "RECLAIM" and gate != "BEAR":
+            entry  = price
+            stop   = vwap - stop_buf
+            target = upper_1 if upper_1 > price else price + half_band
+            if stop >= entry or target <= entry:
+                return None
+            conf = min(88, 55 + (rvol - 1.3) * 12 + (8 if gate == "BULL" else 0))
+            reason = (
+                f"VWAP RECLAIM scalp: price {price:.2f} reclaimed VWAP {vwap:.2f}; "
+                f"target σ1 {target:.2f}; RVOL {rvol:.1f}x"
+            )
+            return AlgoResult(
+                algo="VWAP_TOUCH_SCALP_BULL", direction="BUY",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=_rr(entry, stop, target), reason=reason,
+            )
+
+        if event == "REJECTION" and gate != "BULL":
+            entry  = price
+            stop   = vwap + stop_buf
+            target = lower_1 if lower_1 < price else price - half_band
+            if stop <= entry or target >= entry:
+                return None
+            conf = min(88, 55 + (rvol - 1.3) * 12 + (8 if gate == "BEAR" else 0))
+            reason = (
+                f"VWAP REJECTION scalp: price {price:.2f} rejected off VWAP {vwap:.2f}; "
+                f"target σ1 {target:.2f}; RVOL {rvol:.1f}x"
+            )
+            return AlgoResult(
+                algo="VWAP_TOUCH_SCALP_BEAR", direction="SELL",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=_rr(entry, stop, target), reason=reason,
+            )
+    except Exception as exc:
+        logger.debug("eval_vwap_touch_scalp error: %s", exc)
+    return None
+
+
+# ── Algo 4: VWAP HOD Scalp ────────────────────────────────────────────────────
+
+def eval_vwap_hod_scalp(sig) -> Optional[AlgoResult]:
+    """
+    VWAP HOD Scalp (Algo 4 / Phase 2.8) — bullish pullback-to-VWAP continuation.
+
+    In a bullish trend (MTF gate BULL), price dips to test VWAP and bounces.
+    This captures the dip-and-resume pattern, targeting a new session HOD.
+
+    Trigger:
+      - vwap_event in {ABOVE, RECLAIM, AT_1SD_UP} (price above or at VWAP)
+      - z_score between −0.5 and +1.0 (near VWAP, not extended)
+      - MTF gate BULL
+      - RVOL ≥ 1.2
+
+    Entry  = current price.
+    Stop   = vwap_lower_1 (−1σ — structure broken if price falls through).
+    Target = session_high (HOD extension).
+    """
+    try:
+        event     = getattr(sig, "vwap_event", "FLAT")
+        vwap      = float(getattr(sig, "vwap_price", 0.0))
+        z_score   = float(getattr(sig, "vwap_z_score", 0.0))
+        lower_1   = float(getattr(sig, "vwap_lower_1", 0.0))
+        sess_high = float(getattr(sig, "session_high", 0.0))
+        rvol      = float(getattr(sig, "rel_volume", 1.0))
+        gate      = getattr(sig, "short_tf_alignment", "MIXED")
+        price     = float(sig.price)
+
+        if vwap <= 0 or sess_high <= 0:
+            return None
+        if event not in ("ABOVE", "RECLAIM", "AT_1SD_UP"):
+            return None
+        if not (-0.5 <= z_score <= 1.0):
+            return None
+        if gate != "BULL" or rvol < 1.2:
+            return None
+        if sess_high <= price:
+            return None  # already at HOD — no room to target
+
+        entry  = price
+        stop   = lower_1 if lower_1 > 0 and lower_1 < price else vwap * 0.997
+        target = sess_high
+        if stop >= entry:
+            return None
+
+        conf = min(88, 50 + (rvol - 1.2) * 10 + z_score * 5)
+        reason = (
+            f"VWAP HOD scalp: z={z_score:.2f}, price {price:.2f} near VWAP {vwap:.2f}; "
+            f"target HOD {sess_high:.2f}; RVOL {rvol:.1f}x"
+        )
+        return AlgoResult(
+            algo="VWAP_HOD_SCALP", direction="BUY",
+            confidence=round(conf, 1),
+            entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+            rr=_rr(entry, stop, target), reason=reason,
+        )
+    except Exception as exc:
+        logger.debug("eval_vwap_hod_scalp error: %s", exc)
+    return None
+
+
+# ── Algo 5: VWAP LOD Scalp ────────────────────────────────────────────────────
+
+def eval_vwap_lod_scalp(sig) -> Optional[AlgoResult]:
+    """
+    VWAP LOD Scalp (Algo 5 / Phase 2.9) — bearish bounce-to-VWAP continuation.
+
+    Mirror of VWAP HOD Scalp for the bear side.  Price below VWAP, bounces
+    up to test VWAP from below, fails in the REJECTION zone, LOD as target.
+
+    Trigger:
+      - vwap_event in {BELOW, REJECTION, AT_1SD_DOWN}
+      - z_score between −1.0 and +0.5
+      - MTF gate BEAR
+      - RVOL ≥ 1.2
+
+    Entry  = current price.
+    Stop   = vwap_upper_1 (+1σ).
+    Target = session_low (LOD extension).
+    """
+    try:
+        event    = getattr(sig, "vwap_event", "FLAT")
+        vwap     = float(getattr(sig, "vwap_price", 0.0))
+        z_score  = float(getattr(sig, "vwap_z_score", 0.0))
+        upper_1  = float(getattr(sig, "vwap_upper_1", 0.0))
+        sess_low = float(getattr(sig, "session_low", 0.0))
+        rvol     = float(getattr(sig, "rel_volume", 1.0))
+        gate     = getattr(sig, "short_tf_alignment", "MIXED")
+        price    = float(sig.price)
+
+        if vwap <= 0 or sess_low <= 0:
+            return None
+        if event not in ("BELOW", "REJECTION", "AT_1SD_DOWN"):
+            return None
+        if not (-1.0 <= z_score <= 0.5):
+            return None
+        if gate != "BEAR" or rvol < 1.2:
+            return None
+        if sess_low >= price:
+            return None  # already at LOD
+
+        entry  = price
+        stop   = upper_1 if upper_1 > 0 and upper_1 > price else vwap * 1.003
+        target = sess_low
+        if stop <= entry or target >= entry:
+            return None
+
+        conf = min(88, 50 + (rvol - 1.2) * 10 + abs(z_score) * 5)
+        reason = (
+            f"VWAP LOD scalp: z={z_score:.2f}, price {price:.2f} near VWAP {vwap:.2f}; "
+            f"target LOD {sess_low:.2f}; RVOL {rvol:.1f}x"
+        )
+        return AlgoResult(
+            algo="VWAP_LOD_SCALP", direction="SELL",
+            confidence=round(conf, 1),
+            entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+            rr=_rr(entry, stop, target), reason=reason,
+        )
+    except Exception as exc:
+        logger.debug("eval_vwap_lod_scalp error: %s", exc)
+    return None
+
+
+# ── Algo 9: Level Rejection Scalp ─────────────────────────────────────────────
+
+def eval_level_rejection_scalp(sig) -> Optional[AlgoResult]:
+    """
+    Level Rejection Scalp (Algo 9 / Phase 2.10).
+
+    Fires when price reaches the ±2σ VWAP bands (statistically extreme
+    intraday extension) and the VWAP event confirms the overshoot.
+    Mean-reversion trade targeting VWAP as the exit.
+
+    Bull (AT_2SD_DOWN — oversold):
+      Entry  = current price
+      Stop   = lower_2 − 5% of the 2σ width (buffer)
+      Target = vwap_price
+
+    Bear (AT_2SD_UP — overbought):
+      Entry  = current price
+      Stop   = upper_2 + 5% buffer
+      Target = vwap_price
+    """
+    try:
+        event   = getattr(sig, "vwap_event", "FLAT")
+        vwap    = float(getattr(sig, "vwap_price", 0.0))
+        upper_2 = float(getattr(sig, "vwap_upper_2", 0.0))
+        lower_2 = float(getattr(sig, "vwap_lower_2", 0.0))
+        rvol    = float(getattr(sig, "rel_volume", 1.0))
+        gate    = getattr(sig, "short_tf_alignment", "MIXED")
+        price   = float(sig.price)
+
+        if vwap <= 0 or upper_2 <= 0 or lower_2 <= 0 or rvol < 1.2:
+            return None
+
+        buf = (upper_2 - lower_2) * 0.05
+
+        if event == "AT_2SD_DOWN" and gate != "BEAR":
+            entry  = price
+            stop   = lower_2 - buf
+            target = vwap
+            if stop >= entry or target <= entry:
+                return None
+            conf = min(85, 52 + (rvol - 1.2) * 10 + (8 if gate == "BULL" else 0))
+            reason = (
+                f"Level rejection scalp bull: price {price:.2f} at −2σ {lower_2:.2f}; "
+                f"target VWAP {vwap:.2f}; RVOL {rvol:.1f}x"
+            )
+            return AlgoResult(
+                algo="LEVEL_REJECTION_SCALP_BULL", direction="BUY",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=_rr(entry, stop, target), reason=reason,
+            )
+
+        if event == "AT_2SD_UP" and gate != "BULL":
+            entry  = price
+            stop   = upper_2 + buf
+            target = vwap
+            if stop <= entry or target >= entry:
+                return None
+            conf = min(85, 52 + (rvol - 1.2) * 10 + (8 if gate == "BEAR" else 0))
+            reason = (
+                f"Level rejection scalp bear: price {price:.2f} at +2σ {upper_2:.2f}; "
+                f"target VWAP {vwap:.2f}; RVOL {rvol:.1f}x"
+            )
+            return AlgoResult(
+                algo="LEVEL_REJECTION_SCALP_BEAR", direction="SELL",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=_rr(entry, stop, target), reason=reason,
+            )
+    except Exception as exc:
+        logger.debug("eval_level_rejection_scalp error: %s", exc)
+    return None
+
+
+# ── Algo 11: Micro Pullback Scalp ─────────────────────────────────────────────
+
+def eval_micro_pullback_scalp(sig) -> Optional[AlgoResult]:
+    """
+    Micro Pullback Scalp (Algo 11 / Phase 2.11) — VWAP-supported trend continuation.
+
+    In a strongly directional market (MTF gate BULL or BEAR), a small pullback
+    to just above/below VWAP creates a low-risk continuation entry.
+
+    Bull: event in {ABOVE, RECLAIM, AT_1SD_UP}, z_score 0.1–1.2, gate BULL.
+      Entry  = current price
+      Stop   = VWAP × 0.999 (just below VWAP — structure broken)
+      Target = vwap_upper_1 (first σ extension)
+
+    Bear: event in {BELOW, REJECTION, AT_1SD_DOWN}, z_score −1.2–(−0.1), gate BEAR.
+      Entry  = current price
+      Stop   = VWAP × 1.001
+      Target = vwap_lower_1
+    """
+    try:
+        event    = getattr(sig, "vwap_event", "FLAT")
+        vwap     = float(getattr(sig, "vwap_price", 0.0))
+        z_score  = float(getattr(sig, "vwap_z_score", 0.0))
+        upper_1  = float(getattr(sig, "vwap_upper_1", 0.0))
+        lower_1  = float(getattr(sig, "vwap_lower_1", 0.0))
+        rvol     = float(getattr(sig, "rel_volume", 1.0))
+        gate     = getattr(sig, "short_tf_alignment", "MIXED")
+        mtf_gate = bool(getattr(sig, "mtf_gate_passed", False))
+        price    = float(sig.price)
+
+        if vwap <= 0 or rvol < 1.3 or gate == "MIXED":
+            return None
+
+        bull_events = {"ABOVE", "RECLAIM", "AT_1SD_UP"}
+        bear_events = {"BELOW", "REJECTION", "AT_1SD_DOWN"}
+
+        if gate == "BULL" and event in bull_events and 0.1 <= z_score <= 1.2:
+            if upper_1 <= 0 or upper_1 <= price:
+                return None
+            entry  = price
+            stop   = vwap * 0.999
+            target = upper_1
+            if stop >= entry or target <= entry:
+                return None
+            conf = min(85, 48 + (rvol - 1.3) * 10 + z_score * 6 + (10 if mtf_gate else 0))
+            reason = (
+                f"Micro pullback scalp bull: z={z_score:.2f}, VWAP {vwap:.2f}, "
+                f"target σ1 {upper_1:.2f}; RVOL {rvol:.1f}x; TF {gate}"
+            )
+            return AlgoResult(
+                algo="MICRO_PULLBACK_SCALP_BULL", direction="BUY",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=_rr(entry, stop, target), reason=reason,
+            )
+
+        if gate == "BEAR" and event in bear_events and -1.2 <= z_score <= -0.1:
+            if lower_1 <= 0 or lower_1 >= price:
+                return None
+            entry  = price
+            stop   = vwap * 1.001
+            target = lower_1
+            if stop <= entry or target >= entry:
+                return None
+            conf = min(85, 48 + (rvol - 1.3) * 10 + abs(z_score) * 6 + (10 if mtf_gate else 0))
+            reason = (
+                f"Micro pullback scalp bear: z={z_score:.2f}, VWAP {vwap:.2f}, "
+                f"target σ1 {lower_1:.2f}; RVOL {rvol:.1f}x; TF {gate}"
+            )
+            return AlgoResult(
+                algo="MICRO_PULLBACK_SCALP_BEAR", direction="SELL",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=_rr(entry, stop, target), reason=reason,
+            )
+    except Exception as exc:
+        logger.debug("eval_micro_pullback_scalp error: %s", exc)
+    return None
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 _ALGO_REGISTRY = [
+    # Phase 1 — breakout / momentum
     eval_orb5,
     eval_orb15,
     eval_gap_and_go,
@@ -633,6 +988,12 @@ _ALGO_REGISTRY = [
     eval_hod_lod_break,
     eval_bull_flag,
     eval_bear_flag,
+    # Phase 2 — VWAP scalps
+    eval_vwap_touch_scalp,
+    eval_vwap_hod_scalp,
+    eval_vwap_lod_scalp,
+    eval_level_rejection_scalp,
+    eval_micro_pullback_scalp,
 ]
 
 
