@@ -57,6 +57,7 @@ from agent.trade_management import build_trade_plan
 from agent.signal_tracker import init_db, record_signal, resolve_pending, record_signals_batch, resolve_short_term, get_ticker_learning_scores
 from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
+from agent.trading_algos import evaluate_all as evaluate_trading_algos
 from agent.exit_signals import analyse_exits
 from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades, rt_check_positions as pt_rt_check
 from agent.macro_calendar import check_macro_event
@@ -326,6 +327,9 @@ class StockSignal:
     order_flow_label:    str   = "NEUTRAL"
     signal_strength:     str   = "STANDARD"   # STRONG|STANDARD|WEAK|CONFLICTED|BLOCKED|NO_SIGNAL
     signal_size_mult:    float = 1.0   # position size multiplier from arbitration
+
+    # ── Algorithm signals (Phase 1+ trading algos) ────────────────────────────
+    algo_signals: list = field(default_factory=list)  # list of AlgoResult dicts
 
     def to_dict(self) -> dict:
         import math
@@ -949,7 +953,7 @@ def analyse_ticker(
         candles = _build_candles(df_1m)
         info    = _get_info(ticker)
 
-        return StockSignal(
+        _sig = StockSignal(
             ticker            = ticker,
             name              = info.get("name", ticker),
             price             = round(price, 4),
@@ -1120,6 +1124,14 @@ def analyse_ticker(
             signal_strength     = _sig_strength,
             signal_size_mult    = _sig_size_mult,
         )
+
+        # Evaluate structured trading algorithm signals (Phase 1+)
+        try:
+            _sig.algo_signals = evaluate_trading_algos(_sig)
+        except Exception as _ae:
+            logger.debug("[%s] trading_algos error: %s", ticker, _ae)
+
+        return _sig
     except Exception as e:
         logger.warning(f"[{ticker}] analysis error: {e}", exc_info=True)
         return None
