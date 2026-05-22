@@ -107,6 +107,17 @@ def make_pg_conn(host, port, db, user, password):
 
 # ─── Type helpers ─────────────────────────────────────────────────────────────
 
+_TIER_MAP = {"HIGH": 1, "REGULAR": 2, "LOW": 3, "TIER1": 1, "TIER2": 2, "TIER3": 3}
+
+def _tier(v: Any) -> int:
+    """Convert text tier ('HIGH'/'REGULAR'/'LOW') or numeric string to SMALLINT."""
+    if v is None:
+        return 2
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return _TIER_MAP.get(str(v).upper().strip(), 2)
+
 def _f(v: Any) -> Optional[float]:
     try:
         return float(v) if v is not None else None
@@ -226,7 +237,7 @@ def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
                 r["ticker"], r["direction"],
                 _f(r["confidence"]) or 0.0,
                 _f(r["entry_price"]),
-                r["trading_tier"] or "REGULAR",
+                _tier(r["trading_tier"]),
                 r["regime"] or "", r["session"] or "",
                 r["vol_bucket"] or "NORMAL", r["trend"] or "",
                 _b(r["is_suppressed"]),
