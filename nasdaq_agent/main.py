@@ -9,6 +9,7 @@ import html as _html
 import json
 import logging
 import os
+import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -142,6 +143,52 @@ manager = ConnectionManager()
 
 # Captured at startup so the scanner background thread can schedule broadcasts
 _event_loop: asyncio.AbstractEventLoop | None = None
+
+# ── Signal cache — persists last scan across server restarts ──────────────────
+# Allows /api/signals and the WS connect handler to serve stale-but-valid data
+# immediately instead of waiting for the next full scan (up to 6 minutes).
+_SIGNAL_CACHE_FILE = os.path.join(
+    os.path.expanduser("~"), ".nasdaq_agent", "signal_cache.json"
+)
+_last_signals_dicts: list[dict] = []   # in-memory fast path
+_last_signals_ts:    str        = ""   # ISO timestamp of the cached scan
+
+
+def _save_signal_cache(signals_dicts: list[dict], ts: str) -> None:
+    """Atomically write signal cache to disk after every completed scan."""
+    global _last_signals_dicts, _last_signals_ts
+    _last_signals_dicts = signals_dicts
+    _last_signals_ts    = ts
+    try:
+        os.makedirs(os.path.dirname(_SIGNAL_CACHE_FILE), exist_ok=True)
+        tmp = _SIGNAL_CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"ts": ts, "signals": signals_dicts}, f, separators=(",", ":"))
+        os.replace(tmp, _SIGNAL_CACHE_FILE)
+    except Exception as _ce:
+        logger.debug("Signal cache write failed: %s", _ce)
+
+
+def _load_signal_cache() -> None:
+    """Load the on-disk signal cache at startup (max 4 h old)."""
+    global _last_signals_dicts, _last_signals_ts
+    try:
+        if not os.path.exists(_SIGNAL_CACHE_FILE):
+            return
+        age = time.time() - os.path.getmtime(_SIGNAL_CACHE_FILE)
+        if age > 14400:   # discard if older than 4 hours
+            return
+        with open(_SIGNAL_CACHE_FILE) as f:
+            data = json.load(f)
+        sigs = data.get("signals", [])
+        if sigs:
+            _last_signals_dicts = sigs
+            _last_signals_ts    = data.get("ts", "")
+            logger.info(
+                "[Cache] Loaded %d signals from disk (age %.0fs)", len(sigs), age
+            )
+    except Exception as _ce:
+        logger.debug("Signal cache read failed: %s", _ce)
 
 # ── Schwab price → WebSocket broadcast ───────────────────────────────────────
 _schwab_tick_registered: bool = False
@@ -321,9 +368,14 @@ def _on_signals(signals: list[StockSignal]) -> None:
                 f"TOS auto-trade: {len(_tos_results)} orders placed this cycle"
             )
 
+    sigs_dicts = [s.to_dict() for s in signals]
+
+    # Persist to disk cache so the next page load is instantaneous
+    _save_signal_cache(sigs_dicts, scanner.last_scan or "")
+
     payload = _dumps({
         "type":          "update",
-        "signals":       [s.to_dict() for s in signals],
+        "signals":       sigs_dicts,
         "regime":        regime.to_dict(),
         "session":       session,
         "alerts":        alerts,
@@ -396,6 +448,7 @@ _tos_auto_trade: bool = os.getenv("SCHWAB_AUTO_TRADE", "false").lower() == "true
 async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
+    _load_signal_cache()   # pre-populate cache before any scan runs
     scanner.register_callback(_on_signals)
     scanner.register_per_ticker_callback(_on_ticker)
     scanner.start_background()
@@ -531,11 +584,25 @@ async def root():
 
 @app.get("/api/signals")
 async def get_signals():
-    """REST endpoint: returns the latest cached scan results."""
+    """REST endpoint: returns the latest cached scan results.
+
+    Serves live in-memory signals when a scan has completed, otherwise falls
+    back to the disk cache so the page is never blank on a warm restart.
+    """
+    if scanner.signals:
+        sigs      = [s.to_dict() for s in scanner.signals]
+        last_scan = scanner.last_scan
+        from_cache = False
+    else:
+        sigs      = _last_signals_dicts
+        last_scan = _last_signals_ts or scanner.last_scan
+        from_cache = bool(sigs)
     return {
-        "last_scan": scanner.last_scan,
-        "count": len(scanner.signals),
-        "signals": [s.to_dict() for s in scanner.signals],
+        "last_scan":  last_scan,
+        "count":      len(sigs),
+        "signals":    sigs,
+        "from_cache": from_cache,
+        "scanning":   scanner.is_running and not scanner.signals,
     }
 
 
@@ -1650,20 +1717,44 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     logger.info(f"WebSocket client connected. Total: {len(manager.active)}")
-    # Keepalive task runs concurrently — sends pings on a timer, never in
-    # response to client messages (that was the ping-pong loop bug).
     keepalive = asyncio.create_task(_ws_keepalive(ws))
     try:
-        # Send current state immediately on connect so tab is live before first scan
-        if scanner.signals:
-            payload = _dumps({
-                "type": "update",
-                "signals": [s.to_dict() for s in scanner.signals],
-            })
-            await ws.send_text(payload)
+        regime  = get_regime()
+        session = get_session_info()
 
-        # Drain incoming client messages.  We don't respond here — keepalive task
-        # handles server→client pings on its own schedule.
+        # Choose best available signals: live > in-memory cache > disk cache
+        if scanner.signals:
+            live_sigs   = [s.to_dict() for s in scanner.signals]
+            from_cache  = False
+        elif _last_signals_dicts:
+            live_sigs   = _last_signals_dicts
+            from_cache  = True
+        else:
+            live_sigs   = []
+            from_cache  = False
+
+        if live_sigs:
+            # Full update so the tab is immediately usable
+            await ws.send_text(_dumps({
+                "type":          "update",
+                "signals":       live_sigs,
+                "regime":        regime.to_dict(),
+                "session":       session,
+                "from_cache":    from_cache,
+                "scanned_count": len(live_sigs),
+            }))
+        else:
+            # No data yet (cold start) — send a status frame so the loading
+            # screen can show regime/session info rather than spinning blindly.
+            await ws.send_text(_dumps({
+                "type":       "scan_status",
+                "scanning":   True,
+                "regime":     regime.to_dict(),
+                "session":    session,
+                "n_total":    _get_universe_total(),
+            }))
+
+        # Drain incoming client messages.
         while True:
             await ws.receive_text()
 

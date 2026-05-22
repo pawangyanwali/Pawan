@@ -1484,8 +1484,39 @@ class Scanner:
 
     def _loop(self) -> None:
         self.is_running = True
+        _first = True
         while self.is_running:
             try:
+                # On cold start, wait up to 45 s for the WS streamer to build
+                # up candles so fetch_batch_realtime can serve them from memory
+                # instead of hitting the Schwab REST API for all 257 tickers.
+                # This avoids the 429 cascade that makes the first scan take
+                # 400+ seconds.  Skipped on warm restarts (cache already hot).
+                if _first:
+                    _first = False
+                    try:
+                        from agent.broker.schwab_streamer import (
+                            get_streaming_bar_count, is_streamer_ready,
+                        )
+                        from config import SCHWAB_ENABLED
+                        if SCHWAB_ENABLED and is_streamer_ready():
+                            _deadline = time.time() + 45
+                            while time.time() < _deadline:
+                                # Wait until at least 10 tickers have ≥5 bars
+                                ready = sum(
+                                    1 for t in NASDAQ_TICKERS[:50]
+                                    if get_streaming_bar_count(t) >= 5
+                                )
+                                if ready >= 10:
+                                    logger.info(
+                                        "[Scanner] WS streamer warmed (%d tickers "
+                                        "with bars) — starting first scan.", ready
+                                    )
+                                    break
+                                time.sleep(3)
+                    except Exception:
+                        pass  # non-Schwab path — no delay needed
+
                 self.run_once()
             except Exception as e:
                 logger.error(f"Scanner loop error: {e}", exc_info=True)

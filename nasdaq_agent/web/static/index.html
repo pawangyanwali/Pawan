@@ -470,9 +470,7 @@
 <div class="loading-overlay" id="loading">
   <div class="spinner"></div>
   <div class="loading-text" id="loading-main">Connecting to NASDAQ agent…</div>
-  <div class="loading-text" style="font-size:11px;color:#475569">
-    First scan: 80 tickers — scans every <strong style="color:#94a3b8">~30 seconds</strong>
-  </div>
+  <div class="loading-text" id="loading-sub" style="font-size:11px;color:#475569">Fetching market data…</div>
   <div id="loading-timer" style="font-size:11px;color:#334155;margin-top:8px">Elapsed: 0s</div>
   <div id="loading-health" style="font-size:11px;color:#334155"></div>
 </div>
@@ -1774,6 +1772,20 @@ function connectWS() {
       return;
     }
 
+    // Cold-start status: scanner is running but no signals yet — update loading screen
+    if (m.type === 'scan_status') {
+      const sub = document.getElementById('loading-sub');
+      if (sub) {
+        const regime = m.regime?.label || '';
+        const sess   = m.session?.session || '';
+        sub.textContent = `Scanning ${m.n_total || '—'} tickers${regime ? ' · ' + regime : ''}${sess ? ' · ' + sess : ''}`;
+      }
+      // Regime/session info available even before signals arrive
+      if (m.regime) _regime = m.regime;
+      if (m.session) { _sessionInfo = m.session; updateSessionBanner(); }
+      return;
+    }
+
     // Progressive ticker streaming — one signal arrives as soon as it's ready
     if (m.type === 'ticker_update') {
       const sig = m.signal;
@@ -1783,6 +1795,9 @@ function connectWS() {
       // Update scan progress chip immediately (no render needed for this)
       const sc = document.getElementById('scan-count');
       if (sc) sc.textContent = `${m.n_done}/${m.n_total} scanned`;
+      // Update loading sub-text with scan progress
+      const sub = document.getElementById('loading-sub');
+      if (sub) sub.textContent = `Scanning… ${m.n_done}/${m.n_total} tickers complete`;
       hideLoading();
       _scheduleRender();
       return;
@@ -2128,7 +2143,7 @@ async function pollFallback() {
   // while a reconnect attempt is in flight.
   const wsLive = ws && ws.readyState === WebSocket.OPEN;
   if (wsLive && Date.now() - _wsLastMsgAt < 60000) return;
-  try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); } } catch {}
+  try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); if (d.from_cache) { const sub = document.getElementById('loading-sub'); } } } catch {}
 }
 setInterval(pollFallback, 15000);
 function hideLoading() { const el = document.getElementById('loading'); el.classList.add('hidden'); setTimeout(() => el.style.display='none', 600); }
