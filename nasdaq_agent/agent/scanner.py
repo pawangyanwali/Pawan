@@ -37,7 +37,7 @@ from agent.data_fetcher import (
     fetch_ticker_info,
 )
 from agent.technical import compute_indicators, score_technical
-from agent.volume import score_volume, relative_volume, detect_unusual_volume
+from agent.volume import score_volume, relative_volume, detect_unusual_volume, rvol_time_of_day
 from agent.ml_model import predict, predict_daily, predict_reversal, predict_ensemble, predict_swing, get_or_create_swing, retrain_all
 from agent.sentiment import score_sentiment
 from agent.prediction import generate_prediction
@@ -525,7 +525,7 @@ def analyse_ticker(
             deep_trained  = _deep_trained,
         )
         sent, headlines = score_sentiment(ticker)
-        rvol            = relative_volume(df_ind)
+        rvol            = rvol_time_of_day(df_ind, df_1d)
         uvol            = detect_unusual_volume(df_ind)
 
         # Multi-timeframe analysis (6 TFs: 5M, 15M, 30M, 1H, 4H, 1D)
