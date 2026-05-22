@@ -204,8 +204,14 @@ def _fast_xgb_fit(
 
     # sklearn ≥1.6 removed cv='prefit'; FrozenEstimator is the replacement —
     # it prevents re-fitting inside CalibratedClassifierCV, same behaviour.
-    cal = CalibratedClassifierCV(FrozenEstimator(base), method="sigmoid")
-    cal.fit(X_cal, y_cal)
+    # cv is capped to the smallest class size so StratifiedKFold never warns
+    # about classes with fewer members than n_splits.
+    _min_cls = int(np.bincount(y_cal).min()) if len(np.unique(y_cal)) > 1 else 2
+    _cv = max(2, min(5, _min_cls))
+    cal = CalibratedClassifierCV(FrozenEstimator(base), method="sigmoid", cv=_cv)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+        cal.fit(X_cal, y_cal)
     return cal
 
 
