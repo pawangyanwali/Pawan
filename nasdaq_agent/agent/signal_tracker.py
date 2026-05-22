@@ -361,7 +361,7 @@ def get_market_breakdown_stats(min_count: int = 5, lookback_days: int = 30) -> d
                    outcome, short_outcome
             FROM signals
             WHERE ts >= datetime('now', ?)
-              AND is_suppressed = 0
+              AND is_suppressed IS NOT TRUE
               AND (outcome != 'PENDING' OR short_outcome != 'PENDING')
         """, (f"-{lookback_days} days",)).fetchall()
 
@@ -442,7 +442,7 @@ def get_market_breakdown_stats(min_count: int = 5, lookback_days: int = 30) -> d
 def get_stats(ticker: Optional[str] = None, limit: int = 200) -> dict:
     """Return accuracy statistics for a ticker or globally."""
     with _conn_ro() as c:
-        where  = "WHERE ticker=? AND (is_suppressed IS NULL OR is_suppressed=0)" if ticker else "WHERE (is_suppressed IS NULL OR is_suppressed=0)"
+        where  = "WHERE ticker=? AND is_suppressed IS NOT TRUE" if ticker else "WHERE is_suppressed IS NOT TRUE"
         params = (ticker,) if ticker else ()
         rows   = c.execute(
             f"SELECT outcome, pnl_pct FROM signals {where} ORDER BY id DESC LIMIT ?",
@@ -478,7 +478,7 @@ def get_observation_summary() -> dict:
               SUM(CASE WHEN outcome='WIN' OR short_outcome='WIN' THEN 1 ELSE 0 END) as wins
             FROM signals
             WHERE ts >= datetime('now', '-30 days')
-              AND is_suppressed = 0
+              AND is_suppressed IS NOT TRUE
         """).fetchone()
 
     total    = row["total"] or 0
@@ -540,7 +540,7 @@ def get_suppressed_stats(lookback_days: int = 7) -> dict:
             rows = c.execute("""
                 SELECT direction, session, regime, confidence
                 FROM signals
-                WHERE is_suppressed = 1
+                WHERE is_suppressed IS TRUE
                   AND ts >= datetime('now', ?)
             """, (f"-{lookback_days} days",)).fetchall()
     total = len(rows)
