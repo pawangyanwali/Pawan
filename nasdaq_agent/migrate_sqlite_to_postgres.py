@@ -114,6 +114,30 @@ def _confidence(v: Any) -> float:
     f = _f(v) or 0.0
     return round(f / 100.0, 4) if f > 1.0 else round(f, 4)
 
+# session values allowed by signals_session_check
+_SESSION_MAP = {
+    'OPEN':        'REGULAR',
+    'MARKET':      'REGULAR',
+    'REGULAR':     'REGULAR',
+    'PRE_MARKET':  'PRE_MARKET',
+    'PRE':         'PRE_MARKET',
+    'PREMARKET':   'PRE_MARKET',
+    'AFTER_HOURS': 'AFTER_HOURS',
+    'AFTERHOURS':  'AFTER_HOURS',
+    'AH':          'AFTER_HOURS',
+    'EXTENDED':    'AFTER_HOURS',
+    'CLOSED':      'CLOSED',
+}
+
+def _session(v: Any) -> str:
+    return _SESSION_MAP.get(str(v).upper().strip() if v else '', 'REGULAR')
+
+# direction: only BUY/SELL allowed
+_DIR_MAP = {'BUY': 'BUY', 'LONG': 'BUY', 'SELL': 'SELL', 'SHORT': 'SELL'}
+
+def _direction(v: Any) -> Optional[str]:
+    return _DIR_MAP.get(str(v).upper().strip() if v else '', None)
+
 def _tier(v: Any) -> int:
     """Convert text tier ('HIGH'/'REGULAR'/'LOW') or numeric string to SMALLINT."""
     if v is None:
@@ -231,6 +255,13 @@ def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
         return {"total": len(rows), "dry_run": True}
 
     with pg.cursor() as cur:
+        # Skip rows that would violate NOT NULL / CHECK constraints
+        valid = [r for r in rows if _f(r["entry_price"]) and _f(r["entry_price"]) > 0
+                                 and _direction(r["direction"])]
+        skipped = len(rows) - len(valid)
+        if skipped:
+            log.warning(f"  Skipping {skipped} rows with null/zero price or invalid direction")
+
         psycopg2.extras.execute_batch(cur, """
             INSERT INTO signals (
                 ticker, direction, confidence, price, tier,
@@ -239,11 +270,11 @@ def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
             ) VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s)
         """, [
             (
-                r["ticker"], r["direction"],
+                r["ticker"], _direction(r["direction"]),
                 _confidence(r["confidence"]),
                 _f(r["entry_price"]),
                 _tier(r["trading_tier"]),
-                r["regime"] or "", r["session"] or "",
+                r["regime"] or "", _session(r["session"]),
                 r["vol_bucket"] or "NORMAL", r["trend"] or "",
                 _b(r["is_suppressed"]),
                 r["short_outcome"] or "PENDING",
@@ -260,7 +291,7 @@ def migrate_signals(sqlite_dir: Path, pg, dry_run: bool) -> dict:
                 }),
                 _ts(r["ts"]),
             )
-            for r in rows
+            for r in valid
         ], page_size=500)
     pg.commit()
 
@@ -387,7 +418,7 @@ def migrate_trades(sqlite_dir: Path, pg, dry_run: bool) -> dict:
             )
         """, [
             (
-                r["ticker"], r["direction"], r["status"] or "CLOSED",
+                r["ticker"], _direction(r["direction"]) or r["direction"], r["status"] or "CLOSED",
                 _f(r["entry_price"]),
                 _ts(r["opened_at"]),
                 _i(r["shares"]) or 1,
