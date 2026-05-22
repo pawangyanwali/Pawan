@@ -128,6 +128,15 @@ class _TokenManager:
             self._tokens.update(data)
             self._tokens["stored_at"] = time.time()
         self._save()
+        # Reset account-hash cache so discovery retries with the new token
+        if self.name == "Trader":
+            try:
+                import agent.broker.schwab_client as _sc
+                _sc._cached_account_hash = ""
+                _sc._hash_discovery_failed = False
+                _sc._hash_last_attempt = 0.0
+            except Exception:
+                pass
         logger.info(f"[Schwab/{self.name}] Tokens saved.")
 
     # ── Refresh ───────────────────────────────────────────────────────────────
@@ -207,7 +216,6 @@ class _TokenManager:
             "response_type":         "code",
             "client_id":             self.client_id(),
             "redirect_uri":          redirect_uri,
-            "scope":                 "readonly",
             "code_challenge":        code_challenge,
             "code_challenge_method": "S256",
             "state":                 state,
