@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
 import urllib.request
 import urllib.parse
 from typing import Optional
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 TRADER_BASE = "https://api.schwabapi.com/trader/v1"
 
 _cached_account_hash: str = ""   # populated on first successful /accounts call
+_hash_discovery_failed: bool = False  # set True after permanent failure; stops retrying
 
 
 def _account_number() -> str:
@@ -35,33 +37,85 @@ def _get_account_hash() -> str:
     """
     Return the hashed account number required by Schwab's /accounts/{hash} endpoint.
 
-    Schwab's API requires the encrypted/hashed form of the account number for all
-    account-specific calls — the plain account number returns 400 Bad Request.
-    We discover it once via GET /trader/v1/accounts, cache it for the session,
-    and fall back to the configured SCHWAB_ACCOUNT_NUMBER if the call fails.
+    Discovery order:
+      1. GET /accounts/accountNumbers  (dedicated endpoint, preferred)
+      2. GET /accounts                 (full account list — hashValue embedded)
+    Results are cached for the session.  Raises RuntimeError if both fail.
     """
-    global _cached_account_hash
+    global _cached_account_hash, _hash_discovery_failed
     if _cached_account_hash:
         return _cached_account_hash
+    if _hash_discovery_failed:
+        raise RuntimeError(
+            "Account hash unavailable — Schwab account endpoints returned 400. "
+            "Verify SCHWAB_ACCOUNT_NUMBER and that your Accounts+Trading app is approved."
+        )
+
+    configured = os.getenv("SCHWAB_ACCOUNT_NUMBER", "").strip()
+
+    def _pick_hash(entries: list) -> str | None:
+        for entry in entries:
+            acct_num = str(entry.get("accountNumber", ""))
+            hash_val = entry.get("hashValue")
+            if not hash_val:
+                # /accounts returns hashValue inside securitiesAccount sometimes
+                hash_val = entry.get("securitiesAccount", {}).get("hashValue")
+            if not hash_val:
+                continue
+            if configured and acct_num == configured:
+                return hash_val
+        # No match — use first
+        for entry in entries:
+            h = entry.get("hashValue") or entry.get("securitiesAccount", {}).get("hashValue")
+            if h:
+                return h
+        return None
+
+    # ── Attempt 1: /accounts/accountNumbers ──────────────────────────────────
     try:
-        data = _get("/accounts/accountNumbers")
-        # Response: [{"accountNumber": "...", "hashValue": "..."}, ...]
+        data = _get_raw("/accounts/accountNumbers")
         if isinstance(data, list) and data:
-            configured = os.getenv("SCHWAB_ACCOUNT_NUMBER", "").strip()
-            # Prefer the account whose plain number matches SCHWAB_ACCOUNT_NUMBER
-            for entry in data:
-                if configured and str(entry.get("accountNumber", "")) == configured:
-                    _cached_account_hash = entry["hashValue"]
-                    logger.info(f"[Schwab] Account hash discovered for account ending ...{configured[-4:] if len(configured) >= 4 else configured}")
-                    return _cached_account_hash
-            # No match — use the first account
-            _cached_account_hash = data[0]["hashValue"]
-            logger.info(f"[Schwab] Using first account hash (no SCHWAB_ACCOUNT_NUMBER match)")
-            return _cached_account_hash
+            h = _pick_hash(data)
+            if h:
+                _cached_account_hash = h
+                suffix = configured[-4:] if len(configured) >= 4 else configured
+                logger.info(f"[Schwab] Account hash discovered via /accountNumbers (acct ...{suffix})")
+                return _cached_account_hash
+    except urllib.error.HTTPError as e:
+        body = "<no body>"
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        logger.warning(f"[Schwab] /accounts/accountNumbers returned {e.code}: {body}")
     except Exception as e:
-        logger.warning(f"[Schwab] Could not discover account hash: {e} — falling back to configured number")
-    # Last resort: use whatever is configured (may still 400 but gives a clear error)
-    return _account_number()
+        logger.warning(f"[Schwab] /accounts/accountNumbers error: {e}")
+
+    # ── Attempt 2: GET /accounts (returns full account objects) ─────────────
+    try:
+        data = _get_raw("/accounts")
+        if isinstance(data, list) and data:
+            h = _pick_hash(data)
+            if h:
+                _cached_account_hash = h
+                suffix = configured[-4:] if len(configured) >= 4 else configured
+                logger.info(f"[Schwab] Account hash discovered via /accounts (acct ...{suffix})")
+                return _cached_account_hash
+    except urllib.error.HTTPError as e:
+        body = "<no body>"
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        logger.warning(f"[Schwab] /accounts returned {e.code}: {body}")
+    except Exception as e:
+        logger.warning(f"[Schwab] /accounts error: {e}")
+
+    _hash_discovery_failed = True
+    raise RuntimeError(
+        "Could not discover Schwab account hash from /accounts/accountNumbers or /accounts. "
+        "Check SCHWAB_ACCOUNT_NUMBER and that the Accounts+Trading app is approved."
+    )
 
 
 def _headers() -> dict:
@@ -78,6 +132,14 @@ def _headers() -> dict:
 def _is_trader_connected() -> bool:
     """True only when the Accounts+Trading token is present."""
     return bool(get_access_token())
+
+
+def _get_raw(path: str):
+    """Like _get but raises urllib.error.HTTPError on 4xx/5xx (body still readable)."""
+    url = f"{TRADER_BASE}{path}"
+    req = urllib.request.Request(url, headers=_headers())
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
 
 
 def _get(path: str) -> dict:
@@ -107,7 +169,13 @@ def _delete(path: str) -> None:
 
 def get_account() -> dict:
     """Return account summary (balances, buying power, etc.)."""
-    acct = _get_account_hash()
+    if not _is_trader_connected():
+        return {}
+    try:
+        acct = _get_account_hash()
+    except RuntimeError as e:
+        logger.debug(f"get_account skipped: {e}")
+        return {}
     try:
         data = _get(f"/accounts/{acct}?fields=positions")
         return data
@@ -121,7 +189,10 @@ def get_positions() -> list[dict]:
     if not _is_trader_connected():
         logger.debug("get_positions: Trader app not connected — skipping")
         return []
-    acct = _get_account_hash()
+    try:
+        acct = _get_account_hash()
+    except RuntimeError:
+        return []
     try:
         data = _get(f"/accounts/{acct}?fields=positions")
         positions = (
@@ -150,7 +221,10 @@ def get_orders(status: str = "WORKING") -> list[dict]:
     if not _is_trader_connected():
         logger.debug("get_orders: Trader app not connected — skipping")
         return []
-    acct = _get_account_hash()
+    try:
+        acct = _get_account_hash()
+    except RuntimeError:
+        return []
     try:
         data = _get(f"/accounts/{acct}/orders?status={status}&maxResults=50")
         return data if isinstance(data, list) else []
@@ -163,6 +237,8 @@ def get_account_summary() -> dict:
     """Return simplified balance summary. Empty dict if Trader app not connected."""
     if not _is_trader_connected():
         logger.debug("get_account_summary: Trader app not connected — skipping")
+        return {}
+    if _hash_discovery_failed:
         return {}
     try:
         data   = get_account()
