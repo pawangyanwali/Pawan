@@ -412,8 +412,8 @@ def get_performance_stats(
                 ORDER BY fired_at DESC
             """, (f"-{lookback_days}",)).fetchall()
             tracking_count = c.execute(
-                "SELECT COUNT(*) FROM bt_signals WHERE status='TRACKING'"
-            ).fetchone()[0]
+                "SELECT COUNT(*) AS n FROM bt_signals WHERE status='TRACKING'"
+            ).fetchone()["n"]
 
     rows = [dict(r) for r in rows]
     if not rows:

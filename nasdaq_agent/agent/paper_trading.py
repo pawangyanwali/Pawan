@@ -208,8 +208,8 @@ def maybe_open_trade(
                 return None
 
             open_count = c.execute(
-                "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
-            ).fetchone()[0]
+                "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
+            ).fetchone()["n"]
             if open_count >= _MAX_CONCURRENT_TRADES:
                 logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_MAX_CONCURRENT_TRADES}) reached")
                 return None
@@ -593,8 +593,8 @@ def close_stale_positions() -> int:
     with _lock:
         with _conn() as c:
             count = c.execute(
-                "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
-            ).fetchone()[0]
+                "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
+            ).fetchone()["n"]
 
     if count == 0:
         return 0
@@ -1026,8 +1026,8 @@ def get_summary() -> dict:
             "SELECT pnl_pct, pnl_dollar, direction FROM paper_trades WHERE status='CLOSED'"
         ).fetchall()
         open_count = c.execute(
-            "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
-        ).fetchone()[0]
+            "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
+        ).fetchone()["n"]
 
     total    = len(closed)
     # Win = positive dollar P&L (source of truth — not pnl_pct which can be inflated)
