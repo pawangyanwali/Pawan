@@ -44,14 +44,20 @@ TIMEFRAME_CONFIG = [
     ("30M",  "5m",   "30min",       8,         0.13),   # resample 5M → 30M
     ("15M",  "5m",   "15min",       10,        0.08),   # resample 5M → 15M
     ("5M",   "5m",   None,          20,        0.05),
+    ("1M",   "1m",   None,          20,        0.03),   # live scalp trigger TF
 ]
 
+# Short-term gate: require these three TFs to agree before firing intraday signals
+_GATE_TIMEFRAMES = {"1M", "5M", "15M"}
+
 _NEUTRAL_RESULT = {
-    "mtf_score": 0.0,
-    "alignment": "MIXED",
-    "bull_count": 0,
-    "bear_count": 0,
-    "timeframes": {},
+    "mtf_score":          0.0,
+    "alignment":          "MIXED",
+    "bull_count":         0,
+    "bear_count":         0,
+    "timeframes":         {},
+    "short_tf_alignment": "MIXED",
+    "mtf_gate_passed":    False,
 }
 
 _OHLCV_AGG = {
@@ -204,10 +210,28 @@ def multi_timeframe_analysis(
     mtf_score = round(float(np.clip(mtf_score, -1.0, 1.0)), 4)
     alignment = _alignment_label(bull_count, bear_count, len(timeframes))
 
+    # Short-TF alignment gate: 1M + 5M + 15M must agree
+    gate_trends = [
+        timeframes[tf]["trend"]
+        for tf in _GATE_TIMEFRAMES
+        if tf in timeframes
+    ]
+    if len(gate_trends) == len(_GATE_TIMEFRAMES):
+        if all(t == "UPTREND" for t in gate_trends):
+            short_tf_alignment = "BULL"
+        elif all(t == "DOWNTREND" for t in gate_trends):
+            short_tf_alignment = "BEAR"
+        else:
+            short_tf_alignment = "MIXED"
+    else:
+        short_tf_alignment = "MIXED"
+
     return {
-        "mtf_score":  mtf_score,
-        "alignment":  alignment,
-        "bull_count": bull_count,
-        "bear_count": bear_count,
-        "timeframes": timeframes,
+        "mtf_score":          mtf_score,
+        "alignment":          alignment,
+        "bull_count":         bull_count,
+        "bear_count":         bear_count,
+        "timeframes":         timeframes,
+        "short_tf_alignment": short_tf_alignment,
+        "mtf_gate_passed":    short_tf_alignment in ("BULL", "BEAR"),
     }

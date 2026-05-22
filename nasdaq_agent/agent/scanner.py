@@ -157,11 +157,13 @@ class StockSignal:
     open_price:   float = 0.0
 
     # ── Multi-timeframe analysis ───────────────────────────────────────────────
-    mtf_score:      float = 0.0
-    mtf_alignment:  str   = "MIXED"
-    mtf_bull_count: int   = 0
-    mtf_bear_count: int   = 0
-    mtf_timeframes: dict  = field(default_factory=dict)
+    mtf_score:           float = 0.0
+    mtf_alignment:       str   = "MIXED"
+    mtf_bull_count:      int   = 0
+    mtf_bear_count:      int   = 0
+    mtf_timeframes:      dict  = field(default_factory=dict)
+    short_tf_alignment:  str   = "MIXED"  # 1M+5M+15M gate: "BULL"|"BEAR"|"MIXED"
+    mtf_gate_passed:     bool  = False    # True when all short TFs agree
 
     # ── Support / Resistance ──────────────────────────────────────────────────
     supports:     list  = field(default_factory=list)
@@ -985,11 +987,13 @@ def analyse_ticker(
                    if isinstance(v, (int, float)) and v > 0},
             },
             poc               = float(_value_area.get("poc", 0.0)) or pred["poc"],
-            mtf_score         = float(mtf["mtf_score"]),
-            mtf_alignment     = mtf["alignment"],
-            mtf_bull_count    = int(mtf["bull_count"]),
-            mtf_bear_count    = int(mtf["bear_count"]),
-            mtf_timeframes    = mtf["timeframes"],
+            mtf_score          = float(mtf["mtf_score"]),
+            mtf_alignment      = mtf["alignment"],
+            mtf_bull_count     = int(mtf["bull_count"]),
+            mtf_bear_count     = int(mtf["bear_count"]),
+            mtf_timeframes     = mtf["timeframes"],
+            short_tf_alignment = mtf.get("short_tf_alignment", "MIXED"),
+            mtf_gate_passed    = bool(mtf.get("mtf_gate_passed", False)),
             rsi_zone          = pred.get("rsi_zone",          "NEUTRAL"),
             rsi_value         = float(pred.get("rsi_value",  50.0)),
             rsi_gated         = bool(pred.get("rsi_gated",   False)),
