@@ -129,8 +129,9 @@ def init_db() -> None:
 
 def _migrate_columns(c) -> None:
     from agent.db import using_postgres
-    if using_postgres():
-        existing: set[str] = set()   # IF NOT EXISTS handles duplicates on PG
+    pg = using_postgres()
+    if pg:
+        existing: set[str] = set()   # unused for PG — we use IF NOT EXISTS instead
     else:
         existing = {row[1] for row in c.execute("PRAGMA table_info(paper_trades)").fetchall()}
     additions = [
@@ -160,14 +161,23 @@ def _migrate_columns(c) -> None:
         ("shares_remaining",   "INTEGER DEFAULT 0"),
         ("order_flow_score",   "REAL DEFAULT 0"),
         ("size_mult",          "REAL DEFAULT 1.0"),
-        ("cost_basis",  "REAL DEFAULT 0"),   # entry_price × shares (allocated capital)
+        ("cost_basis",         "REAL DEFAULT 0"),   # entry_price × shares (allocated capital)
     ]
     for col, definition in additions:
-        if col not in existing:
+        if pg:
+            # Use IF NOT EXISTS so the statement is always a no-op for existing
+            # columns — this prevents a failed ALTER from aborting the transaction
+            # and blocking subsequent migrations.
             try:
-                c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
+                c.execute(f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {definition}")
             except Exception:
                 pass
+        else:
+            if col not in existing:
+                try:
+                    c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
+                except Exception:
+                    pass
 
     # Ensure account_config has a default row
     try:
