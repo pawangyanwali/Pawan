@@ -498,6 +498,7 @@
     <button onclick="openWeekendLearning()" id="wl-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Weekend Learning — historical deep-train">📚 Weekend</button>
     <button onclick="openAfterHours()" id="ah-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🌙 After-Hours</button>
     <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
+    <button onclick="openAlgoPerf()" id="algo-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Algorithm signal performance">⚙️ Algos</button>
     <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Schwab connections &amp; data sources">🏦 Schwab <span id="schwab-hdr-dot" style="font-size:9px;transition:color .3s">○</span></button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="openAlertModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Alert settings">🔔 Alerts</button>
@@ -1510,6 +1511,83 @@ TRADING_MAX_POSITION_PCT=10
     <div style="background:var(--surface2);border-radius:8px;padding:14px 16px;border:1px solid var(--border)">
       <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:10px">📅 Past Weekend Runs</div>
       <div id="wl-history" style="font-size:11px;color:var(--muted)">No history yet.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Algorithm Performance Modal -->
+<div class="history-modal" id="algo-modal">
+  <div class="history-modal-inner" style="max-width:1200px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <div style="font-size:14px;font-weight:700;color:var(--text)">⚙️ Algorithm Performance</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">Live signal fires · paper trade results · per-algo win rates</div>
+      </div>
+      <button onclick="closeAlgoPerf()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+    </div>
+
+    <!-- Tabs -->
+    <div style="display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:8px">
+      <button id="algo-tab-perf"  onclick="algoTab('perf')"  style="background:var(--accent);color:#fff;border:none;border-radius:5px;padding:4px 14px;font-size:11px;cursor:pointer">Performance</button>
+      <button id="algo-tab-fires" onclick="algoTab('fires')" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:4px 14px;font-size:11px;cursor:pointer">Signal History</button>
+    </div>
+
+    <!-- Performance tab -->
+    <div id="algo-pane-perf">
+      <div id="algo-perf-summary" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px"></div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:11px" id="algo-perf-table">
+          <thead>
+            <tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
+              <th style="padding:6px 8px">Algorithm</th>
+              <th style="padding:6px 8px;text-align:right">Fires</th>
+              <th style="padding:6px 8px;text-align:right">Trades</th>
+              <th style="padding:6px 8px;text-align:right">Closed</th>
+              <th style="padding:6px 8px;text-align:right">Wins</th>
+              <th style="padding:6px 8px;text-align:right">Losses</th>
+              <th style="padding:6px 8px;text-align:right">Win%</th>
+              <th style="padding:6px 8px;text-align:right">Avg P&L%</th>
+              <th style="padding:6px 8px;text-align:right">Total $</th>
+              <th style="padding:6px 8px;text-align:right">Avg RR</th>
+              <th style="padding:6px 8px;text-align:right">Avg Bars</th>
+              <th style="padding:6px 8px;text-align:right">Last Fire</th>
+            </tr>
+          </thead>
+          <tbody id="algo-perf-tbody">
+            <tr><td colspan="12" style="text-align:center;color:var(--muted);padding:24px">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Signal History tab -->
+    <div id="algo-pane-fires" style="display:none">
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:11px" id="algo-fires-table">
+          <thead>
+            <tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
+              <th style="padding:6px 8px">Time</th>
+              <th style="padding:6px 8px">Ticker</th>
+              <th style="padding:6px 8px">Algorithm</th>
+              <th style="padding:6px 8px">Dir</th>
+              <th style="padding:6px 8px;text-align:right">Conf%</th>
+              <th style="padding:6px 8px;text-align:right">Entry</th>
+              <th style="padding:6px 8px;text-align:right">Stop</th>
+              <th style="padding:6px 8px;text-align:right">Target</th>
+              <th style="padding:6px 8px;text-align:right">RR</th>
+              <th style="padding:6px 8px;text-align:center">Traded?</th>
+            </tr>
+          </thead>
+          <tbody id="algo-fires-tbody">
+            <tr><td colspan="10" style="text-align:center;color:var(--muted);padding:24px">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;text-align:right">
+      <button onclick="loadAlgoPerf()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;font-size:10px;cursor:pointer">↺ Refresh</button>
+      <span id="algo-last-updated" style="font-size:10px;color:var(--muted);margin-left:8px"></span>
     </div>
   </div>
 </div>
@@ -3672,6 +3750,126 @@ function _ptRenderLearning(ls, summary) {
 }
 
 function closePaperTrading() { document.getElementById('paper-modal').classList.remove('open'); }
+
+// ─── Algorithm Performance Modal ──────────────────────────────────────────────
+function openAlgoPerf() {
+  document.getElementById('algo-modal').classList.add('open');
+  loadAlgoPerf();
+}
+function closeAlgoPerf() { document.getElementById('algo-modal').classList.remove('open'); }
+
+function algoTab(tab) {
+  ['perf','fires'].forEach(t => {
+    document.getElementById('algo-pane-' + t).style.display = t === tab ? '' : 'none';
+    const btn = document.getElementById('algo-tab-' + t);
+    if (btn) {
+      btn.style.background = t === tab ? 'var(--accent)' : 'var(--surface2)';
+      btn.style.color      = t === tab ? '#fff' : 'var(--muted)';
+      btn.style.border     = t === tab ? 'none' : '1px solid var(--border)';
+    }
+  });
+}
+
+async function loadAlgoPerf() {
+  try {
+    const r = await fetch('/api/algo-performance');
+    const d = await r.json();
+
+    // ── Performance tab ────────────────────────────────────────────────────
+    const stats = d.algo_stats || [];
+    const tbody = document.getElementById('algo-perf-tbody');
+
+    // Summary pills
+    const totalFires  = stats.reduce((s,a) => s + a.total_fires, 0);
+    const totalTrades = stats.reduce((s,a) => s + a.closed_trades, 0);
+    const totalWins   = stats.reduce((s,a) => s + a.wins, 0);
+    const totalPnl    = stats.reduce((s,a) => s + a.total_pnl_dollar, 0);
+    const overallWR   = totalTrades > 0 ? (totalWins / totalTrades * 100).toFixed(1) : '—';
+    document.getElementById('algo-perf-summary').innerHTML = `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:120px;text-align:center">
+        <div style="font-size:20px;font-weight:700;color:var(--text)">${totalFires}</div>
+        <div style="font-size:10px;color:var(--muted)">Total Signal Fires</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:120px;text-align:center">
+        <div style="font-size:20px;font-weight:700;color:var(--text)">${totalTrades}</div>
+        <div style="font-size:10px;color:var(--muted)">Closed Algo Trades</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:120px;text-align:center">
+        <div style="font-size:20px;font-weight:700;color:${parseFloat(overallWR)>=50?'#22c55e':'#ef4444'}">${overallWR}%</div>
+        <div style="font-size:10px;color:var(--muted)">Overall Win Rate</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:120px;text-align:center">
+        <div style="font-size:20px;font-weight:700;color:${totalPnl>=0?'#22c55e':'#ef4444'}">$${totalPnl.toFixed(0)}</div>
+        <div style="font-size:10px;color:var(--muted)">Total Algo P&L</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:120px;text-align:center">
+        <div style="font-size:20px;font-weight:700;color:var(--text)">${stats.length}</div>
+        <div style="font-size:10px;color:var(--muted)">Active Algorithms</div>
+      </div>`;
+
+    if (stats.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:32px">No algorithm signals fired yet — signals appear once the market scanner is running.</td></tr>';
+    } else {
+      tbody.innerHTML = stats.map(a => {
+        const wr    = a.win_rate;
+        const wrCol = wr >= 60 ? '#22c55e' : wr >= 45 ? '#f59e0b' : '#ef4444';
+        const pnlCol= a.avg_pnl_pct >= 0 ? '#22c55e' : '#ef4444';
+        const totCol= a.total_pnl_dollar >= 0 ? '#22c55e' : '#ef4444';
+        const lastF = a.last_fire ? a.last_fire.substring(11,16) + ' UTC' : '—';
+        const algoLabel = a.algo.replace(/_/g,' ');
+        return `<tr style="border-bottom:1px solid var(--border);transition:background .15s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
+          <td style="padding:6px 8px;font-weight:600;color:var(--text)">${algoLabel}</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--muted)">${a.total_fires}</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--muted)">${a.trades_triggered}</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--muted)">${a.closed_trades}</td>
+          <td style="padding:6px 8px;text-align:right;color:#22c55e">${a.wins}</td>
+          <td style="padding:6px 8px;text-align:right;color:#ef4444">${a.losses}</td>
+          <td style="padding:6px 8px;text-align:right;font-weight:700;color:${wrCol}">${a.closed_trades > 0 ? wr.toFixed(1)+'%' : '—'}</td>
+          <td style="padding:6px 8px;text-align:right;color:${pnlCol}">${a.closed_trades > 0 ? (a.avg_pnl_pct>=0?'+':'')+a.avg_pnl_pct.toFixed(2)+'%' : '—'}</td>
+          <td style="padding:6px 8px;text-align:right;color:${totCol};font-weight:600">${a.closed_trades > 0 ? (a.total_pnl_dollar>=0?'+$':'−$')+Math.abs(a.total_pnl_dollar).toFixed(0) : '—'}</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--muted)">${a.avg_rr > 0 ? a.avg_rr.toFixed(2)+'x' : '—'}</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--muted)">${a.avg_bars_held > 0 ? a.avg_bars_held.toFixed(0) : '—'}</td>
+          <td style="padding:6px 8px;text-align:right;color:var(--muted);font-size:10px">${lastF}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // ── Signal History tab ─────────────────────────────────────────────────
+    const fires  = d.recent_fires || [];
+    const ftbody = document.getElementById('algo-fires-tbody');
+    if (fires.length === 0) {
+      ftbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:32px">No signal fires recorded yet.</td></tr>';
+    } else {
+      ftbody.innerHTML = fires.map(f => {
+        const ts  = f.logged_at ? f.logged_at.substring(11,19) + ' UTC' : '—';
+        const dir = f.direction === 'BUY'
+          ? '<span style="color:#22c55e;font-weight:600">▲ BUY</span>'
+          : '<span style="color:#ef4444;font-weight:600">▼ SELL</span>';
+        const traded = f.trade_opened
+          ? '<span style="color:#22c55e">✓</span>'
+          : '<span style="color:var(--muted)">—</span>';
+        const algo = (f.algo||'').replace(/_/g,' ');
+        return `<tr style="border-bottom:1px solid var(--border);transition:background .15s" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
+          <td style="padding:5px 8px;color:var(--muted);font-size:10px">${ts}</td>
+          <td style="padding:5px 8px;font-weight:600;color:var(--text)">${f.ticker||'—'}</td>
+          <td style="padding:5px 8px;color:var(--muted)">${algo}</td>
+          <td style="padding:5px 8px">${dir}</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--muted)">${(f.confidence||0).toFixed(0)}%</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--muted)">$${(f.entry||0).toFixed(2)}</td>
+          <td style="padding:5px 8px;text-align:right;color:#ef4444">$${(f.stop||0).toFixed(2)}</td>
+          <td style="padding:5px 8px;text-align:right;color:#22c55e">$${(f.target||0).toFixed(2)}</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--muted)">${(f.rr||0).toFixed(2)}x</td>
+          <td style="padding:5px 8px;text-align:center">${traded}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    document.getElementById('algo-last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('algo-perf-tbody').innerHTML =
+      `<tr><td colspan="12" style="text-align:center;color:#ef4444;padding:24px">Error: ${e.message}</td></tr>`;
+  }
+}
 
 // ─── Paper Trading — Account tab ───────────────────────────────────────────────
 async function ptLoadAccountTab() {

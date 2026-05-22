@@ -32,7 +32,7 @@ from agent.market_hours import get_session_info
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals, get_observation_summary
 from agent.position_sizing import calculate as calc_position
-from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl, get_equity_curve, get_weekly_pnl, get_ticker_pnl, get_account_state, update_account_config
+from agent.paper_trading import get_summary as pt_summary, get_open_trades, get_closed_trades, get_daily_pnl, get_today_pnl, get_equity_curve, get_weekly_pnl, get_ticker_pnl, get_account_state, update_account_config, get_algo_performance
 from agent.macro_calendar import check_macro_event, get_upcoming_events
 from agent.live_backtest import get_performance_stats, get_tracking_signals, get_recent_resolved, get_price_path
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
@@ -1014,6 +1014,14 @@ async def paper_performance():
         "equity_curve": equity,
         "ticker_pnl":   ticker,
     }
+
+
+@app.get("/api/algo-performance")
+async def algo_performance_endpoint():
+    """Per-algorithm signal fire stats and closed-trade performance."""
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(_pt_executor, get_algo_performance)
+    return result
 
 
 @app.get("/api/macro-calendar")

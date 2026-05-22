@@ -59,7 +59,7 @@ from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.trading_algos import evaluate_all as evaluate_trading_algos, detect_flag
 from agent.exit_signals import analyse_exits
-from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades, rt_check_positions as pt_rt_check
+from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades, rt_check_positions as pt_rt_check, log_algo_signals
 from agent.macro_calendar import check_macro_event
 from agent.live_backtest import (
     init_db as bt_init_db,
@@ -1160,6 +1160,34 @@ def analyse_ticker(
             _sig.algo_signals = evaluate_trading_algos(_sig)
         except Exception as _ae:
             logger.debug("[%s] trading_algos error: %s", ticker, _ae)
+
+        # Log algo fires and open algo-driven paper trades
+        if _sig.algo_signals:
+            _algo_trade_opened = False
+            for _asig in _sig.algo_signals:
+                _trade_id = maybe_open_trade(
+                    ticker            = ticker,
+                    direction         = _asig["direction"],
+                    price             = float(_asig["entry"]),
+                    target            = float(_asig["target"]),
+                    stop              = float(_asig["stop"]),
+                    confidence        = float(_asig["confidence"]),
+                    rr_qualifies      = float(_asig.get("rr", 0)) >= 1.5,
+                    rr_ratio          = float(_asig.get("rr", 0)),
+                    session           = sess_info.get("session", ""),
+                    regime            = regime.regime,
+                    entry_type        = "ALGO",
+                    order_flow_score  = _of_score,
+                    size_mult         = 1.0,
+                    trading_tier      = _trading_tier,
+                    algo_name         = _asig["algo"],
+                )
+                if _trade_id:
+                    _algo_trade_opened = True
+            try:
+                log_algo_signals(ticker, _sig.algo_signals, trade_opened=_algo_trade_opened)
+            except Exception as _le:
+                logger.debug("[%s] algo log error: %s", ticker, _le)
 
         return _sig
     except Exception as e:

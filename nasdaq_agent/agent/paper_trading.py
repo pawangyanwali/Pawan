@@ -116,7 +116,8 @@ def init_db() -> None:
             shares_remaining    INTEGER DEFAULT 0,
             order_flow_score    DOUBLE PRECISION DEFAULT 0,
             size_mult           DOUBLE PRECISION DEFAULT 1.0,
-            cost_basis          DOUBLE PRECISION DEFAULT 0
+            cost_basis          DOUBLE PRECISION DEFAULT 0,
+            algo_name           TEXT    DEFAULT ''
         )
     """ if using_postgres() else """
         CREATE TABLE IF NOT EXISTS paper_trades (
@@ -151,7 +152,24 @@ def init_db() -> None:
             shares_remaining    INTEGER DEFAULT 0,
             order_flow_score    REAL    DEFAULT 0,
             size_mult           REAL    DEFAULT 1.0,
-            cost_basis          REAL    DEFAULT 0
+            cost_basis          REAL    DEFAULT 0,
+            algo_name           TEXT    DEFAULT ''
+        )
+    """
+
+    create_algo_signal_log = """
+        CREATE TABLE IF NOT EXISTS algo_signal_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            logged_at    TEXT    NOT NULL,
+            ticker       TEXT    NOT NULL,
+            algo         TEXT    NOT NULL,
+            direction    TEXT    NOT NULL,
+            confidence   REAL    DEFAULT 0,
+            entry        REAL    DEFAULT 0,
+            stop         REAL    DEFAULT 0,
+            target       REAL    DEFAULT 0,
+            rr           REAL    DEFAULT 0,
+            trade_opened INTEGER DEFAULT 0
         )
     """
 
@@ -202,7 +220,7 @@ def init_db() -> None:
         # uses DOUBLE PRECISION, so only stale columns need the cast repair.
         # Drop the legacy CHECK constraints that caused NUMERIC(5,4) overflows.
         _ddl = (
-            [create_paper_trades, create_account_config, create_balance_snapshots]
+            [create_paper_trades, create_account_config, create_balance_snapshots, create_algo_signal_log]
             + [f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {defn}"
                for col, defn in _COLUMN_ADDITIONS]
             + [f"ALTER TABLE paper_trades DROP CONSTRAINT IF EXISTS {con}"
@@ -234,6 +252,7 @@ def init_db() -> None:
             c.execute(create_paper_trades)
             c.execute(create_account_config)
             c.execute(create_balance_snapshots)
+            c.execute(create_algo_signal_log)
             _migrate_columns(c)
             # Ensure default config row
             try:
@@ -278,6 +297,7 @@ _COLUMN_ADDITIONS = [
     ("order_flow_score",   "REAL DEFAULT 0"),
     ("size_mult",          "REAL DEFAULT 1.0"),
     ("cost_basis",         "REAL DEFAULT 0"),   # entry_price × shares (allocated capital)
+    ("algo_name",          "TEXT DEFAULT ''"),  # algo that triggered the trade ('' = ML)
 ]
 
 
@@ -327,6 +347,7 @@ def maybe_open_trade(
     order_flow_score: float = 0.0,
     size_mult:        float = 1.0,
     trading_tier:     str   = "REGULAR",
+    algo_name:        str   = "",
 ) -> Optional[int]:
     """
     Open a paper trade when all PRD entry gates pass.
@@ -436,8 +457,9 @@ def maybe_open_trade(
                   (opened_at, ticker, direction, entry_price, target, stop,
                    confidence, rr_ratio, rr_qualifies, shares, shares_remaining,
                    session, regime, vwap_event, rsi_zone, entry_type,
-                   t1_price, t2_price, order_flow_score, size_mult, cost_basis)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   t1_price, t2_price, order_flow_score, size_mult, cost_basis,
+                   algo_name)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
@@ -448,6 +470,7 @@ def maybe_open_trade(
                 t1_price, t2_price,
                 round(order_flow_score, 4), round(effective_size_mult, 2),
                 round(price * shares, 2),
+                algo_name,
             ))
             c.commit()
             logger.info(
@@ -1556,6 +1579,126 @@ def get_weekly_pnl() -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False) -> None:
+    """
+    Persist every fired algo signal to algo_signal_log for performance tracking.
+    Call this every time evaluate_trading_algos() returns results.
+    """
+    if not algo_signals:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with _conn() as c:
+            for sig in algo_signals:
+                c.execute(
+                    """INSERT INTO algo_signal_log
+                         (logged_at, ticker, algo, direction, confidence,
+                          entry, stop, target, rr, trade_opened)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        now, ticker,
+                        sig.get("algo", ""),
+                        sig.get("direction", ""),
+                        float(sig.get("confidence", 0)),
+                        float(sig.get("entry", 0)),
+                        float(sig.get("stop", 0)),
+                        float(sig.get("target", 0)),
+                        float(sig.get("rr", 0)),
+                        int(trade_opened),
+                    ),
+                )
+            c.commit()
+    except Exception as e:
+        logger.debug(f"[ALGO_LOG] {ticker}: {e}")
+
+
+def get_algo_performance() -> dict:
+    """
+    Return per-algo performance statistics aggregated from both
+    algo_signal_log (all fires) and paper_trades (closed trades).
+    """
+    try:
+        with _conn_ro() as c:
+            # Per-algo fire counts and trade-opened counts from signal log
+            fire_rows = c.execute("""
+                SELECT
+                    algo,
+                    COUNT(*)                              AS total_fires,
+                    SUM(trade_opened)                     AS trades_triggered,
+                    AVG(rr)                               AS avg_rr_at_fire,
+                    MIN(logged_at)                        AS first_fire,
+                    MAX(logged_at)                        AS last_fire
+                FROM algo_signal_log
+                GROUP BY algo
+                ORDER BY total_fires DESC
+            """).fetchall()
+
+            # Per-algo closed-trade stats from paper_trades
+            trade_rows = c.execute("""
+                SELECT
+                    algo_name                             AS algo,
+                    COUNT(*)                              AS total_trades,
+                    SUM(CASE WHEN pnl_dollar > 0 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN pnl_dollar <= 0 THEN 1 ELSE 0 END) AS losses,
+                    AVG(pnl_pct)                          AS avg_pnl_pct,
+                    SUM(pnl_dollar)                       AS total_pnl_dollar,
+                    AVG(rr_ratio)                         AS avg_rr,
+                    AVG(bars_held)                        AS avg_bars_held
+                FROM paper_trades
+                WHERE status='CLOSED' AND algo_name != ''
+                GROUP BY algo_name
+                ORDER BY total_pnl_dollar DESC
+            """).fetchall()
+
+            # Recent fires (last 100)
+            recent_rows = c.execute("""
+                SELECT logged_at, ticker, algo, direction, confidence,
+                       entry, stop, target, rr, trade_opened
+                FROM algo_signal_log
+                ORDER BY id DESC LIMIT 100
+            """).fetchall()
+
+    except Exception as e:
+        logger.debug(f"[ALGO_PERF] query error: {e}")
+        return {"algo_stats": [], "recent_fires": [], "error": str(e)}
+
+    fires_by_algo = {r["algo"]: dict(r) for r in fire_rows}
+    trades_by_algo = {r["algo"]: dict(r) for r in trade_rows}
+
+    # Merge into a single list
+    all_algos = sorted(set(fires_by_algo) | set(trades_by_algo))
+    algo_stats = []
+    for algo in all_algos:
+        f = fires_by_algo.get(algo, {})
+        t = trades_by_algo.get(algo, {})
+        wins   = int(t.get("wins", 0) or 0)
+        losses = int(t.get("losses", 0) or 0)
+        total  = wins + losses
+        algo_stats.append({
+            "algo":            algo,
+            "total_fires":     int(f.get("total_fires", 0) or 0),
+            "trades_triggered":int(f.get("trades_triggered", 0) or 0),
+            "closed_trades":   total,
+            "wins":            wins,
+            "losses":          losses,
+            "win_rate":        round(wins / total * 100, 1) if total > 0 else 0.0,
+            "avg_pnl_pct":     round(float(t.get("avg_pnl_pct", 0) or 0), 3),
+            "total_pnl_dollar":round(float(t.get("total_pnl_dollar", 0) or 0), 2),
+            "avg_rr":          round(float(t.get("avg_rr", 0) or 0), 2),
+            "avg_bars_held":   round(float(t.get("avg_bars_held", 0) or 0), 1),
+            "avg_rr_at_fire":  round(float(f.get("avg_rr_at_fire", 0) or 0), 2),
+            "first_fire":      f.get("first_fire", ""),
+            "last_fire":       f.get("last_fire", ""),
+        })
+
+    recent_fires = [dict(r) for r in recent_rows]
+
+    return {
+        "algo_stats":   algo_stats,
+        "recent_fires": recent_fires,
+    }
 
 
 def get_ticker_pnl() -> list[dict]:
