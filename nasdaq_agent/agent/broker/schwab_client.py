@@ -21,12 +21,47 @@ logger = logging.getLogger(__name__)
 
 TRADER_BASE = "https://api.schwabapi.com/trader/v1"
 
+_cached_account_hash: str = ""   # populated on first successful /accounts call
+
 
 def _account_number() -> str:
     n = os.getenv("SCHWAB_ACCOUNT_NUMBER", "")
     if not n:
         raise RuntimeError("SCHWAB_ACCOUNT_NUMBER not set in .env")
     return n
+
+
+def _get_account_hash() -> str:
+    """
+    Return the hashed account number required by Schwab's /accounts/{hash} endpoint.
+
+    Schwab's API requires the encrypted/hashed form of the account number for all
+    account-specific calls — the plain account number returns 400 Bad Request.
+    We discover it once via GET /trader/v1/accounts, cache it for the session,
+    and fall back to the configured SCHWAB_ACCOUNT_NUMBER if the call fails.
+    """
+    global _cached_account_hash
+    if _cached_account_hash:
+        return _cached_account_hash
+    try:
+        data = _get("/accounts/accountNumbers")
+        # Response: [{"accountNumber": "...", "hashValue": "..."}, ...]
+        if isinstance(data, list) and data:
+            configured = os.getenv("SCHWAB_ACCOUNT_NUMBER", "").strip()
+            # Prefer the account whose plain number matches SCHWAB_ACCOUNT_NUMBER
+            for entry in data:
+                if configured and str(entry.get("accountNumber", "")) == configured:
+                    _cached_account_hash = entry["hashValue"]
+                    logger.info(f"[Schwab] Account hash discovered for account ending ...{configured[-4:] if len(configured) >= 4 else configured}")
+                    return _cached_account_hash
+            # No match — use the first account
+            _cached_account_hash = data[0]["hashValue"]
+            logger.info(f"[Schwab] Using first account hash (no SCHWAB_ACCOUNT_NUMBER match)")
+            return _cached_account_hash
+    except Exception as e:
+        logger.warning(f"[Schwab] Could not discover account hash: {e} — falling back to configured number")
+    # Last resort: use whatever is configured (may still 400 but gives a clear error)
+    return _account_number()
 
 
 def _headers() -> dict:
@@ -72,7 +107,7 @@ def _delete(path: str) -> None:
 
 def get_account() -> dict:
     """Return account summary (balances, buying power, etc.)."""
-    acct = _account_number()
+    acct = _get_account_hash()
     try:
         data = _get(f"/accounts/{acct}?fields=positions")
         return data
@@ -86,7 +121,7 @@ def get_positions() -> list[dict]:
     if not _is_trader_connected():
         logger.debug("get_positions: Trader app not connected — skipping")
         return []
-    acct = _account_number()
+    acct = _get_account_hash()
     try:
         data = _get(f"/accounts/{acct}?fields=positions")
         positions = (
@@ -115,7 +150,7 @@ def get_orders(status: str = "WORKING") -> list[dict]:
     if not _is_trader_connected():
         logger.debug("get_orders: Trader app not connected — skipping")
         return []
-    acct = _account_number()
+    acct = _get_account_hash()
     try:
         data = _get(f"/accounts/{acct}/orders?status={status}&maxResults=50")
         return data if isinstance(data, list) else []
@@ -165,7 +200,7 @@ def place_equity_order(
     For extended-hours orders, pass session="SEAMLESS" and order_type="LIMIT".
     Market orders are not allowed during extended hours.
     """
-    acct = _account_number()
+    acct = _get_account_hash()
 
     instruction = "BUY" if direction.upper() in ("BUY", "STRONG BUY") else "SELL_SHORT"
 
@@ -212,7 +247,7 @@ def place_bracket_order(
     Place an OCO bracket order: entry + take-profit + stop-loss in one ticket.
     If entry_price ≈ current market, use MARKET entry + OCO exits.
     """
-    acct = _account_number()
+    acct = _get_account_hash()
 
     is_buy  = direction.upper() in ("BUY", "STRONG BUY")
     entry_instruction = "BUY"          if is_buy else "SELL_SHORT"
@@ -273,7 +308,7 @@ def place_bracket_order(
 
 def cancel_order(order_id: str) -> bool:
     """Cancel an open order by ID."""
-    acct = _account_number()
+    acct = _get_account_hash()
     try:
         _delete(f"/accounts/{acct}/orders/{order_id}")
         return True
@@ -285,7 +320,7 @@ def cancel_order(order_id: str) -> bool:
 def close_position(ticker: str, qty: int, is_long: bool) -> dict:
     """Market-close an existing position."""
     instruction = "SELL" if is_long else "BUY_TO_COVER"
-    acct = _account_number()
+    acct = _get_account_hash()
     order = {
         "orderType": "MARKET",
         "session":   "NORMAL",
