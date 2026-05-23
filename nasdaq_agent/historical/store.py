@@ -90,12 +90,11 @@ def upsert_bars(interval: str, ticker: str, df: pd.DataFrame) -> int:
 def get_last_ts(interval: str, ticker: str) -> int | None:
     """Return the most recent stored epoch-ms for a ticker/interval, or None."""
     tbl = table_name(interval)
-    use_pg = using_postgres()
-    ph = "%s" if use_pg else "?"
-    sql = f"SELECT MAX(ts) FROM {tbl} WHERE ticker = {ph}"
+    ph = "%s" if using_postgres() else "?"
+    sql = f"SELECT MAX(ts) AS max_ts FROM {tbl} WHERE ticker = {ph}"
     with get_conn(HISTORY_DB_PATH) as conn:
         row = conn.execute(sql, (ticker,)).fetchone()
-    return row[0] if row and row[0] is not None else None
+    return row["max_ts"] if row and row["max_ts"] is not None else None
 
 
 def row_counts() -> dict[str, int]:
@@ -105,8 +104,8 @@ def row_counts() -> dict[str, int]:
         tbl = table_name(iv)
         try:
             with get_conn(HISTORY_DB_PATH) as conn:
-                row = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
-            counts[iv] = row[0] if row else 0
+                row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {tbl}").fetchone()
+            counts[iv] = row["cnt"] if row else 0
         except Exception:
             counts[iv] = 0
     return counts
@@ -118,9 +117,9 @@ def ticker_counts(interval: str) -> dict[str, int]:
     try:
         with get_conn(HISTORY_DB_PATH) as conn:
             rows = conn.execute(
-                f"SELECT ticker, COUNT(*) FROM {tbl} GROUP BY ticker ORDER BY ticker"
+                f"SELECT ticker, COUNT(*) AS cnt FROM {tbl} GROUP BY ticker ORDER BY ticker"
             ).fetchall()
-        return {r[0]: r[1] for r in rows}
+        return {r["ticker"]: r["cnt"] for r in rows}
     except Exception:
         return {}
 
@@ -128,8 +127,7 @@ def ticker_counts(interval: str) -> dict[str, int]:
 def read_ticker_bars(interval: str, ticker: str) -> pd.DataFrame:
     """Load all stored bars for one ticker/interval into a DataFrame."""
     tbl = table_name(interval)
-    use_pg = using_postgres()
-    ph = "%s" if use_pg else "?"
+    ph = "%s" if using_postgres() else "?"
     sql = (
         f"SELECT ts, open, high, low, close, volume FROM {tbl} "
         f"WHERE ticker = {ph} ORDER BY ts"
@@ -140,14 +138,14 @@ def read_ticker_bars(interval: str, ticker: str) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
 
-    index = pd.to_datetime([r[0] for r in rows], unit="ms", utc=True)
+    index = pd.to_datetime([r["ts"] for r in rows], unit="ms", utc=True)
     return pd.DataFrame(
         {
-            "Open":   [r[1] for r in rows],
-            "High":   [r[2] for r in rows],
-            "Low":    [r[3] for r in rows],
-            "Close":  [r[4] for r in rows],
-            "Volume": [r[5] for r in rows],
+            "Open":   [r["open"]   for r in rows],
+            "High":   [r["high"]   for r in rows],
+            "Low":    [r["low"]    for r in rows],
+            "Close":  [r["close"]  for r in rows],
+            "Volume": [r["volume"] for r in rows],
         },
         index=index,
     )

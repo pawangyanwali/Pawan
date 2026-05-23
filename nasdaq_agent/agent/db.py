@@ -290,6 +290,30 @@ class _PgConnection:
         return _PgCursor(cur)
 
     def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type:
+                self._conn.rollback()
+            else:
+                self._conn.commit()
+        finally:
+            _get_pool().putconn(self._conn)
+        return False
+
+    def close(self):
+        try:
+            _get_pool().putconn(self._conn)
+        except Exception:
+            pass
+
 
 class _SqliteConnection:
     """
