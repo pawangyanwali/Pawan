@@ -27,6 +27,7 @@ Usage examples
 
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 import time
@@ -55,16 +56,35 @@ except (ImportError, Exception):
 
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s  %(levelname)-8s  %(name)-32s  %(message)s",
+    fmt   = logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(name)-32s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    # Console
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(fmt)
+
+    # File — always written regardless of verbose flag
+    log_dir = Path("/opt/nasdaq-agent/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "backfill.log"
+    fh = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=20 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    fh.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.addHandler(ch)
+    root.addHandler(fh)
+
     # Silence noisy sub-loggers unless verbose
     if not verbose:
         for noisy in ("urllib3", "httpx", "httpcore", "asyncio"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    logging.getLogger("backfill.main").info("Logging to %s", log_path)
 
 
 def _parse_args() -> argparse.Namespace:
