@@ -18,6 +18,7 @@ mid-run can be resumed without re-fetching completed work.
 """
 
 import logging
+import signal
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +29,41 @@ from historical import progress, store
 from historical.schema import CHUNK_DAYS, DIRECT_INTERVALS, RESAMPLE_FROM_30MIN
 
 logger = logging.getLogger(__name__)
+
+_HARD_TIMEOUT_S = 35   # SIGALRM fires after this many seconds, interrupting recv()
+
+
+class _HardTimeout(Exception):
+    """Raised by SIGALRM handler when an API call exceeds _HARD_TIMEOUT_S."""
+
+
+def _fetch(ticker: str, interval: str, start_ms: int, end_ms: int) -> pd.DataFrame:
+    """
+    Call fetch_price_history_range with a SIGALRM hard deadline.
+
+    requests/urllib3 does not reliably honour socket timeouts on pooled
+    connections (the timeout is not always reset when a connection is reused).
+    SIGALRM fires unconditionally after _HARD_TIMEOUT_S seconds, interrupting
+    the blocking recv() syscall at the OS level so the process never stalls
+    longer than that wall-clock time.
+
+    Only called from the main thread (backfill is single-threaded);
+    signal.alarm() requires the main thread.
+    """
+    def _handler(signum, frame):
+        raise _HardTimeout()
+
+    prev = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(_HARD_TIMEOUT_S)
+    try:
+        return fetch_price_history_range(ticker, interval, start_ms, end_ms)
+    except _HardTimeout:
+        logger.warning("[Backfill] %s %s %s: hard %ds timeout — treating as empty",
+                       ticker, interval, _ms_label(start_ms), _HARD_TIMEOUT_S)
+        return pd.DataFrame()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, prev)
 
 
 # ── Auth probe ─────────────────────────────────────────────────────────────────
@@ -41,7 +77,7 @@ def check_auth() -> bool:
     probe_start = int((datetime.now(timezone.utc) - timedelta(days=4)).timestamp() * 1000)
 
     for attempt in range(1, 4):
-        df = fetch_price_history_range("SPY", "1min", probe_start, probe_end)
+        df = _fetch("SPY", "1min", probe_start, probe_end)
         if not df.empty:
             logger.info("[Backfill] Auth OK — SPY probe returned %d bars", len(df))
             return True
@@ -142,7 +178,7 @@ def fetch_interval_ticker(
         _wait_if_blocked()
         _throttle()
         logger.info("[Backfill] %s %s %s: requesting...", ticker, interval, _ms_label(start_ms))
-        df = fetch_price_history_range(ticker, interval, start_ms, end_ms)
+        df = _fetch(ticker, interval, start_ms, end_ms)
         logger.info("[Backfill] %s %s %s: got %d rows", ticker, interval, _ms_label(start_ms), len(df))
 
         if df.empty:
@@ -210,7 +246,7 @@ def fetch_daily_ticker(ticker: str, start_ms: int, end_ms: int) -> tuple[int, st
         return 0, "already_done"
     _wait_if_blocked()
     _throttle()
-    df = fetch_price_history_range(ticker, "1day", start_ms, end_ms)
+    df = _fetch(ticker, "1day", start_ms, end_ms)
     if df.empty:
         try:
             from agent.broker.schwab_market_data import _backoff_until
