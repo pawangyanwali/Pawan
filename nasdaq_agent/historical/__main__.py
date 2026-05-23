@@ -191,7 +191,6 @@ def main() -> None:
     if not args.resample_only and not args.daily_only:
         est = fetcher.estimate_time(tickers, args.years, args.rate)
         log.info("Time estimate: %s", est)
-        log.info("Progress is checkpointed — safe to Ctrl+C and resume with --resume")
 
     # ── Run ──────────────────────────────────────────────────────────────────
     t0 = time.time()

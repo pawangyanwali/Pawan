@@ -128,13 +128,15 @@ def fetch_1min_ticker(
     Skips already-done chunks (resume-safe).
     Aborts early if Schwab returns empty data for `empty_limit` consecutive
     chunks (indicates the ticker has no history that far back).
+    If the CDN is blocking, waits once then skips the ticker entirely
+    rather than hammering in a retry loop.
     """
     stored = 0
     consecutive_empty = 0
 
     for start_ms, end_ms in chunks:
         if progress.is_chunk_done(ticker, "1min", start_ms):
-            consecutive_empty = 0   # reset — previous run stored it
+            consecutive_empty = 0
             continue
 
         _wait_if_blocked()
@@ -142,21 +144,22 @@ def fetch_1min_ticker(
         df = fetch_price_history_range(ticker, "1min", start_ms, end_ms)
 
         if df.empty:
-            # If the API is blocked right now, don't mark as done — we want to retry.
+            # Check if this is a CDN block vs. genuinely no data for this date
             try:
                 from agent.broker.schwab_market_data import _backoff_until
                 if _backoff_until > time.time():
-                    logger.warning("[Backfill] %s chunk %s skipped (CDN block) — will retry",
-                                   ticker, _ms_label(start_ms))
-                    _wait_if_blocked()
-                    continue
+                    logger.warning(
+                        "[Backfill] %s: CDN block detected — skipping ticker, will resume next run",
+                        ticker,
+                    )
+                    return stored   # leave chunks unmarked so they retry next run
             except Exception:
                 pass
 
             consecutive_empty += 1
             logger.debug("[Backfill] %s 1min chunk %s empty (%d)", ticker,
                          _ms_label(start_ms), consecutive_empty)
-            progress.mark_chunk_done(ticker, "1min", start_ms)  # genuinely no data
+            progress.mark_chunk_done(ticker, "1min", start_ms)
             if consecutive_empty >= empty_limit:
                 logger.info("[Backfill] %s: %d consecutive empty chunks — stopping early",
                             ticker, empty_limit)
