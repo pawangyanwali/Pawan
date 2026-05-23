@@ -1,14 +1,20 @@
 """
-Core fetch/resample logic for the historical backfill service.
+Core fetch logic for the historical backfill service.
 
 Strategy
 --------
-1. Fetch 1min data per ticker in 9-calendar-day chunks (safe under Schwab limits).
-   Store raw 1min bars immediately so progress survives crashes.
-2. After all 1min chunks for a ticker are done, resample to 5min / 15min / 30min / 1h / 4h
-   and store all derived intervals.  Resampling per-ticker avoids OHLC boundary
-   artefacts that occur when resampling across chunk seams.
-3. Fetch 1day separately — single request per ticker covers 2+ years.
+Fetch each Schwab-native interval directly to maximise history depth:
+  1min  — 9-day chunks    (~50 days available from Schwab)
+  5min  — 30-day chunks   (potentially 6+ months)
+  15min — 90-day chunks   (potentially 1+ year)
+  30min — 180-day chunks  (potentially 1+ year)
+  1day  — single request  (2+ years)
+
+After 30min is complete, resample to intervals Schwab does not provide natively:
+  1h, 2h, 4h  ← resampled from 30min
+
+All fetches are resumable: each chunk is checkpointed immediately so a crash
+mid-run can be resumed without re-fetching completed work.
 """
 
 import logging
@@ -19,18 +25,18 @@ import pandas as pd
 
 from agent.broker.schwab_market_data import fetch_price_history_range
 from historical import progress, store
-from historical.schema import RESAMPLE_FROM_1MIN
+from historical.schema import CHUNK_DAYS, DIRECT_INTERVALS, RESAMPLE_FROM_30MIN
 
 logger = logging.getLogger(__name__)
 
 
+# ── Auth probe ─────────────────────────────────────────────────────────────────
+
 def check_auth() -> bool:
     """
-    Verify that the Schwab Market Data token is valid and the API is reachable.
-    Returns True only when a live data request succeeds.
-    Retries up to 3 times with a 35s gap to ride out transient CDN blocks.
+    Verify the Schwab Market Data token is valid. Retries 3× with 35s gap
+    to ride out transient CDN blocks before declaring failure.
     """
-    from datetime import timezone
     probe_end   = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
     probe_start = int((datetime.now(timezone.utc) - timedelta(days=4)).timestamp() * 1000)
 
@@ -40,42 +46,29 @@ def check_auth() -> bool:
             logger.info("[Backfill] Auth OK — SPY probe returned %d bars", len(df))
             return True
 
-        # Distinguish CDN block (token fine, API temporarily blocked) from real auth failure
         try:
             from agent.broker.schwab_market_data import _is_authorised, _auth_headers, _backoff_until
-            authorised = _is_authorised()
+            authorised  = _is_authorised()
             has_headers = bool(_auth_headers())
             blocked_for = max(0.0, _backoff_until - time.time())
         except Exception:
             authorised, has_headers, blocked_for = False, False, 0.0
 
         if not authorised or not has_headers:
-            logger.error(
-                "[Backfill] Auth probe failed — token missing. "
-                "Ensure nasdaq-agent service has completed Schwab OAuth."
-            )
+            logger.error("[Backfill] Auth probe failed — token missing or expired.")
             return False
 
-        # Token is valid but CDN is blocking — wait and retry
         wait = max(blocked_for + 5, 35)
-        logger.warning(
-            "[Backfill] CDN block active (attempt %d/3) — waiting %.0fs before retry",
-            attempt, wait,
-        )
+        logger.warning("[Backfill] CDN block (attempt %d/3) — waiting %.0fs", attempt, wait)
         time.sleep(wait)
 
-    logger.error(
-        "[Backfill] CDN block persisted after 3 retries. "
-        "Wait a few minutes for Akamai to clear the IP block, then re-run."
-    )
+    logger.error("[Backfill] CDN block persisted after 3 retries.")
     return False
 
 
 # ── Rate limiting ──────────────────────────────────────────────────────────────
-# Backfill runs at 0.5 req/s by default (one request every 2s).
-# This is much slower than the live scanner so both can run concurrently
-# without triggering Schwab's Akamai CDN IP-level rate limiter.
-_REQ_GAP = 2.0          # seconds between API calls
+
+_REQ_GAP   = 1.0
 _last_req: float = 0.0
 
 
@@ -88,16 +81,12 @@ def _throttle() -> None:
 
 
 def _wait_if_blocked(pause_s: int = 30) -> None:
-    """If Schwab's CDN backoff is active, sleep until it clears (+ pause_s extra)."""
     try:
         from agent.broker.schwab_market_data import _backoff_until
         remaining = _backoff_until - time.time()
         if remaining > 0:
             wait = remaining + pause_s
-            logger.warning(
-                "[Backfill] Schwab CDN block active (%.0fs remaining) — pausing %.0fs",
-                remaining, wait,
-            )
+            logger.warning("[Backfill] CDN block (%.0fs remaining) — pausing %.0fs", remaining, wait)
             time.sleep(wait)
     except Exception:
         pass
@@ -106,112 +95,100 @@ def _wait_if_blocked(pause_s: int = 30) -> None:
 # ── Chunk generation ───────────────────────────────────────────────────────────
 
 def date_chunks(
-    start_dt: datetime,
-    end_dt:   datetime,
+    start_dt:   datetime,
+    end_dt:     datetime,
     chunk_days: int = 9,
-    newest_first: bool = True,
 ) -> list[tuple[int, int]]:
     """
-    Return list of (start_ms, end_ms) epoch-ms pairs covering [start_dt, end_dt].
-    Each window is chunk_days calendar days wide (9 days ≈ 6-7 trading days,
-    safely below Schwab's apparent 10-trading-day limit for minute endpoints).
-
-    newest_first=True (default): chunks ordered recent → old so we capture all
-    available 1min history before hitting the API's lookback limit (~30 days).
-    The early-abort in fetch_1min_ticker then cleanly stops when the API returns
-    empty data for older dates rather than aborting before any data is fetched.
+    Return (start_ms, end_ms) pairs covering [start_dt, end_dt], newest first.
+    Newest-first ordering ensures we capture all available history before the
+    API's lookback limit is reached; early-abort on consecutive empties then
+    stops cleanly instead of wasting calls on ancient dates.
     """
     chunks = []
     cur = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
     end = end_dt.replace(hour=23, minute=59, second=59, microsecond=0)
     while cur <= end:
         chunk_end = min(cur + timedelta(days=chunk_days), end)
-        chunks.append((
-            int(cur.timestamp() * 1000),
-            int(chunk_end.timestamp() * 1000),
-        ))
+        chunks.append((int(cur.timestamp() * 1000), int(chunk_end.timestamp() * 1000)))
         cur = chunk_end + timedelta(days=1)
-    if newest_first:
-        chunks.reverse()
+    chunks.reverse()
     return chunks
 
 
-# ── Fetch 1min ─────────────────────────────────────────────────────────────────
+# ── Generic minute-interval fetcher ───────────────────────────────────────────
 
-def fetch_1min_ticker(
-    ticker:     str,
-    chunks:     list[tuple[int, int]],
+def fetch_interval_ticker(
+    ticker:      str,
+    interval:    str,
+    chunks:      list[tuple[int, int]],
     empty_limit: int = 5,
 ) -> int:
     """
-    Fetch all 1min chunks for one ticker.  Returns total bars stored.
+    Fetch all chunks for one ticker/interval. Returns total bars stored.
     Skips already-done chunks (resume-safe).
-    Aborts early if Schwab returns empty data for `empty_limit` consecutive
-    chunks (indicates the ticker has no history that far back).
-    If the CDN is blocking, waits once then skips the ticker entirely
-    rather than hammering in a retry loop.
+    Stops early after `empty_limit` consecutive empty chunks — signals we have
+    reached Schwab's lookback boundary for this interval.
+    Skips the ticker entirely on a CDN block so chunks remain retryable.
     """
     stored = 0
     consecutive_empty = 0
 
     for start_ms, end_ms in chunks:
-        if progress.is_chunk_done(ticker, "1min", start_ms):
+        if progress.is_chunk_done(ticker, interval, start_ms):
             consecutive_empty = 0
             continue
 
         _wait_if_blocked()
         _throttle()
-        logger.info("[Backfill] %s 1min %s: requesting...", ticker, _ms_label(start_ms))
-        df = fetch_price_history_range(ticker, "1min", start_ms, end_ms)
-        logger.info("[Backfill] %s 1min %s: got %d rows", ticker, _ms_label(start_ms), len(df))
+        logger.info("[Backfill] %s %s %s: requesting...", ticker, interval, _ms_label(start_ms))
+        df = fetch_price_history_range(ticker, interval, start_ms, end_ms)
+        logger.info("[Backfill] %s %s %s: got %d rows", ticker, interval, _ms_label(start_ms), len(df))
 
         if df.empty:
-            # Check if this is a CDN block vs. genuinely no data for this date
             try:
                 from agent.broker.schwab_market_data import _backoff_until
                 if _backoff_until > time.time():
-                    logger.warning(
-                        "[Backfill] %s: CDN block detected — skipping ticker, will resume next run",
-                        ticker,
-                    )
-                    return stored   # leave chunks unmarked so they retry next run
+                    logger.warning("[Backfill] %s %s: CDN block — skipping, will retry next run",
+                                   ticker, interval)
+                    return stored
             except Exception:
                 pass
 
             consecutive_empty += 1
-            logger.info("[Backfill] %s 1min %s: empty (%d consecutive)",
-                        ticker, _ms_label(start_ms), consecutive_empty)
-            progress.mark_chunk_done(ticker, "1min", start_ms)
+            logger.info("[Backfill] %s %s %s: empty (%d consecutive)",
+                        ticker, interval, _ms_label(start_ms), consecutive_empty)
+            progress.mark_chunk_done(ticker, interval, start_ms)
             if consecutive_empty >= empty_limit:
-                logger.info("[Backfill] %s: %d consecutive empty chunks — stopping early",
-                            ticker, empty_limit)
+                logger.info("[Backfill] %s %s: %d consecutive empty — stopping early",
+                            ticker, interval, empty_limit)
                 break
             continue
 
         consecutive_empty = 0
-        n = store.upsert_bars("1min", ticker, df)
+        n = store.upsert_bars(interval, ticker, df)
         stored += n
-        progress.mark_chunk_done(ticker, "1min", start_ms)
-        logger.info("[Backfill] %s 1min %s: +%d bars (ticker total: %d)",
-                    ticker, _ms_label(start_ms), n, stored)
+        progress.mark_chunk_done(ticker, interval, start_ms)
+        logger.info("[Backfill] %s %s %s: +%d bars (total: %d)",
+                    ticker, interval, _ms_label(start_ms), n, stored)
 
     return stored
 
 
-# ── Resample 1min → derived intervals ─────────────────────────────────────────
+# ── Resample 30min → 1h / 2h / 4h ────────────────────────────────────────────
 
 def resample_ticker(ticker: str) -> dict[str, int]:
     """
-    Load all stored 1min bars for a ticker, resample to every derived interval,
-    and upsert.  Returns dict of {interval: bars_stored}.
+    Load all stored 30min bars for a ticker, resample to 1h/2h/4h, and upsert.
+    Returns {interval: bars_stored}.
     """
-    df_1min = store.read_ticker_bars("1min", ticker)
-    if df_1min.empty:
+    df_30min = store.read_ticker_bars("30min", ticker)
+    if df_30min.empty:
         return {}
 
     results: dict[str, int] = {}
-    for interval, rule in RESAMPLE_FROM_1MIN.items():
-        resampled = df_1min.resample(rule).agg({
+    for interval, rule in RESAMPLE_FROM_30MIN.items():
+        resampled = df_30min.resample(rule).agg({
             "Open":   "first",
             "High":   "max",
             "Low":    "min",
@@ -231,6 +208,7 @@ def fetch_daily_ticker(ticker: str, start_ms: int, end_ms: int) -> tuple[int, st
     """Fetch 1day bars for one ticker. Returns (bars_stored, status)."""
     if progress.is_daily_done(ticker):
         return 0, "already_done"
+    _wait_if_blocked()
     _throttle()
     df = fetch_price_history_range(ticker, "1day", start_ms, end_ms)
     if df.empty:
@@ -250,78 +228,74 @@ def fetch_daily_ticker(ticker: str, start_ms: int, end_ms: int) -> tuple[int, st
 # ── Main coordinator ───────────────────────────────────────────────────────────
 
 def run(
-    tickers:      list[str],
-    years:        int   = 2,
-    rate_s:       float = 2.0,
-    resample_only: bool = False,
-    daily_only:    bool = False,
+    tickers:       list[str],
+    years:         int   = 2,
+    rate_s:        float = 1.0,
+    resample_only: bool  = False,
+    daily_only:    bool  = False,
 ) -> None:
     """
-    Run the full backfill for a list of tickers.
+    Full backfill across all intervals.
 
-    Phases:
-      1. Fetch 1min (chunked, resumable)
-      2. Resample 1min → 5min / 15min / 30min / 1h / 4h
-      3. Fetch 1day
+    Phases (all resumable):
+      1-4. Fetch 1min / 5min / 15min / 30min directly from Schwab
+      5.   Resample 30min → 1h, 2h, 4h
+      6.   Fetch 1day
     """
     global _REQ_GAP
     _REQ_GAP = rate_s
 
-    now_utc   = datetime.now(timezone.utc)
-    start_dt  = now_utc - timedelta(days=365 * years)
-    end_dt    = now_utc - timedelta(days=1)
-
-    start_ms  = int(start_dt.timestamp() * 1000)
-    end_ms    = int(end_dt.timestamp()   * 1000)
-
-    chunks    = date_chunks(start_dt, end_dt)
+    now_utc  = datetime.now(timezone.utc)
+    start_dt = now_utc - timedelta(days=365 * years)
+    end_dt   = now_utc - timedelta(days=1)
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms   = int(end_dt.timestamp()   * 1000)
     n_tickers = len(tickers)
-    n_chunks  = len(chunks)
 
-    logger.info(
-        "[Backfill] %d tickers | %d years | %d chunks/ticker | ~%d total API calls",
-        n_tickers, years, n_chunks, n_tickers * (n_chunks + 1),
-    )
-
-    # ── Auth probe ───────────────────────────────────────────────────────────
+    # ── Auth check ───────────────────────────────────────────────────────────
     if not resample_only:
         logger.info("[Backfill] Checking Schwab Market Data auth...")
         if not check_auth():
             logger.error(
-                "[Backfill] ABORTING — Schwab Market Data token is missing or expired.\n"
-                "  The token is owned by the running nasdaq-agent service.\n"
-                "  Make sure the service is active: sudo systemctl status nasdaq-agent\n"
-                "  If the service is running, wait 30s for token refresh and try again.\n"
-                "  Token file location: ~/.nasdaq_agent/schwab_md_*.json"
+                "[Backfill] ABORTING — token missing or expired.\n"
+                "  Ensure nasdaq-agent service is active: sudo systemctl status nasdaq-agent\n"
+                "  Token location: ~/.nasdaq_agent/schwab_md_*.json"
             )
             return
 
-    # ── Phase 1: 1min fetch ──────────────────────────────────────────────────
-    if not resample_only and not daily_only:
-        logger.info("[Backfill] Phase 1: fetching 1min data for %d tickers", n_tickers)
-        total_1min = 0
-        for i, ticker in enumerate(tickers, 1):
-            done_chunks = sum(
-                1 for s, _ in chunks if progress.is_chunk_done(ticker, "1min", s)
-            )
-            if done_chunks == len(chunks):
-                logger.info("[Backfill] [%d/%d] %s 1min: already complete — skip",
-                            i, n_tickers, ticker)
-                continue
-            logger.info("[Backfill] [%d/%d] %s 1min: starting (%d/%d chunks done)",
-                        i, n_tickers, ticker, done_chunks, n_chunks)
-            bars = fetch_1min_ticker(ticker, chunks)
-            total_1min += bars
-            logger.info("[Backfill] [%d/%d] %s 1min: done  +%d bars  (phase total: %d)",
-                        i, n_tickers, ticker, bars, total_1min)
+    # ── Phases 1-4: fetch each native minute interval ────────────────────────
+    minute_intervals = ["1min", "5min", "15min", "30min"]
 
-    # ── Phase 2: resample ────────────────────────────────────────────────────
+    if not resample_only and not daily_only:
+        for phase_num, interval in enumerate(minute_intervals, 1):
+            chunk_days = CHUNK_DAYS[interval]
+            chunks     = date_chunks(start_dt, end_dt, chunk_days)
+            n_chunks   = len(chunks)
+
+            logger.info(
+                "[Backfill] Phase %d: fetching %s — %d tickers, %d chunks each",
+                phase_num, interval, n_tickers, n_chunks,
+            )
+            phase_total = 0
+            for i, ticker in enumerate(tickers, 1):
+                done = sum(1 for s, _ in chunks if progress.is_chunk_done(ticker, interval, s))
+                if done == n_chunks:
+                    logger.debug("[Backfill] [%d/%d] %s %s: all chunks done — skip",
+                                 i, n_tickers, ticker, interval)
+                    continue
+                logger.info("[Backfill] [%d/%d] %s %s: starting (%d/%d chunks done)",
+                            i, n_tickers, ticker, interval, done, n_chunks)
+                bars = fetch_interval_ticker(ticker, interval, chunks)
+                phase_total += bars
+                logger.info("[Backfill] [%d/%d] %s %s: done +%d bars (phase total: %d)",
+                            i, n_tickers, ticker, interval, bars, phase_total)
+
+    # ── Phase 5: resample 30min → 1h, 2h, 4h ────────────────────────────────
     if not daily_only:
-        logger.info("[Backfill] Phase 2: resampling 1min → derived intervals")
+        logger.info("[Backfill] Phase 5: resampling 30min → 1h/2h/4h for %d tickers", n_tickers)
         for i, ticker in enumerate(tickers, 1):
             if progress.is_resampled(ticker):
-                logger.debug("[Backfill] [%d/%d] %s resample: skip (already done)",
-                             i, n_tickers, ticker)
+                logger.debug("[Backfill] [%d/%d] %s resample: skip", i, n_tickers, ticker)
                 continue
             result = resample_ticker(ticker)
             if result:
@@ -329,25 +303,23 @@ def run(
                             i, n_tickers, ticker,
                             ", ".join(f"{iv}={n}" for iv, n in result.items()))
             else:
-                logger.info("[Backfill] [%d/%d] %s resample: no 1min data to resample",
-                            i, n_tickers, ticker)
+                logger.info("[Backfill] [%d/%d] %s resample: no 30min data yet", i, n_tickers, ticker)
 
-    # ── Phase 3: 1day fetch ──────────────────────────────────────────────────
-    logger.info("[Backfill] Phase 3: fetching 1day data for %d tickers", n_tickers)
+    # ── Phase 6: fetch 1day ──────────────────────────────────────────────────
+    logger.info("[Backfill] Phase 6: fetching 1day for %d tickers", n_tickers)
     daily_stored = 0
     for i, ticker in enumerate(tickers, 1):
-        _wait_if_blocked()
         n, status = fetch_daily_ticker(ticker, start_ms, end_ms)
         daily_stored += n
         if status == "already_done":
-            logger.debug("[Backfill] [%d/%d] %s 1day: skip (already done)", i, n_tickers, ticker)
+            logger.debug("[Backfill] [%d/%d] %s 1day: skip", i, n_tickers, ticker)
         elif status == "cdn_block":
             logger.warning("[Backfill] [%d/%d] %s 1day: CDN block — will retry on resume",
                            i, n_tickers, ticker)
         elif status == "empty":
-            logger.info("[Backfill] [%d/%d] %s 1day: no data returned", i, n_tickers, ticker)
+            logger.info("[Backfill] [%d/%d] %s 1day: no data", i, n_tickers, ticker)
         else:
-            logger.info("[Backfill] [%d/%d] %s 1day: +%d bars  (total so far: %d)",
+            logger.info("[Backfill] [%d/%d] %s 1day: +%d bars (total: %d)",
                         i, n_tickers, ticker, n, daily_stored)
 
     logger.info("[Backfill] All phases complete.")
@@ -360,13 +332,18 @@ def _ms_label(ms: int) -> str:
 
 
 def estimate_time(tickers: list[str], years: int, rate_s: float = _REQ_GAP) -> str:
-    """Human-readable time estimate for a full backfill run."""
-    n_chunks   = len(date_chunks(
-        datetime.now(timezone.utc) - timedelta(days=365 * years),
-        datetime.now(timezone.utc) - timedelta(days=1),
-    ))
-    total_reqs = len(tickers) * (n_chunks + 1)   # +1 for daily
-    secs       = total_reqs * rate_s
-    h, rem     = divmod(int(secs), 3600)
-    m          = rem // 60
-    return f"~{h}h {m}m  ({total_reqs:,} API calls at {1/rate_s:.1f} req/s)"
+    """Human-readable estimate of total API calls and wall-clock time."""
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=365 * years)
+    end   = now - timedelta(days=1)
+
+    total = 0
+    for interval, chunk_days in CHUNK_DAYS.items():
+        n_chunks = len(date_chunks(start, end, chunk_days))
+        total += len(tickers) * n_chunks
+    total += len(tickers)  # 1day: one call per ticker
+
+    secs   = total * rate_s
+    h, rem = divmod(int(secs), 3600)
+    m      = rem // 60
+    return f"~{h}h {m}m  ({total:,} API calls at {1/rate_s:.1f} req/s, worst-case all chunks fetched)"
