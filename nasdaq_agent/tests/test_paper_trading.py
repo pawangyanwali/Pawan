@@ -16,14 +16,15 @@ def test_open_trade_high_confidence():
     assert any(t["ticker"] == "AAPL" for t in open_trades)
 
 def test_low_confidence_trade_blocked():
-    """Low confidence (below dynamic gate) should be rejected."""
-    tid = maybe_open_trade("MSFT", "BUY", 300.0, 310.0, 295.0, confidence=30.0, rr_qualifies=True)
-    assert tid is None, "confidence below gate should block paper trade"
+    """Confidence below the 25% floor must be rejected (pure data collection floor)."""
+    tid = maybe_open_trade("MSFT", "BUY", 300.0, 310.0, 295.0, confidence=15.0, rr_qualifies=True)
+    assert tid is None, "confidence below 25% floor should block paper trade"
 
-def test_rr_not_qualifying_blocked():
-    """rr_qualifies=False blocks the trade even if confidence is high."""
+def test_rr_not_qualifying_still_opens():
+    """rr_qualifies=False does NOT block paper trades — we need every data point.
+    Position size is just scaled down (min 20% of normal) but the trade opens."""
     tid = maybe_open_trade("NVDA", "BUY", 500.0, 510.0, 495.0, confidence=80.0, rr_qualifies=False)
-    assert tid is None, "rr_qualifies=False must block paper trade"
+    assert tid is not None, "rr_qualifies=False must still open a paper trade (data collection)"
 
 def test_no_duplicate_open_trade():
     maybe_open_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True)

@@ -79,10 +79,13 @@ def test_update_tracking_loss_sell():
 
 def test_update_tracking_vwap_loss_buy():
     """BUY signal entered above VWAP — loses when price drops below VWAP.
-    Condition: entry >= vwap AND current_price < vwap."""
-    # entry=522.0 >= vwap=521.0, then price drops to 519.0 < vwap=521.0
+    Condition: entry >= vwap AND current_price < vwap AND bars >= 3 AND r <= -0.2R."""
+    # entry=522.0 >= vwap=521.0, price at 519.0 < vwap=521.0, r_val=-0.6 < -0.2
+    # VWAP_LOSS requires the trade to be open for at least 3 bars before it can fire.
     record_signal("NVDA", "BUY", entry_price=522.0, target=532.0, stop=517.0)
-    resolved = update_tracking("NVDA", current_price=519.0, vwap=521.0)
+    resolved = []
+    for _ in range(3):
+        resolved = update_tracking("NVDA", current_price=519.0, vwap=521.0)
     assert len(resolved) == 1
     assert resolved[0]["status"] == "LOSS"
     assert resolved[0]["exit_reason"] == "VWAP_LOSS"

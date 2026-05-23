@@ -351,6 +351,22 @@ def fetch_batch_daily(tickers: list) -> dict[str, pd.DataFrame]:
     return fetch_batch_interval(tickers, "1day", 500, ttl=DAILY_CACHE_TTL)
 
 
+def get_last_cached_close(ticker: str) -> float | None:
+    """Return the most recently cached Close price for a ticker, ignoring TTL.
+
+    Used as a fallback when live prices are unavailable (after-hours stale-close).
+    Checks in-memory cache across all intervals — no API calls, no TTL check.
+    """
+    for interval in ("1min", "5min", "1day"):
+        with _interval_cache_lock:
+            entry = _interval_cache.get(ticker, {}).get(interval)
+        if entry:
+            df, _ = entry
+            if not df.empty and "Close" in df.columns:
+                return float(df.iloc[-1]["Close"])
+    return None
+
+
 # ── OHLCV resampling (free — no API calls) ────────────────────────────────────
 
 def resample_ohlcv(df: pd.DataFrame, freq: str) -> pd.DataFrame:

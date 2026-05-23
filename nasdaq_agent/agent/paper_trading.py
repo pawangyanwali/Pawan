@@ -766,17 +766,20 @@ def _record_close(
     pnl_pct = pnl_dollar / (entry * denom_shares + 0.01) * 100
 
     outcome = "WIN" if pnl_dollar > 0 else "LOSS"
-    c.execute("""
+    cur = c.execute("""
         UPDATE paper_trades
         SET status='CLOSED', closed_at=?, exit_price=?,
             exit_reason=?, pnl_pct=?, pnl_dollar=?
-        WHERE id=?
+        WHERE id=? AND status='OPEN'
     """, (
         datetime.now(timezone.utc).isoformat(),
         round(ep, 4), exit_reason,
         round(pnl_pct, 3), round(pnl_dollar, 2),
         trade_id,
     ))
+    if getattr(cur, 'rowcount', 1) == 0:
+        logger.debug(f"[PAPER] Trade #{trade_id} already closed — double-close guard")
+        return
     logger.info(
         f"[PAPER] Closed {ticker} {direction} @ ${ep:.2f} | "
         f"{outcome} ${pnl_dollar:+.2f} ({pnl_pct:+.2f}%) | Reason: {exit_reason}"
@@ -791,7 +794,7 @@ def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
     Called at 3:45 PM ET hard close, after-hours, or on startup when market is closed.
     Returns number of positions closed.
     """
-    from agent.data_fetcher import fetch_batch_realtime
+    from agent.data_fetcher import fetch_batch_realtime, get_last_cached_close
 
     # Step 1: read open rows without holding the lock during the API call
     with _lock:
@@ -822,7 +825,18 @@ def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
             for row in rows:
                 ticker = row["ticker"]
                 df = prices.get(ticker)
-                ep = float(df.iloc[-1]["Close"]) if (df is not None and not df.empty) else float(row["entry_price"])
+                if df is not None and not df.empty:
+                    ep = float(df.iloc[-1]["Close"])
+                else:
+                    # Live price unavailable (market closed / API down).
+                    # Use last in-memory cached price before falling back to entry.
+                    ep = get_last_cached_close(ticker)
+                    if ep is None:
+                        ep = float(row["entry_price"])
+                        logger.warning(
+                            f"[PAPER] No price for {ticker} at {reason} "
+                            f"— using entry ${ep:.2f} (P&L will be $0)"
+                        )
                 _record_close(
                     c, row["id"], ep, reason,
                     float(row["entry_price"]), row["direction"],
