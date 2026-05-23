@@ -1827,7 +1827,7 @@ function connectWS() {
         sub.textContent = `Scanning ${m.n_total || '—'} tickers${regime ? ' · ' + regime : ''}${sess ? ' · ' + sess : ''}`;
       }
       // Regime/session info available even before signals arrive
-      if (m.regime) _regime = m.regime;
+      if (m.regime)  { _regimeInfo  = m.regime;  updateRegimeBanner(m.regime); }
       if (m.session) { _sessionInfo = m.session; updateSessionBanner(); }
       return;
     }
@@ -2173,7 +2173,7 @@ async function pollPipelineMetrics() {
     const d = await (await fetch(`${BACKEND_HTTP}/api/credit-usage`)).json();
     const chip = document.getElementById('api-credit-chip');
     if (chip && d.used != null) {
-      const pct = d.pct ?? Math.round(d.used / 377 * 100);
+      const pct = d.pct ?? Math.round(d.used / (d.plan_limit ?? 377) * 100);
       const col = pct > 85 ? '#ef4444' : pct > 65 ? '#f59e0b' : 'var(--green)';
       chip.textContent = `API ${d.used}/${d.plan_limit ?? 377}`;
       chip.style.color = col;

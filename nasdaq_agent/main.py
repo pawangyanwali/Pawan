@@ -1137,12 +1137,6 @@ async def historical_backtest_results():
     return state
 
 
-@app.get("/api/historical/backtest/results")
-async def historical_backtest_results():
-    """Last completed historical backtest report, sorted by expectancy."""
-    return dict(_hist_backtest_state)
-
-
 @app.get("/api/paper-trading/daily")
 async def paper_daily_pnl():
     """Per-day P&L summary for last 14 days."""
