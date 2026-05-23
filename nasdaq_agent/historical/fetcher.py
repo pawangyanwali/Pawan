@@ -224,16 +224,24 @@ def resample_ticker(ticker: str) -> dict[str, int]:
 
 # ── Fetch 1day ─────────────────────────────────────────────────────────────────
 
-def fetch_daily_ticker(ticker: str, start_ms: int, end_ms: int) -> int:
-    """Fetch 1day bars for one ticker covering the full backfill window."""
+def fetch_daily_ticker(ticker: str, start_ms: int, end_ms: int) -> tuple[int, str]:
+    """Fetch 1day bars for one ticker. Returns (bars_stored, status)."""
     if progress.is_daily_done(ticker):
-        return 0
+        return 0, "already_done"
     _throttle()
     df = fetch_price_history_range(ticker, "1day", start_ms, end_ms)
-    n = store.upsert_bars("1day", ticker, df) if not df.empty else 0
+    if df.empty:
+        try:
+            from agent.broker.schwab_market_data import _backoff_until
+            if _backoff_until > time.time():
+                return 0, "cdn_block"
+        except Exception:
+            pass
+        progress.mark_daily_done(ticker)
+        return 0, "empty"
+    n = store.upsert_bars("1day", ticker, df)
     progress.mark_daily_done(ticker)
-    logger.debug("[Backfill] %s 1day: +%d bars", ticker, n)
-    return n
+    return n, "ok"
 
 
 # ── Main coordinator ───────────────────────────────────────────────────────────
@@ -313,12 +321,22 @@ def run(
                             ", ".join(f"{iv}={n}" for iv, n in result.items()))
 
     # ── Phase 3: 1day fetch ──────────────────────────────────────────────────
-    logger.info("[Backfill] Phase 3: fetching 1day data")
+    logger.info("[Backfill] Phase 3: fetching 1day data for %d tickers", n_tickers)
+    daily_stored = 0
     for i, ticker in enumerate(tickers, 1):
         _wait_if_blocked()
-        n = fetch_daily_ticker(ticker, start_ms, end_ms)
-        if n:
-            logger.info("[Backfill] [%d/%d] %s 1day: +%d bars", i, n_tickers, ticker, n)
+        n, status = fetch_daily_ticker(ticker, start_ms, end_ms)
+        daily_stored += n
+        if status == "already_done":
+            logger.debug("[Backfill] [%d/%d] %s 1day: skip (already done)", i, n_tickers, ticker)
+        elif status == "cdn_block":
+            logger.warning("[Backfill] [%d/%d] %s 1day: CDN block — will retry on resume",
+                           i, n_tickers, ticker)
+        elif status == "empty":
+            logger.info("[Backfill] [%d/%d] %s 1day: no data returned", i, n_tickers, ticker)
+        else:
+            logger.info("[Backfill] [%d/%d] %s 1day: +%d bars  (total so far: %d)",
+                        i, n_tickers, ticker, n, daily_stored)
 
     logger.info("[Backfill] All phases complete.")
 
