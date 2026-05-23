@@ -31,10 +31,12 @@ def retrain_from_history(
     tickers:     list[str],
     interval:    str = _DEFAULT_INTERVAL,
     max_workers: int = _DEFAULT_WORKERS,
+    progress_cb  = None,
 ) -> dict:
     """
     Retrain StockMLModel for each ticker using stored historical bars.
 
+    progress_cb(done, total, ticker, ok) is called after each ticker completes.
     Returns summary dict: {total, trained, skipped, elapsed_s}.
     """
     from agent.ml_model import get_or_create
@@ -72,6 +74,11 @@ def retrain_from_history(
                 skipped += 1
                 logger.warning("[HistRetrain] [%d/%d] %s: skipped — %s",
                                done_count, n, ticker, reason)
+            if progress_cb:
+                try:
+                    progress_cb(done_count, n, ticker, ok)
+                except Exception:
+                    pass
 
     elapsed = round(time.time() - t0, 1)
     summary = {"total": n, "trained": trained, "skipped": skipped, "elapsed_s": elapsed}

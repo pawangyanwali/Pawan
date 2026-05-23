@@ -297,11 +297,15 @@ def aggregate_results(
 # ── Full run ───────────────────────────────────────────────────────────────────
 
 def run_backtest(
-    tickers:  list[str],
-    interval: str   = "5min",
-    max_bars: int   = MAX_BARS,
+    tickers:     list[str],
+    interval:    str = "5min",
+    max_bars:    int = MAX_BARS,
+    progress_cb  = None,
 ) -> list[SignalReport]:
-    """Run backtest across all tickers for one interval. Returns aggregated reports."""
+    """Run backtest across all tickers for one interval. Returns aggregated reports.
+
+    progress_cb(done, total, ticker, n_trades_so_far) is called after each ticker.
+    """
     all_trades: list[TradeResult] = []
     n = len(tickers)
 
@@ -311,6 +315,11 @@ def run_backtest(
         all_trades.extend(trades)
         if i % 100 == 0 or i == n:
             logger.info("[Backtest] [%d/%d] total trades so far: %d", i, n, len(all_trades))
+        if progress_cb:
+            try:
+                progress_cb(i, n, ticker, len(all_trades))
+            except Exception:
+                pass
 
     reports = aggregate_results(all_trades, interval)
     logger.info("[Backtest] Complete — %d trades, %d signals", len(all_trades), len(reports))

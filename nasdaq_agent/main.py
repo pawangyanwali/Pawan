@@ -1057,32 +1057,54 @@ async def trigger_deep_train(background_tasks: BackgroundTasks):
 
 # ── Historical retrain & backtest ─────────────────────────────────────────────
 
-_hist_retrain_running  = False
-_hist_retrain_summary: dict = {}
-_hist_backtest_running = False
-_hist_backtest_results: list = []
+_hist_retrain_state: dict = {
+    "running": False, "done": 0, "total": 0,
+    "current_ticker": "", "trained": 0, "skipped": 0,
+    "started_at": 0.0, "elapsed_s": 0.0, "summary": {},
+}
+_hist_backtest_state: dict = {
+    "running": False, "done": 0, "total": 0,
+    "current_ticker": "", "trades_so_far": 0,
+    "started_at": 0.0, "elapsed_s": 0.0, "results": [],
+}
 
 
 @app.post("/api/historical/retrain")
 async def historical_retrain(background_tasks: BackgroundTasks):
     """Retrain all ML models using 2-year historical bars instead of the live Schwab fetch."""
-    global _hist_retrain_running
-    if _hist_retrain_running:
+    if _hist_retrain_state["running"]:
         return {"status": "already_running", "message": "Historical retrain already in progress."}
 
     from config import NASDAQ_TICKERS
+    tickers = list(NASDAQ_TICKERS)
 
     def _run():
-        global _hist_retrain_running, _hist_retrain_summary
-        _hist_retrain_running = True
+        import time as _t
+        _hist_retrain_state.update(
+            running=True, done=0, total=len(tickers),
+            current_ticker="", trained=0, skipped=0,
+            started_at=_t.time(), elapsed_s=0.0, summary={},
+        )
         try:
             from historical.retrain import retrain_from_history
-            _hist_retrain_summary = retrain_from_history(list(NASDAQ_TICKERS), interval="5min", max_workers=4)
+
+            def _cb(done, total, ticker, ok):
+                _hist_retrain_state["done"]    = done
+                _hist_retrain_state["current_ticker"] = ticker
+                if ok:
+                    _hist_retrain_state["trained"] += 1
+                else:
+                    _hist_retrain_state["skipped"] += 1
+                _hist_retrain_state["elapsed_s"] = round(_t.time() - _hist_retrain_state["started_at"], 1)
+
+            summary = retrain_from_history(tickers, interval="5min", max_workers=4, progress_cb=_cb)
+            _hist_retrain_state["summary"] = summary
         except Exception as exc:
             logger.warning("[hist-retrain] failed: %s", exc)
-            _hist_retrain_summary = {"error": str(exc)}
+            _hist_retrain_state["summary"] = {"error": str(exc)}
         finally:
-            _hist_retrain_running = False
+            _hist_retrain_state["running"] = False
+            _hist_retrain_state["elapsed_s"] = round(_t.time() - _hist_retrain_state["started_at"], 1)
 
     background_tasks.add_task(_run)
     return {"status": "started", "message": "Historical retrain started — retraining all models from 2-year DB."}
@@ -1091,31 +1113,42 @@ async def historical_retrain(background_tasks: BackgroundTasks):
 @app.get("/api/historical/retrain/status")
 async def historical_retrain_status():
     """Current state and last-run summary of the historical retrain job."""
-    return {"running": _hist_retrain_running, "summary": _hist_retrain_summary}
+    return dict(_hist_retrain_state)
 
 
 @app.post("/api/historical/backtest/run")
 async def historical_backtest_run(background_tasks: BackgroundTasks, interval: str = "5min"):
     """Run vectorized backtest over stored historical bars for all tickers."""
-    global _hist_backtest_running
-    if _hist_backtest_running:
+    if _hist_backtest_state["running"]:
         return {"status": "already_running", "message": "Historical backtest already in progress."}
 
     from config import NASDAQ_TICKERS
+    tickers = list(NASDAQ_TICKERS)
 
     def _run():
-        global _hist_backtest_running, _hist_backtest_results
-        _hist_backtest_running = True
+        import time as _t
+        _hist_backtest_state.update(
+            running=True, done=0, total=len(tickers),
+            current_ticker="", trades_so_far=0,
+            started_at=_t.time(), elapsed_s=0.0, results=[],
+        )
         try:
             from historical.backtest import run_backtest
-            reports = run_backtest(list(NASDAQ_TICKERS), interval=interval)
             from dataclasses import asdict
-            _hist_backtest_results = [asdict(r) for r in reports]
+
+            def _cb(done, total, ticker, trades_so_far):
+                _hist_backtest_state["done"]          = done
+                _hist_backtest_state["current_ticker"] = ticker
+                _hist_backtest_state["trades_so_far"] = trades_so_far
+                _hist_backtest_state["elapsed_s"]     = round(_t.time() - _hist_backtest_state["started_at"], 1)
+
+            reports = run_backtest(tickers, interval=interval, progress_cb=_cb)
+            _hist_backtest_state["results"] = [asdict(r) for r in reports]
         except Exception as exc:
             logger.warning("[hist-backtest] failed: %s", exc)
-            _hist_backtest_results = []
         finally:
-            _hist_backtest_running = False
+            _hist_backtest_state["running"] = False
+            _hist_backtest_state["elapsed_s"] = round(_t.time() - _hist_backtest_state["started_at"], 1)
 
     background_tasks.add_task(_run)
     return {"status": "started", "message": f"Historical backtest started ({interval})."}
@@ -1124,7 +1157,7 @@ async def historical_backtest_run(background_tasks: BackgroundTasks, interval: s
 @app.get("/api/historical/backtest/results")
 async def historical_backtest_results():
     """Last completed historical backtest report, sorted by expectancy."""
-    return {"running": _hist_backtest_running, "results": _hist_backtest_results}
+    return dict(_hist_backtest_state)
 
 
 @app.get("/api/paper-trading/daily")

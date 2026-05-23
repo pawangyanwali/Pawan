@@ -5101,7 +5101,8 @@ function nnTab(name) {
     if (btn) btn.classList.toggle('active', t===name);
   });
   if (name === 'risk')       loadRiskStatus();
-  if (name === 'historical') loadHistoricalStatus();
+  if (name === 'historical') { loadHistoricalStatus(); _startHistPoll(); }
+  else                       { _stopHistPoll(); }
 }
 
 async function loadNeuralStatus() {
@@ -5576,33 +5577,69 @@ async function triggerFullRetrain(btn) {
 
 // ── Historical retrain & backtest ─────────────────────────────────────────────
 
+let _histPollTimer = null;
+
+function _startHistPoll() {
+  if (_histPollTimer) return;
+  _histPollTimer = setInterval(loadHistoricalStatus, 10000);
+}
+function _stopHistPoll() {
+  if (_histPollTimer) { clearInterval(_histPollTimer); _histPollTimer = null; }
+}
+
+function _pct(done, total) {
+  return total > 0 ? Math.round(done / total * 100) : 0;
+}
+function _progressBar(done, total) {
+  const p = _pct(done, total);
+  return `<div style="background:var(--surface);border-radius:3px;height:4px;margin-top:5px;overflow:hidden">
+    <div style="background:var(--accent);height:100%;width:${p}%;transition:width .3s"></div></div>`;
+}
+
 async function loadHistoricalStatus() {
   try {
     const [rt, bt] = await Promise.all([
       fetch(`${BACKEND_HTTP}/api/historical/retrain/status`).then(r => r.json()),
       fetch(`${BACKEND_HTTP}/api/historical/backtest/results`).then(r => r.json()),
     ]);
+
+    // ── Retrain status ───────────────────────────────────────────────────────
     const rEl = document.getElementById('hist-retrain-status');
     if (rEl) {
       if (rt.running) {
-        rEl.innerHTML = '<span style="color:#f59e0b">⏳ Running…</span>';
+        const pct = _pct(rt.done, rt.total);
+        rEl.innerHTML = `<span style="color:#f59e0b">⏳ ${rt.done}/${rt.total} tickers (${pct}%) — ${rt.current_ticker} — ${rt.trained} trained, ${rt.skipped} skipped — ${rt.elapsed_s}s elapsed</span>
+          ${_progressBar(rt.done, rt.total)}`;
+        _startHistPoll();
       } else if (rt.summary?.trained !== undefined) {
-        rEl.innerHTML = `<span style="color:var(--green)">✓ Last run: ${rt.summary.trained} trained, ${rt.summary.skipped} skipped in ${rt.summary.elapsed_s}s</span>`;
+        rEl.innerHTML = `<span style="color:var(--green)">✓ Done — ${rt.summary.trained} trained, ${rt.summary.skipped} skipped in ${rt.summary.elapsed_s}s</span>
+          ${_progressBar(rt.total, rt.total)}`;
+      } else if (rt.summary?.error) {
+        rEl.innerHTML = `<span style="color:var(--red)">✕ Error: ${rt.summary.error}</span>`;
       } else {
         rEl.textContent = 'Not started';
       }
     }
+
+    // ── Backtest status ──────────────────────────────────────────────────────
     const bEl = document.getElementById('hist-bt-status');
     if (bEl) {
       if (bt.running) {
-        bEl.innerHTML = '<span style="color:#f59e0b">⏳ Running… (may take several minutes for 477 tickers)</span>';
+        const pct = _pct(bt.done, bt.total);
+        bEl.innerHTML = `<span style="color:#f59e0b">⏳ ${bt.done}/${bt.total} tickers (${pct}%) — ${bt.current_ticker} — ${bt.trades_so_far.toLocaleString()} trades found — ${bt.elapsed_s}s elapsed</span>
+          ${_progressBar(bt.done, bt.total)}`;
+        _startHistPoll();
       } else if (bt.results?.length) {
-        bEl.innerHTML = `<span style="color:var(--green)">✓ ${bt.results.length} signals evaluated</span>`;
+        bEl.innerHTML = `<span style="color:var(--green)">✓ Complete — ${bt.results.length} signals, ${bt.elapsed_s}s</span>`;
         renderHistBacktestTable(bt.results);
       } else {
         bEl.textContent = 'No results yet';
       }
     }
+
+    // Stop polling when both are idle
+    if (!rt.running && !bt.running) _stopHistPoll();
+
   } catch(e) {}
 }
 
@@ -5663,30 +5700,12 @@ async function triggerHistBacktest(btn) {
   if (!confirm(`Run vectorized backtest on ${interval} bars for all 477 tickers. This may take several minutes. Continue?`)) return;
   const orig = btn.textContent;
   btn.disabled = true;
-  btn.textContent = '⏳ Running…';
-  const statusEl = document.getElementById('hist-bt-status');
+  btn.textContent = '⏳ Starting…';
   try {
     const r = await (await fetch(`${BACKEND_HTTP}/api/historical/backtest/run?interval=${interval}`, { method: 'POST' })).json();
-    if (r.status === 'already_running') {
-      btn.textContent = '⏳ In progress…';
-      if (statusEl) statusEl.innerHTML = '<span style="color:#f59e0b">⏳ Already running…</span>';
-    } else {
-      if (statusEl) statusEl.innerHTML = '<span style="color:#f59e0b">⏳ Running… (may take several minutes)</span>';
-      // Poll for results every 15s
-      const pollId = setInterval(async () => {
-        try {
-          const res = await (await fetch(`${BACKEND_HTTP}/api/historical/backtest/results`)).json();
-          if (!res.running && res.results?.length) {
-            clearInterval(pollId);
-            if (statusEl) statusEl.innerHTML = `<span style="color:var(--green)">✓ ${res.results.length} signals evaluated</span>`;
-            renderHistBacktestTable(res.results);
-            btn.disabled = false;
-            btn.textContent = orig;
-          }
-        } catch(e) {}
-      }, 15000);
-    }
-    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 600000); // 10 min safety reset
+    btn.textContent = r.status === 'already_running' ? '⏳ In progress…' : '✓ Started';
+    _startHistPoll();
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 600000);
   } catch(e) {
     btn.textContent = '✕ Error';
     setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 4000);
