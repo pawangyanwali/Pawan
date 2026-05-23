@@ -19,21 +19,29 @@ def init_tables() -> None:
     ddl_list = get_all_ddl(use_pg)
     HISTORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    with get_conn(HISTORY_DB_PATH) as conn:
-        for ddl in ddl_list:
-            try:
-                if use_pg:
-                    # DDL needs autocommit in PostgreSQL
-                    raw = conn._conn  # type: ignore[attr-defined]
-                    prev = raw.autocommit
-                    raw.autocommit = True
-                    raw.execute(ddl.strip())
-                    raw.autocommit = prev
-                else:
+    if use_pg:
+        from agent.db import _get_pool
+        pool = _get_pool()
+        raw = pool.getconn()
+        try:
+            raw.autocommit = True
+            with raw.cursor() as cur:
+                for ddl in ddl_list:
+                    try:
+                        cur.execute(ddl.strip())
+                    except Exception as exc:
+                        logger.warning("DDL warning: %s", exc)
+        finally:
+            pool.putconn(raw)
+    else:
+        with get_conn(HISTORY_DB_PATH) as conn:
+            for ddl in ddl_list:
+                try:
                     conn.execute(ddl.strip())
                     conn.commit()
-            except Exception as exc:
-                logger.warning("DDL warning: %s", exc)
+                except Exception as exc:
+                    logger.warning("DDL warning: %s", exc)
+
     logger.info("[HistStore] Tables initialised (%s)", "PostgreSQL" if use_pg else "SQLite")
 
 
