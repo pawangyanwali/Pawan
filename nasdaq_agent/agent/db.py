@@ -279,33 +279,17 @@ class _PgConnection:
 
         return _PgCursor(cur, lastrowid)
 
+    def executemany(self, sql: str, params_list) -> "_PgCursor | _NullCursor":
+        """Batch-insert using execute_batch (fewer round-trips than executemany)."""
+        stripped = sql.strip().upper()
+        if stripped.startswith("PRAGMA"):
+            return _NullCursor()
+        pg_sql = _to_pg(sql)
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        psycopg2.extras.execute_batch(cur, pg_sql, params_list, page_size=500)
+        return _PgCursor(cur)
+
     def commit(self):
-        self._conn.commit()
-
-    def rollback(self):
-        self._conn.rollback()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        try:
-            if exc_type:
-                self._conn.rollback()
-            else:
-                self._conn.commit()
-        finally:
-            _get_pool().putconn(self._conn)
-        return False
-
-    def close(self):
-        try:
-            _get_pool().putconn(self._conn)
-        except Exception:
-            pass
-
-
-# ── SQLite path ────────────────────────────────────────────────────────────────
 
 class _SqliteConnection:
     """
@@ -329,6 +313,9 @@ class _SqliteConnection:
         if params is None:
             return self._conn.execute(sql)
         return self._conn.execute(sql, params)
+
+    def executemany(self, sql: str, params_list):
+        return self._conn.executemany(sql, params_list)
 
     def commit(self):
         self._conn.commit()
