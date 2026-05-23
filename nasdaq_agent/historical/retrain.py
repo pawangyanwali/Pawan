@@ -10,6 +10,9 @@ are passed to StockMLModel.train_from_df(), which calls prepare_training_data()
 (leakage-free split + ATR-adaptive labels) then fits the calibrated XGBoost.
 Saved models are written to data/models/ and picked up on the next service restart.
 
+Status is written to STATUS_FILE as JSON so the web service can read progress
+even when the retrain runs as a detached subprocess.
+
 Usage (via __main__.py):
   python -m historical --retrain
   python -m historical --retrain --tickers AAPL,MSFT,NVDA
@@ -17,14 +20,28 @@ Usage (via __main__.py):
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_INTERVAL = "5min"
 _DEFAULT_WORKERS  = 4
+
+STATUS_FILE = Path.home() / ".nasdaq_agent" / "hist_retrain_status.json"
+
+
+def _write_status(state: dict) -> None:
+    try:
+        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATUS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(STATUS_FILE)
+    except Exception:
+        pass
 
 
 def retrain_from_history(
@@ -36,6 +53,7 @@ def retrain_from_history(
     """
     Retrain StockMLModel for each ticker using stored historical bars.
 
+    Writes live progress to STATUS_FILE so the web service can poll it.
     progress_cb(done, total, ticker, ok) is called after each ticker completes.
     Returns summary dict: {total, trained, skipped, elapsed_s}.
     """
@@ -43,9 +61,15 @@ def retrain_from_history(
     from historical.store import read_ticker_bars
 
     t0 = time.time()
+    n  = len(tickers)
     trained = 0
     skipped = 0
-    n = len(tickers)
+
+    _write_status({
+        "running": True, "done": 0, "total": n,
+        "current_ticker": "", "trained": 0, "skipped": 0,
+        "elapsed_s": 0.0, "started_at": t0, "summary": {},
+    })
 
     def _train_one(ticker: str) -> tuple[str, bool, str]:
         try:
@@ -74,6 +98,13 @@ def retrain_from_history(
                 skipped += 1
                 logger.warning("[HistRetrain] [%d/%d] %s: skipped — %s",
                                done_count, n, ticker, reason)
+
+            _write_status({
+                "running": True, "done": done_count, "total": n,
+                "current_ticker": ticker, "trained": trained, "skipped": skipped,
+                "elapsed_s": round(time.time() - t0, 1),
+                "started_at": t0, "summary": {},
+            })
             if progress_cb:
                 try:
                     progress_cb(done_count, n, ticker, ok)
@@ -82,6 +113,12 @@ def retrain_from_history(
 
     elapsed = round(time.time() - t0, 1)
     summary = {"total": n, "trained": trained, "skipped": skipped, "elapsed_s": elapsed}
+    _write_status({
+        "running": False, "done": n, "total": n,
+        "current_ticker": "", "trained": trained, "skipped": skipped,
+        "elapsed_s": elapsed, "started_at": t0, "summary": summary,
+    })
     logger.info("[HistRetrain] Done — %d trained, %d skipped in %.0fs",
                 trained, skipped, elapsed)
     return summary
+

@@ -5637,8 +5637,8 @@ async function loadHistoricalStatus() {
       }
     }
 
-    // Stop polling when both are idle
-    if (!rt.running && !bt.running) _stopHistPoll();
+    // Stop polling when both subprocesses are idle
+    if (!rt.running && !rt.proc_running && !bt.running && !bt.proc_running) _stopHistPoll();
 
   } catch(e) {}
 }

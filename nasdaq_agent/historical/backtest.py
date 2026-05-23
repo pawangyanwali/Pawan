@@ -19,14 +19,30 @@ Usage (via __main__.py):
 """
 from __future__ import annotations
 
+import json
 import logging
+import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+STATUS_FILE = Path.home() / ".nasdaq_agent" / "hist_backtest_status.json"
+
+
+def _write_status(state: dict) -> None:
+    try:
+        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATUS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(STATUS_FILE)
+    except Exception:
+        pass
+
 
 # Exit parameters — mirror paper_trading.py rules
 ATR_STOP_MULT = 1.0   # stop = entry ± 1×ATR
@@ -304,15 +320,31 @@ def run_backtest(
 ) -> list[SignalReport]:
     """Run backtest across all tickers for one interval. Returns aggregated reports.
 
+    Writes live progress to STATUS_FILE so the web service can poll it.
     progress_cb(done, total, ticker, n_trades_so_far) is called after each ticker.
     """
     all_trades: list[TradeResult] = []
     n = len(tickers)
+    t0 = time.time()
+
+    _write_status({
+        "running": True, "done": 0, "total": n,
+        "current_ticker": "", "trades_so_far": 0,
+        "elapsed_s": 0.0, "started_at": t0, "results": [],
+    })
 
     logger.info("[Backtest] %s — %d tickers, max_bars=%d", interval, n, max_bars)
     for i, ticker in enumerate(tickers, 1):
         trades = backtest_ticker(ticker, interval, max_bars)
         all_trades.extend(trades)
+
+        if i % 10 == 0 or i == n:
+            _write_status({
+                "running": True, "done": i, "total": n,
+                "current_ticker": ticker, "trades_so_far": len(all_trades),
+                "elapsed_s": round(time.time() - t0, 1),
+                "started_at": t0, "results": [],
+            })
         if i % 100 == 0 or i == n:
             logger.info("[Backtest] [%d/%d] total trades so far: %d", i, n, len(all_trades))
         if progress_cb:
@@ -322,6 +354,13 @@ def run_backtest(
                 pass
 
     reports = aggregate_results(all_trades, interval)
+    elapsed = round(time.time() - t0, 1)
+    _write_status({
+        "running": False, "done": n, "total": n,
+        "current_ticker": "", "trades_so_far": len(all_trades),
+        "elapsed_s": elapsed, "started_at": t0,
+        "results": [asdict(r) for r in reports],
+    })
     logger.info("[Backtest] Complete — %d trades, %d signals", len(all_trades), len(reports))
     return reports
 

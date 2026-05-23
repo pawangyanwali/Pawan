@@ -9,8 +9,11 @@ import html as _html
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 import numpy as np
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Set
@@ -1056,102 +1059,82 @@ async def trigger_deep_train(background_tasks: BackgroundTasks):
 
 
 # ── Historical retrain & backtest ─────────────────────────────────────────────
+# These jobs run as detached subprocesses so they never block the Gunicorn
+# worker or get killed by its timeout/SIGABRT.  Progress is written to a JSON
+# status file by the subprocess; the API endpoints just read that file.
 
-_hist_retrain_state: dict = {
-    "running": False, "done": 0, "total": 0,
-    "current_ticker": "", "trained": 0, "skipped": 0,
-    "started_at": 0.0, "elapsed_s": 0.0, "summary": {},
-}
-_hist_backtest_state: dict = {
-    "running": False, "done": 0, "total": 0,
-    "current_ticker": "", "trades_so_far": 0,
-    "started_at": 0.0, "elapsed_s": 0.0, "results": [],
-}
+_PACKAGE_DIR = Path(__file__).parent          # nasdaq_agent/
+_RETRAIN_STATUS = Path.home() / ".nasdaq_agent" / "hist_retrain_status.json"
+_BACKTEST_STATUS = Path.home() / ".nasdaq_agent" / "hist_backtest_status.json"
+
+_hist_retrain_proc: subprocess.Popen | None = None
+_hist_backtest_proc: subprocess.Popen | None = None
+
+
+def _proc_running(proc: subprocess.Popen | None) -> bool:
+    return proc is not None and proc.poll() is None
+
+
+def _read_status(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
 
 
 @app.post("/api/historical/retrain")
-async def historical_retrain(background_tasks: BackgroundTasks):
-    """Retrain all ML models using 2-year historical bars instead of the live Schwab fetch."""
-    if _hist_retrain_state["running"]:
+async def historical_retrain():
+    """Retrain all ML models using 2-year historical bars.
+
+    Runs as a detached subprocess — never blocks the web worker.
+    Poll /api/historical/retrain/status for live progress.
+    """
+    global _hist_retrain_proc
+    if _proc_running(_hist_retrain_proc):
         return {"status": "already_running", "message": "Historical retrain already in progress."}
 
-    from config import NASDAQ_TICKERS
-    tickers = list(NASDAQ_TICKERS)
-
-    def _run():
-        import time as _t
-        _hist_retrain_state.update(
-            running=True, done=0, total=len(tickers),
-            current_ticker="", trained=0, skipped=0,
-            started_at=_t.time(), elapsed_s=0.0, summary={},
-        )
-        try:
-            from historical.retrain import retrain_from_history
-
-            def _cb(done, total, ticker, ok):
-                _hist_retrain_state["done"]    = done
-                _hist_retrain_state["current_ticker"] = ticker
-                if ok:
-                    _hist_retrain_state["trained"] += 1
-                else:
-                    _hist_retrain_state["skipped"] += 1
-                _hist_retrain_state["elapsed_s"] = round(_t.time() - _hist_retrain_state["started_at"], 1)
-
-            summary = retrain_from_history(tickers, interval="5min", max_workers=4, progress_cb=_cb)
-            _hist_retrain_state["summary"] = summary
-        except Exception as exc:
-            logger.warning("[hist-retrain] failed: %s", exc)
-            _hist_retrain_state["summary"] = {"error": str(exc)}
-        finally:
-            _hist_retrain_state["running"] = False
-            _hist_retrain_state["elapsed_s"] = round(_t.time() - _hist_retrain_state["started_at"], 1)
-
-    background_tasks.add_task(_run)
-    return {"status": "started", "message": "Historical retrain started — retraining all models from 2-year DB."}
+    cmd = [sys.executable, "-m", "historical", "--retrain", "--interval", "5min", "--workers", "4"]
+    _hist_retrain_proc = subprocess.Popen(cmd, cwd=str(_PACKAGE_DIR))
+    logger.info("[hist-retrain] Subprocess started (pid=%d)", _hist_retrain_proc.pid)
+    return {"status": "started", "message": "Historical retrain started as background process."}
 
 
 @app.get("/api/historical/retrain/status")
 async def historical_retrain_status():
-    """Current state and last-run summary of the historical retrain job."""
-    return dict(_hist_retrain_state)
+    """Live progress of the historical retrain subprocess (reads status file)."""
+    state = _read_status(_RETRAIN_STATUS)
+    state["proc_running"] = _proc_running(_hist_retrain_proc)
+    # If subprocess exited but file still says running, correct it
+    if not state.get("proc_running") and state.get("running"):
+        state["running"] = False
+    return state
 
 
 @app.post("/api/historical/backtest/run")
-async def historical_backtest_run(background_tasks: BackgroundTasks, interval: str = "5min"):
-    """Run vectorized backtest over stored historical bars for all tickers."""
-    if _hist_backtest_state["running"]:
+async def historical_backtest_run(interval: str = "5min"):
+    """Run vectorized backtest over stored historical bars.
+
+    Runs as a detached subprocess — never blocks the web worker.
+    Poll /api/historical/backtest/results for live progress and final results.
+    """
+    global _hist_backtest_proc
+    if _proc_running(_hist_backtest_proc):
         return {"status": "already_running", "message": "Historical backtest already in progress."}
 
-    from config import NASDAQ_TICKERS
-    tickers = list(NASDAQ_TICKERS)
-
-    def _run():
-        import time as _t
-        _hist_backtest_state.update(
-            running=True, done=0, total=len(tickers),
-            current_ticker="", trades_so_far=0,
-            started_at=_t.time(), elapsed_s=0.0, results=[],
-        )
-        try:
-            from historical.backtest import run_backtest
-            from dataclasses import asdict
-
-            def _cb(done, total, ticker, trades_so_far):
-                _hist_backtest_state["done"]          = done
-                _hist_backtest_state["current_ticker"] = ticker
-                _hist_backtest_state["trades_so_far"] = trades_so_far
-                _hist_backtest_state["elapsed_s"]     = round(_t.time() - _hist_backtest_state["started_at"], 1)
-
-            reports = run_backtest(tickers, interval=interval, progress_cb=_cb)
-            _hist_backtest_state["results"] = [asdict(r) for r in reports]
-        except Exception as exc:
-            logger.warning("[hist-backtest] failed: %s", exc)
-        finally:
-            _hist_backtest_state["running"] = False
-            _hist_backtest_state["elapsed_s"] = round(_t.time() - _hist_backtest_state["started_at"], 1)
-
-    background_tasks.add_task(_run)
+    cmd = [sys.executable, "-m", "historical", "--backtest", "--interval", interval]
+    _hist_backtest_proc = subprocess.Popen(cmd, cwd=str(_PACKAGE_DIR))
+    logger.info("[hist-backtest] Subprocess started (pid=%d)", _hist_backtest_proc.pid)
     return {"status": "started", "message": f"Historical backtest started ({interval})."}
+
+
+@app.get("/api/historical/backtest/results")
+async def historical_backtest_results():
+    """Live progress and final results of the historical backtest (reads status file)."""
+    state = _read_status(_BACKTEST_STATUS)
+    state["proc_running"] = _proc_running(_hist_backtest_proc)
+    if not state.get("proc_running") and state.get("running"):
+        state["running"] = False
+    return state
 
 
 @app.get("/api/historical/backtest/results")
