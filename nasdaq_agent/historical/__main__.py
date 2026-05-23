@@ -97,8 +97,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Years of history to fetch (default: 2)")
     p.add_argument("--tickers",       type=str,   default=None,
                    help="Comma-separated tickers (default: full universe)")
-    p.add_argument("--rate",          type=float, default=0.67,
-                   help="Seconds between API calls (default: 0.67 = 1.5 req/s)")
+    p.add_argument("--rate",          type=float, default=1.0,
+                   help="Seconds between API calls (default: 1.0 = 1 req/s)")
     p.add_argument("--resume",        action="store_true",
                    help="Resume from saved checkpoint (default when checkpoint exists)")
     p.add_argument("--reset",         action="store_true",
