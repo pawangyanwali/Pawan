@@ -10,7 +10,7 @@ on:
 
 jobs:
   deploy:
-    name: SSH deploy & restart
+    name: SSH deploy & reload
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -37,16 +37,30 @@ jobs:
             echo "=== Installing any new dependencies ==="
             sudo -u "$APP_USER" "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
 
-            echo "=== Ensure agent.err is cleared on each restart ==="
+            echo "=== Ensure service file has required directives ==="
             SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+            PATCHED=0
             if ! grep -q "ExecStartPre" "$SERVICE_FILE"; then
               sudo sed -i '/^ExecStart=/i ExecStartPre=/bin/truncate -s 0 /opt/nasdaq-agent/logs/agent.err' "$SERVICE_FILE"
-              sudo systemctl daemon-reload
               echo "Patched service file with ExecStartPre"
+              PATCHED=1
+            fi
+            if ! grep -q "ExecReload" "$SERVICE_FILE"; then
+              sudo sed -i '/^ExecStart=/a ExecReload=/bin/kill -s HUP $MAINPID' "$SERVICE_FILE"
+              echo "Patched service file with ExecReload"
+              PATCHED=1
+            fi
+            if [ "$PATCHED" = "1" ]; then
+              sudo systemctl daemon-reload
             fi
 
-            echo "=== Restarting service ==="
-            sudo systemctl restart "$SERVICE"
+            echo "=== Reloading service (zero-downtime) ==="
+            if sudo systemctl reload "$SERVICE" 2>/dev/null; then
+              echo "Graceful reload sent"
+            else
+              echo "Reload not supported, falling back to restart"
+              sudo systemctl restart "$SERVICE"
+            fi
 
             echo "=== Waiting for service to come up ==="
             for i in $(seq 1 12); do
