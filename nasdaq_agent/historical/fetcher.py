@@ -44,11 +44,17 @@ def date_chunks(
     start_dt: datetime,
     end_dt:   datetime,
     chunk_days: int = 9,
+    newest_first: bool = True,
 ) -> list[tuple[int, int]]:
     """
     Return list of (start_ms, end_ms) epoch-ms pairs covering [start_dt, end_dt].
     Each window is chunk_days calendar days wide (9 days ≈ 6-7 trading days,
-    safely below Schwab's apparent 10-trading-day burst for minute endpoints).
+    safely below Schwab's apparent 10-trading-day limit for minute endpoints).
+
+    newest_first=True (default): chunks ordered recent → old so we capture all
+    available 1min history before hitting the API's lookback limit (~30 days).
+    The early-abort in fetch_1min_ticker then cleanly stops when the API returns
+    empty data for older dates rather than aborting before any data is fetched.
     """
     chunks = []
     cur = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -60,6 +66,8 @@ def date_chunks(
             int(chunk_end.timestamp() * 1000),
         ))
         cur = chunk_end + timedelta(days=1)
+    if newest_first:
+        chunks.reverse()
     return chunks
 
 
@@ -68,7 +76,7 @@ def date_chunks(
 def fetch_1min_ticker(
     ticker:     str,
     chunks:     list[tuple[int, int]],
-    empty_limit: int = 10,
+    empty_limit: int = 5,
 ) -> int:
     """
     Fetch all 1min chunks for one ticker.  Returns total bars stored.
