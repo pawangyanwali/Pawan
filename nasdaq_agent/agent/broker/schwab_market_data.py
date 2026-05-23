@@ -76,7 +76,7 @@ def _auth_headers() -> dict | None:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
-def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
+def _get(path: str, params: dict, timeout: "int | tuple" = 20) -> dict | list:
     """Authenticated GET to the Schwab Market Data API."""
     # Honour 429 back-off: skip this cycle rather than piling on blocked requests.
     backoff_rem = _backoff_until - time.time()
@@ -435,7 +435,7 @@ def fetch_price_history_range(
             "endDate":               end_ms,
             "needExtendedHoursData": "true" if extended_hours else "false",
         },
-        timeout=30,
+        timeout=(8, 22),  # 8s connect + 22s read; avoids indefinite stall
     )
     candles = data.get("candles", []) if isinstance(data, dict) else []
     if not candles:

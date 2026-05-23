@@ -29,6 +29,7 @@ import argparse
 import logging
 import logging.handlers
 import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -133,6 +134,10 @@ def _print_status() -> None:
 
 
 def main() -> None:
+    # Hard socket-level timeout so DNS hangs and TCP stalls never block forever.
+    # requests/urllib3 has its own timeout, but OS-level stalls can bypass it.
+    socket.setdefaulttimeout(35)
+
     args = _parse_args()
     _setup_logging(args.verbose)
     log = logging.getLogger("backfill.main")

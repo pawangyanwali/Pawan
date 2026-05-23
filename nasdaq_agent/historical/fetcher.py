@@ -161,7 +161,9 @@ def fetch_1min_ticker(
 
         _wait_if_blocked()
         _throttle()
+        logger.info("[Backfill] %s 1min %s: requesting...", ticker, _ms_label(start_ms))
         df = fetch_price_history_range(ticker, "1min", start_ms, end_ms)
+        logger.info("[Backfill] %s 1min %s: got %d rows", ticker, _ms_label(start_ms), len(df))
 
         if df.empty:
             # Check if this is a CDN block vs. genuinely no data for this date
