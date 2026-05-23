@@ -1,0 +1,240 @@
+"""
+Core fetch/resample logic for the historical backfill service.
+
+Strategy
+--------
+1. Fetch 1min data per ticker in 9-calendar-day chunks (safe under Schwab limits).
+   Store raw 1min bars immediately so progress survives crashes.
+2. After all 1min chunks for a ticker are done, resample to 5min / 15min / 30min / 1h / 4h
+   and store all derived intervals.  Resampling per-ticker avoids OHLC boundary
+   artefacts that occur when resampling across chunk seams.
+3. Fetch 1day separately — single request per ticker covers 2+ years.
+"""
+
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+
+from agent.broker.schwab_market_data import fetch_price_history_range
+from historical import progress, store
+from historical.schema import RESAMPLE_FROM_1MIN
+
+logger = logging.getLogger(__name__)
+
+# ── Rate limiting ──────────────────────────────────────────────────────────────
+# Backfill runs at 1.5 req/s — well below Schwab's burst limit and isolated
+# from the live scanner's own rate state.
+_REQ_GAP = 0.67          # seconds between API calls
+_last_req: float = 0.0
+
+
+def _throttle() -> None:
+    global _last_req
+    elapsed = time.time() - _last_req
+    if elapsed < _REQ_GAP:
+        time.sleep(_REQ_GAP - elapsed)
+    _last_req = time.time()
+
+
+# ── Chunk generation ───────────────────────────────────────────────────────────
+
+def date_chunks(
+    start_dt: datetime,
+    end_dt:   datetime,
+    chunk_days: int = 9,
+) -> list[tuple[int, int]]:
+    """
+    Return list of (start_ms, end_ms) epoch-ms pairs covering [start_dt, end_dt].
+    Each window is chunk_days calendar days wide (9 days ≈ 6-7 trading days,
+    safely below Schwab's apparent 10-trading-day burst for minute endpoints).
+    """
+    chunks = []
+    cur = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = end_dt.replace(hour=23, minute=59, second=59, microsecond=0)
+    while cur <= end:
+        chunk_end = min(cur + timedelta(days=chunk_days), end)
+        chunks.append((
+            int(cur.timestamp() * 1000),
+            int(chunk_end.timestamp() * 1000),
+        ))
+        cur = chunk_end + timedelta(days=1)
+    return chunks
+
+
+# ── Fetch 1min ─────────────────────────────────────────────────────────────────
+
+def fetch_1min_ticker(
+    ticker:     str,
+    chunks:     list[tuple[int, int]],
+    empty_limit: int = 10,
+) -> int:
+    """
+    Fetch all 1min chunks for one ticker.  Returns total bars stored.
+    Skips already-done chunks (resume-safe).
+    Aborts early if Schwab returns empty data for `empty_limit` consecutive
+    chunks (indicates the ticker has no history that far back).
+    """
+    stored = 0
+    consecutive_empty = 0
+
+    for start_ms, end_ms in chunks:
+        if progress.is_chunk_done(ticker, "1min", start_ms):
+            consecutive_empty = 0   # reset — previous run stored it
+            continue
+
+        _throttle()
+        df = fetch_price_history_range(ticker, "1min", start_ms, end_ms)
+
+        if df.empty:
+            consecutive_empty += 1
+            logger.debug("[Backfill] %s 1min chunk %s empty (%d)", ticker,
+                         _ms_label(start_ms), consecutive_empty)
+            progress.mark_chunk_done(ticker, "1min", start_ms)  # don't retry
+            if consecutive_empty >= empty_limit:
+                logger.info("[Backfill] %s: %d consecutive empty chunks — stopping early",
+                            ticker, empty_limit)
+                break
+            continue
+
+        consecutive_empty = 0
+        n = store.upsert_bars("1min", ticker, df)
+        stored += n
+        progress.mark_chunk_done(ticker, "1min", start_ms)
+        logger.debug("[Backfill] %s 1min chunk %s: +%d bars", ticker, _ms_label(start_ms), n)
+
+    return stored
+
+
+# ── Resample 1min → derived intervals ─────────────────────────────────────────
+
+def resample_ticker(ticker: str) -> dict[str, int]:
+    """
+    Load all stored 1min bars for a ticker, resample to every derived interval,
+    and upsert.  Returns dict of {interval: bars_stored}.
+    """
+    df_1min = store.read_ticker_bars("1min", ticker)
+    if df_1min.empty:
+        return {}
+
+    results: dict[str, int] = {}
+    for interval, rule in RESAMPLE_FROM_1MIN.items():
+        resampled = df_1min.resample(rule).agg({
+            "Open":   "first",
+            "High":   "max",
+            "Low":    "min",
+            "Close":  "last",
+            "Volume": "sum",
+        }).dropna(subset=["Open", "Close"])
+        n = store.upsert_bars(interval, ticker, resampled)
+        results[interval] = n
+
+    progress.mark_resampled(ticker)
+    return results
+
+
+# ── Fetch 1day ─────────────────────────────────────────────────────────────────
+
+def fetch_daily_ticker(ticker: str, start_ms: int, end_ms: int) -> int:
+    """Fetch 1day bars for one ticker covering the full backfill window."""
+    if progress.is_daily_done(ticker):
+        return 0
+    _throttle()
+    df = fetch_price_history_range(ticker, "1day", start_ms, end_ms)
+    n = store.upsert_bars("1day", ticker, df) if not df.empty else 0
+    progress.mark_daily_done(ticker)
+    logger.debug("[Backfill] %s 1day: +%d bars", ticker, n)
+    return n
+
+
+# ── Main coordinator ───────────────────────────────────────────────────────────
+
+def run(
+    tickers:      list[str],
+    years:        int   = 2,
+    rate_s:       float = _REQ_GAP,
+    resample_only: bool = False,
+    daily_only:    bool = False,
+) -> None:
+    """
+    Run the full backfill for a list of tickers.
+
+    Phases:
+      1. Fetch 1min (chunked, resumable)
+      2. Resample 1min → 5min / 15min / 30min / 1h / 4h
+      3. Fetch 1day
+    """
+    global _REQ_GAP
+    _REQ_GAP = rate_s
+
+    now_utc   = datetime.now(timezone.utc)
+    start_dt  = now_utc - timedelta(days=365 * years)
+    end_dt    = now_utc - timedelta(days=1)
+
+    start_ms  = int(start_dt.timestamp() * 1000)
+    end_ms    = int(end_dt.timestamp()   * 1000)
+
+    chunks    = date_chunks(start_dt, end_dt)
+    n_tickers = len(tickers)
+    n_chunks  = len(chunks)
+
+    logger.info(
+        "[Backfill] %d tickers | %d years | %d chunks/ticker | ~%d total API calls",
+        n_tickers, years, n_chunks, n_tickers * (n_chunks + 1),
+    )
+
+    # ── Phase 1: 1min fetch ──────────────────────────────────────────────────
+    if not resample_only and not daily_only:
+        logger.info("[Backfill] Phase 1: fetching 1min data")
+        for i, ticker in enumerate(tickers, 1):
+            done_chunks = sum(
+                1 for s, _ in chunks if progress.is_chunk_done(ticker, "1min", s)
+            )
+            if done_chunks == len(chunks):
+                logger.debug("[Backfill] %s 1min already complete — skip", ticker)
+                continue
+            logger.info("[Backfill] [%d/%d] %s: fetching 1min (%d/%d chunks done)",
+                        i, n_tickers, ticker, done_chunks, n_chunks)
+            bars = fetch_1min_ticker(ticker, chunks)
+            logger.info("[Backfill] [%d/%d] %s: +%d bars stored", i, n_tickers, ticker, bars)
+
+    # ── Phase 2: resample ────────────────────────────────────────────────────
+    if not daily_only:
+        logger.info("[Backfill] Phase 2: resampling 1min → derived intervals")
+        for i, ticker in enumerate(tickers, 1):
+            if progress.is_resampled(ticker):
+                continue
+            result = resample_ticker(ticker)
+            if result:
+                logger.info("[Backfill] [%d/%d] %s resampled: %s",
+                            i, n_tickers, ticker,
+                            ", ".join(f"{iv}={n}" for iv, n in result.items()))
+
+    # ── Phase 3: 1day fetch ──────────────────────────────────────────────────
+    logger.info("[Backfill] Phase 3: fetching 1day data")
+    for i, ticker in enumerate(tickers, 1):
+        n = fetch_daily_ticker(ticker, start_ms, end_ms)
+        if n:
+            logger.info("[Backfill] [%d/%d] %s 1day: +%d bars", i, n_tickers, ticker, n)
+
+    logger.info("[Backfill] All phases complete.")
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _ms_label(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def estimate_time(tickers: list[str], years: int, rate_s: float = _REQ_GAP) -> str:
+    """Human-readable time estimate for a full backfill run."""
+    n_chunks   = len(date_chunks(
+        datetime.now(timezone.utc) - timedelta(days=365 * years),
+        datetime.now(timezone.utc) - timedelta(days=1),
+    ))
+    total_reqs = len(tickers) * (n_chunks + 1)   # +1 for daily
+    secs       = total_reqs * rate_s
+    h, rem     = divmod(int(secs), 3600)
+    m          = rem // 60
+    return f"~{h}h {m}m  ({total_reqs:,} API calls at {1/rate_s:.1f} req/s)"

@@ -394,6 +394,72 @@ def fetch_price_history(
         return pd.DataFrame()
 
 
+def fetch_price_history_range(
+    ticker:         str,
+    interval:       str,
+    start_ms:       int,
+    end_ms:         int,
+    extended_hours: bool = False,
+) -> pd.DataFrame:
+    """
+    Fetch OHLCV for an explicit date range (epoch ms).
+    Used exclusively by the historical backfill service.
+
+    interval: "1min" | "5min" | "15min" | "30min" | "1day"
+    Schwab supports arbitrary start/end ranges; periodType=day is required
+    for minute frequencies even when startDate/endDate are supplied.
+    """
+    if not _is_authorised():
+        return pd.DataFrame()
+
+    _RANGE_MAP: dict[str, tuple] = {
+        "1min":  ("minute",  1, "day"),
+        "5min":  ("minute",  5, "day"),
+        "15min": ("minute", 15, "day"),
+        "30min": ("minute", 30, "day"),
+        "1day":  ("daily",   1, "year"),
+    }
+    if interval not in _RANGE_MAP:
+        logger.warning("[Schwab MD] fetch_price_history_range: unknown interval %s", interval)
+        return pd.DataFrame()
+
+    freq_type, freq, period_type = _RANGE_MAP[interval]
+    data = _get(
+        "/pricehistory",
+        {
+            "symbol":                ticker,
+            "periodType":            period_type,
+            "frequencyType":         freq_type,
+            "frequency":             freq,
+            "startDate":             start_ms,
+            "endDate":               end_ms,
+            "needExtendedHoursData": "true" if extended_hours else "false",
+        },
+        timeout=30,
+    )
+    candles = data.get("candles", []) if isinstance(data, dict) else []
+    if not candles:
+        return pd.DataFrame()
+
+    try:
+        df = pd.DataFrame(
+            {
+                "Open":   [c["open"]               for c in candles],
+                "High":   [c["high"]               for c in candles],
+                "Low":    [c["low"]                for c in candles],
+                "Close":  [c["close"]              for c in candles],
+                "Volume": [float(c.get("volume", 0)) for c in candles],
+            },
+            index=pd.to_datetime([c["datetime"] for c in candles], unit="ms", utc=True),
+        )
+        df = df.sort_index()
+        logger.debug("[Schwab MD] range %s/%s: %d bars", ticker, interval, len(df))
+        return df
+    except Exception as exc:
+        logger.debug("[Schwab MD] range parse error %s: %s", ticker, exc)
+        return pd.DataFrame()
+
+
 def fetch_price_history_batch(
     tickers:        list[str],
     interval:       str  = "1min",
