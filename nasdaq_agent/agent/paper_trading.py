@@ -159,6 +159,20 @@ def init_db() -> None:
 
     create_algo_signal_log = """
         CREATE TABLE IF NOT EXISTS algo_signal_log (
+            id           SERIAL PRIMARY KEY,
+            logged_at    TEXT              NOT NULL,
+            ticker       TEXT              NOT NULL,
+            algo         TEXT              NOT NULL,
+            direction    TEXT              NOT NULL,
+            confidence   DOUBLE PRECISION  DEFAULT 0,
+            entry        DOUBLE PRECISION  DEFAULT 0,
+            stop         DOUBLE PRECISION  DEFAULT 0,
+            target       DOUBLE PRECISION  DEFAULT 0,
+            rr           DOUBLE PRECISION  DEFAULT 0,
+            trade_opened INTEGER           DEFAULT 0
+        )
+    """ if using_postgres() else """
+        CREATE TABLE IF NOT EXISTS algo_signal_log (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             logged_at    TEXT    NOT NULL,
             ticker       TEXT    NOT NULL,
