@@ -26,29 +26,49 @@ logger = logging.getLogger(__name__)
 
 def check_auth() -> bool:
     """
-    Verify that the Schwab Market Data token is valid before starting the backfill.
-    Fetches one known ticker for a recent 1-day window as a live probe.
-    Returns True if data comes back, False if auth is broken.
+    Verify that the Schwab Market Data token is valid and the API is reachable.
+    Returns True only when a live data request succeeds.
+    Retries up to 3 times with a 35s gap to ride out transient CDN blocks.
     """
     from datetime import timezone
     probe_end   = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
     probe_start = int((datetime.now(timezone.utc) - timedelta(days=4)).timestamp() * 1000)
-    df = fetch_price_history_range("SPY", "1min", probe_start, probe_end)
-    if df.empty:
-        # Try to get a more specific error from auth status
+
+    for attempt in range(1, 4):
+        df = fetch_price_history_range("SPY", "1min", probe_start, probe_end)
+        if not df.empty:
+            logger.info("[Backfill] Auth OK — SPY probe returned %d bars", len(df))
+            return True
+
+        # Distinguish CDN block (token fine, API temporarily blocked) from real auth failure
         try:
-            from agent.broker.schwab_market_data import _is_authorised, _auth_headers
+            from agent.broker.schwab_market_data import _is_authorised, _auth_headers, _backoff_until
             authorised = _is_authorised()
-            headers    = _auth_headers()
+            has_headers = bool(_auth_headers())
+            blocked_for = max(0.0, _backoff_until - time.time())
+        except Exception:
+            authorised, has_headers, blocked_for = False, False, 0.0
+
+        if not authorised or not has_headers:
             logger.error(
-                "[Backfill] Auth probe returned empty. _is_authorised=%s, headers=%s",
-                authorised, "present" if headers else "MISSING",
+                "[Backfill] Auth probe failed — token missing. "
+                "Ensure nasdaq-agent service has completed Schwab OAuth."
             )
-        except Exception as exc:
-            logger.error("[Backfill] Auth probe failed: %s", exc)
-        return False
-    logger.info("[Backfill] Auth OK — SPY probe returned %d bars", len(df))
-    return True
+            return False
+
+        # Token is valid but CDN is blocking — wait and retry
+        wait = max(blocked_for + 5, 35)
+        logger.warning(
+            "[Backfill] CDN block active (attempt %d/3) — waiting %.0fs before retry",
+            attempt, wait,
+        )
+        time.sleep(wait)
+
+    logger.error(
+        "[Backfill] CDN block persisted after 3 retries. "
+        "Wait a few minutes for Akamai to clear the IP block, then re-run."
+    )
+    return False
 
 
 # ── Rate limiting ──────────────────────────────────────────────────────────────
