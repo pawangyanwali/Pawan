@@ -67,7 +67,7 @@ def _throttle() -> None:
     _last_req = time.time()
 
 
-def _wait_if_blocked(pause_s: int = 300) -> None:
+def _wait_if_blocked(pause_s: int = 30) -> None:
     """If Schwab's CDN backoff is active, sleep until it clears (+ pause_s extra)."""
     try:
         from agent.broker.schwab_market_data import _backoff_until
@@ -148,7 +148,7 @@ def fetch_1min_ticker(
                 if _backoff_until > time.time():
                     logger.warning("[Backfill] %s chunk %s skipped (CDN block) — will retry",
                                    ticker, _ms_label(start_ms))
-                    _wait_if_blocked(60)
+                    _wait_if_blocked()
                     continue
             except Exception:
                 pass
@@ -292,7 +292,7 @@ def run(
     # ── Phase 3: 1day fetch ──────────────────────────────────────────────────
     logger.info("[Backfill] Phase 3: fetching 1day data")
     for i, ticker in enumerate(tickers, 1):
-        _wait_if_blocked(60)
+        _wait_if_blocked()
         n = fetch_daily_ticker(ticker, start_ms, end_ms)
         if n:
             logger.info("[Backfill] [%d/%d] %s 1day: +%d bars", i, n_tickers, ticker, n)
