@@ -18,14 +18,14 @@ def test_compute_indicators_returns_dataframe():
 def test_compute_indicators_expected_columns():
     df = make_ohlcv()
     result = compute_indicators(df)
-    expected = ["rsi", "macd", "ema9", "ema21", "bb_upper", "bb_lower", "vwap"]
+    expected = ["rsi_14", "macd", "ema_9", "ema_20", "bb_upper", "bb_lower", "vwap"]
     for col in expected:
         assert col in result.columns, f"missing column: {col}"
 
 def test_rsi_in_valid_range():
     df = make_ohlcv(n=60)
     result = compute_indicators(df)
-    rsi = result["rsi"].dropna()
+    rsi = result["rsi_14"].dropna()
     assert (rsi >= 0).all() and (rsi <= 100).all(), "RSI must be 0-100"
 
 def test_score_technical_returns_float():
@@ -58,7 +58,7 @@ def test_compute_indicators_no_nan_at_end():
     df = make_ohlcv(n=100)
     result = compute_indicators(df)
     last = result.iloc[-1]
-    critical = ["rsi", "macd", "ema9", "ema21"]
+    critical = ["rsi_14", "macd", "ema_9", "ema_20"]
     for col in critical:
         if col in last.index:
             assert not np.isnan(last[col]), f"{col} is NaN at last bar"

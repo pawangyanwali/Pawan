@@ -63,9 +63,13 @@ def test_target_below_entry_for_sell():
 
 # ── _evaluate_rr ──────────────────────────────────────────────────────────────
 
+def _sr(support: float, resist: float) -> dict:
+    """Build a minimal SR dict for _evaluate_rr."""
+    return {"supports": [support], "resistances": [resist], "pivots": {}, "poc": 0.0}
+
 def test_evaluate_rr_buy_basic():
     stop, target, rr, quality, qualifies = _evaluate_rr(
-        price=100.0, support=96.0, resist=110.0, direction="BUY"
+        price=100.0, sr=_sr(96.0, 110.0), direction="BUY"
     )
     assert target > 100.0, "BUY target must be above price"
     assert stop < 100.0,   "BUY stop must be below price"
@@ -73,7 +77,7 @@ def test_evaluate_rr_buy_basic():
 
 def test_evaluate_rr_sell_basic():
     stop, target, rr, quality, qualifies = _evaluate_rr(
-        price=100.0, support=92.0, resist=104.0, direction="SELL"
+        price=100.0, sr=_sr(92.0, 104.0), direction="SELL"
     )
     assert target < 100.0, "SELL target must be below price"
     assert stop > 100.0,   "SELL stop must be above price"
@@ -81,25 +85,25 @@ def test_evaluate_rr_sell_basic():
 def test_minimum_target_distance_buy():
     """Target must be at least 0.3% above price even if resist is very close."""
     stop, target, rr, quality, qualifies = _evaluate_rr(
-        price=100.0, support=99.0, resist=100.01, direction="BUY"
+        price=100.0, sr=_sr(99.0, 100.01), direction="BUY"
     )
     assert target >= 100.0 * 1.003, f"target too close to entry: {target}"
 
 def test_minimum_target_distance_sell():
     """Target must be at least 0.3% below price even if support is very close."""
     stop, target, rr, quality, qualifies = _evaluate_rr(
-        price=100.0, support=99.99, resist=101.0, direction="SELL"
+        price=100.0, sr=_sr(99.99, 101.0), direction="SELL"
     )
     assert target <= 100.0 * 0.997, f"target too close to entry: {target}"
 
 def test_rr_qualifies_threshold():
     stop, target, rr, quality, qualifies = _evaluate_rr(
-        price=100.0, support=96.0, resist=110.0, direction="BUY"
+        price=100.0, sr=_sr(96.0, 110.0), direction="BUY"
     )
     assert qualifies == (rr >= 2.0)
 
 def test_quality_labels():
     _, _, rr, quality, _ = _evaluate_rr(
-        price=100.0, support=96.0, resist=115.0, direction="BUY"
+        price=100.0, sr=_sr(96.0, 115.0), direction="BUY"
     )
     assert quality in ("EXCELLENT", "GOOD", "OK", "LOW")
