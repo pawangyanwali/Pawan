@@ -903,9 +903,10 @@
 
     <!-- Tabs -->
     <div class="bt-tabs" style="margin-bottom:14px">
-      <button class="bt-tab active" onclick="nnTab('progress')" id="nn-tab-progress">Training Progress</button>
-      <button class="bt-tab"        onclick="nnTab('history')"  id="nn-tab-history">Epoch History</button>
-      <button class="bt-tab"        onclick="nnTab('risk')"     id="nn-tab-risk">Risk Controls</button>
+      <button class="bt-tab active" onclick="nnTab('progress')"   id="nn-tab-progress">Training Progress</button>
+      <button class="bt-tab"        onclick="nnTab('history')"    id="nn-tab-history">Epoch History</button>
+      <button class="bt-tab"        onclick="nnTab('risk')"       id="nn-tab-risk">Risk Controls</button>
+      <button class="bt-tab"        onclick="nnTab('historical')" id="nn-tab-historical">📚 Historical Data</button>
     </div>
 
     <div id="nn-panel-progress" style="display:block">
@@ -994,6 +995,51 @@
 
     <div id="nn-panel-risk" style="display:none">
       <div style="color:var(--muted);font-size:11px">Loading risk controls…</div>
+    </div>
+
+    <!-- Historical Data tab -->
+    <div id="nn-panel-historical" style="display:none">
+
+      <!-- Historical Retrain -->
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div>
+            <div style="font-size:12px;font-weight:700;color:var(--text)">📚 Historical ML Retrain</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">Retrain XGBoost models using 2-year stored bars (~40× more data than live fetch)</div>
+          </div>
+          <button id="hist-retrain-btn" onclick="triggerHistRetrain(this)"
+            style="background:#16a34a;border:none;color:white;border-radius:5px;padding:5px 14px;cursor:pointer;font-family:inherit;font-size:11px;white-space:nowrap">
+            ↺ Retrain from History
+          </button>
+        </div>
+        <div id="hist-retrain-status" style="font-size:11px;color:var(--muted)">Not started</div>
+      </div>
+
+      <!-- Historical Backtest -->
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div>
+            <div style="font-size:12px;font-weight:700;color:var(--text)">📊 Historical Backtest</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">Vectorized signal backtest with ATR-based T1/T2 exits across all tickers</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <select id="hist-bt-interval" style="background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 8px;font-family:inherit;font-size:11px">
+              <option value="5min">5min</option>
+              <option value="15min">15min</option>
+              <option value="30min">30min</option>
+              <option value="1h">1h</option>
+              <option value="1day">1day</option>
+            </select>
+            <button id="hist-bt-btn" onclick="triggerHistBacktest(this)"
+              style="background:#2563eb;border:none;color:white;border-radius:5px;padding:5px 14px;cursor:pointer;font-family:inherit;font-size:11px;white-space:nowrap">
+              ▶ Run Backtest
+            </button>
+          </div>
+        </div>
+        <div id="hist-bt-status" style="font-size:11px;color:var(--muted);margin-bottom:10px">No results yet</div>
+        <div id="hist-bt-results" style="overflow-x:auto"></div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -5049,12 +5095,13 @@ function closeNeural() {
 }
 
 function nnTab(name) {
-  ['progress','history','risk'].forEach(t => {
+  ['progress','history','risk','historical'].forEach(t => {
     document.getElementById('nn-panel-'+t).style.display = t===name ? 'block' : 'none';
     const btn = document.getElementById('nn-tab-'+t);
     if (btn) btn.classList.toggle('active', t===name);
   });
-  if (name === 'risk') loadRiskStatus();
+  if (name === 'risk')       loadRiskStatus();
+  if (name === 'historical') loadHistoricalStatus();
 }
 
 async function loadNeuralStatus() {
@@ -5524,6 +5571,125 @@ async function triggerFullRetrain(btn) {
     btn.textContent = '✕ Error';
     btn.style.color = 'var(--red)';
     setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.color = 'var(--muted)'; }, 4000);
+  }
+}
+
+// ── Historical retrain & backtest ─────────────────────────────────────────────
+
+async function loadHistoricalStatus() {
+  try {
+    const [rt, bt] = await Promise.all([
+      fetch(`${BACKEND_HTTP}/api/historical/retrain/status`).then(r => r.json()),
+      fetch(`${BACKEND_HTTP}/api/historical/backtest/results`).then(r => r.json()),
+    ]);
+    const rEl = document.getElementById('hist-retrain-status');
+    if (rEl) {
+      if (rt.running) {
+        rEl.innerHTML = '<span style="color:#f59e0b">⏳ Running…</span>';
+      } else if (rt.summary?.trained !== undefined) {
+        rEl.innerHTML = `<span style="color:var(--green)">✓ Last run: ${rt.summary.trained} trained, ${rt.summary.skipped} skipped in ${rt.summary.elapsed_s}s</span>`;
+      } else {
+        rEl.textContent = 'Not started';
+      }
+    }
+    const bEl = document.getElementById('hist-bt-status');
+    if (bEl) {
+      if (bt.running) {
+        bEl.innerHTML = '<span style="color:#f59e0b">⏳ Running… (may take several minutes for 477 tickers)</span>';
+      } else if (bt.results?.length) {
+        bEl.innerHTML = `<span style="color:var(--green)">✓ ${bt.results.length} signals evaluated</span>`;
+        renderHistBacktestTable(bt.results);
+      } else {
+        bEl.textContent = 'No results yet';
+      }
+    }
+  } catch(e) {}
+}
+
+function renderHistBacktestTable(results) {
+  const el = document.getElementById('hist-bt-results');
+  if (!el || !results.length) return;
+  const rows = results.map(r => {
+    const wrColor = r.win_rate >= 0.55 ? 'var(--green)' : r.win_rate >= 0.48 ? '#f59e0b' : 'var(--red)';
+    const exColor = r.expectancy > 0 ? 'var(--green)' : 'var(--red)';
+    return `<tr>
+      <td style="font-weight:600;color:var(--text)">${r.signal}</td>
+      <td style="text-align:right">${r.n_trades.toLocaleString()}</td>
+      <td style="text-align:right;color:${wrColor}">${(r.win_rate*100).toFixed(1)}%</td>
+      <td style="text-align:right;color:var(--green)">${r.avg_win_r.toFixed(3)}R</td>
+      <td style="text-align:right;color:var(--red)">${r.avg_loss_r.toFixed(3)}R</td>
+      <td style="text-align:right;color:${exColor};font-weight:600">${r.expectancy.toFixed(3)}R</td>
+      <td style="text-align:right">${r.sharpe.toFixed(2)}</td>
+      <td style="text-align:right;color:var(--red)">${r.max_dd.toFixed(2)}R</td>
+      <td style="text-align:right;color:var(--muted)">${r.tickers_with_trades}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:11px">
+    <thead><tr style="color:var(--muted);text-transform:uppercase;font-size:10px;letter-spacing:.4px">
+      <th style="text-align:left;padding:5px 4px;border-bottom:1px solid var(--border)">Signal</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">Trades</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">Win%</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">Avg Win</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">Avg Loss</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">Expect</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">Sharpe</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">MaxDD</th>
+      <th style="text-align:right;padding:5px 4px;border-bottom:1px solid var(--border)">Tickers</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+async function triggerHistRetrain(btn) {
+  if (!confirm('Retrain all ML models using 2-year historical bars. Runs in background, takes 10–30 min. Continue?')) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Starting…';
+  try {
+    const r = await (await fetch(`${BACKEND_HTTP}/api/historical/retrain`, { method: 'POST' })).json();
+    btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '✓ Started';
+    btn.style.background = r.status === 'already_running' ? '#b45309' : '#15803d';
+    document.getElementById('hist-retrain-status').innerHTML = '<span style="color:#f59e0b">⏳ Running…</span>';
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.background = '#16a34a'; }, 15000);
+  } catch(e) {
+    btn.textContent = '✕ Error';
+    btn.style.background = '#dc2626';
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.background = '#16a34a'; }, 4000);
+  }
+}
+
+async function triggerHistBacktest(btn) {
+  const interval = document.getElementById('hist-bt-interval')?.value || '5min';
+  if (!confirm(`Run vectorized backtest on ${interval} bars for all 477 tickers. This may take several minutes. Continue?`)) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Running…';
+  const statusEl = document.getElementById('hist-bt-status');
+  try {
+    const r = await (await fetch(`${BACKEND_HTTP}/api/historical/backtest/run?interval=${interval}`, { method: 'POST' })).json();
+    if (r.status === 'already_running') {
+      btn.textContent = '⏳ In progress…';
+      if (statusEl) statusEl.innerHTML = '<span style="color:#f59e0b">⏳ Already running…</span>';
+    } else {
+      if (statusEl) statusEl.innerHTML = '<span style="color:#f59e0b">⏳ Running… (may take several minutes)</span>';
+      // Poll for results every 15s
+      const pollId = setInterval(async () => {
+        try {
+          const res = await (await fetch(`${BACKEND_HTTP}/api/historical/backtest/results`)).json();
+          if (!res.running && res.results?.length) {
+            clearInterval(pollId);
+            if (statusEl) statusEl.innerHTML = `<span style="color:var(--green)">✓ ${res.results.length} signals evaluated</span>`;
+            renderHistBacktestTable(res.results);
+            btn.disabled = false;
+            btn.textContent = orig;
+          }
+        } catch(e) {}
+      }, 15000);
+    }
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 600000); // 10 min safety reset
+  } catch(e) {
+    btn.textContent = '✕ Error';
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 4000);
   }
 }
 
