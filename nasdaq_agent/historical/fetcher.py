@@ -23,6 +23,34 @@ from historical.schema import RESAMPLE_FROM_1MIN
 
 logger = logging.getLogger(__name__)
 
+
+def check_auth() -> bool:
+    """
+    Verify that the Schwab Market Data token is valid before starting the backfill.
+    Fetches one known ticker for a recent 1-day window as a live probe.
+    Returns True if data comes back, False if auth is broken.
+    """
+    from datetime import timezone
+    probe_end   = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
+    probe_start = int((datetime.now(timezone.utc) - timedelta(days=4)).timestamp() * 1000)
+    df = fetch_price_history_range("SPY", "1min", probe_start, probe_end)
+    if df.empty:
+        # Try to get a more specific error from auth status
+        try:
+            from agent.broker.schwab_market_data import _is_authorised, _auth_headers
+            authorised = _is_authorised()
+            headers    = _auth_headers()
+            logger.error(
+                "[Backfill] Auth probe returned empty. _is_authorised=%s, headers=%s",
+                authorised, "present" if headers else "MISSING",
+            )
+        except Exception as exc:
+            logger.error("[Backfill] Auth probe failed: %s", exc)
+        return False
+    logger.info("[Backfill] Auth OK — SPY probe returned %d bars", len(df))
+    return True
+
+
 # ── Rate limiting ──────────────────────────────────────────────────────────────
 # Backfill runs at 1.5 req/s — well below Schwab's burst limit and isolated
 # from the live scanner's own rate state.
@@ -191,6 +219,19 @@ def run(
         "[Backfill] %d tickers | %d years | %d chunks/ticker | ~%d total API calls",
         n_tickers, years, n_chunks, n_tickers * (n_chunks + 1),
     )
+
+    # ── Auth probe ───────────────────────────────────────────────────────────
+    if not resample_only:
+        logger.info("[Backfill] Checking Schwab Market Data auth...")
+        if not check_auth():
+            logger.error(
+                "[Backfill] ABORTING — Schwab Market Data token is missing or expired.\n"
+                "  The token is owned by the running nasdaq-agent service.\n"
+                "  Make sure the service is active: sudo systemctl status nasdaq-agent\n"
+                "  If the service is running, wait 30s for token refresh and try again.\n"
+                "  Token file location: ~/.nasdaq_agent/schwab_md_*.json"
+            )
+            return
 
     # ── Phase 1: 1min fetch ──────────────────────────────────────────────────
     if not resample_only and not daily_only:
