@@ -81,7 +81,7 @@ def make_ohlcv(
     noise = rng.uniform(0.1, 0.5, n)
     highs  = closes + noise
     lows   = closes - noise
-    opens  = np.roll(closes, 1)
+    opens  = np.clip(np.roll(closes, 1), lows, highs)
     opens[0] = start_price
 
     idx = pd.date_range("2025-01-10 09:30", periods=n, freq="1min")
