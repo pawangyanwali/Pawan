@@ -177,8 +177,8 @@ def fetch_1min_ticker(
                 pass
 
             consecutive_empty += 1
-            logger.debug("[Backfill] %s 1min chunk %s empty (%d)", ticker,
-                         _ms_label(start_ms), consecutive_empty)
+            logger.info("[Backfill] %s 1min %s: empty (%d consecutive)",
+                        ticker, _ms_label(start_ms), consecutive_empty)
             progress.mark_chunk_done(ticker, "1min", start_ms)
             if consecutive_empty >= empty_limit:
                 logger.info("[Backfill] %s: %d consecutive empty chunks — stopping early",
@@ -190,7 +190,8 @@ def fetch_1min_ticker(
         n = store.upsert_bars("1min", ticker, df)
         stored += n
         progress.mark_chunk_done(ticker, "1min", start_ms)
-        logger.debug("[Backfill] %s 1min chunk %s: +%d bars", ticker, _ms_label(start_ms), n)
+        logger.info("[Backfill] %s 1min %s: +%d bars (ticker total: %d)",
+                    ticker, _ms_label(start_ms), n, stored)
 
     return stored
 
@@ -295,30 +296,39 @@ def run(
 
     # ── Phase 1: 1min fetch ──────────────────────────────────────────────────
     if not resample_only and not daily_only:
-        logger.info("[Backfill] Phase 1: fetching 1min data")
+        logger.info("[Backfill] Phase 1: fetching 1min data for %d tickers", n_tickers)
+        total_1min = 0
         for i, ticker in enumerate(tickers, 1):
             done_chunks = sum(
                 1 for s, _ in chunks if progress.is_chunk_done(ticker, "1min", s)
             )
             if done_chunks == len(chunks):
-                logger.debug("[Backfill] %s 1min already complete — skip", ticker)
+                logger.info("[Backfill] [%d/%d] %s 1min: already complete — skip",
+                            i, n_tickers, ticker)
                 continue
-            logger.info("[Backfill] [%d/%d] %s: fetching 1min (%d/%d chunks done)",
+            logger.info("[Backfill] [%d/%d] %s 1min: starting (%d/%d chunks done)",
                         i, n_tickers, ticker, done_chunks, n_chunks)
             bars = fetch_1min_ticker(ticker, chunks)
-            logger.info("[Backfill] [%d/%d] %s: +%d bars stored", i, n_tickers, ticker, bars)
+            total_1min += bars
+            logger.info("[Backfill] [%d/%d] %s 1min: done  +%d bars  (phase total: %d)",
+                        i, n_tickers, ticker, bars, total_1min)
 
     # ── Phase 2: resample ────────────────────────────────────────────────────
     if not daily_only:
         logger.info("[Backfill] Phase 2: resampling 1min → derived intervals")
         for i, ticker in enumerate(tickers, 1):
             if progress.is_resampled(ticker):
+                logger.debug("[Backfill] [%d/%d] %s resample: skip (already done)",
+                             i, n_tickers, ticker)
                 continue
             result = resample_ticker(ticker)
             if result:
                 logger.info("[Backfill] [%d/%d] %s resampled: %s",
                             i, n_tickers, ticker,
                             ", ".join(f"{iv}={n}" for iv, n in result.items()))
+            else:
+                logger.info("[Backfill] [%d/%d] %s resample: no 1min data to resample",
+                            i, n_tickers, ticker)
 
     # ── Phase 3: 1day fetch ──────────────────────────────────────────────────
     logger.info("[Backfill] Phase 3: fetching 1day data for %d tickers", n_tickers)
