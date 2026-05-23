@@ -23,6 +23,15 @@ Usage examples
 
 # Reset all progress and start fresh:
   python -m nasdaq_agent.historical --reset
+
+# Retrain ML models using 2-year historical bars (replaces live Schwab fetch):
+  python -m nasdaq_agent.historical --retrain
+  python -m nasdaq_agent.historical --retrain --tickers AAPL,MSFT --workers 8
+
+# Run vectorized backtest over stored bars:
+  python -m nasdaq_agent.historical --backtest
+  python -m nasdaq_agent.historical --backtest --interval 5min --tickers AAPL,MSFT
+  python -m nasdaq_agent.historical --backtest --interval 1day
 """
 
 import argparse
@@ -110,6 +119,14 @@ def _parse_args() -> argparse.Namespace:
                    help="Only fetch/refresh 1day bars (fast)")
     p.add_argument("--status",        action="store_true",
                    help="Print progress summary and DB row counts, then exit")
+    p.add_argument("--retrain",       action="store_true",
+                   help="Retrain ML models using stored historical bars (no API calls)")
+    p.add_argument("--backtest",      action="store_true",
+                   help="Run vectorized backtest over stored historical bars")
+    p.add_argument("--interval",      type=str,   default="5min",
+                   help="Interval for --retrain / --backtest (default: 5min)")
+    p.add_argument("--workers",       type=int,   default=4,
+                   help="Parallel workers for --retrain (default: 4)")
     p.add_argument("--verbose",       action="store_true",
                    help="Debug logging")
     return p.parse_args()
@@ -164,6 +181,32 @@ def main() -> None:
         progress.load()
         store.init_tables()
         _print_status()
+        return
+
+    # ── Retrain ML models from historical bars ───────────────────────────────
+    if args.retrain:
+        store.init_tables()
+        if args.tickers:
+            tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+        else:
+            from config import NASDAQ_TICKERS
+            tickers = list(NASDAQ_TICKERS)
+        from historical.retrain import retrain_from_history
+        summary = retrain_from_history(tickers, interval=args.interval, max_workers=args.workers)
+        log.info("Retrain summary: %s", summary)
+        return
+
+    # ── Vectorized backtest over historical bars ─────────────────────────────
+    if args.backtest:
+        store.init_tables()
+        if args.tickers:
+            tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+        else:
+            from config import NASDAQ_TICKERS
+            tickers = list(NASDAQ_TICKERS)
+        from historical.backtest import run_backtest, print_report
+        reports = run_backtest(tickers, interval=args.interval)
+        print_report(reports)
         return
 
     # ── Reset ────────────────────────────────────────────────────────────────
