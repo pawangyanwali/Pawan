@@ -37,7 +37,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Try to load .env from the standard deployment location
+# Try to load .env from the standard deployment location.
+# Skip silently if the file is not readable (service user owns it).
 _ENV_PATHS = [
     _REPO_ROOT / ".env",
     Path("/opt/nasdaq-agent/nasdaq_agent/.env"),
@@ -45,11 +46,11 @@ _ENV_PATHS = [
 try:
     from dotenv import load_dotenv
     for _p in _ENV_PATHS:
-        if _p.exists():
+        if _p.exists() and os.access(_p, os.R_OK):
             load_dotenv(_p)
             break
-except ImportError:
-    pass  # dotenv optional — env vars may already be set
+except (ImportError, Exception):
+    pass  # env vars may already be exported in the shell
 
 
 def _setup_logging(verbose: bool) -> None:
