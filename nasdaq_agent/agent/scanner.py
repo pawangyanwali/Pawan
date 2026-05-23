@@ -1373,6 +1373,12 @@ class Scanner:
         batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
         batch_5m = fetch_batch_interval(active_tickers, "5min", 500, CACHE_TTL_5M)
         batch_1h = fetch_batch_interval(active_tickers, "1h",   500, CACHE_TTL_1H)
+        # On cold start (first scan), all three prior fetches made real API calls.
+        # A brief pause lets Schwab's per-minute bucket partially refill before
+        # the 1day sweep, preventing the 429 storm seen in production logs.
+        # On warm scans (cache hits), this branch is never reached.
+        if self._scan_count == 0:
+            time.sleep(8)
         batch_1d = fetch_batch_interval(active_tickers, "1day", 500, CACHE_TTL_1D)
 
         # Fetch SPY/QQQ + sector ETFs for regime, RS and sector context

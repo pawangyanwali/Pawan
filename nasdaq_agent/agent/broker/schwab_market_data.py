@@ -150,6 +150,7 @@ def _get(path: str, params: dict, timeout: int = 20) -> dict | list:
 
 _rate_lock    = threading.Lock()
 _backoff_until: float = 0.0        # epoch time when 429 back-off expires
+_backoff_last:  float = 0.0        # duration of the most recent back-off window
 _BACKOFF_BASE   = 2.0              # seconds for first 429 back-off
 _BACKOFF_MAX    = 30.0             # cap at 30s
 
@@ -160,28 +161,31 @@ _BG_GAP  = 1.0   # 1 s between background calls
 
 
 def _on_429() -> None:
-    """Called when Schwab returns HTTP 429. Sets a short back-off window.
+    """Called when Schwab returns HTTP 429. Sets an exponentially growing back-off.
 
     Concurrent requests often all 429 within the same millisecond.
-    Without a guard, 18 simultaneous 429s compound: 2→4→8→16→30s in <200ms.
-    Fix: only compound when NOT already in a backoff (remaining ≤ 1s).
+    Guard: only compound when NOT already inside an active back-off window.
+    _backoff_last tracks the previous duration so doubling works correctly
+    across retry cycles (remaining * 2 would always collapse to _BACKOFF_BASE).
     """
-    global _backoff_until
+    global _backoff_until, _backoff_last
     with _rate_lock:
         remaining = _backoff_until - time.time()
         if remaining > 1.0:
             return  # concurrent 429 — already backed off, don't compound
-        new_backoff = min(max(remaining * 2.0, _BACKOFF_BASE), _BACKOFF_MAX)
+        new_backoff = min(max(_backoff_last * 2.0, _BACKOFF_BASE), _BACKOFF_MAX)
+        _backoff_last = new_backoff
         _backoff_until = time.time() + new_backoff
     logger.warning(f"[Schwab MD] 429 → back-off {new_backoff:.1f}s")
 
 
 def _on_success() -> None:
-    """Clear back-off window after a clean response."""
-    global _backoff_until
+    """Clear back-off window and reset duration after a clean response."""
+    global _backoff_until, _backoff_last
     if _backoff_until > time.time():
         with _rate_lock:
             _backoff_until = 0.0
+    _backoff_last = 0.0
 
 
 # Prevent simultaneous refresh storms when many concurrent calls all get 401/403
