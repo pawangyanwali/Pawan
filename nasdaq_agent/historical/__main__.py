@@ -120,6 +120,20 @@ def main() -> None:
     # Late imports — after sys.path and env are set up
     from historical import fetcher, progress, store
 
+    # ── Load Schwab Market Data token from disk ──────────────────────────────
+    # The main service calls this at startup. The backfill is a separate process
+    # so it must load the stored token explicitly before making any API calls.
+    try:
+        from agent.broker.schwab_auth import load_stored_md_tokens
+        ok = load_stored_md_tokens()
+        if not ok:
+            log.warning(
+                "Schwab MD token could not be loaded from disk — auth will likely fail.\n"
+                "  Ensure nasdaq-agent service is running and has completed OAuth for Market Data."
+            )
+    except Exception as _auth_exc:
+        log.warning("Could not load MD token: %s", _auth_exc)
+
     # ── Status only ──────────────────────────────────────────────────────────
     if args.status:
         progress.load()
