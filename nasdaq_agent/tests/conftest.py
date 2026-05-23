@@ -3,6 +3,7 @@ Shared fixtures for all tests.
 """
 import os
 import sys
+import types
 import tempfile
 from pathlib import Path
 
@@ -12,6 +13,38 @@ import pytest
 
 # Ensure nasdaq_agent is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# ── ta library stub ────────────────────────────────────────────────────────────
+# Install a minimal stub when the real `ta` library is not available so that
+# test_comprehensive.py can import main.py (which chains through ml_model →
+# feature_engine → ta).  test_prediction.py / test_technical.py already guard
+# themselves with pytest.importorskip("ta") — we tell pytest to skip those
+# files when only the stub is available by using collect_ignore_glob.
+
+_TA_IS_REAL = False
+try:
+    import ta as _ta_check
+    _TA_IS_REAL = hasattr(getattr(_ta_check, "trend", None), "ema_indicator")
+except ImportError:
+    pass
+
+if not _TA_IS_REAL and "ta" not in sys.modules:
+    _ta_stub = types.ModuleType("ta")
+    _ta_stub._is_stub = True
+    for _sub in ("trend", "momentum", "volatility", "volume", "others"):
+        _m = types.ModuleType(f"ta.{_sub}")
+        _ta_stub.__dict__[_sub] = _m
+        sys.modules[f"ta.{_sub}"] = _m
+    sys.modules["ta"] = _ta_stub
+
+# Skip test files that require real ta when only the stub is present
+collect_ignore: list[str] = []
+if not _TA_IS_REAL:
+    _tests_dir = Path(__file__).parent
+    collect_ignore = [
+        str(_tests_dir / "test_prediction.py"),
+        str(_tests_dir / "test_technical.py"),
+    ]
 
 # ── Point SQLite DBs to temp files during tests ───────────────────────────────
 @pytest.fixture(autouse=True)

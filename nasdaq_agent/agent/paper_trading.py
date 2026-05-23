@@ -370,6 +370,10 @@ def maybe_open_trade(
     if direction not in ("BUY", "SELL"):
         return None
 
+    if price <= 0 or stop <= 0:
+        logger.debug(f"[PAPER] {ticker} skip: invalid price ({price}) or stop ({stop})")
+        return None
+
     min_conf = _get_min_confidence()
     if confidence < min_conf:
         logger.debug(f"[PAPER] {ticker} skip: conf {confidence:.0f}% < floor {min_conf:.0f}%")

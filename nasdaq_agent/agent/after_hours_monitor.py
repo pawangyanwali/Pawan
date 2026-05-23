@@ -219,6 +219,7 @@ def get_opening_bias(ticker: str) -> dict:
 
 def get_all_biases() -> list[dict]:
     """Return all current AH snapshots — used by the dashboard API."""
+    init_db()
     with _lock:
         with _conn() as c:
             rows = c.execute("""
