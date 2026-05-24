@@ -43,6 +43,11 @@ TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
+# Persistent backup dir one level above the git repo — survives git pull / redeploys.
+# e.g. /opt/nasdaq-agent/nasdaq_agent/data/ (primary)
+#      /opt/nasdaq-agent/tokens/             (backup)
+_BACKUP_DIR = Path(__file__).parent.parent.parent.parent / "tokens"
+
 
 # ── Reusable token manager ────────────────────────────────────────────────────
 
@@ -83,7 +88,14 @@ class _TokenManager:
 
     def _save(self) -> None:
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self._token_path.write_text(json.dumps(self._tokens, indent=2))
+        payload = json.dumps(self._tokens, indent=2)
+        self._token_path.write_text(payload)
+        # Mirror to persistent backup so tokens survive git-pull redeploys / container restarts.
+        try:
+            _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            (_BACKUP_DIR / self._token_path.name).write_text(payload)
+        except Exception as _e:
+            logger.debug(f"[Schwab/{self.name}] Token backup write skipped: {_e}")
 
     def _load_from_disk(self) -> dict:
         if self._token_path.exists():
@@ -91,6 +103,20 @@ class _TokenManager:
                 return json.loads(self._token_path.read_text())
             except Exception:
                 pass
+        # Primary path missing (fresh deploy / container restart) — try persistent backup.
+        backup_path = _BACKUP_DIR / self._token_path.name
+        if backup_path.exists():
+            try:
+                data = json.loads(backup_path.read_text())
+                # Restore to primary location so normal path works from here on.
+                _DATA_DIR.mkdir(parents=True, exist_ok=True)
+                self._token_path.write_text(json.dumps(data, indent=2))
+                logger.info(
+                    f"[Schwab/{self.name}] Tokens restored from persistent backup → {self._token_path}"
+                )
+                return data
+            except Exception as _e:
+                logger.warning(f"[Schwab/{self.name}] Backup restore failed: {_e}")
         return {}
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
