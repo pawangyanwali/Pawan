@@ -84,12 +84,22 @@ from agent.after_hours_monitor import (
 from agent.trading_hours import get_trading_tier, is_signal_recommended
 
 try:
-    from agent.algo_learning_engine import get_engine as _get_ale, get_selector_weights as _get_sel_weights
+    from agent.algo_learning_engine import (
+        get_engine as _get_ale,
+        get_selector_weights as _get_sel_weights,
+        get_algo_params as _get_algo_params,
+    )
     _ALE_AVAILABLE = True
 except ImportError:
     _ALE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+# Per-signal consecutive-fire counter for entry_window_bars staleness detection.
+# Keyed by "TICKER:ALGO_NAME". Incremented each cycle the signal fires; deleted
+# when the signal stops firing so the next fire starts fresh.
+_sig_consec: dict[str, int] = {}
+_sig_consec_lock = threading.Lock()
 
 
 def _scan_interval() -> int:
@@ -1227,6 +1237,40 @@ def analyse_ticker(
                 except Exception as _bt_err:
                     logger.debug("[%s] bt_record algo error: %s", ticker, _bt_err)
 
+                # ── Increment consecutive-fire counter (used by entry_window_bars) ───
+                _sig_key = f"{ticker}:{_asig['algo']}"
+                with _sig_consec_lock:
+                    _consec = _sig_consec.get(_sig_key, 0) + 1
+                    _sig_consec[_sig_key] = _consec
+
+                # ── conf_gate: per-algo-family learned minimum confidence ────────────
+                if _ALE_AVAILABLE:
+                    try:
+                        _cg = float(_get_algo_params(_asig["algo"]).get("conf_gate", 55.0))
+                        if float(_asig["confidence"]) < _cg:
+                            logger.debug(
+                                "[%s] %s conf %.1f < conf_gate %.1f — suppressed",
+                                ticker, _asig["algo"], _asig["confidence"], _cg,
+                            )
+                            continue
+                    except Exception as _cge:
+                        logger.debug("[%s] conf_gate error: %s", ticker, _cge)
+
+                # ── entry_window_bars: staleness guard ───────────────────────────────
+                # Signals that have been firing for too many consecutive scan cycles
+                # are considered stale (breakout already digested — don't chase).
+                if _ALE_AVAILABLE:
+                    try:
+                        _ew = int(_get_algo_params(_asig["algo"]).get("entry_window_bars", 3))
+                        if _consec > _ew:
+                            logger.debug(
+                                "[%s] %s stale: cycle %d > entry_window %d — trade skipped",
+                                ticker, _asig["algo"], _consec, _ew,
+                            )
+                            continue
+                    except Exception as _ewe:
+                        logger.debug("[%s] entry_window error: %s", ticker, _ewe)
+
                 # Phase 2 staged deployment: SHADOW (observe only) | PAPER | LIVE
                 _routing = "PAPER"
                 if _ALE_AVAILABLE:
@@ -1265,6 +1309,14 @@ def analyse_ticker(
                 log_algo_signals(ticker, _sig.algo_signals, trade_opened=_algo_trade_opened)
             except Exception as _le:
                 logger.debug("[%s] algo log error: %s", ticker, _le)
+
+        # Reset consecutive counters for signals that stopped firing this cycle
+        # so the next fire is treated as fresh.
+        _fired = {f"{ticker}:{s['algo']}" for s in (_sig.algo_signals or [])}
+        with _sig_consec_lock:
+            for _k in [k for k in list(_sig_consec) if k.startswith(f"{ticker}:")]:
+                if _k not in _fired:
+                    del _sig_consec[_k]
 
         return _sig
     except Exception as e:
