@@ -756,15 +756,19 @@ def analyse_ticker(
             # During regular session: read stored AH bias to inform confidence
             _ah_bias = get_opening_bias(ticker)
 
-        # Apply backtest-derived confidence calibration
+        # Apply backtest-derived confidence calibration (outcome predictor when trained,
+        # simple context-win-rate table as fallback).
         pred["confidence"] = adjust_confidence(
-            confidence  = pred["confidence"],
-            vwap_event  = vwap_sig["event"],
-            rsi_zone    = pred.get("rsi_zone", ""),
-            session     = sess_info.get("session", ""),
-            regime      = regime.regime,
-            entry_type  = pred.get("entry_type", ""),
-            direction   = pred["direction"],
+            confidence    = pred["confidence"],
+            vwap_event    = vwap_sig["event"],
+            rsi_zone      = pred.get("rsi_zone", ""),
+            session       = sess_info.get("session", ""),
+            regime        = regime.regime,
+            entry_type    = pred.get("entry_type", ""),
+            direction     = pred["direction"],
+            rr_ratio      = float(pred.get("rr_ratio", 0.0) or 0.0),
+            mtf_alignment = float(pred.get("mtf_alignment", 0.0) or 0.0),
+            rsi_value     = float(pred.get("rsi", 50.0) or 50.0),
         )
 
         # IMMEDIATE entries are structurally weaker (57% WR vs 62-70% for setups).
