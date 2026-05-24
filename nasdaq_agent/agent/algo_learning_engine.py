@@ -1111,6 +1111,13 @@ class AlgoLearningEngine:
             # Persist after each cycle
             self.save()
 
+            # ── Phase 2: drift detection, walk-forward, transfer, deployment ──
+            try:
+                from agent.algo_learning_p2 import get_phase2_engine as _get_p2
+                _get_p2().run_cycle(new_outcomes_df, cycle_num)
+            except Exception as _p2_err:
+                logger.warning(f"[AlgoLearningEngine] Phase 2 error: {_p2_err}")
+
         except Exception as exc:
             logger.warning(f"[AlgoLearningEngine] run_cycle error: {exc}")
 
@@ -1143,6 +1150,22 @@ class AlgoLearningEngine:
             return self._counterfact.record_suppressed(**kwargs)
         except Exception:
             return ""
+
+    def get_routing(self, algo_name: str, ucb_weight: float = 1.0) -> str:
+        """Signal routing from Phase 2 StagedDeploymentController: SHADOW|PAPER|LIVE."""
+        try:
+            from agent.algo_learning_p2 import get_phase2_engine as _get_p2
+            return _get_p2().get_routing(algo_name, ucb_weight)
+        except Exception:
+            return "PAPER"
+
+    def get_drift_summary(self) -> dict:
+        """Phase 2 concept drift state for dashboard API."""
+        try:
+            from agent.algo_learning_p2 import get_phase2_engine as _get_p2
+            return _get_p2().get_drift_summary()
+        except Exception:
+            return {}
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────
