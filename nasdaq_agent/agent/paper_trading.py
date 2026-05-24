@@ -501,6 +501,34 @@ def maybe_open_trade(
             return cur.lastrowid
 
 
+def update_trade_stop(trade_id: int, new_stop: float, reason: str = "") -> bool:
+    """
+    Update the stop_loss for an open trade (used by RegimeTransitionHandler).
+    Returns True if the trade was found and updated.
+    """
+    try:
+        with _lock:
+            with _conn() as c:
+                row = c.execute(
+                    "SELECT id, stop FROM paper_trades WHERE id=? AND status='OPEN'",
+                    (trade_id,)
+                ).fetchone()
+                if not row:
+                    return False
+                c.execute(
+                    "UPDATE paper_trades SET stop=? WHERE id=?",
+                    (round(float(new_stop), 4), trade_id)
+                )
+                c.commit()
+                logger.info(
+                    f"[PAPER] Trade #{trade_id} stop updated → ${new_stop:.4f} ({reason})"
+                )
+                return True
+    except Exception as exc:
+        logger.warning(f"[PAPER] update_trade_stop error: {exc}")
+        return False
+
+
 def update_open_trades(ticker: str, df, current_price: float,
                        bar_high: float = 0.0, bar_low: float = 0.0) -> None:
     """

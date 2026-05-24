@@ -44,6 +44,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Adaptive parameter integration ───────────────────────────────────────────
+# Imports the algo learning engine to get tuned parameter values.
+# Falls back gracefully to hardcoded defaults if the engine is unavailable.
+try:
+    from agent.algo_learning_engine import get_algo_params as _get_algo_params
+    _ALE_AVAILABLE = True
+except ImportError:
+    _ALE_AVAILABLE = False
+
+
+def _param(algo_family: str, name: str, default: float) -> float:
+    """
+    Get current tuned parameter value from the learning engine, fall back to default.
+    Used by all algo eval functions (proof-of-concept shown in eval_orb5;
+    all other algos follow the same pattern).
+    """
+    if not _ALE_AVAILABLE:
+        return default
+    try:
+        params = _get_algo_params(algo_family)
+        return float(params.get(name, default))
+    except Exception:
+        return default
+
 
 @dataclass
 class AlgoResult:
@@ -97,14 +121,19 @@ def eval_orb5(sig) -> Optional[AlgoResult]:
         price = float(sig.price)
         or_range = orh - orl
 
-        if bo == "BULL" and rvol >= 1.5 and gate != "BEAR":
+        # Adaptive parameters — tuned by AlgoLearningEngine, fall back to defaults
+        # Other algos follow this same _param() pattern.
+        _rvol_gate   = _param("ORB", "rvol_gate",   1.5)
+        _target_mult = _param("ORB", "target_mult", 1.5)
+
+        if bo == "BULL" and rvol >= _rvol_gate and gate != "BEAR":
             entry  = price
             stop   = orl
-            target = entry + or_range * 1.5
+            target = entry + or_range * _target_mult
             conf   = min(95, 60 + (rvol - 1.5) * 10 + (10 if gate == "BULL" else 0))
             reason = (
                 f"ORB-5 bull breakout: price {price:.2f} > ORH {orh:.2f}; "
-                f"RVOL {rvol:.1f}x; TF gate {gate}"
+                f"RVOL {rvol:.1f}x (gate {_rvol_gate:.1f}x); TF gate {gate}"
             )
             return AlgoResult(
                 algo="ORB5_BULL", direction="BUY",
@@ -113,14 +142,14 @@ def eval_orb5(sig) -> Optional[AlgoResult]:
                 rr=_rr(entry, stop, target), reason=reason,
             )
 
-        if bo == "BEAR" and rvol >= 1.5 and gate != "BULL":
+        if bo == "BEAR" and rvol >= _rvol_gate and gate != "BULL":
             entry  = price
             stop   = orh
-            target = entry - or_range * 1.5
+            target = entry - or_range * _target_mult
             conf   = min(95, 60 + (rvol - 1.5) * 10 + (10 if gate == "BEAR" else 0))
             reason = (
                 f"ORB-5 bear breakdown: price {price:.2f} < ORL {orl:.2f}; "
-                f"RVOL {rvol:.1f}x; TF gate {gate}"
+                f"RVOL {rvol:.1f}x (gate {_rvol_gate:.1f}x); TF gate {gate}"
             )
             return AlgoResult(
                 algo="ORB5_BEAR", direction="SELL",

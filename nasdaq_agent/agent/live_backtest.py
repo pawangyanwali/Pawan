@@ -89,7 +89,10 @@ def init_db() -> None:
                 bars_tracked  INTEGER DEFAULT 0,
                 max_favorable_r REAL DEFAULT 0,
                 pnl_pct       REAL,
-                r_multiple    REAL
+                r_multiple    REAL,
+                algo_name     TEXT DEFAULT '',
+                is_counterfactual INTEGER DEFAULT 0,
+                suppression_reason TEXT DEFAULT ''
             )
         """)
         c.execute("""
@@ -127,6 +130,9 @@ def init_db() -> None:
             ("max_favorable_r","REAL DEFAULT 0"),
             ("pnl_pct",        "REAL"),
             ("r_multiple",     "REAL"),
+            ("algo_name",        "TEXT DEFAULT ''"),
+            ("is_counterfactual", "INTEGER DEFAULT 0"),
+            ("suppression_reason", "TEXT DEFAULT ''"),
         ]:
             try:
                 c.execute(f"ALTER TABLE bt_signals ADD COLUMN {col} {typedef}")
@@ -164,26 +170,30 @@ def init_db() -> None:
 # ── Record a new signal ────────────────────────────────────────────────────────
 
 def record_signal(
-    ticker:       str,
-    direction:    str,
-    entry_price:  float,
-    target:       float,
-    stop:         float,
-    rr_ratio:     float = 0.0,
-    confidence:   float = 0.0,
-    session:      str   = "",
-    regime:       str   = "",
-    vwap_event:   str   = "",
-    rsi_zone:     str   = "",
-    rsi_value:    float = 50.0,
-    sector_etf:   str   = "",
-    sector_trend: str   = "",
-    entry_type:   str   = "IMMEDIATE",
-    mtf_alignment: str  = "",
+    ticker:             str,
+    direction:          str,
+    entry_price:        float,
+    target:             float,
+    stop:               float,
+    rr_ratio:           float = 0.0,
+    confidence:         float = 0.0,
+    session:            str   = "",
+    regime:             str   = "",
+    vwap_event:         str   = "",
+    rsi_zone:           str   = "",
+    rsi_value:          float = 50.0,
+    sector_etf:         str   = "",
+    sector_trend:       str   = "",
+    entry_type:         str   = "IMMEDIATE",
+    mtf_alignment:      str   = "",
+    algo_name:          str   = "",
+    is_counterfactual:  int   = 0,
+    suppression_reason: str   = "",
 ) -> str:
     """
     Record a new signal for tracking.  Returns signal_id.
     Duplicate signals for the same ticker within the same scan are ignored.
+    Counterfactual (shadow) signals use is_counterfactual=1.
     """
     if direction not in ("BUY", "SELL"):
         return ""
@@ -206,8 +216,9 @@ def record_signal(
                 INSERT INTO bt_signals
                   (signal_id, fired_at, ticker, direction, entry_price, target, stop,
                    rr_ratio, confidence, session, regime, vwap_event, rsi_zone, rsi_value,
-                   sector_etf, sector_trend, entry_type, mtf_alignment)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   sector_etf, sector_trend, entry_type, mtf_alignment,
+                   algo_name, is_counterfactual, suppression_reason)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 signal_id,
                 datetime.now(timezone.utc).isoformat(),
@@ -216,6 +227,7 @@ def record_signal(
                 round(rr_ratio, 3), round(confidence, 2),
                 session, regime, vwap_event, rsi_zone, round(rsi_value, 1),
                 sector_etf, sector_trend, entry_type, mtf_alignment,
+                algo_name, int(is_counterfactual), suppression_reason,
             ))
             c.commit()
             logger.debug(f"[BT] Tracking {direction} {ticker} @ ${entry_price:.2f}  T:${target:.2f}  S:${stop:.2f}")

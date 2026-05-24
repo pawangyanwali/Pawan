@@ -83,6 +83,12 @@ from agent.after_hours_monitor import (
 )
 from agent.trading_hours import get_trading_tier, is_signal_recommended
 
+try:
+    from agent.algo_learning_engine import get_engine as _get_ale, get_selector_weights as _get_sel_weights
+    _ALE_AVAILABLE = True
+except ImportError:
+    _ALE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -1182,8 +1188,45 @@ def analyse_ticker(
 
         # Log algo fires and open algo-driven paper trades
         if _sig.algo_signals:
+            # Apply AlgoSelector weights to confidence scores before processing
+            if _ALE_AVAILABLE and _sig.algo_signals:
+                try:
+                    _context_key = f"{regime.regime}:{sess_info.get('session','')}:{vwap_sig.get('event','')}"
+                    _algo_names  = [a["algo"] for a in _sig.algo_signals]
+                    _sel_weights = _get_sel_weights(_algo_names, _context_key)
+                    for _asig in _sig.algo_signals:
+                        _asig["confidence"] = round(float(min(max(
+                            _asig["confidence"] * _sel_weights.get(_asig["algo"], 1.0),
+                            25.0), 95.0)), 1)
+                except Exception as _ale_err:
+                    logger.debug("[%s] AlgoSelector weight error: %s", ticker, _ale_err)
+
             _algo_trade_opened = False
             for _asig in _sig.algo_signals:
+                # Record algo signals in bt_signals for learning engine analysis
+                try:
+                    bt_record(
+                        ticker        = ticker,
+                        direction     = _asig["direction"],
+                        entry_price   = float(_asig["entry"]),
+                        target        = float(_asig["target"]),
+                        stop          = float(_asig["stop"]),
+                        rr_ratio      = float(_asig.get("rr", 0)),
+                        confidence    = float(_asig["confidence"]),
+                        session       = sess_info.get("session", ""),
+                        regime        = regime.regime,
+                        vwap_event    = vwap_sig.get("event", ""),
+                        rsi_zone      = pred.get("rsi_zone", ""),
+                        rsi_value     = float(pred.get("rsi_value", 50.0)),
+                        sector_etf    = sector_ctx.etf,
+                        sector_trend  = sector_ctx.sector_trend,
+                        entry_type    = "ALGO",
+                        mtf_alignment = mtf["alignment"],
+                        algo_name     = _asig["algo"],
+                    )
+                except Exception as _bt_err:
+                    logger.debug("[%s] bt_record algo error: %s", ticker, _bt_err)
+
                 _trade_id = maybe_open_trade(
                     ticker            = ticker,
                     direction         = _asig["direction"],

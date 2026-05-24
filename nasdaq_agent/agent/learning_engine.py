@@ -245,6 +245,16 @@ class LearningEngine:
         self._last_threshold = new_threshold
         self._last_cycle_ts  = ts
 
+        # ── Wire in algo learning engine ──────────────────────────────────────
+        try:
+            from agent.algo_learning_engine import get_engine as _get_ale
+            from agent.live_backtest import get_outcomes_for_ml
+            outcomes_df = get_outcomes_for_ml(min_count=1)
+            if outcomes_df is not None and not outcomes_df.empty:
+                _get_ale().run_cycle(outcomes_df, self._cycle_count)
+        except Exception as _ale_err:
+            _log(f"AlgoLearningEngine cycle error: {_ale_err}", level="WARNING")
+
         # ── 5. Maybe trigger ML model retrain (heavier operation) ────────────
         new_bt_outcomes = bt_count - self._last_bt_count
         new_pt_outcomes = pt_count - self._last_pt_count
