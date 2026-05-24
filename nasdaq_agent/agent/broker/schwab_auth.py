@@ -43,10 +43,9 @@ TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
-# Persistent backup dir one level above the git repo — survives git pull / redeploys.
-# e.g. /opt/nasdaq-agent/nasdaq_agent/data/ (primary)
-#      /opt/nasdaq-agent/tokens/             (backup)
-_BACKUP_DIR = Path(__file__).parent.parent.parent.parent / "tokens"
+# Persistent backup dir in the app user's home — writable without sudo, survives redeploys.
+# Override with SCHWAB_TOKEN_BACKUP_DIR env var if a different path is preferred.
+_BACKUP_DIR = Path(os.getenv("SCHWAB_TOKEN_BACKUP_DIR", Path.home() / ".nasdaq-agent"))
 
 
 # ── Reusable token manager ────────────────────────────────────────────────────
