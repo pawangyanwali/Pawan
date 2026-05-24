@@ -132,14 +132,24 @@ class ConnectionManager:
         self.active.discard(ws)
 
     async def broadcast(self, message: str) -> None:
-        dead = set()
-        for ws in self.active:
+        # Snapshot first — prevents RuntimeError if a disconnect() fires during await.
+        snapshot = list(self.active)
+        if not snapshot:
+            return
+
+        async def _send(ws: WebSocket) -> WebSocket | None:
             try:
-                await ws.send_text(message)
+                # Per-client timeout: one frozen browser can't stall all others.
+                await asyncio.wait_for(ws.send_text(message), timeout=5.0)
+                return None
             except Exception:
-                dead.add(ws)
+                return ws
+
+        # Send to all clients in parallel — a slow client no longer blocks fast ones.
+        dead = await asyncio.gather(*[_send(ws) for ws in snapshot])
         for ws in dead:
-            self.active.discard(ws)
+            if ws is not None:
+                self.active.discard(ws)
 
 
 manager = ConnectionManager()
