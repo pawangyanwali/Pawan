@@ -1736,6 +1736,66 @@ TRADING_MAX_POSITION_PCT=10
   </div>
 </div>
 
+<!-- Learning Engine Panel -->
+<div id="learning-panel" style="position:fixed;bottom:20px;right:20px;width:480px;max-width:calc(100vw - 40px);z-index:400;font-family:'SF Mono','Fira Code',monospace;font-size:11px">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.5)">
+    <!-- Panel header — click to collapse/expand -->
+    <div id="learning-panel-header" onclick="toggleLearningPanel()" style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;cursor:pointer;background:var(--surface2);border-bottom:1px solid var(--border);user-select:none">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:12px;font-weight:700;color:var(--text)">Learning Engine</span>
+        <span id="lp-deploy-badge" style="padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(100,116,139,.2);color:var(--muted);border:1px solid var(--border)">—</span>
+        <span id="lp-drift-badge" style="display:none;padding:2px 7px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid var(--red)">0 drift</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="lp-updated" style="font-size:9px;color:var(--muted)"></span>
+        <span id="lp-toggle-icon" style="color:var(--muted);font-size:12px">▲</span>
+      </div>
+    </div>
+
+    <!-- Panel body (collapsible) -->
+    <div id="learning-panel-body" style="display:none">
+
+      <!-- Section 1: Deployment status row -->
+      <div style="padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;flex-shrink:0">Deployment:</span>
+        <span id="lp-deploy-full" style="font-size:11px;font-weight:700;color:var(--muted)">—</span>
+        <span style="flex:1"></span>
+        <span id="lp-drift-count" style="font-size:10px;color:var(--muted)">Drift alerts: <strong id="lp-drift-num" style="color:var(--text)">—</strong></span>
+      </div>
+
+      <!-- Section 2: Per-family parameter table -->
+      <div style="padding:8px 14px 4px;border-bottom:1px solid var(--border)">
+        <div class="bt-section-title" style="margin:0 0 6px">Learned Parameters per Family</div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:10px">
+            <thead>
+              <tr style="background:var(--surface2)">
+                <th style="padding:4px 6px;text-align:left;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border);white-space:nowrap">Family</th>
+                <th style="padding:4px 6px;text-align:right;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border);white-space:nowrap">RVol Gate</th>
+                <th style="padding:4px 6px;text-align:right;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border);white-space:nowrap">Conf Gate</th>
+                <th style="padding:4px 6px;text-align:right;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border);white-space:nowrap">Entry Win</th>
+                <th style="padding:4px 6px;text-align:right;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border);white-space:nowrap">Tgt Mult</th>
+              </tr>
+            </thead>
+            <tbody id="lp-params-tbody">
+              <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:12px">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Section 3: Recent param change log -->
+      <div style="padding:8px 14px 10px">
+        <div class="bt-section-title" style="margin:0 0 6px">Recent Param Changes</div>
+        <div id="lp-param-log" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px 10px;max-height:100px;overflow-y:auto;font-size:10px;line-height:1.7;color:var(--muted)">
+          <span style="color:var(--muted)">Loading…</span>
+        </div>
+      </div>
+
+    </div><!-- /panel body -->
+  </div>
+</div>
+
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL', tierFilter = 'ALL';
@@ -6059,6 +6119,118 @@ async function brokerToggleAuto() {
     await loadBrokerStatus();
   } catch(e) {}
 }
+
+// ─── Learning Engine Panel ────────────────────────────────────────────────────
+
+let _lpCollapsed = true;  // panel starts collapsed
+
+function toggleLearningPanel() {
+  _lpCollapsed = !_lpCollapsed;
+  const body = document.getElementById('learning-panel-body');
+  const icon = document.getElementById('lp-toggle-icon');
+  if (body) body.style.display = _lpCollapsed ? 'none' : 'block';
+  if (icon) icon.textContent = _lpCollapsed ? '▲' : '▼';
+  if (!_lpCollapsed) refreshLearningPanel();
+}
+
+const _LP_DEFAULTS = {rvol_gate: 1.5, conf_gate: 55.0, target_mult: 1.5, stop_mult: 1.0, entry_window_bars: 3};
+
+function _lpFmtVal(val, param) {
+  if (val == null) return '<span style="color:var(--muted)">—</span>';
+  const def = _LP_DEFAULTS[param];
+  const changed = def != null && Math.abs(val - def) > 0.001;
+  const color = changed ? 'var(--yellow)' : 'var(--text)';
+  const disp = param === 'conf_gate' ? val.toFixed(1) : (param === 'entry_window_bars' ? val.toFixed(0) : val.toFixed(2));
+  return `<span style="color:${color};font-weight:${changed ? '700' : '400'}">${disp}</span>`;
+}
+
+async function refreshLearningPanel() {
+  // 1. Fetch params
+  try {
+    const pd = await fetch(`${BACKEND_HTTP}/api/learning/params`, {signal: AbortSignal.timeout(8000)}).then(r => r.json());
+    const tbody = document.getElementById('lp-params-tbody');
+    if (tbody) {
+      if (!pd.available) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:10px">Learning engine not available</td></tr>';
+      } else {
+        const families = ['ORB','GAP_TREND','GAP_FADE','BREAKOUT','FLAG','VWAP_SCALP','LEVEL_SCALP','RS_REGIME'];
+        tbody.innerHTML = families.map(f => {
+          const p = (pd.families || {})[f] || {};
+          return `<tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:3px 6px;font-weight:600;color:var(--text);white-space:nowrap">${f}</td>
+            <td style="padding:3px 6px;text-align:right">${_lpFmtVal(p.rvol_gate, 'rvol_gate')}</td>
+            <td style="padding:3px 6px;text-align:right">${_lpFmtVal(p.conf_gate, 'conf_gate')}</td>
+            <td style="padding:3px 6px;text-align:right">${_lpFmtVal(p.entry_window_bars, 'entry_window_bars')}</td>
+            <td style="padding:3px 6px;text-align:right">${_lpFmtVal(p.target_mult, 'target_mult')}</td>
+          </tr>`;
+        }).join('');
+      }
+    }
+  } catch(e) {
+    const tbody = document.getElementById('lp-params-tbody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:10px">Unavailable</td></tr>';
+  }
+
+  // 2. Fetch phase2 — deployment mode + drift alerts
+  try {
+    const p2 = await fetch(`${BACKEND_HTTP}/api/learning/phase2`, {signal: AbortSignal.timeout(8000)}).then(r => r.json());
+    const mode = (p2.deployment || {}).current_mode || (p2.available === false ? 'N/A' : 'SHADOW');
+    const drifts = ((p2.drift || {}).material_drifts || []).length;
+
+    // Deployment badge colors
+    const modeColors = {
+      SHADOW: {bg: 'rgba(100,116,139,.2)', color: 'var(--muted)', border: 'var(--border)'},
+      PAPER_ONLY: {bg: 'rgba(245,158,11,.15)', color: 'var(--yellow)', border: 'var(--yellow)'},
+      PARTIAL_LIVE: {bg: 'rgba(249,115,22,.15)', color: '#fb923c', border: '#fb923c'},
+      FULL_LIVE: {bg: 'rgba(34,197,94,.15)', color: 'var(--green)', border: 'var(--green)'},
+    };
+    const mc = modeColors[mode] || modeColors.SHADOW;
+
+    const smallBadge = document.getElementById('lp-deploy-badge');
+    const fullBadge = document.getElementById('lp-deploy-full');
+    if (smallBadge) {
+      smallBadge.textContent = mode;
+      smallBadge.style.background = mc.bg;
+      smallBadge.style.color = mc.color;
+      smallBadge.style.borderColor = mc.border;
+    }
+    if (fullBadge) {
+      fullBadge.textContent = mode;
+      fullBadge.style.color = mc.color;
+    }
+
+    const driftBadge = document.getElementById('lp-drift-badge');
+    const driftNum = document.getElementById('lp-drift-num');
+    if (driftBadge) driftBadge.style.display = drifts > 0 ? 'inline-block' : 'none';
+    if (driftBadge) driftBadge.textContent = `${drifts} drift${drifts !== 1 ? 's' : ''}`;
+    if (driftNum) { driftNum.textContent = drifts; driftNum.style.color = drifts > 0 ? 'var(--red)' : 'var(--text)'; }
+  } catch(e) {}
+
+  // 3. Fetch learning log — filter for param changes
+  try {
+    const ld = await fetch(`${BACKEND_HTTP}/api/learning-log?limit=50`, {signal: AbortSignal.timeout(8000)}).then(r => r.json());
+    const entries = (ld.log || []).filter(e => e.message && /param/i.test(e.message)).slice(-5).reverse();
+    const logEl = document.getElementById('lp-param-log');
+    if (logEl) {
+      if (!entries.length) {
+        logEl.innerHTML = '<span style="color:var(--muted)">No param changes logged yet.</span>';
+      } else {
+        logEl.innerHTML = entries.map(e => {
+          const ts = e.ts ? new Date(e.ts).toLocaleTimeString() : '';
+          return `<div style="margin-bottom:2px"><span style="color:#475569;margin-right:6px">${ts}</span><span style="color:var(--yellow)">${e.message}</span></div>`;
+        }).join('');
+      }
+    }
+  } catch(e) {}
+
+  // Update timestamp
+  const upd = document.getElementById('lp-updated');
+  if (upd) upd.textContent = new Date().toLocaleTimeString();
+}
+
+// Initial load + 60s polling
+refreshLearningPanel();
+setInterval(refreshLearningPanel, 60000);
 </script>
 </body>
 </html>

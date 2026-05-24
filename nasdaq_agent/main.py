@@ -51,6 +51,20 @@ try:
 except ImportError:
     _get_p2_engine = None  # type: ignore[assignment]
     _P2_AVAILABLE = False
+
+try:
+    from agent.algo_learning_engine import get_algo_params as _get_algo_params
+    _ALE_AVAILABLE = True
+except ImportError:
+    _get_algo_params = None  # type: ignore[assignment]
+    _ALE_AVAILABLE = False
+
+try:
+    from agent.walk_forward_trainer import get_walk_forward_trainer as _get_wf_trainer
+    _WFT_AVAILABLE = True
+except ImportError:
+    _get_wf_trainer = None  # type: ignore[assignment]
+    _WFT_AVAILABLE = False
 from agent.broker.schwab_auth import (
     load_stored_tokens, load_stored_md_tokens,
     get_token_status, get_md_token_status,
@@ -1266,6 +1280,42 @@ async def backtest_path(signal_id: str):
     return {"signal_id": signal_id, "path": get_price_path(signal_id)}
 
 
+@app.get("/api/learning/params")
+async def learning_params_status():
+    """Per-family learned parameter values for dashboard display."""
+    if not _ALE_AVAILABLE:
+        return {"available": False, "families": {}, "defaults": {}}
+
+    # Representative algo per family — used to look up current tuned params
+    _FAMILY_REPRESENTATIVES = {
+        "ORB":         "ORB5_BULL",
+        "GAP_TREND":   "GAP_AND_GO_BULL",
+        "GAP_FADE":    "GAP_FADE_BULL",
+        "BREAKOUT":    "PDH_BREAKOUT_BULL",
+        "FLAG":        "BULL_FLAG",
+        "VWAP_SCALP":  "VWAP_TOUCH_SCALP_BULL",
+        "LEVEL_SCALP": "LEVEL_REJECTION_SCALP_BULL",
+        "RS_REGIME":   "SPY_BETA_CATCHUP_BULL",
+    }
+    defaults = {
+        "rvol_gate": 1.5,
+        "conf_gate": 55.0,
+        "target_mult": 1.5,
+        "stop_mult": 1.0,
+        "entry_window_bars": 3,
+    }
+    loop = asyncio.get_running_loop()
+    families: dict = {}
+    for family, algo_name in _FAMILY_REPRESENTATIVES.items():
+        try:
+            params = await loop.run_in_executor(None, lambda a=algo_name: _get_algo_params(a))
+            families[family] = {k: params.get(k, defaults[k]) for k in defaults}
+        except Exception as exc:
+            logger.debug("learning/params family %s error: %s", family, exc)
+            families[family] = dict(defaults)
+    return {"available": True, "families": families, "defaults": defaults}
+
+
 @app.get("/api/learning-status")
 async def learning_status():
     """Adaptive filter state — blocked contexts, dynamic threshold, win rate progress."""
@@ -1302,6 +1352,20 @@ async def learning_phase2_status():
         return {"available": True, **status}
     except Exception as exc:
         logger.warning("phase2 status error: %s", exc)
+        return {"available": True, "error": str(exc)}
+
+
+@app.get("/api/learning/walk-forward-stats")
+async def walk_forward_stats():
+    """Walk-forward trainer last-run summary — per-family stats and param recommendations."""
+    if not _WFT_AVAILABLE:
+        return {"available": False}
+    loop = asyncio.get_running_loop()
+    try:
+        status = await loop.run_in_executor(None, lambda: _get_wf_trainer().get_status())
+        return {"available": True, **status}
+    except Exception as exc:
+        logger.warning("walk-forward-stats error: %s", exc)
         return {"available": True, "error": str(exc)}
 
 

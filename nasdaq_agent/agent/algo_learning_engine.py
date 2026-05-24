@@ -528,14 +528,46 @@ class AlgoSelector:
 class ParameterAdapter:
     """
     Wires LossAnalyzer → ParameterControlRegistry to suggest param adjustments.
-    Uses a very slow EWMA (alpha=0.10) to avoid over-fitting to recent trades.
+    Uses a slow EWMA (base alpha=0.10) whose effective rate scales up when Phase 2
+    detects concept drift — faster adaptation under MATERIAL drift, conservative
+    during stable periods.
     """
 
-    _EWMA_ALPHA = 0.10
+    _EWMA_ALPHA_BASE = 0.10
+    # Drift multipliers: stable → 1×, WARNING → 1.5×, MATERIAL → 2×
+    _DRIFT_MULT_STABLE   = 1.0
+    _DRIFT_MULT_WARNING  = 1.5
+    _DRIFT_MULT_MATERIAL = 2.0
 
     def __init__(self, registry: ParameterControlRegistry, loss_analyzer: LossAnalyzer):
         self._reg  = registry
         self._loss = loss_analyzer
+
+    def _get_effective_alpha(self, base: float | None = None) -> float:
+        """
+        Return the effective EWMA alpha, scaled by current drift severity.
+        Reads from Phase 2 ConceptDriftDetector without importing at class definition
+        time (avoids circular imports and is safe if Phase 2 is unavailable).
+        """
+        if base is None:
+            base = self._EWMA_ALPHA_BASE
+        try:
+            from agent.algo_learning_p2 import get_phase2_engine as _gp2
+            drift = _gp2().get_drift_summary()
+            material_drifts = drift.get("material_drifts", [])
+            recent_events   = drift.get("recent_events",   [])
+            warning_drifts  = [
+                e for e in recent_events
+                if isinstance(e, dict) and e.get("level") == "WARNING"
+                and e.get("feature") not in material_drifts
+            ]
+            if material_drifts:
+                return base * self._DRIFT_MULT_MATERIAL
+            if warning_drifts:
+                return base * self._DRIFT_MULT_WARNING
+        except Exception:
+            pass
+        return base * self._DRIFT_MULT_STABLE
 
     def adapt(self, algo_family: str, algo_name: str, cycle_num: int) -> dict:
         """
@@ -548,45 +580,46 @@ class ParameterAdapter:
             if not cause:
                 return changes
 
+            alpha = self._get_effective_alpha()  # drift-adjusted learning rate
             adjustments: list[tuple[str, float, str]] = []  # (param, delta, reason)
 
             if cause == "STOP_TOO_TIGHT":
                 # Increase stop_mult to give trades more room
                 old = self._reg.get(algo_family, "stop_mult")
-                new = old * (1 + self._EWMA_ALPHA)
-                adjustments.append(("stop_mult", new, f"STOP_TOO_TIGHT: widen stop"))
+                new = old * (1 + alpha)
+                adjustments.append(("stop_mult", new, f"STOP_TOO_TIGHT: widen stop (α={alpha:.3f})"))
 
             elif cause == "WRONG_DIRECTION":
                 # Raise conf_gate to filter lower-conviction entries
                 old = self._reg.get(algo_family, "conf_gate")
-                new = old + 1.0
-                adjustments.append(("conf_gate", new, f"WRONG_DIRECTION: raise conf gate"))
+                new = old + 1.0 * (alpha / self._EWMA_ALPHA_BASE)
+                adjustments.append(("conf_gate", new, f"WRONG_DIRECTION: raise conf gate (α={alpha:.3f})"))
 
             elif cause == "REGIME_MISMATCH":
                 old = self._reg.get(algo_family, "conf_gate")
-                new = old + 1.0
-                adjustments.append(("conf_gate", new, f"REGIME_MISMATCH: raise conf gate"))
+                new = old + 1.0 * (alpha / self._EWMA_ALPHA_BASE)
+                adjustments.append(("conf_gate", new, f"REGIME_MISMATCH: raise conf gate (α={alpha:.3f})"))
 
             elif cause == "TIMEOUT_DRIFT":
                 # Target is too far — pull it in
                 old = self._reg.get(algo_family, "target_mult")
-                new = old * (1 - self._EWMA_ALPHA)
-                adjustments.append(("target_mult", new, f"TIMEOUT_DRIFT: reduce target_mult"))
+                new = old * (1 - alpha)
+                adjustments.append(("target_mult", new, f"TIMEOUT_DRIFT: reduce target_mult (α={alpha:.3f})"))
 
             elif cause == "VWAP_CONFLICT":
                 old = self._reg.get(algo_family, "rvol_gate")
-                new = old + 0.05
-                adjustments.append(("rvol_gate", new, f"VWAP_CONFLICT: raise rvol gate"))
+                new = old + 0.05 * (alpha / self._EWMA_ALPHA_BASE)
+                adjustments.append(("rvol_gate", new, f"VWAP_CONFLICT: raise rvol gate (α={alpha:.3f})"))
 
             elif cause == "TIMING_LATE":
                 old = self._reg.get(algo_family, "entry_window_bars")
-                new = old - 1
-                adjustments.append(("entry_window_bars", new, f"TIMING_LATE: tighten entry window"))
+                new = old - max(1, round(alpha / self._EWMA_ALPHA_BASE))
+                adjustments.append(("entry_window_bars", new, f"TIMING_LATE: tighten entry window (α={alpha:.3f})"))
 
             elif cause == "VOLATILITY_SPIKE":
                 old = self._reg.get(algo_family, "stop_mult")
-                new = old * (1 + self._EWMA_ALPHA * 2)
-                adjustments.append(("stop_mult", new, f"VOLATILITY_SPIKE: widen stop for volatility"))
+                new = old * (1 + alpha * 2)
+                adjustments.append(("stop_mult", new, f"VOLATILITY_SPIKE: widen stop for volatility (α={alpha:.3f})"))
 
             for param, new_val, reason in adjustments:
                 old_val = self._reg.get(algo_family, param)

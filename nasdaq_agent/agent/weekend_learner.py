@@ -289,6 +289,58 @@ def _phase_retrain(tickers: list[str]) -> bool:
         return False
 
 
+def _phase_walk_forward_trainer(tickers: list[str], cycle_num: int = 0) -> dict:
+    """
+    Phase 5b (Walk-Forward Trainer): fetch 5min/15min OHLCV from the historical
+    cache and run WalkForwardTrainer.run() to generate parameter recommendations
+    for AlgoLearningEngine.
+
+    Runs after the calibration phase, so Phase 1 data has already been fetched.
+    Errors are caught and logged — never re-raised.
+    """
+    try:
+        from agent.walk_forward_trainer import get_walk_forward_trainer
+        from agent.historical_cache import get_bars
+
+        _emit({"phase_label": "Phase 5b — Walk-Forward Trainer: building OHLCV map"})
+
+        ohlcv_map: dict = {}
+        for ticker in tickers:
+            if _stop_flag.is_set():
+                break
+            tf_map: dict = {}
+            for tf in ("5min", "15min"):
+                try:
+                    df = get_bars(ticker, tf, min_bars=60)
+                    if df is not None and not df.empty:
+                        tf_map[tf] = df
+                except Exception as exc:
+                    logger.warning(
+                        f"[WeekendLearner] WFTrainer get_bars {ticker}/{tf}: {exc}"
+                    )
+            if tf_map:
+                ohlcv_map[ticker] = tf_map
+
+        _emit({"phase_label": f"Phase 5b — Walk-Forward Trainer: running on {len(ohlcv_map)} tickers"})
+
+        trainer = get_walk_forward_trainer()
+        summary = trainer.run(
+            tickers=tickers,
+            ohlcv_map=ohlcv_map,
+            cycle_num=cycle_num,
+        )
+        n_recs = summary.get("total_records", 0)
+        n_rec  = len(summary.get("recommendations", []))
+        logger.info(
+            f"[WeekendLearner] WFTrainer done — "
+            f"{n_recs} records, {n_rec} recommendations"
+        )
+        return summary
+    except Exception as exc:
+        logger.warning(f"[WeekendLearner] WFTrainer phase failed: {exc}")
+        return {}
+
+
 def _phase_calibrate(records: list[dict], weekend_dt: str) -> bool:
     """
     Phase 4: derive per-context win rates from both walk-forward records AND
@@ -402,6 +454,11 @@ def _run_learning(tickers: list[str]) -> None:
         # Phase 5 — calibrate adaptive filter from walk-forward + MTF data
         calibrated = _phase_calibrate(records, weekend_dt)
         _emit({"filter_calibrated": calibrated})
+        if _stop_flag.is_set():
+            return
+
+        # Phase 5b — walk-forward trainer: generate param recommendations
+        _phase_walk_forward_trainer(tickers, cycle_num=0)
 
         # Done
         total_wins = sum(1 for r in records if r["won"])
