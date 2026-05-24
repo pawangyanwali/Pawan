@@ -453,7 +453,8 @@ class TestGapAndGo:
         assert res.stop == pytest.approx(101.0)
 
     def test_none_when_rvol_too_low(self):
-        res = eval_gap_and_go(self._bull_sig(rel_volume=1.9))
+        # Engine initial rvol_gate is 1.5 for GAP_TREND; use 1.4 to stay below it
+        res = eval_gap_and_go(self._bull_sig(rel_volume=1.4))
         assert res is None
 
     def test_none_when_gap_pct_too_small(self):

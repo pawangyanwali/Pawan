@@ -187,10 +187,13 @@ def eval_orb15(sig) -> Optional[AlgoResult]:
         price = float(sig.price)
         or_range = orh - orl
 
-        if bo == "BULL" and rvol >= 1.5 and gate != "BEAR":
+        _rvol_gate   = _param("ORB", "rvol_gate",   1.5)
+        _target_mult = _param("ORB", "target_mult", 1.5)
+
+        if bo == "BULL" and rvol >= _rvol_gate and gate != "BEAR":
             entry  = price
             stop   = orl
-            target = entry + or_range * 1.5
+            target = entry + or_range * _target_mult
             conf   = min(95, 60 + (rvol - 1.5) * 10 + (10 if gate == "BULL" else 0))
             reason = (
                 f"ORB-15 bull breakout: price {price:.2f} > ORH {orh:.2f}; "
@@ -203,10 +206,10 @@ def eval_orb15(sig) -> Optional[AlgoResult]:
                 rr=_rr(entry, stop, target), reason=reason,
             )
 
-        if bo == "BEAR" and rvol >= 1.5 and gate != "BULL":
+        if bo == "BEAR" and rvol >= _rvol_gate and gate != "BULL":
             entry  = price
             stop   = orh
-            target = entry - or_range * 1.5
+            target = entry - or_range * _target_mult
             conf   = min(95, 60 + (rvol - 1.5) * 10 + (10 if gate == "BEAR" else 0))
             reason = (
                 f"ORB-15 bear breakdown: price {price:.2f} < ORL {orl:.2f}; "
@@ -249,7 +252,9 @@ def eval_gap_and_go(sig) -> Optional[AlgoResult]:
 
         abs_gap_pts = abs(gap_pct / 100.0 * today_open) if today_open > 0 else 0.0
 
-        if gap_type == "GAP_UP" and gap_pct >= 2.0 and color == "GREEN" and rvol >= 2.0 and gate != "BEAR":
+        _rvol_gate = _param("GAP_TREND", "rvol_gate", 2.0)
+
+        if gap_type == "GAP_UP" and gap_pct >= 2.0 and color == "GREEN" and rvol >= _rvol_gate and gate != "BEAR":
             entry  = price
             stop   = sess_low if sess_low > 0 else price * 0.98
             target = entry + abs_gap_pts
@@ -265,7 +270,7 @@ def eval_gap_and_go(sig) -> Optional[AlgoResult]:
                 rr=_rr(entry, stop, target), reason=reason,
             )
 
-        if gap_type == "GAP_DOWN" and gap_pct <= -2.0 and color == "RED" and rvol >= 2.0 and gate != "BULL":
+        if gap_type == "GAP_DOWN" and gap_pct <= -2.0 and color == "RED" and rvol >= _rvol_gate and gate != "BULL":
             entry  = price
             stop   = sess_high if sess_high > 0 else price * 1.02
             target = entry - abs_gap_pts
@@ -315,8 +320,10 @@ def eval_gap_fade(sig) -> Optional[AlgoResult]:
         if today_open <= 0 or prev_close <= 0:
             return None
 
+        _rvol_gate = _param("GAP_FADE", "rvol_gate", 1.5)
+
         if (gap_type == "GAP_UP" and gap_pct >= 1.5 and price < today_open
-                and rvol >= 1.5 and gate != "BULL"):
+                and rvol >= _rvol_gate and gate != "BULL"):
             entry  = price
             stop   = sess_high if sess_high > price else price * 1.01
             target = prev_close
@@ -335,7 +342,7 @@ def eval_gap_fade(sig) -> Optional[AlgoResult]:
             )
 
         if (gap_type == "GAP_DOWN" and gap_pct <= -1.5 and price > today_open
-                and rvol >= 1.5 and gate != "BEAR"):
+                and rvol >= _rvol_gate and gate != "BEAR"):
             entry  = price
             stop   = sess_low if sess_low < price else price * 0.99
             target = prev_close
@@ -385,7 +392,9 @@ def eval_pdh_pdl_breakout(sig) -> Optional[AlgoResult]:
 
         atr_proxy = pd_range * 0.5
 
-        if price > pdh and rvol >= 1.5 and gate != "BEAR":
+        _rvol_gate = _param("BREAKOUT", "rvol_gate", 1.5)
+
+        if price > pdh and rvol >= _rvol_gate and gate != "BEAR":
             entry  = price
             stop   = pdh - atr_proxy
             target = pdh + pd_range * 0.5
@@ -401,7 +410,7 @@ def eval_pdh_pdl_breakout(sig) -> Optional[AlgoResult]:
                 rr=_rr(entry, stop, target), reason=reason,
             )
 
-        if price < pdl and rvol >= 1.5 and gate != "BULL":
+        if price < pdl and rvol >= _rvol_gate and gate != "BULL":
             entry  = price
             stop   = pdl + atr_proxy
             target = pdl - pd_range * 0.5
@@ -457,8 +466,10 @@ def eval_hod_lod_break(sig) -> Optional[AlgoResult]:
             return None
         buf = sess_range * 0.05
 
+        _rvol_gate = _param("BREAKOUT", "rvol_gate", 1.5)
+
         # Bull: price == session_high (new HOD)
-        if abs(price - sess_high) <= buf and rvol >= 1.5 and gate != "BEAR":
+        if abs(price - sess_high) <= buf and rvol >= _rvol_gate and gate != "BEAR":
             entry  = price
             stop   = sess_high - buf * 2
             target = entry + sess_range * 0.5
@@ -475,7 +486,7 @@ def eval_hod_lod_break(sig) -> Optional[AlgoResult]:
             )
 
         # Bear: price == session_low (new LOD)
-        if abs(price - sess_low) <= buf and rvol >= 1.5 and gate != "BULL":
+        if abs(price - sess_low) <= buf and rvol >= _rvol_gate and gate != "BULL":
             entry  = price
             stop   = sess_low + buf * 2
             target = entry - sess_range * 0.5
@@ -692,7 +703,9 @@ def eval_vwap_touch_scalp(sig) -> Optional[AlgoResult]:
         gate    = getattr(sig, "short_tf_alignment", "MIXED")
         price   = float(sig.price)
 
-        if vwap <= 0 or rvol < 1.3:
+        _rvol_gate = _param("VWAP_SCALP", "rvol_gate", 1.3)
+
+        if vwap <= 0 or rvol < _rvol_gate:
             return None
 
         half_band = (upper_1 - lower_1) / 2 if upper_1 > lower_1 else vwap * 0.003
@@ -767,13 +780,15 @@ def eval_vwap_hod_scalp(sig) -> Optional[AlgoResult]:
         gate      = getattr(sig, "short_tf_alignment", "MIXED")
         price     = float(sig.price)
 
+        _rvol_gate = _param("VWAP_SCALP", "rvol_gate", 1.2)
+
         if vwap <= 0 or sess_high <= 0:
             return None
         if event not in ("ABOVE", "RECLAIM", "AT_1SD_UP"):
             return None
         if not (-0.5 <= z_score <= 1.0):
             return None
-        if gate != "BULL" or rvol < 1.2:
+        if gate != "BULL" or rvol < _rvol_gate:
             return None
         if sess_high <= price:
             return None  # already at HOD — no room to target
@@ -829,13 +844,15 @@ def eval_vwap_lod_scalp(sig) -> Optional[AlgoResult]:
         gate     = getattr(sig, "short_tf_alignment", "MIXED")
         price    = float(sig.price)
 
+        _rvol_gate = _param("VWAP_SCALP", "rvol_gate", 1.2)
+
         if vwap <= 0 or sess_low <= 0:
             return None
         if event not in ("BELOW", "REJECTION", "AT_1SD_DOWN"):
             return None
         if not (-1.0 <= z_score <= 0.5):
             return None
-        if gate != "BEAR" or rvol < 1.2:
+        if gate != "BEAR" or rvol < _rvol_gate:
             return None
         if sess_low >= price:
             return None  # already at LOD
@@ -891,7 +908,9 @@ def eval_level_rejection_scalp(sig) -> Optional[AlgoResult]:
         gate    = getattr(sig, "short_tf_alignment", "MIXED")
         price   = float(sig.price)
 
-        if vwap <= 0 or upper_2 <= 0 or lower_2 <= 0 or rvol < 1.2:
+        _rvol_gate = _param("LEVEL_SCALP", "rvol_gate", 1.2)
+
+        if vwap <= 0 or upper_2 <= 0 or lower_2 <= 0 or rvol < _rvol_gate:
             return None
 
         buf = (upper_2 - lower_2) * 0.05
@@ -966,7 +985,9 @@ def eval_micro_pullback_scalp(sig) -> Optional[AlgoResult]:
         mtf_gate = bool(getattr(sig, "mtf_gate_passed", False))
         price    = float(sig.price)
 
-        if vwap <= 0 or rvol < 1.3 or gate == "MIXED":
+        _rvol_gate = _param("LEVEL_SCALP", "rvol_gate", 1.3)
+
+        if vwap <= 0 or rvol < _rvol_gate or gate == "MIXED":
             return None
 
         bull_events = {"ABOVE", "RECLAIM", "AT_1SD_UP"}
@@ -1051,7 +1072,9 @@ def eval_spy_beta_catchup(sig) -> Optional[AlgoResult]:
         lower_1       = float(getattr(sig, "vwap_lower_1", 0.0))
         vwap          = float(getattr(sig, "vwap_price", 0.0))
 
-        if rs_ratio <= 0 or rs_label == "COUNTER" or rvol < 1.1:
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.1)
+
+        if rs_ratio <= 0 or rs_label == "COUNTER" or rvol < _rvol_gate:
             return None
         if 0.55 <= rs_ratio <= 1.45:
             return None  # not enough lag to trade
@@ -1126,11 +1149,13 @@ def eval_residual_momentum(sig) -> Optional[AlgoResult]:
         sess_high     = float(getattr(sig, "session_high", 0.0))
         sess_low      = float(getattr(sig, "session_low", 0.0))
 
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.2)
+
         if rs_ratio < 1.5 or rs_label != "LEADING":
             return None
         if sector_trend == "BEARISH" or gate == "BEAR":
             return None
-        if rvol < 1.2 or (vwap > 0 and price <= vwap):
+        if rvol < _rvol_gate or (vwap > 0 and price <= vwap):
             return None  # must be above VWAP to confirm leadership
 
         sess_range = (sess_high - sess_low) if sess_high > sess_low else price * 0.02
@@ -1182,13 +1207,15 @@ def eval_residual_reversion(sig) -> Optional[AlgoResult]:
         gate         = getattr(sig, "short_tf_alignment", "MIXED")
         price        = float(sig.price)
 
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.1)
+
         if rs_ratio <= 2.5 or rs_label != "LEADING":
             return None
         if vwap_z <= 1.5:
             return None  # not extended enough
         if sector_trend == "BULLISH":
             return None  # don't fade genuine sector momentum
-        if gate == "BULL" or rvol < 1.1:
+        if gate == "BULL" or rvol < _rvol_gate:
             return None
         if vwap <= 0 or price <= vwap:
             return None
@@ -1242,9 +1269,11 @@ def eval_sector_leader(sig) -> Optional[AlgoResult]:
         sess_high     = float(getattr(sig, "session_high", 0.0))
         sess_low      = float(getattr(sig, "session_low", 0.0))
 
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.2)
+
         if stock_vs_sec != "LEADING" or sector_trend != "BULLISH":
             return None
-        if gate == "BEAR" or rvol < 1.2:
+        if gate == "BEAR" or rvol < _rvol_gate:
             return None
         if vwap > 0 and price <= vwap:
             return None
@@ -1303,11 +1332,13 @@ def eval_sector_laggard_catchup(sig) -> Optional[AlgoResult]:
         vwap          = float(getattr(sig, "vwap_price", 0.0))
         lower_1       = float(getattr(sig, "vwap_lower_1", 0.0))
 
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.1)
+
         if stock_vs_sec != "LAGGING" or sector_trend != "BULLISH":
             return None
         if rs_label == "COUNTER":
             return None  # actively moving against market — not a laggard, a fighter
-        if sector_change < 0.3 or rvol < 1.1 or gate == "BEAR":
+        if sector_change < 0.3 or rvol < _rvol_gate or gate == "BEAR":
             return None
 
         entry  = price
@@ -1365,11 +1396,13 @@ def eval_sector_counter_fade(sig) -> Optional[AlgoResult]:
         sess_high     = float(getattr(sig, "session_high", 0.0))
         upper_2       = float(getattr(sig, "vwap_upper_2", 0.0))
 
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.1)
+
         if stock_vs_sec != "LEADING" or sector_trend != "BEARISH":
             return None
         if gate == "BULL":
             return None  # MTF is bullish — sector thesis not yet confirmed
-        if sector_change > -0.3 or rvol < 1.1:
+        if sector_change > -0.3 or rvol < _rvol_gate:
             return None  # sector isn't actually falling meaningfully
         if vwap <= 0 or price <= vwap:
             return None  # stock should be above VWAP to show the divergence
@@ -1427,6 +1460,8 @@ def eval_regime_aligned_long(sig) -> Optional[AlgoResult]:
         sess_low     = float(getattr(sig, "session_low", 0.0))
         rs_ratio     = float(getattr(sig, "rs_ratio", 1.0))
 
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.2)
+
         if regime != "BULL_TREND":
             return None
         if rs_label not in ("LEADING",):
@@ -1435,7 +1470,7 @@ def eval_regime_aligned_long(sig) -> Optional[AlgoResult]:
             return None
         if vwap_event not in ("ABOVE", "RECLAIM", "AT_1SD_UP"):
             return None
-        if gate == "BEAR" or rvol < 1.2:
+        if gate == "BEAR" or rvol < _rvol_gate:
             return None
 
         sess_range = (sess_high - sess_low) if sess_high > sess_low else price * 0.02
@@ -1492,6 +1527,8 @@ def eval_regime_aligned_short(sig) -> Optional[AlgoResult]:
         sess_low     = float(getattr(sig, "session_low", 0.0))
         rs_ratio     = float(getattr(sig, "rs_ratio", 1.0))
 
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.2)
+
         if regime != "BEAR_TREND":
             return None
         if stock_vs_sec not in ("LAGGING", "IN_LINE"):
@@ -1500,7 +1537,7 @@ def eval_regime_aligned_short(sig) -> Optional[AlgoResult]:
             return None
         if vwap_event not in ("BELOW", "REJECTION", "AT_1SD_DOWN"):
             return None
-        if gate == "BULL" or rvol < 1.2:
+        if gate == "BULL" or rvol < _rvol_gate:
             return None
 
         sess_range = (sess_high - sess_low) if sess_high > sess_low else price * 0.02
@@ -1556,7 +1593,9 @@ def eval_sector_breakout_follow(sig) -> Optional[AlgoResult]:
         upper_1       = float(getattr(sig, "vwap_upper_1", 0.0))
         lower_1       = float(getattr(sig, "vwap_lower_1", 0.0))
 
-        if abs(sector_change) < 0.8 or rvol < 1.1:
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.1)
+
+        if abs(sector_change) < 0.8 or rvol < _rvol_gate:
             return None
         if stock_vs_sec == "COUNTER" or rs_label == "COUNTER":
             return None  # stock fighting the sector — different thesis
@@ -1640,7 +1679,9 @@ def eval_cross_sectional_rs(sig) -> Optional[AlgoResult]:
         sess_high    = float(getattr(sig, "session_high", 0.0))
         sess_low     = float(getattr(sig, "session_low", 0.0))
 
-        if rvol < 1.2:
+        _rvol_gate = _param("RS_REGIME", "rvol_gate", 1.2)
+
+        if rvol < _rvol_gate:
             return None
 
         sess_range = (sess_high - sess_low) if sess_high > sess_low else price * 0.02

@@ -44,6 +44,13 @@ from agent.adaptive_filter import get_status as af_get_status, reset_filter as a
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
 import agent.weekend_learner as weekend_learner
+
+try:
+    from agent.algo_learning_p2 import get_phase2_engine as _get_p2_engine
+    _P2_AVAILABLE = True
+except ImportError:
+    _get_p2_engine = None  # type: ignore[assignment]
+    _P2_AVAILABLE = False
 from agent.broker.schwab_auth import (
     load_stored_tokens, load_stored_md_tokens,
     get_token_status, get_md_token_status,
@@ -1269,11 +1276,33 @@ async def learning_status():
         loop.run_in_executor(None, af_get_status),
         loop.run_in_executor(_pt_executor, get_observation_summary),
     )
-    return {
+    result = {
         **status,
         "engine":       learning_engine.get_status(),
         "observations": obs,
     }
+    if _P2_AVAILABLE:
+        try:
+            p2_status = await loop.run_in_executor(None, lambda: _get_p2_engine().get_status())
+            result["deployment_mode"]  = p2_status.get("deployment", {}).get("current_mode", "SHADOW")
+            result["drift_alerts"]     = p2_status.get("drift", {}).get("material_drifts", [])
+        except Exception as _p2e:
+            logger.debug("learning-status phase2 error: %s", _p2e)
+    return result
+
+
+@app.get("/api/learning/phase2")
+async def learning_phase2_status():
+    """Phase 2 status: concept drift, staged deployment, walk-forward validation, transfer tier."""
+    if not _P2_AVAILABLE:
+        return {"available": False}
+    loop = asyncio.get_running_loop()
+    try:
+        status = await loop.run_in_executor(None, lambda: _get_p2_engine().get_status())
+        return {"available": True, **status}
+    except Exception as exc:
+        logger.warning("phase2 status error: %s", exc)
+        return {"available": True, "error": str(exc)}
 
 
 @app.post("/api/adaptive-filter/reset")

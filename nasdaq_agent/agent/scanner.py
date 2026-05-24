@@ -1227,23 +1227,38 @@ def analyse_ticker(
                 except Exception as _bt_err:
                     logger.debug("[%s] bt_record algo error: %s", ticker, _bt_err)
 
-                _trade_id = maybe_open_trade(
-                    ticker            = ticker,
-                    direction         = _asig["direction"],
-                    price             = float(_asig["entry"]),
-                    target            = float(_asig["target"]),
-                    stop              = float(_asig["stop"]),
-                    confidence        = float(_asig["confidence"]),
-                    rr_qualifies      = float(_asig.get("rr", 0)) >= 1.5,
-                    rr_ratio          = float(_asig.get("rr", 0)),
-                    session           = sess_info.get("session", ""),
-                    regime            = regime.regime,
-                    entry_type        = "ALGO",
-                    order_flow_score  = _of_score,
-                    size_mult         = 1.0,
-                    trading_tier      = _trading_tier,
-                    algo_name         = _asig["algo"],
-                )
+                # Phase 2 staged deployment: SHADOW (observe only) | PAPER | LIVE
+                _routing = "PAPER"
+                if _ALE_AVAILABLE:
+                    try:
+                        _routing = _get_ale().get_routing(_asig["algo"])
+                    except Exception as _re:
+                        logger.debug("[%s] routing error: %s", ticker, _re)
+
+                _trade_id = None
+                if _routing == "SHADOW":
+                    logger.debug(
+                        "[%s] %s → SHADOW routing; signal recorded, paper trade skipped",
+                        ticker, _asig["algo"],
+                    )
+                else:
+                    _trade_id = maybe_open_trade(
+                        ticker            = ticker,
+                        direction         = _asig["direction"],
+                        price             = float(_asig["entry"]),
+                        target            = float(_asig["target"]),
+                        stop              = float(_asig["stop"]),
+                        confidence        = float(_asig["confidence"]),
+                        rr_qualifies      = float(_asig.get("rr", 0)) >= 1.5,
+                        rr_ratio          = float(_asig.get("rr", 0)),
+                        session           = sess_info.get("session", ""),
+                        regime            = regime.regime,
+                        entry_type        = "ALGO",
+                        order_flow_score  = _of_score,
+                        size_mult         = 1.0,
+                        trading_tier      = _trading_tier,
+                        algo_name         = _asig["algo"],
+                    )
                 if _trade_id:
                     _algo_trade_opened = True
             try:
