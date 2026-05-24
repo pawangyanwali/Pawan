@@ -645,7 +645,15 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     _ws_connected = False
                     _ws_error = "Schwab Market Data not authorized — visit /schwab/auth/md"
                     auth_misses += 1
-                    if auth_misses % 10 == 1:   # log once per 30 s, not every 3 s
+                    # Back off logging frequency after extended auth failures:
+                    # first 5 min → every 30 s, first hour → every 5 min, after → every 50 min
+                    if auth_misses <= 100:
+                        _log_interval = 10
+                    elif auth_misses <= 1200:
+                        _log_interval = 100
+                    else:
+                        _log_interval = 1000
+                    if auth_misses % _log_interval == 1:
                         logger.warning(
                             f"[MDPoller] Not authorised (missed {auth_misses} cycles) — "
                             "visit /schwab/auth/md to re-authenticate."
