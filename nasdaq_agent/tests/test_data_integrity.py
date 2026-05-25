@@ -355,7 +355,7 @@ class TestPaperTradeDBIntegrity:
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt.db")
         pt.init_db()
         # Open and close a trade at target
-        maybe_open_trade("INTG_A", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_A", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=112.0)
         update_open_trades("INTG_A", df, current_price=112.0)
         # Verify no closed trade has exit_price = 0
@@ -370,7 +370,7 @@ class TestPaperTradeDBIntegrity:
         import agent.paper_trading as pt
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt2.db")
         pt.init_db()
-        maybe_open_trade("INTG_B", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_B", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=112.0)
         update_open_trades("INTG_B", df, current_price=112.0)
         conn = self._get_conn(tmp_path / "pt2.db")
@@ -384,8 +384,8 @@ class TestPaperTradeDBIntegrity:
         import agent.paper_trading as pt
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt3.db")
         pt.init_db()
-        maybe_open_trade("INTG_C", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
-        maybe_open_trade("INTG_C", "BUY", 101.0, 111.0, 96.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_C", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+        maybe_open_trade("INTG_C", "BUY", 101.0, 111.0, 96.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         conn = self._get_conn(tmp_path / "pt3.db")
         open_for_ticker = conn.execute(
             "SELECT COUNT(*) FROM paper_trades WHERE ticker='INTG_C' AND status='OPEN'"
@@ -398,7 +398,7 @@ class TestPaperTradeDBIntegrity:
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt4.db")
         pt.init_db()
         for ticker, price in [("T1", 50.0), ("T2", 200.0), ("T3", 1500.0)]:
-            maybe_open_trade(ticker, "BUY", price, price * 1.05, price * 0.97, confidence=70.0, rr_qualifies=True)
+            maybe_open_trade(ticker, "BUY", price, price * 1.05, price * 0.97, confidence=70.0, rr_qualifies=True, session="REGULAR")
         conn = self._get_conn(tmp_path / "pt4.db")
         bad = conn.execute(
             "SELECT * FROM paper_trades WHERE entry_price <= 0"
@@ -411,7 +411,7 @@ class TestPaperTradeDBIntegrity:
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt5.db")
         pt.init_db()
         # Open BUY at 100, target 110
-        maybe_open_trade("INTG_WIN", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_WIN", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=115.0)
         update_open_trades("INTG_WIN", df, current_price=115.0)
         conn = self._get_conn(tmp_path / "pt5.db")
@@ -427,7 +427,7 @@ class TestPaperTradeDBIntegrity:
         import agent.paper_trading as pt
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt6.db")
         pt.init_db()
-        maybe_open_trade("INTG_LOSS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_LOSS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=93.0)
         update_open_trades("INTG_LOSS", df, current_price=93.0)
         conn = self._get_conn(tmp_path / "pt6.db")
@@ -447,7 +447,7 @@ class TestPaperTradeDBIntegrity:
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt7.db")
         pt.init_db()
         entry = 100.0
-        maybe_open_trade("INTG_FORM", "BUY", entry, 108.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_FORM", "BUY", entry, 108.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=109.0)
         update_open_trades("INTG_FORM", df, current_price=109.0)
         conn = self._get_conn(tmp_path / "pt7.db")
@@ -464,7 +464,7 @@ class TestPaperTradeDBIntegrity:
         import agent.paper_trading as pt
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt8.db")
         pt.init_db()
-        maybe_open_trade("INTG_TS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_TS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=112.0)
         update_open_trades("INTG_TS", df, current_price=112.0)
         conn = self._get_conn(tmp_path / "pt8.db")
@@ -480,7 +480,7 @@ class TestPaperTradeDBIntegrity:
         import agent.paper_trading as pt
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt9.db")
         pt.init_db()
-        maybe_open_trade("INTG_DC", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("INTG_DC", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=112.0)
         update_open_trades("INTG_DC", df, current_price=112.0)
         update_open_trades("INTG_DC", df, current_price=113.0)  # second close attempt
@@ -780,11 +780,11 @@ class TestDirtyDataResilience:
         assert result["score"] == 0.0
 
     def test_paper_trade_zero_price_rejected(self):
-        tid = maybe_open_trade("DIRTY_ZERO", "BUY", 0.0, 10.0, 0.0, confidence=70.0, rr_qualifies=True)
+        tid = maybe_open_trade("DIRTY_ZERO", "BUY", 0.0, 10.0, 0.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is None, "zero entry price must be rejected"
 
     def test_paper_trade_negative_stop_rejected(self):
-        tid = maybe_open_trade("DIRTY_NEG", "BUY", 100.0, 110.0, -5.0, confidence=70.0, rr_qualifies=True)
+        tid = maybe_open_trade("DIRTY_NEG", "BUY", 100.0, 110.0, -5.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is None, "negative stop must be rejected"
 
     def test_live_backtest_zero_entry_rejected(self):
@@ -849,7 +849,7 @@ class TestEndToEndIntegrity:
         assert sid != "", "signal must be recorded"
 
         # 2. Paper trade
-        tid = maybe_open_trade("E2E_W", "BUY", entry, target, stop, confidence=75.0, rr_qualifies=True)
+        tid = maybe_open_trade("E2E_W", "BUY", entry, target, stop, confidence=75.0, rr_qualifies=True, session="REGULAR")
         assert tid is not None, "paper trade must open"
 
         # 3. Price hits target
@@ -880,7 +880,7 @@ class TestEndToEndIntegrity:
         sid = record_signal("E2E_L", "SELL", entry, target, stop, confidence=72.0)
         assert sid != ""
 
-        tid = maybe_open_trade("E2E_L", "SELL", entry, target, stop, confidence=72.0, rr_qualifies=True)
+        tid = maybe_open_trade("E2E_L", "SELL", entry, target, stop, confidence=72.0, rr_qualifies=True, session="REGULAR")
         assert tid is not None
 
         # Price moves against SELL (rises above stop)
@@ -906,7 +906,7 @@ class TestEndToEndIntegrity:
 
         entry, target, stop = 100.0, 110.0, 95.0
         record_signal("E2E_CC", "BUY", entry, target, stop, confidence=70.0)
-        maybe_open_trade("E2E_CC", "BUY", entry, target, stop, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("E2E_CC", "BUY", entry, target, stop, confidence=70.0, rr_qualifies=True, session="REGULAR")
 
         df = make_ohlcv(start_price=112.0)
         update_open_trades("E2E_CC", df, current_price=112.0)

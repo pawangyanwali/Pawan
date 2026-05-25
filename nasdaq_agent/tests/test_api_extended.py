@@ -16,7 +16,21 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(scope="module")
 def client():
-    """Create a TestClient with scanner mocked out."""
+    """Create a TestClient with scanner and DB mocked out.
+
+    The DB mock must be installed here (not just in the function-scoped
+    tmp_db_paths autouse fixture) because this is a module-scoped fixture —
+    it runs before any function-scoped fixtures, so TestClient's lifespan
+    (which calls init_db) would hit the real PostgreSQL check otherwise.
+    """
+    import sqlite3
+    from tests.conftest import (
+        _make_test_get_conn, _make_noop_get_pool, _reset_test_db,
+    )
+    _reset_test_db()
+    _gc   = _make_test_get_conn()
+    _pool = _make_noop_get_pool()
+
     mock_scanner = MagicMock()
     mock_scanner.signals = []
     mock_scanner.last_scan = None
@@ -26,11 +40,29 @@ def client():
     mock_scanner.register_callback = MagicMock()
     mock_scanner.register_per_ticker_callback = MagicMock()
 
-    with patch("agent.scanner.scanner", mock_scanner), \
+    # Patch DB and scanner before creating the client so any request-time
+    # DB calls go to the in-memory SQLite stub, not the live PostgreSQL pool.
+    with patch("agent.db._get_pool", return_value=_pool), \
+         patch("agent.db.get_conn", _gc), \
+         patch("agent.db.using_postgres", return_value=False), \
+         patch("agent.scanner.scanner", mock_scanner), \
          patch("main.scanner", mock_scanner):
         from main import app
-        with TestClient(app) as c:
-            yield c
+        from auth.dependencies import get_current_user, AuthenticatedUser
+
+        # Override auth so tests that hit protected endpoints don't need a real DB user.
+        _test_admin = AuthenticatedUser(
+            id=1, username="test_admin", role="ADMIN", status="ACTIVE", jti="test-jti"
+        )
+        app.dependency_overrides[get_current_user] = lambda: _test_admin
+
+        # Use TestClient WITHOUT context manager so we don't trigger the
+        # app lifespan (which would try to connect to PostgreSQL / run init_db).
+        # Auth is bypassed via dependency_overrides, so no lifespan DB init needed.
+        c = TestClient(app, raise_server_exceptions=False)
+        yield c
+
+        app.dependency_overrides.clear()
 
 
 # ── /api/services ────────────────────────────────────────────────────────────

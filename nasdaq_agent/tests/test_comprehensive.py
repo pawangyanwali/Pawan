@@ -265,7 +265,7 @@ from agent.paper_trading import (
 
 class TestPaperTradingLifecycle:
     def test_full_buy_win_cycle(self):
-        tid = maybe_open_trade("PT_WIN", "BUY", 100.0, 105.0, 95.0, confidence=70.0, rr_qualifies=True)
+        tid = maybe_open_trade("PT_WIN", "BUY", 100.0, 105.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is not None
         df = make_ohlcv(start_price=107.0)  # above target=105
         update_open_trades("PT_WIN", df, current_price=107.0)
@@ -275,7 +275,7 @@ class TestPaperTradingLifecycle:
         assert match["exit_reason"] in ("TARGET_HIT", "EXIT_NOW", "TARGET")
 
     def test_full_buy_loss_cycle(self):
-        tid = maybe_open_trade("PT_LOSS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        tid = maybe_open_trade("PT_LOSS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is not None
         df = make_ohlcv(start_price=93.0)
         update_open_trades("PT_LOSS", df, current_price=93.0)
@@ -284,7 +284,7 @@ class TestPaperTradingLifecycle:
         assert match is not None, "trade should have closed on stop hit"
 
     def test_pnl_positive_on_buy_win(self):
-        maybe_open_trade("PT_PNL", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("PT_PNL", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=115.0)
         update_open_trades("PT_PNL", df, current_price=115.0)
         closed = get_closed_trades()
@@ -293,7 +293,7 @@ class TestPaperTradingLifecycle:
             assert match["pnl_pct"] > 0, "winning BUY trade must have positive P&L"
 
     def test_pnl_negative_on_buy_loss(self):
-        maybe_open_trade("PT_PNL2", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("PT_PNL2", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=93.0)
         update_open_trades("PT_PNL2", df, current_price=93.0)
         closed = get_closed_trades()
@@ -302,7 +302,7 @@ class TestPaperTradingLifecycle:
             assert match["pnl_pct"] < 0, "losing BUY trade must have negative P&L"
 
     def test_sell_pnl_positive_when_price_falls(self):
-        maybe_open_trade("PT_SELL", "SELL", 200.0, 185.0, 207.0, confidence=75.0, rr_qualifies=True)
+        maybe_open_trade("PT_SELL", "SELL", 200.0, 185.0, 207.0, confidence=75.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=182.0)
         update_open_trades("PT_SELL", df, current_price=182.0)
         closed = get_closed_trades()
@@ -311,20 +311,20 @@ class TestPaperTradingLifecycle:
             assert match["pnl_pct"] > 0, "winning SELL trade must have positive P&L"
 
     def test_no_duplicate_same_ticker(self):
-        maybe_open_trade("PT_DUP", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
-        t2 = maybe_open_trade("PT_DUP", "SELL", 100.0, 90.0, 105.0, confidence=70.0, rr_qualifies=True)
+        maybe_open_trade("PT_DUP", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+        t2 = maybe_open_trade("PT_DUP", "SELL", 100.0, 90.0, 105.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert t2 is None, "cannot open second trade while one is open on same ticker"
 
     def test_low_confidence_floor_blocks(self):
-        tid = maybe_open_trade("PT_LOWC", "BUY", 100.0, 110.0, 95.0, confidence=10.0, rr_qualifies=True)
+        tid = maybe_open_trade("PT_LOWC", "BUY", 100.0, 110.0, 95.0, confidence=10.0, rr_qualifies=True, session="REGULAR")
         assert tid is None, "confidence below 25% floor must be rejected"
 
     def test_rr_false_still_opens(self):
-        tid = maybe_open_trade("PT_RRF", "BUY", 100.0, 102.0, 99.0, confidence=70.0, rr_qualifies=False)
+        tid = maybe_open_trade("PT_RRF", "BUY", 100.0, 102.0, 99.0, confidence=70.0, rr_qualifies=False, session="REGULAR")
         assert tid is not None, "rr_qualifies=False must still open (data collection mode)"
 
     def test_neutral_direction_rejected(self):
-        tid = maybe_open_trade("PT_NEU", "NEUTRAL", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        tid = maybe_open_trade("PT_NEU", "NEUTRAL", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is None
 
     def test_summary_win_rate_in_pct_range(self):
@@ -637,12 +637,21 @@ def _get_client():
         m.scanner = mock_scanner
 
     from fastapi.testclient import TestClient
+    from auth.dependencies import get_current_user, AuthenticatedUser
+    _test_admin = AuthenticatedUser(
+        id=1, username="test_admin", role="ADMIN", status="ACTIVE", jti="test-jti"
+    )
+    m.app.dependency_overrides[get_current_user] = lambda: _test_admin
     return TestClient(m.app, raise_server_exceptions=False)
 
 
 @pytest.fixture(scope="module")
 def client():
-    return _get_client()
+    c = _get_client()
+    yield c
+    import sys
+    if "main" in sys.modules:
+        sys.modules["main"].app.dependency_overrides.clear()
 
 
 class TestAPIHealth:
@@ -1324,7 +1333,7 @@ class TestEdgeCases:
         assert r.status_code in (200, 400, 422)
 
     def test_paper_trading_zero_price_rejected(self):
-        tid = maybe_open_trade("EDGE_ZERO", "BUY", 0.0, 10.0, 0.0, confidence=70.0, rr_qualifies=True)
+        tid = maybe_open_trade("EDGE_ZERO", "BUY", 0.0, 10.0, 0.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is None, "zero entry price should be rejected"
 
     def test_live_backtest_zero_price_rejected(self):
@@ -1336,7 +1345,7 @@ class TestEdgeCases:
         import agent.paper_trading as pt
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "dc_test.db")
         pt.init_db()
-        tid = pt.maybe_open_trade("DC_TEST", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True)
+        tid = pt.maybe_open_trade("DC_TEST", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is not None
         df = make_ohlcv(start_price=112.0)
         pt.update_open_trades("DC_TEST", df, current_price=112.0)
@@ -1368,7 +1377,7 @@ class TestPnLAccuracy:
         import agent.paper_trading as pt
         monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pnl_test.db")
         pt.init_db()
-        pt.maybe_open_trade("PNL_CHK", "BUY", 100.0, 115.0, 95.0, confidence=70.0, rr_qualifies=True)
+        pt.maybe_open_trade("PNL_CHK", "BUY", 100.0, 115.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=116.0)
         pt.update_open_trades("PNL_CHK", df, current_price=116.0)
         closed = pt.get_closed_trades()
@@ -1391,7 +1400,7 @@ class TestPnLAccuracy:
         df = make_ohlcv(start_price=150.0)
         _cache_set("STALE_CHK", "1min", df)
 
-        pt.maybe_open_trade("STALE_CHK", "BUY", 148.0, 155.0, 144.0, confidence=70.0, rr_qualifies=True)
+        pt.maybe_open_trade("STALE_CHK", "BUY", 148.0, 155.0, 144.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         # Force EOD close (close_all_positions_eod uses cached price)
         from agent.paper_trading import close_all_positions_eod
         close_all_positions_eod(reason="EOD_TEST")

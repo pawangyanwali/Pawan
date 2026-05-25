@@ -53,8 +53,8 @@ class TestScannerSourceHasFilters:
     """Verify the filter code is present in scanner.py without importing it."""
 
     def _src(self) -> str:
-        return (pathlib.Path("/home/user/Pawan/nasdaq_agent/agent/scanner.py")
-                .read_text())
+        return (pathlib.Path(__file__).parent.parent / "agent" / "scanner.py"
+                ).read_text()
 
     def test_get_algo_params_imported(self):
         assert "get_algo_params as _get_algo_params" in self._src()

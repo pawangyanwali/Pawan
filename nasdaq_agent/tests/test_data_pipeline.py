@@ -63,10 +63,10 @@ class TestFeatureRegistry:
         from agent.feature_engine import FEATURE_COLS_V2
         assert isinstance(FEATURE_COLS_V2, list)
 
-    def test_feature_cols_v2_length_is_32(self):
+    def test_feature_cols_v2_length_is_34(self):
         from agent.feature_engine import FEATURE_COLS_V2
-        assert len(FEATURE_COLS_V2) == 32, \
-            f"Expected 32 features, got {len(FEATURE_COLS_V2)}"
+        assert len(FEATURE_COLS_V2) == 34, \
+            f"Expected 34 features (23 V1 + 11 including 2 session features), got {len(FEATURE_COLS_V2)}"
 
     def test_feature_cols_v2_no_duplicates(self):
         from agent.feature_engine import FEATURE_COLS_V2
@@ -102,10 +102,10 @@ class TestFeatureRegistry:
         assert set(FEATURE_COLS_V2).issubset(set(FEATURE_COLS_V3))
         assert len(FEATURE_COLS_V3) > len(FEATURE_COLS_V2)
 
-    def test_feature_cols_v3_length_is_40(self):
+    def test_feature_cols_v3_length_is_42(self):
         from agent.feature_engine import FEATURE_COLS_V3
-        assert len(FEATURE_COLS_V3) == 40, \
-            f"Expected 40 V3 features, got {len(FEATURE_COLS_V3)}"
+        assert len(FEATURE_COLS_V3) == 42, \
+            f"Expected 42 V3 features (34 V2 + 8 V3), got {len(FEATURE_COLS_V3)}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -235,7 +235,7 @@ class TestComputeLiveRow:
         df = make_ohlcv(n=200)
         row = compute_live_row(df)
         assert row is not None, "compute_live_row returned None unexpectedly"
-        assert row.shape == (1, 32), f"Expected (1, 32), got {row.shape}"
+        assert row.shape == (1, 34), f"Expected (1, 34), got {row.shape}"
 
     def test_output_dtype_float32(self):
         from agent.feature_engine import compute_live_row
@@ -311,13 +311,13 @@ class TestPrepareTrainingData:
         from agent.feature_engine import prepare_training_data
         df = make_ohlcv(n=500)
         X_train, y_train, X_test, y_test = prepare_training_data(df)
-        assert X_train.shape[1] == 32, f"X_train should have 32 features, got {X_train.shape[1]}"
+        assert X_train.shape[1] == 34, f"X_train should have 34 features, got {X_train.shape[1]}"
 
     def test_x_test_shape_32_features(self):
         from agent.feature_engine import prepare_training_data
         df = make_ohlcv(n=500)
         X_train, y_train, X_test, y_test = prepare_training_data(df)
-        assert X_test.shape[1] == 32
+        assert X_test.shape[1] == 34
 
     def test_x_dtype_float32(self):
         from agent.feature_engine import prepare_training_data
@@ -426,11 +426,11 @@ class TestEndToEndPipeline:
         assert 0.0 <= prob <= 1.0, f"predict_proba out of [0,1]: {prob}"
 
     def test_feature_output_can_be_consumed_by_model(self):
-        """compute_live_row shape must match what StockMLModel expects (32 features)."""
+        """compute_live_row shape must match what StockMLModel expects (34 features)."""
         from agent.feature_engine import compute_live_row
         df = make_ohlcv(n=200, seed=77)
         row = compute_live_row(df)
-        assert row.shape == (1, 32)
+        assert row.shape == (1, 34)
 
     def test_model_trained_on_good_signal_has_accuracy_above_50pct(self):
         """A model trained on clear trending data should beat random."""

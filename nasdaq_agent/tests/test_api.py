@@ -23,7 +23,14 @@ def client():
     with patch("agent.scanner.scanner", mock_scanner), \
          patch("main.scanner", mock_scanner):
         from main import app
+        from auth.dependencies import get_current_user, AuthenticatedUser
+
+        _test_admin = AuthenticatedUser(
+            id=1, username="test_admin", role="ADMIN", status="ACTIVE", jti="test-jti"
+        )
+        app.dependency_overrides[get_current_user] = lambda: _test_admin
         yield TestClient(app)
+        app.dependency_overrides.clear()
 
 
 def test_health_ok(client):
