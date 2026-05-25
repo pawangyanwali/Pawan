@@ -413,6 +413,20 @@ def maybe_open_trade(
         logger.debug(f"[PAPER] {ticker} skip: market CLOSED — no trades on weekends/overnight")
         return None
 
+    # Extended-hours stop widening: wider stop = smaller shares, less capital at risk
+    # on thin ECN spreads (1.5× in pre-market, 2× in after-hours).
+    _stop_mult = (
+        2.0 if _live_session == "AFTER_HOURS" else
+        1.5 if _live_session == "PRE_MARKET"  else
+        1.0
+    )
+    if _stop_mult != 1.0:
+        risk_dist_orig = abs(price - stop)
+        stop = (
+            round(price - risk_dist_orig * _stop_mult, 4) if direction == "BUY"
+            else round(price + risk_dist_orig * _stop_mult, 4)
+        )
+
     # Extended-hours confidence floors and tier gate.
     # REGULAR-tier stocks lack the liquidity for AH/PM trades; HIGH/MODERATE allowed with higher bar.
     _EXT_CONF_FLOOR: dict[str, float] = {"HIGH": 70.0, "MODERATE": 60.0}
@@ -429,20 +443,6 @@ def maybe_open_trade(
                 f" (tier={trading_tier}, sess={_live_session})"
             )
             return None
-
-    # Extended-hours stop widening: wider stop = smaller shares, less capital at risk
-    # on thin ECN spreads (1.5× in pre-market, 2× in after-hours).
-    _stop_mult = (
-        2.0 if _live_session == "AFTER_HOURS" else
-        1.5 if _live_session == "PRE_MARKET"  else
-        1.0
-    )
-    if _stop_mult != 1.0:
-        risk_dist_orig = abs(price - stop)
-        stop = (
-            round(price - risk_dist_orig * _stop_mult, 4) if direction == "BUY"
-            else round(price + risk_dist_orig * _stop_mult, 4)
-        )
 
     rr_mult = round(min(1.0, max(0.20, rr_ratio / 2.0)), 2) if rr_ratio > 0 else 0.20
     effective_size_mult = round(size_mult * rr_mult, 2)
