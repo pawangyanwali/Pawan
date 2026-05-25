@@ -275,10 +275,11 @@ def fetch_batch_realtime(
                 cache_miss.append(ticker)
 
         if cache_miss:
-            # Try SQLite
+            # Try SQLite — skip for extended-hours to avoid mixing AH/PM bars
+            # with regular-session bars that share the same "1min" SQLite key.
             still_miss = []
             for ticker in cache_miss:
-                df = _sqlite_get(ticker, "1min", 300)
+                df = _sqlite_get(ticker, "1min", 300) if not extended_hours else None
                 if df is not None:
                     result[ticker] = df
                     _cache_set(ticker, interval_key, df)
@@ -308,7 +309,8 @@ def fetch_batch_realtime(
                 for ticker, df in fetched.items():
                     result[ticker] = df
                     _cache_set(ticker, interval_key, df)
-                    _sqlite_set(ticker, "1min", df)
+                    if not extended_hours:
+                        _sqlite_set(ticker, "1min", df)
                 logger.info(f"[Schwab] 1min: {len(fetched)}/{len(still_miss)} fetched from API")
 
     # ── Live price overlay ────────────────────────────────────────────────────

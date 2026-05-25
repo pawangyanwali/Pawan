@@ -163,7 +163,7 @@ def refresh_market_hours_cache(target_date: date | None = None) -> bool:
     hours: dict = {}
     try:
         from agent.broker.schwab_market_data import fetch_market_hours as _fmh
-        hours = _fmh("equity")
+        hours = _fmh("equity", target_date=d)
     except Exception as exc:
         _log.debug(f"[MarketHours] fetch_market_hours unavailable: {exc}")
 
@@ -295,14 +295,34 @@ def get_session() -> str:
     now   = datetime.now(ET)
     today = now.date()
 
-    # Weekends (Sat=5, Sun=6) and market holidays → always CLOSED
-    if now.weekday() >= 5 or _is_holiday(today):
+    # Weekends are never trading days — no API needed
+    if now.weekday() >= 5:
         return "CLOSED"
+
+    # Consult the API-backed cache first so actual API holidays and unexpected
+    # early closes (e.g. unscheduled half-days) are respected immediately.
+    c = _get_cache()
+    cache_is_today = (c.get("date") == today)
+
+    if cache_is_today:
+        if not c.get("is_trading_day", True):
+            return "CLOSED"
+        # If the API says the regular session has ended, map to AH or CLOSED
+        reg_close = c.get("regular_close")
+        t_now = now.time()
+        if reg_close is not None and t_now >= reg_close:
+            post_close = c.get("post_close", time(20, 0))
+            return "AFTER_HOURS" if t_now < post_close else "CLOSED"
+    else:
+        # Cache is stale — fall back to hardcoded holiday list
+        if _is_holiday(today):
+            return "CLOSED"
 
     t = now.time()
 
-    # Half-day early-close (market closes at 1:00 PM ET)
-    if _is_half_day(today):
+    # Half-day early-close (market closes at 1:00 PM ET) — static fallback
+    # only reached when the API cache is unavailable or stale.
+    if not cache_is_today and _is_half_day(today):
         if t >= time(13, 0):
             return "CLOSED"
         if t >= time(12, 45):
@@ -327,9 +347,15 @@ def get_session_info() -> dict:
     key       = get_session()
     info      = _SESSIONS[key].copy()
 
-    is_weekend  = now.weekday() >= 5
-    is_holiday  = _is_holiday(today)
-    is_half_day = _is_half_day(today)
+    is_weekend = now.weekday() >= 5
+    # Use API cache for holiday/half-day detection when available
+    c = _get_cache()
+    if c.get("date") == today:
+        is_holiday  = not c.get("is_trading_day", True) and not is_weekend
+        is_half_day = _is_half_day(today)  # half-day flag still from static list
+    else:
+        is_holiday  = _is_holiday(today)
+        is_half_day = _is_half_day(today)
 
     # Override label / advice / color for market-closed states
     if is_weekend:

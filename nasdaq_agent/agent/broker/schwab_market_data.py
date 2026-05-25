@@ -22,7 +22,7 @@ import concurrent.futures
 import logging
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 
 import aiohttp
 import pandas as pd
@@ -977,10 +977,11 @@ def fetch_option_chain(
 
 # ── Market hours ──────────────────────────────────────────────────────────────
 
-def fetch_market_hours(market: str = "equity") -> dict:
+def fetch_market_hours(market: str = "equity", target_date: date | None = None) -> dict:
     """
-    Return full market session info for the given market type.
+    Return full market session info for the given market type and date.
     market: equity | option | bond | future | forex
+    target_date: date to query; defaults to today in ET (not UTC date.today()).
 
     Returns dict with keys:
       is_open:            bool | None   (None = API unavailable)
@@ -998,7 +999,10 @@ def fetch_market_hours(market: str = "equity") -> dict:
     }
     if not _is_authorised():
         return _empty
-    today = date.today().isoformat()
+    if target_date is None:
+        from zoneinfo import ZoneInfo
+        target_date = datetime.now(ZoneInfo("America/New_York")).date()
+    today = target_date.isoformat()
     data = _get("/markets", {"markets": market, "date": today})
     if not isinstance(data, dict):
         return _empty
