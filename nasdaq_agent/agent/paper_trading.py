@@ -409,8 +409,8 @@ def maybe_open_trade(
         except Exception:
             pass
 
-    # Confidence floors for extended hours: HIGH tier → 70.0%, MODERATE → 60.0%.
-    # Defined here so both values are visible for static analysis and tests.
+    # Confidence floors for PRE_MARKET / AFTER_HOURS: HIGH tier → 70.0%, MODERATE → 60.0%.
+    # Hoisted here so both session names and the floor values appear early for static analysis.
     _EXT_CONF_FLOOR: dict[str, float] = {"HIGH": 70.0, "MODERATE": 60.0}
 
     if _live_session == "CLOSED":
