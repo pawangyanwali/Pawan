@@ -1892,7 +1892,8 @@ function connectWS() {
   // Guard: don't stack connections if already open or connecting
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-  ws = new WebSocket(`${BACKEND_WS}/ws`);
+  const _wsAt = sessionStorage.getItem('access_token') || '';
+  ws = new WebSocket(`${BACKEND_WS}/ws` + (_wsAt ? `?token=${encodeURIComponent(_wsAt)}` : ''));
 
   ws.onopen = () => {
     document.getElementById('dot').classList.add('live');
@@ -2174,7 +2175,13 @@ function connectWS() {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (e) => {
+    // Code 4001 = server rejected auth — clear session and force re-login
+    if (e.code === 4001) {
+      sessionStorage.removeItem('access_token');
+      window.location.replace('/login');
+      return;
+    }
     document.getElementById('dot').classList.remove('live');
     document.getElementById('ws-status').textContent = 'Reconnecting…';
     const chip = document.getElementById('ws-chip');

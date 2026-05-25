@@ -44,6 +44,7 @@ from agent.adaptive_filter import get_status as af_get_status, reset_filter as a
 from agent.after_hours_monitor import get_all_biases as ah_get_all
 from agent.learning_engine import learning_engine, get_learning_log
 import agent.weekend_learner as weekend_learner
+from auth.dependencies import require_viewer, require_analyst, AuthenticatedUser
 
 try:
     from agent.algo_learning_p2 import get_phase2_engine as _get_p2_engine
@@ -993,7 +994,8 @@ async def premarket_scan_endpoint():
 
 
 @app.post("/api/premarket-scan/run")
-async def trigger_premarket_scan(background_tasks: BackgroundTasks):
+async def trigger_premarket_scan(background_tasks: BackgroundTasks,
+                                  _user: AuthenticatedUser = Depends(require_analyst)):
     """Manually trigger a pre-market gapper scan."""
     try:
         from agent.premarket_scanner import run_premarket_scan_background
@@ -1250,7 +1252,8 @@ async def historical_retrain_status():
 
 
 @app.post("/api/historical/backtest/run")
-async def historical_backtest_run(interval: str = "5min"):
+async def historical_backtest_run(interval: str = "5min",
+                                   _user: AuthenticatedUser = Depends(require_analyst)):
     """Run vectorized backtest over stored historical bars.
 
     Runs as a detached subprocess — never blocks the web worker.
@@ -1666,7 +1669,7 @@ async def schwab_md_web_callback(request: Request, code: str = "", state: str = 
 
 
 @app.get("/api/broker/status")
-async def broker_status():
+async def broker_status(_user: AuthenticatedUser = Depends(require_viewer)):
     """Connection status for both Schwab apps, token TTLs, account info."""
     from config import SCHWAB_ENABLED
     try:
@@ -1943,7 +1946,8 @@ async def backtest_results():
 
 
 @app.post("/api/backtest/run")
-async def run_backtest(background_tasks: BackgroundTasks):
+async def run_backtest(background_tasks: BackgroundTasks,
+                       _user: AuthenticatedUser = Depends(require_analyst)):
     """Trigger a fresh backtester run in the background."""
     try:
         from agent.backtester import get_backtester
@@ -2041,7 +2045,22 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket, token: str = ""):
+    # Validate access token before accepting into the broadcast pool.
+    # The token is passed as a query param (?token=<access_token>) by the frontend.
+    _authed = False
+    if token:
+        try:
+            from auth.utils import decode_token, is_blacklisted
+            _p = decode_token(token)
+            _authed = (_p.get("type") == "access" and not is_blacklisted(_p.get("jti", "")))
+        except Exception:
+            pass
+    if not _authed:
+        await ws.accept()
+        await ws.close(code=4001)
+        return
+
     await manager.connect(ws)
     logger.info(f"WebSocket client connected. Total: {len(manager.active)}")
     keepalive = asyncio.create_task(_ws_keepalive(ws))

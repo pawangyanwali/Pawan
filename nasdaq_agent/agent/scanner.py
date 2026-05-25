@@ -1428,7 +1428,7 @@ class Scanner:
         if is_ah_eod_close_window():
             try:
                 from agent.paper_trading import close_all_positions_eod
-                closed_n = close_all_positions_eod(reason="AH_EOD_19:55")
+                closed_n = close_all_positions_eod(reason="AH_EOD_19:55", extended_hours=True)
                 if closed_n:
                     logger.info(f"[Scanner] AH EOD hard close 7:55pm — {closed_n} positions closed")
             except Exception as _ahc_e:
@@ -1601,14 +1601,14 @@ class Scanner:
             logger.info(f"Scheduled ML retrain launching ({len(TRAINING_TICKERS)} Tier-1 tickers)…")
             self._last_retrain       = time.time()
             self._last_deep_finetune = time.time()   # full retrain counts as fine-tune too
-            def _bg_retrain():
-                try:
-                    daily_data = fetch_batch_interval(TRAINING_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
-                    retrain_all(TRAINING_TICKERS, daily_data=daily_data)
-                    logger.info("Scheduled ML retrain complete.")
-                except Exception as _re:
-                    logger.warning(f"Background ML retrain failed: {_re}")
-            threading.Thread(target=_bg_retrain, daemon=True, name="ml-retrain").start()
+            # Run in a subprocess so CPU-intensive XGBoost/sklearn training never
+            # stalls the asyncio event loop or the gunicorn worker heartbeat.
+            import subprocess as _sp, sys as _sys
+            from pathlib import Path as _Path
+            _worker = str(_Path(__file__).parent / "_ml_retrain_worker.py")
+            _proc = _sp.Popen([_sys.executable, _worker],
+                              cwd=str(_Path(__file__).parent.parent))
+            logger.info(f"[ML-Retrain] Subprocess started (pid={_proc.pid})")
 
         elif self._should_finetune_deep():
             # Hourly Deep BiLSTM fine-tune — uses cached 15-min data, no API calls.

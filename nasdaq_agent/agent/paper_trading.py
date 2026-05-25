@@ -859,10 +859,12 @@ def _record_close(
         _fire_trade_event("close", ticker)
 
 
-def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
+def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM", extended_hours: bool = False) -> int:
     """
     Force-close ALL open paper trades at current price.
     Called at 3:45 PM ET hard close, after-hours, or on startup when market is closed.
+    Pass extended_hours=True when closing during AH session so prices reflect
+    the actual after-hours quote rather than the stale regular-session close.
     Returns number of positions closed.
     """
     from agent.data_fetcher import fetch_batch_realtime, get_last_cached_close
@@ -885,7 +887,7 @@ def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
     # Step 2: fetch prices outside the lock so reads are never blocked
     tickers = list({r["ticker"] for r in rows})
     try:
-        prices = fetch_batch_realtime(tickers)
+        prices = fetch_batch_realtime(tickers, extended_hours=extended_hours)
     except Exception:
         prices = {}
 

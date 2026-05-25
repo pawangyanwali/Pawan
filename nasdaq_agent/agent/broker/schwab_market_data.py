@@ -159,6 +159,11 @@ _bg_lock = threading.Lock()
 _bg_last = 0.0
 _BG_GAP  = 1.0   # 1 s between background calls
 
+# Sync foreground proactive throttle (100 req/min — respects the 120/min Schwab cap).
+_sync_fg_lock = threading.Lock()
+_sync_fg_last: float = 0.0
+_SYNC_FG_GAP: float  = 0.6   # 0.6 s → 100 req/min
+
 
 def _on_429() -> None:
     """Called when Schwab returns HTTP 429. Sets an exponentially growing back-off.
@@ -278,7 +283,7 @@ _aio_bg_last: float = 0.0
 # burst where 250 tasks queue up and fire as fast as the semaphore releases.
 _aio_rate_lock: "asyncio.Lock | None" = None   # created lazily (loop-bound)
 _aio_rate_last: float = 0.0
-_AIO_RATE_GAP: float  = 0.067   # 67ms → ≤15 req/s  (leaves headroom vs 120/min cap)
+_AIO_RATE_GAP: float  = 0.1     # 100ms → ≤10 req/s ≈ 600 req/min (stays under 120/min per endpoint)
 
 
 def _get_aio_rate_lock() -> "asyncio.Lock":
@@ -322,13 +327,21 @@ async def _aio_bg_wait() -> None:
 
 
 def _rate_wait(background: bool = False) -> None:
-    """Sync path: background throttle + 429 back-off wait."""
+    """Sync path: proactive throttle + 429 back-off wait."""
+    global _bg_last, _sync_fg_last
     if background:
         with _bg_lock:
             gap = time.time() - _bg_last
             if gap < _BG_GAP:
                 time.sleep(_BG_GAP - gap)
             _bg_last = time.time()
+    else:
+        # Foreground sync callers: cap at ~100 req/min to respect the Schwab limit.
+        with _sync_fg_lock:
+            gap = time.time() - _sync_fg_last
+            if gap < _SYNC_FG_GAP:
+                time.sleep(_SYNC_FG_GAP - gap)
+            _sync_fg_last = time.time()
     # Honour any active 429 back-off
     remaining = _backoff_until - time.time()
     if remaining > 0:

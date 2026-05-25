@@ -165,8 +165,10 @@ def fetch_batch_interval(
         else:
             to_fetch.append(ticker)
 
-    # 2) SQLite persistent cache (training intervals, ttl > 0, non-extended)
-    if to_fetch and ttl > 0 and not extended_hours:
+    # 2) PostgreSQL persistent cache (training intervals, ttl > 0).
+    # Extended-hours data is stored under a distinct key (interval_key = "N:ext")
+    # so regular and extended bars never collide in the same cache row.
+    if to_fetch and ttl > 0:
         still_miss: list[str] = []
         for ticker in to_fetch:
             df = _sqlite_get(ticker, interval, ttl)

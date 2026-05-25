@@ -320,9 +320,11 @@ def get_session() -> str:
 
     t = now.time()
 
-    # Half-day early-close (market closes at 1:00 PM ET) — static fallback
-    # only reached when the API cache is unavailable or stale.
-    if not cache_is_today and _is_half_day(today):
+    # Half-day early-close (market closes at 1:00 PM ET).
+    # Must run regardless of cache state: when cache IS current, reg_close==13:00
+    # handles t>=13:00 correctly above, but the 12:45-13:00 HARD_CLOSE window
+    # falls through to the standard table and returns LUNCH_BLOCK without this check.
+    if _is_half_day(today):
         if t >= time(13, 0):
             return "CLOSED"
         if t >= time(12, 45):
