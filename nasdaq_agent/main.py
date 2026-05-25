@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     _SSE_AVAILABLE = False
 
 from agent.scanner import scanner, StockSignal
-from agent.market_hours import get_session_info
+from agent.market_hours import get_session_info, refresh_market_hours_cache
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals, get_observation_summary
 from agent.position_sizing import calculate as calc_position
@@ -499,6 +499,15 @@ async def lifespan(app: FastAPI):
         _hist_init_tables()
     except Exception as _init_err:
         logging.getLogger(__name__).warning(f"DB init warning: {_init_err}")
+
+    # Warm the market-hours cache before the first scan so get_market_session()
+    # doesn't block on its first call mid-scan.  This runs in the background
+    # executor so it doesn't delay startup if Schwab is temporarily unreachable.
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, refresh_market_hours_cache)
+    except Exception:
+        pass
 
     _load_signal_cache()   # pre-populate cache before any scan runs
     scanner.register_callback(_on_signals)

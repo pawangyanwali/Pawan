@@ -979,37 +979,63 @@ def fetch_option_chain(
 
 def fetch_market_hours(market: str = "equity") -> dict:
     """
-    Return market session info for the given market type.
+    Return full market session info for the given market type.
     market: equity | option | bond | future | forex
 
     Returns dict with keys:
-      is_open:     bool
-      open_time:   str (ISO) or None
-      close_time:  str (ISO) or None
+      is_open:            bool | None   (None = API unavailable)
+      open_time:          str (ISO) | None   regular session open
+      close_time:         str (ISO) | None   regular session close
+      pre_market_start:   str (ISO) | None
+      pre_market_end:     str (ISO) | None
+      post_market_start:  str (ISO) | None
+      post_market_end:    str (ISO) | None
     """
+    _empty = {
+        "is_open": None, "open_time": None, "close_time": None,
+        "pre_market_start": None, "pre_market_end": None,
+        "post_market_start": None, "post_market_end": None,
+    }
     if not _is_authorised():
-        return {"is_open": None, "open_time": None, "close_time": None}
+        return _empty
     today = date.today().isoformat()
     data = _get("/markets", {"markets": market, "date": today})
     if not isinstance(data, dict):
-        return {"is_open": None, "open_time": None, "close_time": None}
+        return _empty
     try:
         mkt = data.get(market, {})
-        # Response shape: {market: {product_key: {isOpen, sessionHours: {regularMarket: [{start, end}]}}}}
-        for product_key, info in mkt.items():
-            is_open   = info.get("isOpen", False)
-            sessions  = info.get("sessionHours", {}).get("regularMarket", [])
-            open_time  = sessions[0].get("start")  if sessions else None
-            close_time = sessions[0].get("end")    if sessions else None
-            return {"is_open": is_open, "open_time": open_time, "close_time": close_time}
+        # Response shape: {market: {product_key: {isOpen, sessionHours: {
+        #   preMarket: [{start, end}], regularMarket: [{start, end}], postMarket: [{start, end}]
+        # }}}}
+        for _key, info in mkt.items():
+            hours = info.get("sessionHours", {})
+
+            def _first_window(key: str) -> tuple[str | None, str | None]:
+                windows = hours.get(key, [])
+                if windows:
+                    return windows[0].get("start"), windows[0].get("end")
+                return None, None
+
+            reg_open,  reg_close  = _first_window("regularMarket")
+            pre_open,  pre_close  = _first_window("preMarket")
+            post_open, post_close = _first_window("postMarket")
+            return {
+                "is_open":           info.get("isOpen", False),
+                "open_time":         reg_open,
+                "close_time":        reg_close,
+                "pre_market_start":  pre_open,
+                "pre_market_end":    pre_close,
+                "post_market_start": post_open,
+                "post_market_end":   post_close,
+            }
     except Exception as e:
         logger.debug(f"[Schwab MD] market hours parse error: {e}")
-    return {"is_open": None, "open_time": None, "close_time": None}
+    return _empty
 
 
 def is_market_open() -> bool | None:
     """
-    Quick check: is the equity market currently open?
+    Quick check: is the equity market currently open (regular session)?
     Returns True/False, or None if Schwab is not authorised.
     """
     result = fetch_market_hours("equity")

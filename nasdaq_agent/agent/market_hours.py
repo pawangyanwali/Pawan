@@ -18,9 +18,12 @@ close early at 1:00 PM ET — HARD_CLOSE starts at 12:45 PM.
 """
 from __future__ import annotations
 from datetime import date, datetime, time, timedelta
+import logging
+import threading
 import pytz
 
-ET = pytz.timezone("America/New_York")
+ET  = pytz.timezone("America/New_York")
+_log = logging.getLogger(__name__)
 
 # ── US Market Holidays (NYSE / NASDAQ) 2025–2026 ────────────────────────────
 _MARKET_HOLIDAYS: frozenset[date] = frozenset({
@@ -113,6 +116,178 @@ def _is_holiday(d: date) -> bool:
 
 def _is_half_day(d: date) -> bool:
     return d in _HALF_DAYS
+
+
+# ── API-backed daily session cache ────────────────────────────────────────────
+# Populated once per day from Schwab /markets endpoint (at startup and just
+# after midnight ET).  Falls back to rule-based windows when the API is down.
+#
+# Shape of _day_cache:
+#   date            : date            — which trading day this covers
+#   is_trading_day  : bool            — False on weekends/holidays
+#   regular_open    : time            — normally 09:30
+#   regular_close   : time            — 16:00 or 13:00 on half-days
+#   pre_open        : time            — normally 04:00 (Schwab often returns 07:00)
+#   pre_close       : time            — normally 09:30
+#   post_open       : time            — normally 16:00
+#   post_close      : time            — normally 20:00
+#   source          : str             — "schwab_api" | "rule_based"
+
+_cache_lock: threading.Lock = threading.Lock()
+_day_cache:  dict           = {}
+
+
+def _parse_iso_time(iso: str | None) -> time | None:
+    """Extract ET wall-clock time from an ISO-8601 datetime string."""
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso).astimezone(ET).time().replace(second=0, microsecond=0)
+    except Exception:
+        return None
+
+
+def refresh_market_hours_cache(target_date: date | None = None) -> bool:
+    """
+    Fetch today's (or target_date's) session boundaries from Schwab /markets.
+    Returns True if the Schwab API responded; False if we fell back to rule-based.
+    Always writes a valid entry to _day_cache regardless of API availability.
+
+    Safe to call from any thread; designed to be called at startup and at
+    midnight ET by the background refresh thread.
+    """
+    global _day_cache
+    d = target_date or datetime.now(ET).date()
+
+    # ── Try Schwab API ────────────────────────────────────────────────────────
+    hours: dict = {}
+    try:
+        from agent.broker.schwab_market_data import fetch_market_hours as _fmh
+        hours = _fmh("equity")
+    except Exception as exc:
+        _log.debug(f"[MarketHours] fetch_market_hours unavailable: {exc}")
+
+    api_ok = hours.get("is_open") is not None   # None = not authorised / network error
+
+    if api_ok:
+        reg_open   = _parse_iso_time(hours.get("open_time"))
+        reg_close  = _parse_iso_time(hours.get("close_time"))
+        pre_open   = _parse_iso_time(hours.get("pre_market_start"))
+        pre_close  = _parse_iso_time(hours.get("pre_market_end"))
+        post_open  = _parse_iso_time(hours.get("post_market_start"))
+        post_close = _parse_iso_time(hours.get("post_market_end"))
+        # A trading day has regular session hours; holiday/weekend response has none.
+        is_trading = reg_open is not None
+        entry: dict = {
+            "date":           d,
+            "is_trading_day": is_trading,
+            "regular_open":   reg_open   or time(9, 30),
+            "regular_close":  reg_close  or time(16,  0),
+            "pre_open":       pre_open   or time(4,   0),
+            "pre_close":      pre_close  or time(9,  30),
+            "post_open":      post_open  or time(16,  0),
+            "post_close":     post_close or time(20,  0),
+            "source":         "schwab_api",
+        }
+    else:
+        # ── Rule-based fallback ───────────────────────────────────────────────
+        is_wd      = d.weekday() < 5
+        is_hol     = _is_holiday(d)
+        is_half    = _is_half_day(d)
+        reg_close_t = time(13, 0) if is_half else time(16, 0)
+        entry = {
+            "date":           d,
+            "is_trading_day": is_wd and not is_hol,
+            "regular_open":   time(9, 30),
+            "regular_close":  reg_close_t,
+            "pre_open":       time(4,  0),
+            "pre_close":      time(9, 30),
+            "post_open":      reg_close_t,
+            "post_close":     time(20,  0),
+            "source":         "rule_based",
+        }
+
+    with _cache_lock:
+        _day_cache = entry
+
+    _log.info(
+        "[MarketHours] Cache %s: trading=%s regular %s–%s  pre %s–%s  post %s–%s",
+        entry["source"], entry["is_trading_day"],
+        entry["regular_open"], entry["regular_close"],
+        entry["pre_open"], entry["pre_close"],
+        entry["post_open"], entry["post_close"],
+    )
+    return api_ok
+
+
+def _get_cache() -> dict:
+    """Return today's cache entry; triggers a refresh if the date has rolled over."""
+    with _cache_lock:
+        cached = _day_cache.copy()
+    today = datetime.now(ET).date()
+    if cached.get("date") != today:
+        refresh_market_hours_cache(today)
+        with _cache_lock:
+            cached = _day_cache.copy()
+    return cached
+
+
+def _start_midnight_refresh() -> None:
+    """Daemon thread: re-fetch session boundaries just after midnight ET each day."""
+    import time as _time
+
+    def _loop() -> None:
+        while True:
+            try:
+                now_et  = datetime.now(ET)
+                # Sleep until 00:01 the next calendar day in ET
+                next_day = ET.localize(
+                    datetime.combine(now_et.date() + timedelta(days=1), time(0, 1))
+                )
+                sleep_s = max(0, (next_day - now_et).total_seconds())
+                _time.sleep(sleep_s)
+                refresh_market_hours_cache()
+            except Exception as exc:
+                _log.debug(f"[MarketHours] Midnight refresh error: {exc}")
+                _time.sleep(60)   # retry in 1 min on unexpected error
+
+    t = threading.Thread(target=_loop, daemon=True, name="market-hours-refresh")
+    t.start()
+
+
+_start_midnight_refresh()
+
+
+# ── Public 4-state session API ────────────────────────────────────────────────
+
+def get_market_session() -> str:
+    """
+    Return the canonical market session using the API-backed daily cache.
+
+    REGULAR     — regular trading session  (normally 09:30–16:00 ET)
+    PRE_MARKET  — pre-market session       (normally 04:00–09:30 ET)
+    AFTER_HOURS — post-market session      (normally 16:00–20:00 ET)
+    CLOSED      — outside all sessions (weekends, holidays, overnight)
+
+    Use this in preference to get_session() when you only need to know which
+    broad session the market is in (e.g. for data-fetch decisions and ML
+    feature flags).  get_session() continues to return the fine-grained
+    internal session labels used by risk controls (PRIME, LUNCH_BLOCK, etc.).
+    """
+    c      = _get_cache()
+    now_et = datetime.now(ET)
+    t      = now_et.time().replace(second=0, microsecond=0)
+
+    if not c.get("is_trading_day", False):
+        return "CLOSED"
+
+    if c["regular_open"] <= t < c["regular_close"]:
+        return "REGULAR"
+    if c["pre_open"] <= t < c["pre_close"]:
+        return "PRE_MARKET"
+    if c["post_open"] <= t < c["post_close"]:
+        return "AFTER_HOURS"
+    return "CLOSED"
 
 
 def get_session() -> str:
@@ -239,7 +414,8 @@ def is_pre_market() -> bool:
 
 
 def is_after_hours() -> bool:
-    return get_session() in ("AFTER_HOURS", "CLOSED")
+    """True only during the post-market window (16:00–20:00 ET), not when fully closed."""
+    return get_session() == "AFTER_HOURS"
 
 
 def no_new_entries() -> bool:
