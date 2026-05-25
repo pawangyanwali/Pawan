@@ -1349,14 +1349,21 @@ async def learning_params_status():
         "entry_window_bars": 3,
     }
     loop = asyncio.get_running_loop()
-    families: dict = {}
-    for family, algo_name in _FAMILY_REPRESENTATIVES.items():
+
+    def _safe_params(algo_name: str) -> dict:
         try:
-            params = await loop.run_in_executor(None, lambda a=algo_name: _get_algo_params(a))
-            families[family] = {k: params.get(k, defaults[k]) for k in defaults}
-        except Exception as exc:
-            logger.debug("learning/params family %s error: %s", family, exc)
-            families[family] = dict(defaults)
+            return _get_algo_params(algo_name)
+        except Exception:
+            return {}
+
+    results = await asyncio.gather(
+        *[loop.run_in_executor(None, _safe_params, algo) for algo in _FAMILY_REPRESENTATIVES.values()],
+        return_exceptions=True,
+    )
+    families = {
+        family: {k: (r.get(k, defaults[k]) if isinstance(r, dict) else defaults[k]) for k in defaults}
+        for family, r in zip(_FAMILY_REPRESENTATIVES.keys(), results)
+    }
     return {"available": True, "families": families, "defaults": defaults}
 
 

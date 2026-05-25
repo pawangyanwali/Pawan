@@ -6210,7 +6210,7 @@ function _lpFmtVal(val, param) {
 async function refreshLearningPanel() {
   // 1. Fetch params
   try {
-    const pd = await fetch(`${BACKEND_HTTP}/api/learning/params`, {signal: AbortSignal.timeout(8000)}).then(r => r.json());
+    const pd = await fetch(`${BACKEND_HTTP}/api/learning/params`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
     const tbody = document.getElementById('lp-params-tbody');
     if (tbody) {
       if (!pd.available) {
@@ -6236,7 +6236,7 @@ async function refreshLearningPanel() {
 
   // 2. Fetch phase2 — deployment mode + drift alerts
   try {
-    const p2 = await fetch(`${BACKEND_HTTP}/api/learning/phase2`, {signal: AbortSignal.timeout(8000)}).then(r => r.json());
+    const p2 = await fetch(`${BACKEND_HTTP}/api/learning/phase2`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
     const mode = (p2.deployment || {}).current_mode || (p2.available === false ? 'N/A' : 'SHADOW');
     const drifts = ((p2.drift || {}).material_drifts || []).length;
 
@@ -6271,7 +6271,7 @@ async function refreshLearningPanel() {
 
   // 3. Fetch learning log — filter for param changes
   try {
-    const ld = await fetch(`${BACKEND_HTTP}/api/learning-log?limit=50`, {signal: AbortSignal.timeout(8000)}).then(r => r.json());
+    const ld = await fetch(`${BACKEND_HTTP}/api/learning-log?limit=50`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
     const entries = (ld.log || []).filter(e => e.message && /param/i.test(e.message)).slice(-5).reverse();
     const logEl = document.getElementById('lp-param-log');
     if (logEl) {
