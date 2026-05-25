@@ -73,7 +73,12 @@ info "Dependencies installed."
 section "5 / 7 — .env file"
 ENV_FILE="$APP_DIR/nasdaq_agent/.env"
 if [ ! -f "$ENV_FILE" ]; then
-    cat > "$ENV_FILE" <<'ENVEOF'
+    JWT_SECRET_VAL=$(openssl rand -hex 32)
+    cat > "$ENV_FILE" <<ENVEOF
+# ── JWT signing key — auto-generated at deploy time ──────────────────────────
+# KEEP THIS VALUE STABLE: changing it invalidates all active browser sessions.
+JWT_SECRET=${JWT_SECRET_VAL}
+
 # ── Twelve Data ───────────────────────────────────────────────────────────────
 TWELVE_DATA_API_KEY=PASTE_YOUR_KEY_HERE
 
@@ -108,7 +113,7 @@ User=${APP_USER}
 WorkingDirectory=${APP_DIR}/nasdaq_agent
 EnvironmentFile=${ENV_FILE}
 ExecStartPre=/bin/truncate -s 0 ${APP_DIR}/logs/agent.err
-ExecStart=${VENV}/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log
+ExecStart=${VENV}/bin/gunicorn -c gunicorn.conf.py main:app
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:${APP_DIR}/logs/agent.log

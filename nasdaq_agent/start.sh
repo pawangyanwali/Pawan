@@ -17,7 +17,7 @@ case "${1:-start}" in
     fi
     mkdir -p "$(dirname "$LOG")"
     tmux new-session -d -s "$SESSION" \
-      "cd '$DIR' && uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log 2>&1 | tee -a '$LOG'"
+      "cd '$DIR' && gunicorn -c gunicorn.conf.py main:app 2>&1 | tee -a '$LOG'"
     echo "Started — tmux session: $SESSION"
     echo "Logs:   $LOG"
     echo "Stop:   ./start.sh stop"
