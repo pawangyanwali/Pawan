@@ -2041,17 +2041,19 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, ticket: str = ""):
-    # Validate the ws_ticket before accepting the connection
+async def websocket_endpoint(ws: WebSocket, token: str = ""):
+    # Validate the access_token before accepting the connection.
+    # Using the access token directly avoids the extra /auth/ws-ticket
+    # roundtrip that was causing systematic 403 rejections.
     from auth.utils import decode_token as _dec, is_blacklisted as _blk
     import jwt as _jwt
     _reject = False
-    if not ticket:
+    if not token:
         _reject = True
     else:
         try:
-            _pl = _dec(ticket)
-            if _pl.get("type") != "ws_ticket" or _blk(_pl.get("jti", "")):
+            _pl = _dec(token)
+            if _pl.get("type") != "access" or _blk(_pl.get("jti", "")):
                 _reject = True
         except _jwt.InvalidTokenError:
             _reject = True

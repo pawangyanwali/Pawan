@@ -1888,21 +1888,14 @@ function _resetWatchdog() {
   }, _WS_WATCHDOG_MS);
 }
 
-async function connectWS() {
+function connectWS() {
   // Guard: don't stack connections if already open or connecting
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-  // Fetch a short-lived ws_ticket before opening the connection
   const at = sessionStorage.getItem('access_token');
   if (!at) { window.location.replace('/login'); return; }
-  let ticket = '';
-  try {
-    const tr = await fetch('/auth/ws-ticket', { headers: { 'Authorization': `Bearer ${at}` } });
-    if (tr.ok) { const td = await tr.json(); ticket = td.ticket || ''; }
-  } catch (_) {}
-  if (!ticket) { console.warn('[WS] Could not obtain ws_ticket — retrying in 5s'); setTimeout(connectWS, 5000); return; }
 
-  ws = new WebSocket(`${BACKEND_WS}/ws?ticket=${encodeURIComponent(ticket)}`);
+  ws = new WebSocket(`${BACKEND_WS}/ws?token=${encodeURIComponent(at)}`);
 
   ws.onopen = () => {
     document.getElementById('dot').classList.add('live');
