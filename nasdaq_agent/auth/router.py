@@ -340,6 +340,11 @@ async def change_password_forced(
         )
 
     new_hash = hash_password(body.new_password)
+
+    # Create tokens first — if this fails, the password is NOT changed yet.
+    access_token, _  = create_access_token(user["id"], user["username"], user["role"])
+    refresh_token, _ = create_refresh_token(user["id"])
+
     with get_conn() as c:
         c.execute(
             "UPDATE users SET hashed_password = ?, force_password_change = FALSE WHERE id = ?",
@@ -348,10 +353,6 @@ async def change_password_forced(
 
     invalidate_user_cache(user["id"])
     audit("password_changed", user_id=user["id"], ip_addr=_client_ip(request))
-
-    # Issue tokens now that password is changed
-    access_token, _  = create_access_token(user["id"], user["username"], user["role"])
-    refresh_token, _ = create_refresh_token(user["id"])
     return {
         "access_token":  access_token,
         "refresh_token": refresh_token,
