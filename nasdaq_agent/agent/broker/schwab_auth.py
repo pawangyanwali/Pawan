@@ -166,7 +166,7 @@ class _TokenManager:
 
     # ── Refresh ───────────────────────────────────────────────────────────────
 
-    def refresh(self) -> bool:
+    def refresh(self, _retry: int = 0) -> bool:
         with self._lock:
             rt = self._tokens.get("refresh_token")
         if not rt:
@@ -180,8 +180,8 @@ class _TokenManager:
             return True
         except urllib.error.HTTPError as e:
             if e.code == 400:
-                # 400 = invalid_grant (expired refresh token) or invalid_client (wrong credentials).
-                # Clear stale tokens so the system stops retrying and prompts re-auth.
+                # 400 = invalid_grant (expired/revoked refresh token) or bad credentials.
+                # Do not retry — clear tokens and require re-auth.
                 logger.error(
                     f"[Schwab/{self.name}] Refresh token rejected (400) — "
                     f"tokens cleared. Re-authenticate via /schwab/auth"
@@ -194,10 +194,29 @@ class _TokenManager:
                     except Exception:
                         pass
             else:
-                logger.error(f"[Schwab/{self.name}] Token refresh failed: {e}")
+                # 403 = Akamai WAF transient block; 5xx = Schwab outage.
+                # Retry with exponential backoff (2, 4, 8, 16 … up to 30 min).
+                backoff = min(120 * (2 ** _retry), 1800)
+                logger.warning(
+                    f"[Schwab/{self.name}] Token refresh HTTP {e.code} — "
+                    f"retry #{_retry + 1} in {backoff}s"
+                )
+                t = threading.Timer(backoff, self.refresh, kwargs={"_retry": _retry + 1})
+                t.daemon = True
+                t.start()
+                with self._lock:
+                    self._refresh_timer = t
             return False
         except Exception as e:
-            logger.error(f"[Schwab/{self.name}] Token refresh failed: {e}")
+            backoff = min(120 * (2 ** _retry), 1800)
+            logger.warning(
+                f"[Schwab/{self.name}] Token refresh error — retry #{_retry + 1} in {backoff}s: {e}"
+            )
+            t = threading.Timer(backoff, self.refresh, kwargs={"_retry": _retry + 1})
+            t.daemon = True
+            t.start()
+            with self._lock:
+                self._refresh_timer = t
             return False
 
     def _schedule_refresh(self, expires_in: int) -> None:
