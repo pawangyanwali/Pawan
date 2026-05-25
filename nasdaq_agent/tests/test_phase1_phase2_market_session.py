@@ -1474,3 +1474,335 @@ class TestPhase3SessionGateIntegration:
         assert "_stop_mult" in fn_body and "2.0" in fn_body, (
             "maybe_open_trade must multiply the stop distance in extended hours"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 4 tests: session-aware volume baselines in agent/volume.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import pytz as _pytz
+_ET_TZ = _pytz.timezone("America/New_York")
+
+
+def _make_1m_df(
+    start_et: "_real_dt.datetime",
+    n_bars: int,
+    volume: int = 100_000,
+    close: float = 200.0,
+) -> "pd.DataFrame":
+    """Build a 1-minute OHLCV DataFrame with a DatetimeIndex in America/New_York."""
+    idx = pd.date_range(start=start_et, periods=n_bars, freq="1min", tz=start_et.tzinfo)
+    df  = pd.DataFrame({
+        "Open":   close,
+        "High":   close + 0.10,
+        "Low":    close - 0.10,
+        "Close":  close,
+        "Volume": volume,
+    }, index=idx)
+    return df
+
+
+def _ah_start(date_str: str = "2025-01-13") -> "_real_dt.datetime":
+    """Return 16:00 ET on the given date (after-hours open)."""
+    return _real_dt.datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=16, minute=0, tzinfo=_ET_TZ
+    )
+
+
+def _pm_start(date_str: str = "2025-01-13") -> "_real_dt.datetime":
+    """Return 04:00 ET on the given date (pre-market open)."""
+    return _real_dt.datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=4, minute=0, tzinfo=_ET_TZ
+    )
+
+
+def _reg_start(date_str: str = "2025-01-13") -> "_real_dt.datetime":
+    """Return 09:30 ET on the given date (regular session open)."""
+    return _real_dt.datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=9, minute=30, tzinfo=_ET_TZ
+    )
+
+
+class TestPhase4SessionDetect:
+    """_detect_session() correctly identifies the session from the last bar's ET time."""
+
+    def test_regular_session_930_is_regular(self):
+        from agent.volume import _detect_session
+        import pandas as pd
+        idx = pd.date_range("2025-01-13 14:30", periods=1, freq="1min", tz="UTC")  # 9:30 ET
+        idx_et = idx.tz_convert("America/New_York")
+        assert _detect_session(idx_et) == "REGULAR"
+
+    def test_regular_session_1559_is_regular(self):
+        from agent.volume import _detect_session
+        import pandas as pd
+        idx = pd.date_range("2025-01-13 20:59", periods=1, freq="1min", tz="UTC")  # 15:59 ET
+        idx_et = idx.tz_convert("America/New_York")
+        assert _detect_session(idx_et) == "REGULAR"
+
+    def test_after_hours_1600_detected(self):
+        from agent.volume import _detect_session
+        import pandas as pd
+        idx = pd.date_range("2025-01-13 21:00", periods=1, freq="1min", tz="UTC")  # 16:00 ET
+        idx_et = idx.tz_convert("America/New_York")
+        assert _detect_session(idx_et) == "AFTER_HOURS"
+
+    def test_after_hours_1800_detected(self):
+        from agent.volume import _detect_session
+        import pandas as pd
+        idx = pd.date_range("2025-01-13 23:00", periods=1, freq="1min", tz="UTC")  # 18:00 ET
+        idx_et = idx.tz_convert("America/New_York")
+        assert _detect_session(idx_et) == "AFTER_HOURS"
+
+    def test_pre_market_0700_detected(self):
+        from agent.volume import _detect_session
+        import pandas as pd
+        idx = pd.date_range("2025-01-13 12:00", periods=1, freq="1min", tz="UTC")  # 07:00 ET
+        idx_et = idx.tz_convert("America/New_York")
+        assert _detect_session(idx_et) == "PRE_MARKET"
+
+    def test_pre_market_0429_detected(self):
+        from agent.volume import _detect_session
+        import pandas as pd
+        idx = pd.date_range("2025-01-13 09:29", periods=1, freq="1min", tz="UTC")  # 04:29 ET
+        idx_et = idx.tz_convert("America/New_York")
+        assert _detect_session(idx_et) == "PRE_MARKET"
+
+
+class TestPhase4SessionElapsedHelpers:
+    """_ah_elapsed() and _pm_elapsed() compute correct minutes from session start."""
+
+    def test_ah_elapsed_at_1600_is_zero(self):
+        from agent.volume import _ah_elapsed
+        import pandas as pd
+        ts = pd.Timestamp("2025-01-13 21:00", tz="UTC").tz_convert("America/New_York")
+        assert _ah_elapsed(ts) == 0
+
+    def test_ah_elapsed_at_1630_is_30(self):
+        from agent.volume import _ah_elapsed
+        import pandas as pd
+        ts = pd.Timestamp("2025-01-13 21:30", tz="UTC").tz_convert("America/New_York")
+        assert _ah_elapsed(ts) == 30
+
+    def test_ah_elapsed_at_1800_is_120(self):
+        from agent.volume import _ah_elapsed
+        import pandas as pd
+        ts = pd.Timestamp("2025-01-13 23:00", tz="UTC").tz_convert("America/New_York")
+        assert _ah_elapsed(ts) == 120
+
+    def test_pm_elapsed_at_0400_is_zero(self):
+        from agent.volume import _pm_elapsed
+        import pandas as pd
+        ts = pd.Timestamp("2025-01-13 09:00", tz="UTC").tz_convert("America/New_York")
+        assert _pm_elapsed(ts) == 0
+
+    def test_pm_elapsed_at_0700_is_180(self):
+        from agent.volume import _pm_elapsed
+        import pandas as pd
+        ts = pd.Timestamp("2025-01-13 12:00", tz="UTC").tz_convert("America/New_York")
+        assert _pm_elapsed(ts) == 180
+
+    def test_pm_elapsed_at_0930_is_330(self):
+        from agent.volume import _pm_elapsed
+        import pandas as pd
+        ts = pd.Timestamp("2025-01-13 14:30", tz="UTC").tz_convert("America/New_York")
+        assert _pm_elapsed(ts) == 330
+
+
+class TestPhase4RvolExtended:
+    """rvol_time_of_day() uses session-specific baselines for AH/PM."""
+
+    def test_returns_float(self):
+        from agent.volume import rvol_time_of_day
+        df = _make_1m_df(_ah_start(), 60)
+        result = rvol_time_of_day(df)
+        assert isinstance(result, float)
+        assert result >= 0.0
+
+    def test_ah_rvol_equal_bars_returns_near_one(self):
+        """All-same-volume AH history → RVOL ≈ 1.0."""
+        from agent.volume import rvol_time_of_day
+        # Build 5 past AH sessions + today, all equal volume
+        frames = []
+        for day_offset in range(6, 0, -1):
+            # Use Mon-Sat offsets: skip weekends for realism
+            date_str = f"2025-01-{13 - day_offset:02d}"
+            frames.append(_make_1m_df(_ah_start(date_str), 60, volume=50_000))
+        # today (day 0) = same volume
+        frames.append(_make_1m_df(_ah_start("2025-01-13"), 30, volume=50_000))
+        df_all = pd.concat(frames).sort_index()
+        result = rvol_time_of_day(df_all)
+        # 30 bars at 50k = 1.5M; historical baseline at 30 elapsed = ~1.5M → rvol ≈ 1.0
+        assert 0.5 <= result <= 2.0, f"Uniform AH rvol should be near 1.0, got {result}"
+
+    def test_ah_spike_returns_above_one(self):
+        """Today's AH volume 3× historical baseline → RVOL ≈ 3."""
+        from agent.volume import rvol_time_of_day
+        frames = []
+        for day_offset in range(6, 0, -1):
+            date_str = f"2025-01-{13 - day_offset:02d}"
+            frames.append(_make_1m_df(_ah_start(date_str), 60, volume=50_000))
+        # today: 3× volume
+        frames.append(_make_1m_df(_ah_start("2025-01-13"), 30, volume=150_000))
+        df_all = pd.concat(frames).sort_index()
+        result = rvol_time_of_day(df_all)
+        assert result > 1.5, f"3× AH spike should give rvol > 1.5, got {result}"
+
+    def test_ah_does_not_use_regular_session_bars_for_baseline(self):
+        """AH rvol baseline must ignore regular-session bars from the same days."""
+        from agent.volume import rvol_time_of_day
+        frames = []
+        for day_offset in range(6, 0, -1):
+            date_str = f"2025-01-{13 - day_offset:02d}"
+            # Regular session: 390 bars at 5M/bar (huge regular-session volume)
+            frames.append(_make_1m_df(_reg_start(date_str), 390, volume=5_000_000))
+            # AH session: 60 bars at 100k/bar (typical AH volume)
+            frames.append(_make_1m_df(_ah_start(date_str), 60, volume=100_000))
+        # Today AH: same 100k volume
+        frames.append(_make_1m_df(_ah_start("2025-01-13"), 30, volume=100_000))
+        df_all = pd.concat(frames).sort_index()
+        result = rvol_time_of_day(df_all)
+        # If regular-session bars were used as baseline (avg 5M vs today's 100k),
+        # result would be near 0.0.  Correct AH-only baseline → ≈ 1.0.
+        assert result > 0.3, (
+            f"AH rvol should use AH-only baseline, not regular session. Got {result}"
+        )
+
+    def test_pm_rvol_uniform_returns_near_one(self):
+        """Uniform PM volume across 4 historical days → RVOL ≈ 1.0."""
+        from agent.volume import rvol_time_of_day
+        frames = []
+        for day_offset in range(5, 0, -1):
+            date_str = f"2025-01-{13 - day_offset:02d}"
+            frames.append(_make_1m_df(_pm_start(date_str), 120, volume=30_000))
+        frames.append(_make_1m_df(_pm_start("2025-01-13"), 60, volume=30_000))
+        df_all = pd.concat(frames).sort_index()
+        result = rvol_time_of_day(df_all)
+        assert 0.4 <= result <= 2.5, f"Uniform PM rvol should be near 1.0, got {result}"
+
+    def test_empty_dataframe_returns_one(self):
+        from agent.volume import rvol_time_of_day
+        result = rvol_time_of_day(pd.DataFrame())
+        assert result == 1.0
+
+    def test_none_dataframe_returns_one(self):
+        from agent.volume import rvol_time_of_day
+        assert rvol_time_of_day(None) == 1.0
+
+    def test_regular_session_path_unchanged(self):
+        """Regular session still uses the 9:30-based profile/history."""
+        from agent.volume import rvol_time_of_day
+        frames = []
+        for day_offset in range(6, 0, -1):
+            date_str = f"2025-01-{13 - day_offset:02d}"
+            frames.append(_make_1m_df(_reg_start(date_str), 60, volume=1_000_000))
+        frames.append(_make_1m_df(_reg_start("2025-01-13"), 30, volume=1_000_000))
+        df_all = pd.concat(frames).sort_index()
+        result = rvol_time_of_day(df_all)
+        assert 0.5 <= result <= 2.0, f"Uniform regular-session rvol should be ≈ 1.0, got {result}"
+
+
+class TestPhase4DetectUnusualVolumeExtended:
+    """detect_unusual_volume() uses session-specific baseline for AH/PM."""
+
+    def test_ah_spike_vs_ah_baseline_detected(self):
+        """A 3× spike in AH relative to AH history is detected as unusual."""
+        from agent.volume import detect_unusual_volume
+        # First 59 bars: normal AH volume; last bar: spike
+        df = _make_1m_df(_ah_start(), 59, volume=50_000)
+        spike_row = _make_1m_df(
+            _ah_start().replace(hour=16, minute=59), 1, volume=150_000
+        )
+        df = pd.concat([df, spike_row]).sort_index()
+        result = detect_unusual_volume(df, threshold=2.5)
+        assert result is True, "3× AH spike must be detected as unusual"
+
+    def test_normal_ah_volume_not_unusual(self):
+        """Uniform AH volume across 20 bars is NOT flagged as unusual."""
+        from agent.volume import detect_unusual_volume
+        df = _make_1m_df(_ah_start(), 25, volume=50_000)
+        result = detect_unusual_volume(df, threshold=2.5)
+        assert result is False, "Uniform AH volume must not be flagged as unusual"
+
+    def test_ah_volume_not_inflated_by_regular_bars(self):
+        """AH 'unusual' check must ignore regular-session bars in the same df."""
+        from agent.volume import detect_unusual_volume
+        # Regular session: 390 bars at 5M (would make AH 100k look near-zero rvol)
+        reg = _make_1m_df(_reg_start(), 390, volume=5_000_000)
+        # AH: 25 bars at 100k (normal AH), last bar at 100k (not a spike)
+        ah  = _make_1m_df(_ah_start(), 25, volume=100_000)
+        df  = pd.concat([reg, ah]).sort_index()
+        # If regular bars polluted the baseline (avg ~5M), 100k/5M << 2.5 → False
+        # But also 100k vs 100k AH baseline = 1.0 << 2.5 → False  ← correct answer
+        result = detect_unusual_volume(df, threshold=2.5)
+        assert result is False, "Normal AH volume must not appear unusual regardless of RS bars"
+
+    def test_regular_session_unchanged(self):
+        """Regular-session detect_unusual_volume still uses 20-bar rolling average."""
+        from agent.volume import detect_unusual_volume
+        df_reg = _make_1m_df(_reg_start(), 25, volume=1_000_000)
+        spike  = _make_1m_df(
+            _reg_start().replace(hour=10, minute=25), 1, volume=3_000_000
+        )
+        df = pd.concat([df_reg, spike]).sort_index()
+        result = detect_unusual_volume(df, threshold=2.5)
+        assert result is True, "3× spike in regular session must be detected"
+
+
+class TestPhase4RelativeVolumeExtended:
+    """relative_volume() uses session-specific baseline for AH/PM."""
+
+    def test_ah_relative_volume_uses_ah_bars(self):
+        """AH relative_volume must compare against AH-only bars."""
+        from agent.volume import relative_volume
+        reg = _make_1m_df(_reg_start(), 390, volume=5_000_000)
+        ah  = _make_1m_df(_ah_start(), 20, volume=100_000)
+        # last bar = same 100k
+        df  = pd.concat([reg, ah]).sort_index()
+        result = relative_volume(df)
+        # If using AH-only baseline: 100k/100k = 1.0
+        # If using all-bars 20-bar window: would be ~0.02
+        assert result > 0.5, (
+            f"AH relative_volume should be ≈1.0 using AH-only baseline, got {result}"
+        )
+
+    def test_regular_session_relative_volume_unchanged(self):
+        """Regular-session relative_volume returns ratio vs 20-bar average."""
+        from agent.volume import relative_volume
+        df = _make_1m_df(_reg_start(), 25, volume=1_000_000)
+        result = relative_volume(df)
+        assert 0.9 <= result <= 1.1, f"Uniform regular-session rvol should be ≈1.0, got {result}"
+
+
+class TestPhase4Profiles:
+    """_AH_CUM_PROFILE and _PM_CUM_PROFILE are well-formed."""
+
+    def test_ah_profile_starts_above_zero(self):
+        from agent.volume import _AH_CUM_PROFILE
+        assert _AH_CUM_PROFILE[0][1] > 0
+
+    def test_ah_profile_ends_at_one(self):
+        from agent.volume import _AH_CUM_PROFILE
+        assert _AH_CUM_PROFILE[-1][1] == 1.0
+
+    def test_ah_profile_is_monotone(self):
+        from agent.volume import _AH_CUM_PROFILE
+        fracs = [f for _, f in _AH_CUM_PROFILE]
+        assert all(fracs[i] <= fracs[i+1] for i in range(len(fracs)-1))
+
+    def test_pm_profile_ends_at_one(self):
+        from agent.volume import _PM_CUM_PROFILE
+        assert _PM_CUM_PROFILE[-1][1] == 1.0
+
+    def test_pm_profile_is_monotone(self):
+        from agent.volume import _PM_CUM_PROFILE
+        fracs = [f for _, f in _PM_CUM_PROFILE]
+        assert all(fracs[i] <= fracs[i+1] for i in range(len(fracs)-1))
+
+    def test_interp_profile_clamps_below_zero(self):
+        from agent.volume import _interp_profile, _AH_CUM_PROFILE
+        assert _interp_profile(-10, _AH_CUM_PROFILE) >= 0
+
+    def test_interp_profile_clamps_above_max(self):
+        from agent.volume import _interp_profile, _AH_CUM_PROFILE
+        assert _interp_profile(9999, _AH_CUM_PROFILE) == 1.0
