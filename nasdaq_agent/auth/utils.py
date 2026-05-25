@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt as _bcrypt
+import hashlib
 import jwt
 import pyotp
 
@@ -33,6 +34,11 @@ def verify_password(plain: str, hashed: str) -> bool:
         return _bcrypt.checkpw(plain.encode(), hashed.encode())
     except Exception:
         return False
+
+
+def hash_token(token: str) -> str:
+    """SHA-256 hash for long tokens (JWTs). bcrypt is limited to 72 bytes."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 # ── JWT helpers ────────────────────────────────────────────────────────────────
@@ -66,7 +72,7 @@ def create_refresh_token(user_id: int) -> tuple[str, str]:
         "type": "refresh",
     }
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
-    token_hash = hash_password(token)
+    token_hash = hash_token(token)
 
     with get_conn() as c:
         c.execute(
