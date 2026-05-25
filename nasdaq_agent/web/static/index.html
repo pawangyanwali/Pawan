@@ -4,6 +4,38 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NASDAQ Scalping Agent</title>
+  <!-- Auth guard — must run before any content renders -->
+  <script>
+    (function () {
+      var at = sessionStorage.getItem('access_token');
+      var rt = localStorage.getItem('refresh_token');
+      if (!at && !rt) {
+        window.location.replace('/login');
+        return;
+      }
+      if (!at && rt) {
+        // Hide body while we attempt a silent refresh
+        document.documentElement.style.visibility = 'hidden';
+        fetch('/auth/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: rt }),
+        })
+          .then(function (res) {
+            if (!res.ok) throw new Error('refresh failed');
+            return res.json();
+          })
+          .then(function (data) {
+            sessionStorage.setItem('access_token', data.access_token);
+            document.documentElement.style.visibility = '';
+          })
+          .catch(function () {
+            localStorage.removeItem('refresh_token');
+            window.location.replace('/login');
+          });
+      }
+    })();
+  </script>
   <!-- PWA -->
   <link rel="manifest" href="/static/manifest.json" />
   <meta name="theme-color" content="#00ff88" />

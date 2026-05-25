@@ -4,6 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NASDAQ Agent — Admin</title>
+  <!-- Auth guard -->
+  <script>
+    (function () {
+      var at = sessionStorage.getItem('access_token');
+      var rt = localStorage.getItem('refresh_token');
+      if (!at && !rt) { window.location.replace('/login'); return; }
+      if (!at && rt) {
+        document.documentElement.style.visibility = 'hidden';
+        fetch('/auth/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: rt }),
+        })
+          .then(function (res) { if (!res.ok) throw new Error(); return res.json(); })
+          .then(function (d) { sessionStorage.setItem('access_token', d.access_token); document.documentElement.style.visibility = ''; })
+          .catch(function () { localStorage.removeItem('refresh_token'); window.location.replace('/login'); });
+      }
+    })();
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
