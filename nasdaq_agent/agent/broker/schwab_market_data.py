@@ -110,10 +110,9 @@ def _get(path: str, params: dict, timeout: "int | tuple" = 20) -> dict | list:
                 except Exception:
                     pass
             if is_cdn_block:
-                _on_429()
+                _on_cdn_block()
                 logger.warning(
-                    f"[Schwab MD] {r.status_code} on {path} — CDN/IP block detected, "
-                    f"backing off (token is still valid)"
+                    f"[Schwab MD] {r.status_code} on {path} — CDN/IP block, 30s hold"
                 )
                 return {}
             # Genuine auth failure (expired/revoked token) — refresh and retry once
@@ -152,7 +151,8 @@ _rate_lock    = threading.Lock()
 _backoff_until: float = 0.0        # epoch time when 429 back-off expires
 _backoff_last:  float = 0.0        # duration of the most recent back-off window
 _BACKOFF_BASE   = 2.0              # seconds for first 429 back-off
-_BACKOFF_MAX    = 30.0             # cap at 30s
+_BACKOFF_MAX    = 60.0             # cap at 60s
+_CDN_BLOCK_BACKOFF = 30.0          # Akamai CDN blocks last 30-60s; skip to 30s immediately
 
 # Background-caller throttle: retrain tasks capped at 1 req/s.
 _bg_lock = threading.Lock()
@@ -179,13 +179,25 @@ def _on_429() -> None:
     logger.warning(f"[Schwab MD] 429 → back-off {new_backoff:.1f}s")
 
 
-def _on_success() -> None:
-    """Clear back-off window and reset duration after a clean response."""
+def _on_cdn_block() -> None:
+    """Called when Schwab returns a CDN/Akamai 403. Applies a flat 30s hold.
+    Akamai IP blocks last 30-60s — skipping straight to 30s beats retrying
+    every 2-8s inside the block window (which extends the block further)."""
     global _backoff_until, _backoff_last
-    if _backoff_until > time.time():
-        with _rate_lock:
+    with _rate_lock:
+        if _backoff_until - time.time() > 1.0:
+            return  # already in back-off
+        _backoff_last  = _CDN_BLOCK_BACKOFF
+        _backoff_until = time.time() + _CDN_BLOCK_BACKOFF
+
+
+def _on_success() -> None:
+    """Clear back-off window after a clean response."""
+    global _backoff_until, _backoff_last
+    with _rate_lock:
+        if _backoff_until > time.time():
             _backoff_until = 0.0
-    _backoff_last = 0.0
+        _backoff_last = 0.0
 
 
 # Prevent simultaneous refresh storms when many concurrent calls all get 401/403

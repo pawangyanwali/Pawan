@@ -72,6 +72,11 @@ _mdpoller_cycle:     int  = 0
 _mdpoller_last_ok:   float = 0.0   # epoch of last successful cycle
 _mdpoller_error:     Optional[str] = None
 
+# ── WS data freshness tracking ─────────────────────────────────────────────────
+# Updated every time LEVELONE_EQUITIES data arrives from Schwab WebSocket.
+# MDPoller checks this to decide whether to fire a REST call or stand down.
+_last_ws_data_at: float = 0.0
+
 MAX_CANDLE_HISTORY = 300   # 5 hours of 1-min bars
 
 # ── Real-time tick callback registry ─────────────────────────────────────────
@@ -180,6 +185,9 @@ _CHART_FIELDS = {
 
 
 def _process_levelone_equities(content: list) -> None:
+    global _last_ws_data_at
+    if content:
+        _last_ws_data_at = time.time()
     updated: list[tuple[str, dict]] = []
     with _lock:
         for item in content:
@@ -663,6 +671,14 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
                 auth_misses = 0   # reset on success
 
+                # Stand down when the WS streamer is actively delivering data.
+                # This eliminates REST/WS rate-limit competition: MDPoller only
+                # fires when the WS stream has been silent for > 2 seconds.
+                if is_ws_data_live(max_age_s=2.0):
+                    consecutive_miss = 0
+                    time.sleep(interval)
+                    continue
+
                 # Submit all batches simultaneously.
                 # Each worker broadcasts the moment its API call returns — no merging,
                 # no waiting for siblings.  The frontend receives N separate `prices`
@@ -718,17 +734,10 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             _mdpoller_cycle = cycle
             cycle += 1
 
-            # Adaptive sleep: back off when rate-limited so we stop hammering the
-            # same bucket and give the scanner's OHLCV fetches room to complete.
-            # Normal: 1 s   |  1–2 misses: 3 s   |  3–9 misses: 8 s   |  10+ misses: 15 s
-            if consecutive_miss == 0:
-                back_off = interval
-            elif consecutive_miss <= 2:
-                back_off = 3.0
-            elif consecutive_miss < 10:
-                back_off = 8.0
-            else:
-                back_off = 15.0
+            # CDN/rate-limit back-off: Akamai blocks last 30-60s. One flat 30s
+            # wait outlasts the block; the old 3s/8s/15s ladder retried 7 times
+            # inside the block window, extending it and causing 46s+ data gaps.
+            back_off = interval if consecutive_miss == 0 else 30.0
 
             elapsed   = time.time() - _cycle_start
             remaining = back_off - elapsed
@@ -918,6 +927,17 @@ def is_streamer_ready() -> bool:
     return bool(
         _streamer_thread and _streamer_thread.is_alive()
         and _ws_connected and _live_quotes
+    )
+
+
+def is_ws_data_live(max_age_s: float = 2.0) -> bool:
+    """True when the WS streamer has received LEVELONE_EQUITIES data within
+    max_age_s seconds. More reliable than is_streamer_ready() because it
+    confirms data is actually flowing, not just that the socket is open."""
+    return bool(
+        _streamer_thread and _streamer_thread.is_alive()
+        and _last_ws_data_at > 0
+        and time.time() - _last_ws_data_at < max_age_s
     )
 
 

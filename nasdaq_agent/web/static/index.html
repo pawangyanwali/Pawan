@@ -486,6 +486,8 @@
       <span id="dot" class="status-dot"></span>
       <span id="ws-status">Connecting…</span>
     </button>
+    <!-- Live price data freshness indicator -->
+    <span id="data-freshness" title="Time since last live price update from Schwab" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">● PRICES</span>
     <span style="white-space:nowrap">Last scan: <span id="last-scan">—</span></span>
     <span id="api-credit-chip" title="Twelve Data API credits used in rolling 60s window" style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;display:none">API —/377</span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
@@ -1800,6 +1802,7 @@ TRADING_MAX_POSITION_PCT=10
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL', tierFilter = 'ALL';
 let _wsLastMsgAt = 0;  // epoch ms of last WS scan_complete message
+let _lastPriceAt = 0;  // epoch ms of last live price update (prices or tick message)
 const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let allBreadth = null;
@@ -1921,6 +1924,7 @@ function connectWS() {
     if (m.type === 'prices') {
       const prices = m.p;
       if (!prices) return;
+      _lastPriceAt = Date.now();
 
       // In extended sessions (AH / pre-market) the Schwab `lastPrice` is the last
       // executed AH trade, which can be stale for minutes in thin markets.
@@ -2015,6 +2019,7 @@ function connectWS() {
     if (m.type === 'tick') {
       const { ticker, last, net_pct_change, bid, ask, volume, high, low } = m;
       if (!ticker || last == null) return;
+      _lastPriceAt = Date.now();
 
       const sig = allSignals.find(s => s.ticker === ticker);
       if (sig) {
@@ -2178,6 +2183,32 @@ setInterval(_pollSchwabHeaderStatus, 30000);
 
 // Heartbeat: send pong to server every 20s to keep proxy/NAT alive
 setInterval(() => _wsSend({ type: 'pong' }), _WS_HEARTBEAT_MS);
+
+// Price freshness indicator — updates every second, shows data age
+setInterval(() => {
+  const el = document.getElementById('data-freshness');
+  if (!el) return;
+  if (!_lastPriceAt) {
+    el.textContent = '● PRICES';
+    el.style.color = 'var(--muted)';
+    el.style.borderColor = 'var(--border)';
+    return;
+  }
+  const age = Math.floor((Date.now() - _lastPriceAt) / 1000);
+  if (age < 2) {
+    el.textContent = '● LIVE';
+    el.style.color = 'var(--green, #26a65b)';
+    el.style.borderColor = 'var(--green, #26a65b)';
+  } else if (age < 5) {
+    el.textContent = `● ${age}s ago`;
+    el.style.color = '#f5a623';
+    el.style.borderColor = '#f5a623';
+  } else {
+    el.textContent = `● STALE ${age}s`;
+    el.style.color = 'var(--red, #e74c3c)';
+    el.style.borderColor = 'var(--red, #e74c3c)';
+  }
+}, 1000);
 
 // Reconnect immediately when tab becomes visible (e.g. phone unlock, tab switch back)
 document.addEventListener('visibilitychange', () => {
