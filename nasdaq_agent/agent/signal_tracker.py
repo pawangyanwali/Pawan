@@ -146,6 +146,25 @@ def init_db() -> None:
 
         c.commit()
 
+        # One-time confidence scale migration: any row with confidence < 2.0
+        # was stored on the 0-1 scale (old bug).  Multiply by 100 to bring
+        # into the [25, 95] range the rest of the system expects.
+        try:
+            affected = c.execute(
+                "SELECT COUNT(*) FROM signals WHERE confidence < 2.0 AND confidence > 0"
+            ).fetchone()[0]
+            if affected:
+                c.execute(
+                    "UPDATE signals SET confidence = ROUND(confidence * 100, 2) "
+                    "WHERE confidence < 2.0 AND confidence > 0"
+                )
+                c.commit()
+                logger.info(
+                    f"[SignalTracker] Migrated {affected} rows from 0-1 confidence scale to 0-100"
+                )
+        except Exception as _e:
+            logger.warning(f"[SignalTracker] Confidence migration skipped: {_e}")
+
 
 def record_signal(
     ticker:       str,

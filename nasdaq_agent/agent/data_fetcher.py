@@ -248,12 +248,31 @@ def fetch_batch_realtime(
     # ── Tier A: streaming candles ─────────────────────────────────────────────
     try:
         from agent.broker.schwab_streamer import get_live_1m_df, is_streamer_ready, get_streaming_bar_count
+
         streamer_up = is_streamer_ready()
         if streamer_up:
+            _now_et = pd.Timestamp.now(tz="America/New_York")
+            _market_open  = _now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+            _market_close = _now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+            _in_session   = _market_open <= _now_et <= _market_close
+
             for ticker in tickers:
                 if get_streaming_bar_count(ticker) >= 20:
                     df = get_live_1m_df(ticker)
                     if df is not None and not df.empty:
+                        # Freshness gate: during regular session the newest bar
+                        # must be ≤5 min old — stale bars mean the streamer
+                        # stopped receiving CHART_EQUITY events for this symbol.
+                        if _in_session:
+                            newest_bar = df.index[-1]
+                            age_s = (_now_et - newest_bar).total_seconds()
+                            if age_s > 300:
+                                logger.debug(
+                                    f"[DataFetcher] {ticker} streaming bar stale "
+                                    f"({age_s:.0f}s) — falling back to REST"
+                                )
+                                rest_needed.append(ticker)
+                                continue
                         result[ticker] = df
                         continue
                 rest_needed.append(ticker)

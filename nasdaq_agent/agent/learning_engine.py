@@ -140,6 +140,65 @@ class LearningEngine:
         self._last_win_rate:    float = 0.0
         self._last_threshold:   float = 65.0
         self._last_blocked_n:   int   = 0     # track to only log NEW blocked contexts
+        self._restore_state_from_db()
+
+    def _restore_state_from_db(self) -> None:
+        """
+        Restore outcome counts from PostgreSQL so restarts don't trigger false
+        ML retrains (counts would otherwise reset to 0, making every existing
+        outcome appear "new").
+        """
+        try:
+            from agent.db import get_conn, using_postgres
+            if not using_postgres():
+                return
+            with get_conn() as c:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS system_kv (
+                        key        TEXT PRIMARY KEY,
+                        value      TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                row = c.execute(
+                    "SELECT value FROM system_kv WHERE key = 'learning_engine_state'"
+                ).fetchone()
+            if row:
+                saved = json.loads(row["value"])
+                self._last_bt_count = int(saved.get("last_bt_count", 0))
+                self._last_pt_count = int(saved.get("last_pt_count", 0))
+                self._last_threshold = float(saved.get("last_threshold", 65.0))
+                logger.info(
+                    f"[Learning] Restored state from DB — "
+                    f"bt_count={self._last_bt_count} pt_count={self._last_pt_count}"
+                )
+        except Exception as e:
+            logger.debug(f"[Learning] State restore skipped: {e}")
+
+    def _save_state_to_db(self) -> None:
+        """Persist restart-sensitive engine state to PostgreSQL."""
+        try:
+            from agent.db import get_conn, using_postgres
+            if not using_postgres():
+                return
+            import json as _json
+            payload = _json.dumps({
+                "last_bt_count":  self._last_bt_count,
+                "last_pt_count":  self._last_pt_count,
+                "last_threshold": self._last_threshold,
+                "cycle_count":    self._cycle_count,
+                "updated_at":     datetime.now(timezone.utc).isoformat(),
+            })
+            with get_conn() as c:
+                c.execute("""
+                    INSERT INTO system_kv (key, value, updated_at)
+                    VALUES ('learning_engine_state', %s, NOW())
+                    ON CONFLICT (key) DO UPDATE
+                        SET value = EXCLUDED.value, updated_at = NOW()
+                """, (payload,))
+                c.commit()
+        except Exception as e:
+            logger.debug(f"[Learning] State save skipped: {e}")
 
     def start(self) -> None:
         if self._running:
@@ -276,6 +335,9 @@ class LearningEngine:
             # Update counts even when not retraining (avoid stale baseline)
             self._last_bt_count = max(self._last_bt_count, bt_count)
             self._last_pt_count = max(self._last_pt_count, pt_count)
+
+        # Persist state so restarts don't reset counts and trigger false retrains
+        self._save_state_to_db()
 
     # ── Data fetchers ─────────────────────────────────────────────────────────
 

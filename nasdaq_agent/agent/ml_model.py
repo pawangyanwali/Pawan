@@ -322,25 +322,52 @@ class StockMLModel:
         if len(class_counts) < 2 or (class_counts.max() / len(y_train)) > 0.85:
             return False
 
-        self.scaler = StandardScaler()
-        self.scaler.fit(X_train)
-        X_tr_s = self.scaler.transform(X_train)
-        X_te_s = self.scaler.transform(X_test)
+        new_scaler = StandardScaler()
+        new_scaler.fit(X_train)
+        X_tr_s = new_scaler.transform(X_train)
+        X_te_s = new_scaler.transform(X_test)
 
-        self.model = _fast_xgb_fit(X_tr_s, y_train, X_te_s, y_test,
-                                    n_estimators=400, max_depth=4,
-                                    learning_rate=0.05, subsample=0.8,
-                                    colsample_bytree=0.8)
-        self.trained = True
-        self._save()
+        # Baseline: score existing model on the same holdout before training
+        old_acc: float = 0.0
+        if self.trained and self.model is not None and self.scaler is not None:
+            try:
+                X_te_old = self.scaler.transform(X_test)
+                old_acc = float(self.model.score(X_te_old, y_test))
+            except Exception:
+                old_acc = 0.0
 
-        acc = self.model.score(X_te_s, y_test)
-        n_trees = getattr(self.model.estimator, "best_iteration", "?")
-        logger.info(
-            f"[{self.ticker}] ScalpML trained | acc={acc:.3f} | "
-            f"trees={n_trees} | samples={len(X_train)}"
+        candidate = _fast_xgb_fit(X_tr_s, y_train, X_te_s, y_test,
+                                   n_estimators=400, max_depth=4,
+                                   learning_rate=0.05, subsample=0.8,
+                                   colsample_bytree=0.8)
+
+        new_acc = float(candidate.score(X_te_s, y_test))
+        n_trees = getattr(candidate.estimator, "best_iteration", "?")
+
+        # Model promotion gate: new model must clear a minimum accuracy floor
+        # AND must not be more than 3 pp worse than the incumbent.
+        _MIN_ACC = 0.52
+        _MAX_REGRESSION = 0.03
+        promoted = new_acc >= _MIN_ACC and (
+            old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION
         )
-        return True
+
+        if promoted:
+            self.model   = candidate
+            self.scaler  = new_scaler
+            self.trained = True
+            self._save()
+            logger.info(
+                f"[{self.ticker}] ScalpML promoted | acc={new_acc:.3f} "
+                f"(prev={old_acc:.3f}) | trees={n_trees} | samples={len(X_train)}"
+            )
+        else:
+            logger.warning(
+                f"[{self.ticker}] ScalpML candidate rejected — "
+                f"new_acc={new_acc:.3f} < floor={_MIN_ACC} or "
+                f"regressed vs old={old_acc:.3f} | samples={len(X_train)}"
+            )
+        return promoted
 
     # ── Inference ─────────────────────────────────────────────────────────────
 
@@ -666,25 +693,42 @@ class DailyMLModel:
         if len(np.unique(y_train)) < 2:
             return False
 
-        self.scaler = StandardScaler()
-        self.scaler.fit(X_train)
-        X_train_s = self.scaler.transform(X_train)
-        X_test_s  = self.scaler.transform(X_test)
+        new_scaler = StandardScaler()
+        new_scaler.fit(X_train)
+        X_train_s = new_scaler.transform(X_train)
+        X_test_s  = new_scaler.transform(X_test)
 
-        self.model = _fast_xgb_fit(X_train_s, y_train, X_test_s, y_test,
-                                    n_estimators=300, max_depth=4,
-                                    learning_rate=0.05, subsample=0.8,
-                                    colsample_bytree=0.8)
-        self.trained = True
-        self._save()
+        old_acc: float = 0.0
+        if self.trained and self.model is not None and self.scaler is not None:
+            try:
+                old_acc = float(self.model.score(self.scaler.transform(X_test), y_test))
+            except Exception:
+                old_acc = 0.0
 
-        acc = self.model.score(X_test_s, y_test)
-        n_trees = getattr(self.model.estimator, "best_iteration", "?")
-        logger.info(
-            f"[{self.ticker}] DailyML trained | acc={acc:.3f} | "
-            f"trees={n_trees} | samples={len(X_train)}"
-        )
-        return True
+        candidate = _fast_xgb_fit(X_train_s, y_train, X_test_s, y_test,
+                                   n_estimators=300, max_depth=4,
+                                   learning_rate=0.05, subsample=0.8,
+                                   colsample_bytree=0.8)
+        new_acc = float(candidate.score(X_test_s, y_test))
+        n_trees = getattr(candidate.estimator, "best_iteration", "?")
+
+        _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
+        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        if promoted:
+            self.model   = candidate
+            self.scaler  = new_scaler
+            self.trained = True
+            self._save()
+            logger.info(
+                f"[{self.ticker}] DailyML promoted | acc={new_acc:.3f} "
+                f"(prev={old_acc:.3f}) | trees={n_trees} | samples={len(X_train)}"
+            )
+        else:
+            logger.warning(
+                f"[{self.ticker}] DailyML candidate rejected — "
+                f"new_acc={new_acc:.3f} vs old={old_acc:.3f} | samples={len(X_train)}"
+            )
+        return promoted
 
     # ── Inference ─────────────────────────────────────────────────────────────
 
@@ -842,27 +886,45 @@ class ReversalMLModel:
         if len(np.unique(y_train)) < 2:
             return False
 
-        self.scaler = StandardScaler()
-        self.scaler.fit(X_train)
-        X_tr = self.scaler.transform(X_train)
-        X_te = self.scaler.transform(X_test)
+        new_scaler = StandardScaler()
+        new_scaler.fit(X_train)
+        X_tr = new_scaler.transform(X_train)
+        X_te = new_scaler.transform(X_test)
+
+        old_acc: float = 0.0
+        if self.trained and self.model is not None and self.scaler is not None:
+            try:
+                old_acc = float(self.model.score(self.scaler.transform(X_test), y_test))
+            except Exception:
+                old_acc = 0.0
 
         spw = float((y == 0).sum()) / max(float((y == 1).sum()), 1)
-        self.model = _fast_xgb_fit(X_tr, y_train, X_te, y_test,
-                                    n_estimators=300, max_depth=4,
-                                    learning_rate=0.05, subsample=0.8,
-                                    colsample_bytree=0.7, min_child_weight=3,
-                                    scale_pos_weight=spw)
-        self.trained = True
-        self._save()
+        candidate = _fast_xgb_fit(X_tr, y_train, X_te, y_test,
+                                   n_estimators=300, max_depth=4,
+                                   learning_rate=0.05, subsample=0.8,
+                                   colsample_bytree=0.7, min_child_weight=3,
+                                   scale_pos_weight=spw)
+        new_acc = float(candidate.score(X_te, y_test))
+        n_trees = getattr(candidate.estimator, "best_iteration", "?")
 
-        acc = self.model.score(X_te, y_test)
-        n_trees = getattr(self.model.estimator, "best_iteration", "?")
-        logger.info(
-            f"[{self.ticker}] ReversalML trained | acc={acc:.3f} | "
-            f"trees={n_trees} | reversals={y.sum()}/{len(y)} ({y.mean()*100:.1f}%)"
-        )
-        return True
+        _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
+        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        if promoted:
+            self.model   = candidate
+            self.scaler  = new_scaler
+            self.trained = True
+            self._save()
+            logger.info(
+                f"[{self.ticker}] ReversalML promoted | acc={new_acc:.3f} "
+                f"(prev={old_acc:.3f}) | trees={n_trees} | reversals={y.sum()}/{len(y)} "
+                f"({y.mean()*100:.1f}%)"
+            )
+        else:
+            logger.warning(
+                f"[{self.ticker}] ReversalML candidate rejected — "
+                f"new_acc={new_acc:.3f} vs old={old_acc:.3f}"
+            )
+        return promoted
 
     def predict_proba(self, df: pd.DataFrame) -> float:
         """Return probability [0,1] of bullish reversal in next 5 bars. 0.5 if untrained."""
@@ -972,25 +1034,42 @@ class SwingMLModel:
         if len(class_counts) < 2 or (class_counts.max() / len(y_train)) > 0.85:
             return False
 
-        self.scaler = StandardScaler()
-        self.scaler.fit(X_train)
-        X_tr_s = self.scaler.transform(X_train)
-        X_te_s = self.scaler.transform(X_test)
+        new_scaler = StandardScaler()
+        new_scaler.fit(X_train)
+        X_tr_s = new_scaler.transform(X_train)
+        X_te_s = new_scaler.transform(X_test)
 
-        self.model = _fast_xgb_fit(X_tr_s, y_train, X_te_s, y_test,
-                                    n_estimators=300, max_depth=4,
-                                    learning_rate=0.05, subsample=0.8,
-                                    colsample_bytree=0.8, min_child_weight=3)
-        self.trained = True
-        self._save()
+        old_acc: float = 0.0
+        if self.trained and self.model is not None and self.scaler is not None:
+            try:
+                old_acc = float(self.model.score(self.scaler.transform(X_test), y_test))
+            except Exception:
+                old_acc = 0.0
 
-        acc = self.model.score(X_te_s, y_test)
-        n_trees = getattr(self.model.estimator, "best_iteration", "?")
-        logger.info(
-            f"[{self.ticker}] SwingML trained | acc={acc:.3f} | "
-            f"trees={n_trees} | samples={len(X_train)} (15min, 2h lookahead)"
-        )
-        return True
+        candidate = _fast_xgb_fit(X_tr_s, y_train, X_te_s, y_test,
+                                   n_estimators=300, max_depth=4,
+                                   learning_rate=0.05, subsample=0.8,
+                                   colsample_bytree=0.8, min_child_weight=3)
+        new_acc = float(candidate.score(X_te_s, y_test))
+        n_trees = getattr(candidate.estimator, "best_iteration", "?")
+
+        _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
+        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        if promoted:
+            self.model   = candidate
+            self.scaler  = new_scaler
+            self.trained = True
+            self._save()
+            logger.info(
+                f"[{self.ticker}] SwingML promoted | acc={new_acc:.3f} "
+                f"(prev={old_acc:.3f}) | trees={n_trees} | samples={len(X_train)} (15min, 2h)"
+            )
+        else:
+            logger.warning(
+                f"[{self.ticker}] SwingML candidate rejected — "
+                f"new_acc={new_acc:.3f} vs old={old_acc:.3f}"
+            )
+        return promoted
 
     def predict_proba(self, df_15m: pd.DataFrame) -> float:
         """
@@ -1109,10 +1188,21 @@ class EnsembleMLModel:
         if len(class_counts) < 2 or (class_counts.max() / len(y_train)) > 0.85:
             return False
 
-        self.scaler = StandardScaler()
-        self.scaler.fit(X_train)
-        Xtr = self.scaler.transform(X_train)
-        Xte = self.scaler.transform(X_test)
+        new_scaler = StandardScaler()
+        new_scaler.fit(X_train)
+        Xtr = new_scaler.transform(X_train)
+        Xte = new_scaler.transform(X_test)
+
+        # Baseline: score existing ensemble on holdout before retraining
+        old_acc: float = 0.0
+        if self.trained and self.models and self.scaler is not None:
+            try:
+                Xte_old = self.scaler.transform(X_test)
+                old_preds = np.array([m.predict(Xte_old) for m in self.models])
+                old_majority = (old_preds.mean(axis=0) >= 0.5).astype(int)
+                old_acc = float((old_majority == y_test).mean())
+            except Exception:
+                old_acc = 0.0
 
         # Train each member in its own thread (3 × independent XGBoost fits)
         def _fit_member(args):
@@ -1120,19 +1210,29 @@ class EnsembleMLModel:
             return _fast_xgb_fit(Xtr, y_train, Xte, y_test, **cfg)
 
         with ThreadPoolExecutor(max_workers=len(self._CONFIGS)) as ex:
-            self.models = list(ex.map(_fit_member, enumerate(self._CONFIGS)))
+            candidate_models = list(ex.map(_fit_member, enumerate(self._CONFIGS)))
 
-        self.trained = True
-        self._save()
-
-        preds = np.array([m.predict(Xte) for m in self.models])
+        preds = np.array([m.predict(Xte) for m in candidate_models])
         majority = (preds.mean(axis=0) >= 0.5).astype(int)
-        acc = float((majority == y_test).mean())
-        logger.info(
-            f"[{self.ticker}] Ensemble trained | acc={acc:.3f} | "
-            f"models={len(self.models)} | samples={len(X_train)}"
-        )
-        return True
+        new_acc = float((majority == y_test).mean())
+
+        _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
+        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        if promoted:
+            self.models  = candidate_models
+            self.scaler  = new_scaler
+            self.trained = True
+            self._save()
+            logger.info(
+                f"[{self.ticker}] Ensemble promoted | acc={new_acc:.3f} "
+                f"(prev={old_acc:.3f}) | members={len(self.models)} | samples={len(X_train)}"
+            )
+        else:
+            logger.warning(
+                f"[{self.ticker}] Ensemble candidate rejected — "
+                f"new_acc={new_acc:.3f} vs old={old_acc:.3f}"
+            )
+        return promoted
 
     def predict(self, df: pd.DataFrame) -> tuple[float, float]:
         """Returns (probability_up, agreement_0_to_1).

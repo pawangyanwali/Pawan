@@ -123,7 +123,10 @@ from agent.sector_etf import ALL_SECTOR_ETFS as _SECTOR_ETFS   # noqa: E402
 SECTOR_ETF_TICKERS = list(set(REGIME_TICKERS + _SECTOR_ETFS))
 
 # ── Paper trading ─────────────────────────────────────────────────────────────
-PAPER_TRADE_MIN_CONFIDENCE = 65.0   # min confidence to auto-paper-trade
+PAPER_TRADE_MIN_CONFIDENCE = 25.0   # data-collection floor — intentionally low so the
+                                    # adaptive filter can observe and learn from 25–55%
+                                    # confidence trades. Production live-trading gate is
+                                    # the adaptive filter's dynamic_threshold (55–63%).
 
 # ── Watchlist persistence ─────────────────────────────────────────────────────
 import json as _json, pathlib as _pathlib

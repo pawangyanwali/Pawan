@@ -422,7 +422,7 @@
       .header-right { gap:6px; }
       /* Show hamburger, hide individual nav buttons */
       .hamburger { display:block; }
-      .header-right button { display:none; }
+      .header-right button:not(.hamburger) { display:none; }
       #alert-toggle { display:none; }
 
       /* Session banner wraps */
@@ -1893,9 +1893,16 @@ function connectWS() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
   const _wsAt = sessionStorage.getItem('access_token') || '';
-  ws = new WebSocket(`${BACKEND_WS}/ws` + (_wsAt ? `?token=${encodeURIComponent(_wsAt)}` : ''));
+  // Token is sent as a first-message after connection (not in the URL) so it
+  // stays out of server/proxy/CDN access logs.
+  ws = new WebSocket(`${BACKEND_WS}/ws`);
 
   ws.onopen = () => {
+    // Send auth handshake immediately — server closes with 4001 if not received
+    // within 10 s or if the token is invalid.
+    if (_wsAt) {
+      ws.send(JSON.stringify({ type: 'auth', token: _wsAt }));
+    }
     document.getElementById('dot').classList.add('live');
     document.getElementById('ws-status').textContent = 'Live';
     const chip = document.getElementById('ws-chip');

@@ -713,7 +713,7 @@ async def admin_page():
 
 
 @app.get("/api/signals")
-async def get_signals():
+async def get_signals(_user: AuthenticatedUser = Depends(require_viewer)):
     """REST endpoint: returns the latest cached scan results.
 
     Serves live in-memory signals when a scan has completed, otherwise falls
@@ -752,7 +752,7 @@ async def health():
 
 
 @app.get("/api/services")
-async def services_status():
+async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     """
     Aggregate health of all infrastructure services for the dashboard panel.
     Returns connectivity status for: Scanner, MD Poller, Valkey, RDS (PostgreSQL).
@@ -859,7 +859,7 @@ async def position_size_endpoint(
 
 
 @app.get("/api/paper-trading")
-async def paper_trading_endpoint():
+async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_viewer)):
     """Return paper trading summary, open and recent closed trades."""
     from datetime import date
 
@@ -1006,7 +1006,7 @@ async def trigger_premarket_scan(background_tasks: BackgroundTasks,
 
 
 @app.get("/api/ml-status")
-async def ml_status():
+async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
     """Aggregate status for all ML model types (includes blend weights and pipeline metrics)."""
     from agent.deep_model import get_model_info, get_training_history, is_training_active, is_trained as deep_is_trained
     from agent.ml_model import (
@@ -1909,7 +1909,7 @@ else:
 # ── Pipeline metrics ─────────────────────────────────────────────────────────
 
 @app.get("/api/pipeline-metrics")
-async def pipeline_metrics():
+async def pipeline_metrics(_user: AuthenticatedUser = Depends(require_viewer)):
     """Return current pipeline throughput and worker metrics."""
     try:
         from agent.pipeline import get_pipeline
@@ -1921,7 +1921,7 @@ async def pipeline_metrics():
 # ── Signal blend weights ─────────────────────────────────────────────────────
 
 @app.get("/api/blend-weights")
-async def blend_weights():
+async def blend_weights(_user: AuthenticatedUser = Depends(require_viewer)):
     """Return current signal blender weight stats."""
     try:
         from agent.signal_blender import get_blender
@@ -1933,7 +1933,7 @@ async def blend_weights():
 # ── Backtester ───────────────────────────────────────────────────────────────
 
 @app.get("/api/backtest/results")
-async def backtest_results():
+async def backtest_results(_user: AuthenticatedUser = Depends(require_viewer)):
     """Return the latest backtester report and run status."""
     try:
         from agent.backtester import get_backtester
@@ -2045,19 +2045,31 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str = ""):
-    # Validate access token before accepting into the broadcast pool.
-    # The token is passed as a query param (?token=<access_token>) by the frontend.
+async def websocket_endpoint(ws: WebSocket):
+    # Accept first, then require an {"type":"auth","token":"<access_token>"} message
+    # within 10 seconds.  This keeps the token out of server/proxy logs (vs query-param).
+    await ws.accept()
+
     _authed = False
-    if token:
-        try:
-            from auth.utils import decode_token, is_blacklisted
-            _p = decode_token(token)
-            _authed = (_p.get("type") == "access" and not is_blacklisted(_p.get("jti", "")))
-        except Exception:
-            pass
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+        msg = json.loads(raw)
+        if msg.get("type") == "auth":
+            token = msg.get("token", "")
+            if token:
+                try:
+                    from auth.utils import decode_token, is_blacklisted
+                    _p = decode_token(token)
+                    _authed = (
+                        _p.get("type") == "access"
+                        and not is_blacklisted(_p.get("jti", ""))
+                    )
+                except Exception:
+                    pass
+    except (asyncio.TimeoutError, Exception):
+        pass
+
     if not _authed:
-        await ws.accept()
         await ws.close(code=4001)
         return
 

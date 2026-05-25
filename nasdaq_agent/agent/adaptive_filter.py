@@ -79,6 +79,52 @@ _state: dict = {
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
+_KV_KEY = "adaptive_filter_state"
+
+
+def _load_from_db() -> dict | None:
+    """Restore adaptive filter state from PostgreSQL system_kv table."""
+    try:
+        from agent.db import get_conn, using_postgres
+        if not using_postgres():
+            return None
+        with get_conn() as c:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS system_kv (
+                    key        TEXT PRIMARY KEY,
+                    value      TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            row = c.execute(
+                "SELECT value FROM system_kv WHERE key = %s", (_KV_KEY,)
+            ).fetchone()
+        if row:
+            return json.loads(row["value"])
+    except Exception as e:
+        logger.debug(f"[AdaptiveFilter] DB restore skipped: {e}")
+    return None
+
+
+def _save_to_db(snapshot: dict) -> None:
+    """Backup adaptive filter state to PostgreSQL system_kv table."""
+    try:
+        from agent.db import get_conn, using_postgres
+        if not using_postgres():
+            return
+        payload = json.dumps(snapshot)
+        with get_conn() as c:
+            c.execute("""
+                INSERT INTO system_kv (key, value, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value, updated_at = NOW()
+            """, (_KV_KEY, payload))
+            c.commit()
+    except Exception as e:
+        logger.debug(f"[AdaptiveFilter] DB backup skipped: {e}")
+
+
 def _load():
     global _state
     try:
@@ -99,8 +145,22 @@ def _load():
                 f"trade_WR={_state['current_win_rate']*100:.1f}%  "
                 f"obs_WR={_state.get('observation_win_rate', 0)*100:.1f}%"
             )
+            return
     except Exception as e:
-        logger.warning(f"[AdaptiveFilter] Could not load saved state: {e}")
+        logger.warning(f"[AdaptiveFilter] Could not load local state: {e}")
+
+    # Local file missing (fresh deployment) — try PostgreSQL backup
+    saved = _load_from_db()
+    if saved:
+        with _lock:
+            _state.update(saved)
+            if _state["dynamic_threshold"] > MAX_THRESHOLD:
+                _state["dynamic_threshold"] = DEFAULT_THRESHOLD
+        logger.info(
+            f"[AdaptiveFilter] Restored from DB — threshold={_state['dynamic_threshold']:.1f}%  "
+            f"blocked={len(_state['blocked_contexts'])}  "
+            f"trade_WR={_state['current_win_rate']*100:.1f}%"
+        )
 
 
 def _save():
@@ -110,6 +170,8 @@ def _save():
             snapshot = dict(_state)
         with open(_FILTER_PATH, "w") as f:
             json.dump(snapshot, f, indent=2)
+        # Mirror to PostgreSQL so state survives fresh deployments
+        _save_to_db(snapshot)
     except Exception as e:
         logger.warning(f"[AdaptiveFilter] Could not save state: {e}")
 

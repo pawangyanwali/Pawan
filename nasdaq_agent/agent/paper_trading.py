@@ -330,18 +330,19 @@ def _get_min_confidence() -> float:
     """
     Return the minimum confidence required to open a paper trade.
 
-    Paper trading is the system's DATA COLLECTION layer — it needs to capture
-    as many signal outcomes as possible so the adaptive filter and ML models
-    can learn.  We therefore use a fixed 45% floor rather than the adaptive
-    filter's dynamic_threshold (which governs LIVE trading recommendations).
+    Paper trading is the DATA COLLECTION layer — the floor is intentionally
+    low (25%) so the adaptive filter can observe and learn from low-confidence
+    trades. The adaptive filter's dynamic_threshold (55–63%) governs live
+    trading recommendations and is NOT used here — doing so would starve the
+    learner by blocking 80%+ of signals before any outcome is recorded.
 
-    The adaptive filter's dynamic_threshold is intentionally NOT used here:
-      - It starts at 55–65% and can rise further as it learns
-      - At 57%+, it would block 80%+ of scanner signals, starving the learner
-      - The adaptive filter should OBSERVE 45-55% confidence trades to decide
-        whether those contexts are worth blocking — it can't learn without data
+    The floor is read from config so it can be tuned without a code deploy.
     """
-    return _PAPER_MIN_CONF
+    try:
+        from config import PAPER_TRADE_MIN_CONFIDENCE
+        return float(PAPER_TRADE_MIN_CONFIDENCE)
+    except Exception:
+        return _PAPER_MIN_CONF
 
 
 def maybe_open_trade(
@@ -373,6 +374,24 @@ def maybe_open_trade(
     if price <= 0 or stop <= 0:
         logger.debug(f"[PAPER] {ticker} skip: invalid price ({price}) or stop ({stop})")
         return None
+
+    # ── Stop/target geometry validation ─────────────────────────────────────
+    # BUY:  stop must be BELOW entry, target must be ABOVE entry.
+    # SELL: stop must be ABOVE entry, target must be BELOW entry.
+    # Inverted geometry produces negative R:R and corrupts learning data.
+    if target > 0:
+        if direction == "BUY" and (stop >= price or target <= price):
+            logger.debug(
+                f"[PAPER] {ticker} BUY geometry invalid: "
+                f"entry={price:.2f} stop={stop:.2f} target={target:.2f}"
+            )
+            return None
+        if direction == "SELL" and (stop <= price or target >= price):
+            logger.debug(
+                f"[PAPER] {ticker} SELL geometry invalid: "
+                f"entry={price:.2f} stop={stop:.2f} target={target:.2f}"
+            )
+            return None
 
     min_conf = _get_min_confidence()
     if confidence < min_conf:

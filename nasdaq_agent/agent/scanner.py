@@ -70,6 +70,7 @@ from agent.live_backtest import (
 from agent.backtest_reporter import maybe_trigger_feedback_retrain, adjust_confidence
 from agent.adaptive_filter import (
     get_confidence_boost,
+    should_suppress,
 )
 from agent.ensemble_model import get_meta_prediction
 from agent.deep_model import predict_deep
@@ -116,6 +117,13 @@ def _scan_interval() -> int:
     # Weekend: Saturday=5, Sunday=6
     if now_et.weekday() >= 5:
         return 600
+    # Market holidays — poll at weekend cadence; no trades possible
+    try:
+        from agent.market_hours import _is_holiday
+        if _is_holiday(now_et.date()):
+            return 600
+    except Exception:
+        pass
     h, m = now_et.hour, now_et.minute
     minutes = h * 60 + m
     OPEN_RANGE_START = 9 * 60 + 30    # 09:30 ET
@@ -906,12 +914,27 @@ def analyse_ticker(
                 if _sec_blocked:
                     _trade_blocked_reason = _sec_msg
 
-        # Adaptive filter = calibration only.
-        # get_confidence_boost() already applied earlier (line ~595).
-        # Signal direction is NEVER modified here — the models learn from
-        # all trade outcomes and improve over time.
+        # ── Adaptive filter context enforcement ──────────────────────────────
+        # should_suppress() checks the learned blocked_contexts (low win-rate
+        # patterns) AND the dynamic confidence threshold. If this signal matches
+        # a blocked context or is below the learned gate, set direction NEUTRAL
+        # so it's recorded as suppressed and the learner sees the outcome.
+        # This enforces the filter beyond advisory-only boost/penalty.
         _is_suppressed   = False
         _suppress_reason = ""
+        if pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            _is_suppressed, _suppress_reason = should_suppress(
+                vwap_event   = vwap_sig.get("event", ""),
+                session      = sess_info.get("session", ""),
+                regime       = regime.regime,
+                rsi_zone     = pred.get("rsi_zone", ""),
+                entry_type   = pred.get("entry_type", ""),
+                direction    = pred["direction"],
+                confidence   = pred["confidence"],
+            )
+            if _is_suppressed:
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"]   = [f"⛔ AF: {_suppress_reason}"] + pred.get("reasons", [])
 
         # Normalise STRONG BUY → BUY and STRONG SELL → SELL for storage.
         # These are the highest-conviction signals and must not be silently dropped.
@@ -1418,6 +1441,15 @@ class Scanner:
     def run_once(self) -> list[StockSignal]:
         t0 = time.time()
         active_tickers = get_active_tickers()
+
+        # ── Market-holiday guard ─────────────────────────────────────────────
+        # On NYSE/NASDAQ holidays the market is CLOSED all day. Skip the full
+        # 250-ticker data fetch and signal analysis to conserve Schwab API quota.
+        # Return the cached signals so the dashboard stays populated.
+        _sess_check = get_session_info()
+        if _sess_check.get("is_holiday", False):
+            logger.info("[Scanner] Market holiday — returning cached signals, skipping scan")
+            return list(self.signals)
 
         # ── EOD Hard Close (PRD 6.4): close all positions at 3:45 PM ET ──────
         from agent.market_hours import (
