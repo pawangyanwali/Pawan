@@ -147,7 +147,7 @@ class ConnectionManager:
         self.active: Set[WebSocket] = set()
 
     async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
+        # ws is already accepted in websocket_endpoint before auth runs
         self.active.add(ws)
 
     def disconnect(self, ws: WebSocket) -> None:
