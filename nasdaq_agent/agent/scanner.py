@@ -1219,6 +1219,16 @@ def analyse_ticker(
 
             _algo_trade_opened = False
             for _asig in _sig.algo_signals:
+                # ── Session gate for algo signals: never open when CLOSED ───────────
+                # The primary prediction path neutralises pred["direction"] for CLOSED
+                # sessions, but algo signals carry their own raw direction and bypass
+                # that gate.  Gate them here so maybe_open_trade is not even called.
+                if _session_now == "CLOSED":
+                    logger.debug(
+                        "[%s] %s algo signal skipped — market CLOSED", ticker, _asig["algo"]
+                    )
+                    continue
+
                 # Record algo signals in bt_signals for learning engine analysis
                 try:
                     bt_record(
@@ -1410,7 +1420,20 @@ class Scanner:
         active_tickers = get_active_tickers()
 
         # ── EOD Hard Close (PRD 6.4): close all positions at 3:45 PM ET ──────
-        from agent.market_hours import is_hard_close_window, is_closing_caution, no_new_entries
+        from agent.market_hours import (
+            is_hard_close_window, is_closing_caution, no_new_entries, is_ah_eod_close_window,
+        )
+
+        # ── After-hours EOD hard close at 7:55 PM ET ─────────────────────────
+        if is_ah_eod_close_window():
+            try:
+                from agent.paper_trading import close_all_positions_eod
+                closed_n = close_all_positions_eod(reason="AH_EOD_19:55")
+                if closed_n:
+                    logger.info(f"[Scanner] AH EOD hard close 7:55pm — {closed_n} positions closed")
+            except Exception as _ahc_e:
+                logger.warning(f"[Scanner] AH EOD 7:55pm close failed: {_ahc_e}")
+
         if is_hard_close_window():
             try:
                 from agent.paper_trading import close_all_positions_eod

@@ -379,13 +379,52 @@ def maybe_open_trade(
         logger.debug(f"[PAPER] {ticker} skip: conf {confidence:.0f}% < floor {min_conf:.0f}%")
         return None
 
-    # ── Paper trading is PURE DATA COLLECTION — no blocking on time/session ──
-    # Every signal ≥45% confidence must get a trade so the system can learn
-    # whether it was right or wrong.  No dead zone, no lunch block, no sector
-    # cap, no circuit breaker, no profit-protect mode.  The only limits are:
-    #   • one open position per ticker (enforced in the DB transaction below)
-    #   • global concurrent cap (enforced in the DB transaction below)
-    # Size still scales with R:R so high-conviction setups get more weight.
+    # ── Phase 3: Session gate — hard block for CLOSED, higher bar for extended hours ──
+    # Use the live session value from the scanner (passed as `session`).
+    # If caller omitted it, fall back to a direct check so the gate is never skipped.
+    _live_session = session
+    if not _live_session:
+        try:
+            from agent.market_hours import get_market_session as _gms
+            _live_session = _gms()
+        except Exception:
+            pass
+
+    if _live_session == "CLOSED":
+        logger.debug(f"[PAPER] {ticker} skip: market CLOSED — no trades on weekends/overnight")
+        return None
+
+    # Extended-hours confidence floors and tier gate.
+    # REGULAR-tier stocks lack the liquidity for AH/PM trades; HIGH/MODERATE allowed with higher bar.
+    _EXT_CONF_FLOOR: dict[str, float] = {"HIGH": 70.0, "MODERATE": 60.0}
+    if _live_session in ("PRE_MARKET", "AFTER_HOURS"):
+        _ext_floor = _EXT_CONF_FLOOR.get(trading_tier)
+        if _ext_floor is None:
+            logger.debug(
+                f"[PAPER] {ticker} skip: REGULAR-tier in {_live_session} — insufficient liquidity"
+            )
+            return None
+        if confidence < _ext_floor:
+            logger.debug(
+                f"[PAPER] {ticker} skip: conf {confidence:.0f}% < ext-hours floor {_ext_floor:.0f}%"
+                f" (tier={trading_tier}, sess={_live_session})"
+            )
+            return None
+
+    # Extended-hours stop widening: wider stop = smaller shares, less capital at risk
+    # on thin ECN spreads (1.5× in pre-market, 2× in after-hours).
+    _stop_mult = (
+        2.0 if _live_session == "AFTER_HOURS" else
+        1.5 if _live_session == "PRE_MARKET"  else
+        1.0
+    )
+    if _stop_mult != 1.0:
+        risk_dist_orig = abs(price - stop)
+        stop = (
+            round(price - risk_dist_orig * _stop_mult, 4) if direction == "BUY"
+            else round(price + risk_dist_orig * _stop_mult, 4)
+        )
+
     rr_mult = round(min(1.0, max(0.20, rr_ratio / 2.0)), 2) if rr_ratio > 0 else 0.20
     effective_size_mult = round(size_mult * rr_mult, 2)
     if effective_size_mult <= 0:

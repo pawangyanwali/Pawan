@@ -418,6 +418,15 @@ def is_after_hours() -> bool:
     return get_session() == "AFTER_HOURS"
 
 
+def is_ah_eod_close_window() -> bool:
+    """True during 19:55–20:05 ET on trading days — hard close window for AH positions."""
+    now_et = datetime.now(ET)
+    if now_et.weekday() >= 5 or _is_holiday(now_et.date()):
+        return False
+    t = now_et.time()
+    return time(19, 55) <= t < time(20, 6)
+
+
 def no_new_entries() -> bool:
     """True only when the market is literally closed or in hard-close wind-down.
     Extended-hours sessions (PRE_MARKET, AFTER_HOURS) are NOT fully blocked —
