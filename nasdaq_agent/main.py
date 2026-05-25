@@ -549,6 +549,42 @@ async def lifespan(app: FastAPI):
             )
     except Exception as _sp_e:
         logging.getLogger(__name__).warning(f"Startup stale-trade sweep failed: {_sp_e}")
+
+    # ── EOD watchdog — fires at 3:45 PM ET independent of the scanner ────────
+    # Guarantees positions are closed even if the scanner loop is stalled.
+    import threading as _threading
+    def _eod_watchdog():
+        import time as _time
+        import zoneinfo as _zi
+        from datetime import datetime as _dt
+        _log = logging.getLogger("eod_watchdog")
+        _fired_on: set = set()   # track dates we already fired to avoid double-close
+        while True:
+            try:
+                now_et = _dt.now(_zi.ZoneInfo("America/New_York"))
+                hm = now_et.hour * 60 + now_et.minute
+                today = now_et.date()
+                # Fire between 3:45 and 4:00 PM ET on weekdays only
+                if now_et.weekday() < 5 and 225 <= hm < 240 and today not in _fired_on:
+                    _fired_on.add(today)
+                    try:
+                        from agent.paper_trading import close_all_positions_eod
+                        n = close_all_positions_eod(reason="EOD_WATCHDOG_3:45PM")
+                        if n:
+                            _log.warning(f"[EOD Watchdog] Force-closed {n} position(s) at 3:45 PM ET")
+                    except Exception as _e:
+                        _log.error(f"[EOD Watchdog] Close failed: {_e}", exc_info=True)
+                # Prune old dates so the set doesn't grow forever
+                if len(_fired_on) > 10:
+                    _fired_on = set(sorted(_fired_on)[-5:])
+            except Exception:
+                pass
+            _time.sleep(30)
+
+    _wd = _threading.Thread(target=_eod_watchdog, daemon=True, name="eod-watchdog")
+    _wd.start()
+    logging.getLogger(__name__).info("EOD watchdog started — will force-close all positions at 3:45 PM ET")
+
     from config import SCHWAB_ENABLED
     if SCHWAB_ENABLED:
         from config import NASDAQ_TICKERS as _nq_tickers
@@ -829,9 +865,7 @@ async def paper_trading_endpoint():
         }, "open_trades": [], "closed_trades": []})
 
     today_str    = date.today().isoformat()
-    # Group by entry date (when the trade was opened), not close date.
-    # A Friday trade closed on Sunday due to stale cleanup must count as Friday's trade.
-    today_trades = [t for t in closed if (t.get("opened_at") or "")[:10] == today_str]
+    today_trades = [t for t in closed if (t.get("closed_at") or "")[:10] == today_str]
     all_trades   = closed
 
     def _stats(trades):
