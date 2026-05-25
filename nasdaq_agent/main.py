@@ -2072,31 +2072,42 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    # Accept first, then require an {"type":"auth","token":"<access_token>"} message
-    # within 10 seconds.  This keeps the token out of server/proxy logs (vs query-param).
+    # Accept the connection, then authenticate via either:
+    #   Fast path  — valid "token" query-parameter (zero-latency, already in URL)
+    #   Slow path  — {"type":"auth","token":"..."} first message within 10 seconds
+    # Both paths call the same decode_token / is_blacklisted checks.
     await ws.accept()
 
+    def _verify_token(token: str) -> bool:
+        try:
+            from auth.utils import decode_token, is_blacklisted
+            _p = decode_token(token)
+            return _p.get("type") == "access" and not is_blacklisted(_p.get("jti", ""))
+        except Exception:
+            return False
+
     _authed = False
-    try:
-        raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
-        msg = json.loads(raw)
-        if msg.get("type") == "auth":
-            token = msg.get("token", "")
-            if token:
-                try:
-                    from auth.utils import decode_token, is_blacklisted
-                    _p = decode_token(token)
-                    _authed = (
-                        _p.get("type") == "access"
-                        and not is_blacklisted(_p.get("jti", ""))
-                    )
-                except Exception:
-                    pass
-    except (asyncio.TimeoutError, Exception):
-        pass
+
+    # Fast path: token in query param (client already attached it to the URL)
+    _qtoken = ws.query_params.get("token", "")
+    if _qtoken:
+        _authed = _verify_token(_qtoken)
+
+    # Slow path: wait for first-message auth (covers clients that omit the query param)
+    if not _authed:
+        try:
+            raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+            msg = json.loads(raw)
+            if msg.get("type") == "auth":
+                _authed = _verify_token(msg.get("token", ""))
+        except (asyncio.TimeoutError, Exception):
+            pass
 
     if not _authed:
-        await ws.close(code=4001)
+        try:
+            await ws.close(code=4001)
+        except RuntimeError:
+            pass   # client already disconnected before we could send the close frame
         return
 
     await manager.connect(ws)
