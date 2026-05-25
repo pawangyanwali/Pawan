@@ -9,9 +9,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import bcrypt as _bcrypt
 import jwt
 import pyotp
-from passlib.context import CryptContext
 
 from agent.db import get_conn
 
@@ -22,16 +22,17 @@ JWT_ALGO     = "HS256"
 ACCESS_TTL   = int(os.environ.get("JWT_ACCESS_TTL_MINUTES", "30"))   # minutes
 REFRESH_TTL  = int(os.environ.get("JWT_REFRESH_TTL_DAYS",   "7"))    # days
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 # ── Password helpers ───────────────────────────────────────────────────────────
 
 def hash_password(plain: str) -> str:
-    return _pwd_ctx.hash(plain)
+    return _bcrypt.hashpw(plain.encode(), _bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_ctx.verify(plain, hashed)
+    try:
+        return _bcrypt.checkpw(plain.encode(), hashed.encode())
+    except Exception:
+        return False
 
 
 # ── JWT helpers ────────────────────────────────────────────────────────────────
