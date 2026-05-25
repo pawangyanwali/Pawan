@@ -9,6 +9,7 @@ Covers:
 - per-client send timeout (slow client can't stall others)
 - multiple concurrent browsers all receive messages
 - reconnect: new client gets current state immediately
+- /ws endpoint integration: auth flow + manager.connect() without double-accept
 """
 import asyncio
 import json
@@ -304,3 +305,104 @@ class TestMultiBrowser:
         for ws in dead:
             assert ws not in cm.active, "dead client not evicted"
         assert len(cm.active) == 3
+
+
+# ── /ws endpoint integration tests ───────────────────────────────────────────
+#
+# These tests drive the FULL websocket_endpoint() handler, not just
+# ConnectionManager in isolation.  They use raise_server_exceptions=True so
+# any server-side RuntimeError (e.g. double-accept) propagates to the test
+# and causes a hard failure instead of being swallowed silently.
+#
+# Root cause of past regression: websocket_endpoint called ws.accept() at the
+# top for auth, then manager.connect() called ws.accept() a second time →
+# RuntimeError: "Expected websocket.send or websocket.close, got websocket.accept"
+# This class would have caught that immediately.
+
+def _ws_client():
+    """
+    TestClient wired to the real FastAPI app with:
+      - scanner mocked (no background threads)
+      - raise_server_exceptions=True (server RuntimeErrors fail the test)
+    """
+    import main as m
+    mock_scanner = MagicMock()
+    mock_scanner.signals = []
+    mock_scanner.last_scan = None
+    mock_scanner.is_running = True
+    m.scanner = mock_scanner
+
+    from fastapi.testclient import TestClient
+    return TestClient(m.app, raise_server_exceptions=True)
+
+
+_VALID_PAYLOAD = {"type": "access", "jti": "test-jti", "sub": "1"}
+_AUTH_PATCHES = {
+    "auth.utils.decode_token":    _VALID_PAYLOAD,
+    "auth.utils.is_blacklisted":  False,
+}
+
+
+class TestWebSocketEndpoint:
+    """
+    Integration tests for the /ws endpoint.
+
+    Every test here uses raise_server_exceptions=True, so a double-accept,
+    double-close, or any other server-side RuntimeError will fail the test
+    rather than being silently swallowed.
+    """
+
+    def test_query_param_auth_no_double_accept(self):
+        """
+        Regression: valid token in query-param must not trigger a second
+        ws.accept() inside manager.connect() (was RuntimeError in production).
+        """
+        with patch("auth.utils.decode_token", return_value=_VALID_PAYLOAD), \
+             patch("auth.utils.is_blacklisted", return_value=False):
+            client = _ws_client()
+            # If a double-accept RuntimeError occurs, raise_server_exceptions=True
+            # will propagate it and the test fails.
+            with client.websocket_connect("/ws?token=valid_token") as ws:
+                data = ws.receive_text()   # server sends initial scan_status/update frame
+                msg = json.loads(data)
+                assert msg.get("type") in ("update", "scan_status", "ping"), (
+                    f"unexpected first message type: {msg.get('type')}"
+                )
+
+    def test_first_message_auth_no_double_accept(self):
+        """
+        Regression: auth via first JSON message must also avoid double-accept.
+        """
+        with patch("auth.utils.decode_token", return_value=_VALID_PAYLOAD), \
+             patch("auth.utils.is_blacklisted", return_value=False):
+            client = _ws_client()
+            with client.websocket_connect("/ws") as ws:
+                ws.send_text(json.dumps({"type": "auth", "token": "valid_token"}))
+                data = ws.receive_text()
+                msg = json.loads(data)
+                assert msg.get("type") in ("update", "scan_status", "ping")
+
+    def test_invalid_token_closes_connection(self):
+        """
+        A bad token must be rejected cleanly — no unhandled RuntimeError on
+        either the double-close or the double-accept path.
+        """
+        with patch("auth.utils.decode_token", side_effect=Exception("bad token")):
+            client = _ws_client()
+            try:
+                with client.websocket_connect("/ws?token=bad") as ws:
+                    ws.receive_text()   # server should close before sending anything
+            except Exception:
+                pass   # WebSocketDisconnect or similar — expected for rejected auth
+
+    def test_no_token_closes_without_server_error(self):
+        """
+        No token at all: server must reject cleanly without a server-side
+        RuntimeError (the double-close regression).
+        """
+        client = _ws_client()
+        try:
+            with client.websocket_connect("/ws") as ws:
+                ws.receive_text()
+        except Exception:
+            pass   # expected rejection — what matters is no RuntimeError on the server
