@@ -105,25 +105,31 @@ _sig_consec_lock = threading.Lock()
 def _scan_interval() -> int:
     """
     Adaptive scan cadence based on market session.
-    Power hours get 30s scans — more signals when price action is richest.
-    Off-peak gets the default 60s to conserve API credits.
-      09:30–11:00 ET  (opening range + momentum)  → 30s
-      14:30–16:00 ET  (closing power hour)         → 30s
-      everything else                              → 60s
+      Weekend / market closed → 600s  (no trades possible, avoid 429 storms)
+      09:30–11:00 ET          →  30s  (opening power hour)
+      14:30–16:00 ET          →  30s  (closing power hour)
+      everything else         →  60s
     """
     from datetime import datetime
     import zoneinfo
     now_et = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+    # Weekend: Saturday=5, Sunday=6
+    if now_et.weekday() >= 5:
+        return 600
     h, m = now_et.hour, now_et.minute
     minutes = h * 60 + m
-    OPEN_RANGE_END  = 9 * 60 + 30 + 90   # 11:00 ET
-    OPEN_RANGE_START = 9 * 60 + 30       # 09:30 ET
-    CLOSE_START = 14 * 60 + 30           # 14:30 ET (2:30pm)
-    CLOSE_END   = 16 * 60                # 16:00 ET
+    OPEN_RANGE_START = 9 * 60 + 30    # 09:30 ET
+    OPEN_RANGE_END   = 9 * 60 + 30 + 90  # 11:00 ET
+    CLOSE_START      = 14 * 60 + 30   # 14:30 ET
+    CLOSE_END        = 16 * 60        # 16:00 ET
+    MARKET_CLOSE     = 20 * 60        # 20:00 ET (after-hours end)
+    # Outside all trading hours (overnight) — no need to poll aggressively
+    if minutes < OPEN_RANGE_START - 60 or minutes >= MARKET_CLOSE:
+        return 300
     if OPEN_RANGE_START <= minutes < OPEN_RANGE_END:
-        return 30   # opening power hour
+        return 30
     if CLOSE_START <= minutes < CLOSE_END:
-        return 30   # closing power hour
+        return 30
     return SCAN_INTERVAL_SECONDS
 
 
