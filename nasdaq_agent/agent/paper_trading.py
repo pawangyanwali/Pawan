@@ -773,6 +773,20 @@ def update_open_trades(ticker: str, df, current_price: float,
         _trigger_paper_feedback()
 
 
+def _last_market_close_time() -> datetime:
+    """Return the most recent 4:00 PM ET weekday as a UTC datetime."""
+    import pytz
+    et = pytz.timezone("America/New_York")
+    now_et = datetime.now(et)
+    close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    # Step back to the most recent weekday at 4 PM that is in the past
+    if close_et > now_et:
+        close_et -= __import__('datetime').timedelta(days=1)
+    while close_et.weekday() >= 5:  # Saturday=5, Sunday=6
+        close_et -= __import__('datetime').timedelta(days=1)
+    return close_et.astimezone(timezone.utc)
+
+
 def _record_close(
     c,
     trade_id:     int,
@@ -784,6 +798,7 @@ def _record_close(
     partial_pnl:  float = 0.0,
     total_shares: int   = 0,      # original position size for correct pnl_pct
     ticker:       str   = "",
+    close_time:   datetime | None = None,
 ) -> None:
     """Write the final closed state for a trade record."""
     ep = exit_price
@@ -798,13 +813,14 @@ def _record_close(
     pnl_pct = pnl_dollar / (entry * denom_shares + 0.01) * 100
 
     outcome = "WIN" if pnl_dollar > 0 else "LOSS"
+    ts = (close_time or datetime.now(timezone.utc)).isoformat()
     cur = c.execute("""
         UPDATE paper_trades
         SET status='CLOSED', closed_at=?, exit_price=?,
             exit_reason=?, pnl_pct=?, pnl_dollar=?
         WHERE id=? AND status='OPEN'
     """, (
-        datetime.now(timezone.utc).isoformat(),
+        ts,
         round(ep, 4), exit_reason,
         round(pnl_pct, 3), round(pnl_dollar, 2),
         trade_id,
@@ -820,7 +836,7 @@ def _record_close(
         _fire_trade_event("close", ticker)
 
 
-def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
+def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM", close_time: datetime | None = None) -> int:
     """
     Force-close ALL open paper trades at current price.
     Called at 3:45 PM ET hard close, after-hours, or on startup when market is closed.
@@ -874,6 +890,7 @@ def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM") -> int:
                     float(row["entry_price"]), row["direction"],
                     int(row["shares_rem"]), float(row["partial_pnl"]),
                     int(row["shares_total"]), ticker=ticker,
+                    close_time=close_time,
                 )
                 closed += 1
             c.commit()
@@ -888,7 +905,8 @@ def close_stale_positions() -> int:
     """
     Called at startup and after-hours to sweep any positions that were left
     open when the market closed (scanner may not have been running at 3:45 PM).
-    Uses entry price as exit price when live prices are unavailable.
+    Uses the last market close time (not now) so stale closes don't pollute
+    today's P&L when the service restarts on a weekend.
     Returns number of positions closed.
     """
     from agent.market_hours import is_after_hours, no_new_entries
@@ -904,10 +922,12 @@ def close_stale_positions() -> int:
     if count == 0:
         return 0
 
+    last_close = _last_market_close_time()
     logger.warning(
-        f"[PAPER] Found {count} stale open position(s) while market is closed — force-closing"
+        f"[PAPER] Found {count} stale open position(s) while market is closed — "
+        f"force-closing with timestamp {last_close.isoformat()}"
     )
-    return close_all_positions_eod(reason="STALE_MARKET_CLOSED")
+    return close_all_positions_eod(reason="STALE_MARKET_CLOSED", close_time=last_close)
 
 
 def _eod_momentum_favors(df, direction: str, n_bars: int = 4) -> bool:
