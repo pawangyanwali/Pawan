@@ -201,10 +201,12 @@ class _TokenManager:
                     f"[Schwab/{self.name}] Token refresh HTTP {e.code} — "
                     f"retry #{_retry + 1} in {backoff}s"
                 )
-                t = threading.Timer(backoff, self.refresh, kwargs={"_retry": _retry + 1})
-                t.daemon = True
-                t.start()
                 with self._lock:
+                    if self._refresh_timer:
+                        self._refresh_timer.cancel()
+                    t = threading.Timer(backoff, self.refresh, kwargs={"_retry": _retry + 1})
+                    t.daemon = True
+                    t.start()
                     self._refresh_timer = t
             return False
         except Exception as e:
@@ -212,10 +214,12 @@ class _TokenManager:
             logger.warning(
                 f"[Schwab/{self.name}] Token refresh error — retry #{_retry + 1} in {backoff}s: {e}"
             )
-            t = threading.Timer(backoff, self.refresh, kwargs={"_retry": _retry + 1})
-            t.daemon = True
-            t.start()
             with self._lock:
+                if self._refresh_timer:
+                    self._refresh_timer.cancel()
+                t = threading.Timer(backoff, self.refresh, kwargs={"_retry": _retry + 1})
+                t.daemon = True
+                t.start()
                 self._refresh_timer = t
             return False
 

@@ -219,7 +219,7 @@ def _try_refresh_md_token() -> bool:
     """
     global _refresh_last
     with _refresh_lock:
-        if time.time() - _refresh_last < 30:
+        if time.time() - _refresh_last < 180:
             return bool(_auth_headers())
         _refresh_last = time.time()   # stamp before attempt — prevents storm on failure
         try:
@@ -595,7 +595,21 @@ async def _fetch_one_async(
             _on_429()
             return pd.DataFrame()
         if resp.status in (401, 403):
-            # Run the blocking refresh in the executor so we don't block the event loop
+            # Mirror the CDN block detection from the sync _get() path.
+            # Akamai blocks the token endpoint too, so calling refresh when
+            # the IP is blocked only adds more requests and extends the block.
+            is_cdn = (_backoff_until - time.time() > -30)
+            if not is_cdn and resp.status == 403:
+                try:
+                    from agent.broker.schwab_auth import _market_data as _md_cdn_aio
+                    if _md_cdn_aio.get_status().get("access_token_ttl_s", 0) > 60:
+                        is_cdn = True
+                except Exception:
+                    pass
+            if is_cdn:
+                _on_cdn_block()
+                return pd.DataFrame()
+            # Genuine auth failure — refresh once, guarded by _try_refresh_md_token dedup
             import asyncio as _aio
             loop = _aio.get_event_loop()
             refreshed = await loop.run_in_executor(None, _try_refresh_md_token)
