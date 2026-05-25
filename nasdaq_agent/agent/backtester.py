@@ -19,7 +19,6 @@ import json
 import logging
 import math
 import os
-import sqlite3
 import threading
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -29,6 +28,8 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+from agent.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -111,38 +112,34 @@ def _safe_float(v, default: float = 0.0) -> float:
 
 def _load_resolved_signals() -> pd.DataFrame:
     """
-    Read all resolved (non-TRACKING) signals from the live_backtest SQLite db.
+    Read all resolved (non-TRACKING) signals from bt_signals in PostgreSQL.
 
-    Returns an empty DataFrame when the database does not exist, is unreadable,
-    or contains no resolved rows.  Never raises.
+    Returns an empty DataFrame when the table is empty or unreadable. Never raises.
     """
-    if not _DB_PATH.exists():
-        logger.debug("[Backtester] live_backtest.db not found — no data yet.")
-        return pd.DataFrame()
-
     try:
-        conn = sqlite3.connect(str(_DB_PATH), timeout=10)
-        df = pd.read_sql_query(
-            """
-            SELECT
-                ticker,
-                direction,
-                entry_price,
-                exit_price,
-                confidence,
-                session,
-                regime,
-                fired_at   AS recorded_at,
-                resolved_at,
-                status     AS outcome,
-                pnl_pct
-            FROM bt_signals
-            WHERE status IN ('WIN', 'LOSS', 'TIMEOUT')
-            ORDER BY fired_at ASC
-            """,
-            conn,
-        )
-        conn.close()
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT
+                    ticker,
+                    direction,
+                    entry_price,
+                    exit_price,
+                    confidence,
+                    session,
+                    regime,
+                    fired_at   AS recorded_at,
+                    resolved_at,
+                    status     AS outcome,
+                    pnl_pct
+                FROM bt_signals
+                WHERE status IN ('WIN', 'LOSS', 'TIMEOUT')
+                ORDER BY fired_at ASC
+            """).fetchall()
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame([dict(r) for r in rows])
 
         if df.empty:
             return df

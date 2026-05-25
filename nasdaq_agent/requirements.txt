@@ -18,7 +18,16 @@ cryptography>=41.0.0
 # Neural network components (LSTM regime detector)
 torch>=2.0.0
 # RL entry timer uses only stdlib + numpy (no extra dep needed)
-# PostgreSQL driver (used by migrate_sqlite_to_postgres.py)
+# PostgreSQL drivers
 psycopg2-binary>=2.9.9
+asyncpg>=0.29.0
 # Valkey/Redis client for price pub/sub and session cache
 redis>=5.0.0
+# Auth system
+PyJWT>=2.8.0
+passlib[bcrypt]>=1.7.4
+# MFA (TOTP)
+pyotp>=2.9.0
+qrcode>=7.4.2
+# Schema migrations
+alembic>=1.13.0

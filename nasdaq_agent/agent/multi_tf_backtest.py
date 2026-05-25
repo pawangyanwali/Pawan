@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import math
-import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 from agent.walk_forward import replay_signals
+from agent.db import get_conn, _get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -113,53 +113,57 @@ TD_INTERVAL: dict[str, str] = {
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
-_DB_PATH = Path(__file__).parent.parent / "data" / "backtest_mtf.db"
-_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-_lock    = threading.Lock()
+_lock = threading.Lock()
+
+_MTF_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS bt_mtf_trades (
+        id          SERIAL PRIMARY KEY,
+        run_dt      TEXT,
+        timeframe   TEXT,
+        ticker      TEXT,
+        bar_dt      TEXT,
+        direction   TEXT,
+        entry_price REAL,
+        target      REAL,
+        stop        REAL,
+        exit_price  REAL,
+        outcome     TEXT,
+        pnl_r       REAL,
+        bars_held   INTEGER,
+        won         INTEGER
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_mtf_tf_ticker ON bt_mtf_trades (run_dt, timeframe, ticker)",
+    """
+    CREATE TABLE IF NOT EXISTS bt_mtf_summary (
+        run_dt      TEXT,
+        timeframe   TEXT,
+        ticker      TEXT,
+        total       INTEGER,
+        wins        INTEGER,
+        win_rate    REAL,
+        avg_pnl_r   REAL,
+        expectancy  REAL,
+        max_dd_r    REAL,
+        sharpe      REAL,
+        PRIMARY KEY (run_dt, timeframe, ticker)
+    )
+    """,
+]
 
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=30)
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS bt_mtf_trades (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_dt      TEXT,
-            timeframe   TEXT,
-            ticker      TEXT,
-            bar_dt      TEXT,
-            direction   TEXT,
-            entry_price REAL,
-            target      REAL,
-            stop        REAL,
-            exit_price  REAL,
-            outcome     TEXT,
-            pnl_r       REAL,
-            bars_held   INTEGER,
-            won         INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE INDEX IF NOT EXISTS idx_mtf_tf_ticker
-        ON bt_mtf_trades (run_dt, timeframe, ticker)
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS bt_mtf_summary (
-            run_dt      TEXT,
-            timeframe   TEXT,
-            ticker      TEXT,
-            total       INTEGER,
-            wins        INTEGER,
-            win_rate    REAL,
-            avg_pnl_r   REAL,
-            expectancy  REAL,
-            max_dd_r    REAL,
-            sharpe      REAL,
-            PRIMARY KEY (run_dt, timeframe, ticker)
-        )
-    """)
-    c.commit()
-    return c
+def init_db() -> None:
+    """Create bt_mtf_trades and bt_mtf_summary tables if they don't exist."""
+    pool = _get_pool()
+    raw = pool.getconn()
+    try:
+        raw.autocommit = True
+        with raw.cursor() as cur:
+            for ddl in _MTF_DDL:
+                cur.execute(ddl.strip())
+    finally:
+        pool.putconn(raw)
 
 
 # ── Analytics helpers ─────────────────────────────────────────────────────────
@@ -323,8 +327,7 @@ def store_results(all_results: dict[str, dict[str, list[dict]]], run_dt: str) ->
             ))
 
     with _lock:
-        c = _conn()
-        try:
+        with get_conn() as c:
             c.executemany(
                 "INSERT INTO bt_mtf_trades "
                 "(run_dt,timeframe,ticker,bar_dt,direction,entry_price,"
@@ -333,15 +336,17 @@ def store_results(all_results: dict[str, dict[str, list[dict]]], run_dt: str) ->
                 trade_rows,
             )
             c.executemany(
-                "INSERT OR REPLACE INTO bt_mtf_summary "
+                "INSERT INTO bt_mtf_summary "
                 "(run_dt,timeframe,ticker,total,wins,win_rate,"
                 " avg_pnl_r,expectancy,max_dd_r,sharpe) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT (run_dt,timeframe,ticker) DO UPDATE SET "
+                "total=EXCLUDED.total, wins=EXCLUDED.wins, "
+                "win_rate=EXCLUDED.win_rate, avg_pnl_r=EXCLUDED.avg_pnl_r, "
+                "expectancy=EXCLUDED.expectancy, max_dd_r=EXCLUDED.max_dd_r, "
+                "sharpe=EXCLUDED.sharpe",
                 summary_rows,
             )
-            c.commit()
-        finally:
-            c.close()
 
     logger.info(
         f"[MTF] Stored {len(trade_rows)} trades, "
@@ -356,13 +361,12 @@ def get_summary(run_dt: str | None = None, limit_runs: int = 1) -> dict:
     Return aggregated per-timeframe stats across all tickers.
     If run_dt is None, uses the most recent run.
     """
-    c = _conn()
-    try:
+    with get_conn() as c:
         if run_dt is None:
             row = c.execute(
-                "SELECT MAX(run_dt) FROM bt_mtf_summary"
+                "SELECT MAX(run_dt) AS max_run_dt FROM bt_mtf_summary"
             ).fetchone()
-            run_dt = row[0] if row else None
+            run_dt = row["max_run_dt"] if row else None
 
         if not run_dt:
             return {}
@@ -383,35 +387,34 @@ def get_summary(run_dt: str | None = None, limit_runs: int = 1) -> dict:
             ORDER BY timeframe
         """, (run_dt,)).fetchall()
 
-        tf_stats: dict[str, dict] = {}
-        for r in rows:
-            tf = r[0]
-            total = r[1] or 0
-            wins  = r[2] or 0
-            tf_stats[tf] = {
-                "label":      TF_CONFIGS.get(tf, {}).get("label", tf),
-                "total":      total,
-                "wins":       wins,
-                "win_rate":   round(wins / total * 100, 1) if total else 0,
-                "avg_pnl_r":  r[4],
-                "expectancy": r[5],
-                "max_dd_r":   r[6],
-                "sharpe":     r[7],
-                "tickers":    r[8],
-            }
+    tf_stats: dict[str, dict] = {}
+    for r in rows:
+        tf    = r["timeframe"]
+        total = r["total"] or 0
+        wins  = r["wins"] or 0
+        tf_stats[tf] = {
+            "label":      TF_CONFIGS.get(tf, {}).get("label", tf),
+            "total":      total,
+            "wins":       wins,
+            "win_rate":   round(wins / total * 100, 1) if total else 0,
+            "avg_pnl_r":  r["avg_pnl_r"],
+            "expectancy": r["expectancy"],
+            "max_dd_r":   r["max_dd_r"],
+            "sharpe":     r["sharpe"],
+            "tickers":    r["tickers"],
+        }
 
-        return {"run_dt": run_dt, "by_timeframe": tf_stats}
-    finally:
-        c.close()
+    return {"run_dt": run_dt, "by_timeframe": tf_stats}
 
 
 def get_ticker_stats(ticker: str, run_dt: str | None = None) -> dict:
     """Per-TF breakdown for a single ticker."""
-    c = _conn()
-    try:
+    with get_conn() as c:
         if run_dt is None:
-            row = c.execute("SELECT MAX(run_dt) FROM bt_mtf_summary").fetchone()
-            run_dt = row[0] if row else None
+            row = c.execute(
+                "SELECT MAX(run_dt) AS max_run_dt FROM bt_mtf_summary"
+            ).fetchone()
+            run_dt = row["max_run_dt"] if row else None
         if not run_dt:
             return {}
 
@@ -422,28 +425,25 @@ def get_ticker_stats(ticker: str, run_dt: str | None = None) -> dict:
             ORDER BY timeframe
         """, (run_dt, ticker)).fetchall()
 
-        return {
-            "ticker": ticker,
-            "run_dt": run_dt,
-            "timeframes": {
-                r[0]: {
-                    "label":      TF_CONFIGS.get(r[0], {}).get("label", r[0]),
-                    "total":      r[1], "wins": r[2],
-                    "win_rate":   round(r[2] / r[1] * 100, 1) if r[1] else 0,
-                    "avg_pnl_r":  r[4], "expectancy": r[5],
-                    "max_dd_r":   r[6], "sharpe": r[7],
-                }
-                for r in rows
-            },
-        }
-    finally:
-        c.close()
+    return {
+        "ticker": ticker,
+        "run_dt": run_dt,
+        "timeframes": {
+            r["timeframe"]: {
+                "label":      TF_CONFIGS.get(r["timeframe"], {}).get("label", r["timeframe"]),
+                "total":      r["total"], "wins": r["wins"],
+                "win_rate":   round(r["wins"] / r["total"] * 100, 1) if r["total"] else 0,
+                "avg_pnl_r":  r["avg_pnl_r"], "expectancy": r["expectancy"],
+                "max_dd_r":   r["max_dd_r"],  "sharpe":     r["sharpe"],
+            }
+            for r in rows
+        },
+    }
 
 
 def get_run_history(limit: int = 10) -> list[dict]:
     """List of past backtest run dates with overall stats."""
-    c = _conn()
-    try:
+    with get_conn() as c:
         rows = c.execute("""
             SELECT run_dt,
                    SUM(total)                   AS total_trades,
@@ -455,13 +455,16 @@ def get_run_history(limit: int = 10) -> list[dict]:
             ORDER BY run_dt DESC
             LIMIT ?
         """, (limit,)).fetchall()
-        return [
-            {"run_dt": r[0], "total_trades": r[1],
-             "avg_win_rate": r[2], "tickers": r[3], "timeframes": r[4]}
-            for r in rows
-        ]
-    finally:
-        c.close()
+    return [
+        {
+            "run_dt":       r["run_dt"],
+            "total_trades": r["total_trades"],
+            "avg_win_rate": r["avg_win_rate"],
+            "tickers":      r["tickers"],
+            "timeframes":   r["timeframes"],
+        }
+        for r in rows
+    ]
 
 
 def build_training_records(run_dt: str | None = None) -> pd.DataFrame:
@@ -469,20 +472,22 @@ def build_training_records(run_dt: str | None = None) -> pd.DataFrame:
     Return all trade records from the most recent run as a DataFrame
     suitable for XGBoost retraining (outcome label + ticker/TF metadata).
     """
-    c = _conn()
-    try:
+    with get_conn() as c:
         if run_dt is None:
-            row = c.execute("SELECT MAX(run_dt) FROM bt_mtf_trades").fetchone()
-            run_dt = row[0] if row else None
+            row = c.execute(
+                "SELECT MAX(run_dt) AS max_run_dt FROM bt_mtf_trades"
+            ).fetchone()
+            run_dt = row["max_run_dt"] if row else None
         if not run_dt:
             return pd.DataFrame()
 
-        return pd.read_sql_query(
-            "SELECT * FROM bt_mtf_trades WHERE run_dt=?",
-            c, params=(run_dt,)
-        )
-    finally:
-        c.close()
+        rows = c.execute(
+            "SELECT * FROM bt_mtf_trades WHERE run_dt = ?", (run_dt,)
+        ).fetchall()
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows])
 
 
 def compute_filter_calibration(run_dt: str | None = None) -> dict:
@@ -490,11 +495,12 @@ def compute_filter_calibration(run_dt: str | None = None) -> dict:
     Compute per-context win rates for adaptive filter calibration.
     Returns {context_key: {win_rate, count}} — same format as update_filter().
     """
-    c = _conn()
-    try:
+    with get_conn() as c:
         if run_dt is None:
-            row = c.execute("SELECT MAX(run_dt) FROM bt_mtf_trades").fetchone()
-            run_dt = row[0] if row else None
+            row = c.execute(
+                "SELECT MAX(run_dt) AS max_run_dt FROM bt_mtf_trades"
+            ).fetchone()
+            run_dt = row["max_run_dt"] if row else None
         if not run_dt:
             return {}
 
@@ -507,54 +513,52 @@ def compute_filter_calibration(run_dt: str | None = None) -> dict:
                    SUM(won)  AS wins
             FROM bt_mtf_trades WHERE run_dt=?
             GROUP BY timeframe
-            HAVING total >= 10
+            HAVING COUNT(*) >= 10
         """, (run_dt,)).fetchall()
         for r in rows:
-            if r[1]:
-                by_setup[f"timeframe:{r[0]}"] = {
-                    "win_rate": round(r[2] / r[1], 3),
-                    "count":    r[1],
+            if r["total"]:
+                by_setup[f"timeframe:{r['timeframe']}"] = {
+                    "win_rate": round(r["wins"] / r["total"], 3),
+                    "count":    r["total"],
                 }
 
         # Win rate by direction
         rows = c.execute("""
             SELECT direction, COUNT(*) AS total, SUM(won) AS wins
             FROM bt_mtf_trades WHERE run_dt=?
-            GROUP BY direction HAVING total >= 10
+            GROUP BY direction HAVING COUNT(*) >= 10
         """, (run_dt,)).fetchall()
         for r in rows:
-            if r[1]:
-                by_setup[f"direction:{r[0]}"] = {
-                    "win_rate": round(r[2] / r[1], 3),
-                    "count":    r[1],
+            if r["total"]:
+                by_setup[f"direction:{r['direction']}"] = {
+                    "win_rate": round(r["wins"] / r["total"], 3),
+                    "count":    r["total"],
                 }
 
         # Win rate by timeframe × direction
         rows = c.execute("""
             SELECT timeframe, direction, COUNT(*) AS total, SUM(won) AS wins
             FROM bt_mtf_trades WHERE run_dt=?
-            GROUP BY timeframe, direction HAVING total >= 5
+            GROUP BY timeframe, direction HAVING COUNT(*) >= 5
         """, (run_dt,)).fetchall()
         for r in rows:
-            if r[2]:
-                key = f"tf_direction:{r[0]}:{r[1]}"
+            if r["total"]:
+                key = f"tf_direction:{r['timeframe']}:{r['direction']}"
                 by_setup[key] = {
-                    "win_rate": round(r[3] / r[2], 3),
-                    "count":    r[2],
+                    "win_rate": round(r["wins"] / r["total"], 3),
+                    "count":    r["total"],
                 }
 
         # Overall
         row = c.execute(
-            "SELECT COUNT(*), SUM(won) FROM bt_mtf_trades WHERE run_dt=?",
+            "SELECT COUNT(*) AS total, SUM(won) AS wins FROM bt_mtf_trades WHERE run_dt=?",
             (run_dt,)
         ).fetchone()
-        total = row[0] or 0
-        wins  = row[1] or 0
+        total = row["total"] or 0
+        wins  = row["wins"] or 0
         overall_wr = wins / total if total else 0.0
 
-        return {
-            "overall":  {"win_rate": overall_wr, "count": total},
-            "by_setup": by_setup,
-        }
-    finally:
-        c.close()
+    return {
+        "overall":  {"win_rate": overall_wr, "count": total},
+        "by_setup": by_setup,
+    }

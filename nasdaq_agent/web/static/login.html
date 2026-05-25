@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NASDAQ Agent — Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --border:  #30363d;
+      --accent:  #58a6ff;
+      --danger:  #f85149;
+      --success: #3fb950;
+      --text:    #c9d1d9;
+      --muted:   #8b949e;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 400px;
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .logo h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      letter-spacing: -0.5px;
+    }
+
+    .logo span { color: var(--accent); }
+
+    h2 {
+      font-size: 1rem;
+      font-weight: 500;
+      color: var(--muted);
+      text-align: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 0.3rem;
+    }
+
+    input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.55rem 0.75rem;
+      color: var(--text);
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input:focus { border-color: var(--accent); }
+
+    button {
+      width: 100%;
+      background: var(--accent);
+      color: #0d1117;
+      border: none;
+      border-radius: 6px;
+      padding: 0.65rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 0.5rem;
+      transition: opacity 0.15s;
+    }
+
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button:hover:not(:disabled) { opacity: 0.85; }
+
+    .error {
+      background: rgba(248, 81, 73, 0.1);
+      border: 1px solid var(--danger);
+      border-radius: 6px;
+      color: var(--danger);
+      font-size: 0.8rem;
+      padding: 0.5rem 0.75rem;
+      margin-top: 1rem;
+      display: none;
+    }
+
+    .success {
+      background: rgba(63, 185, 80, 0.1);
+      border: 1px solid var(--success);
+      border-radius: 6px;
+      color: var(--success);
+      font-size: 0.8rem;
+      padding: 0.5rem 0.75rem;
+      margin-top: 1rem;
+      display: none;
+    }
+
+    .link {
+      text-align: center;
+      margin-top: 1rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .link a { color: var(--accent); text-decoration: none; }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .mfa-digits {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: center;
+      margin: 1rem 0;
+    }
+
+    .mfa-digits input {
+      width: 3rem;
+      text-align: center;
+      font-size: 1.4rem;
+      padding: 0.4rem;
+    }
+
+    .qr-wrap { text-align: center; margin: 1rem 0; }
+    .qr-wrap img { border-radius: 8px; border: 2px solid var(--border); }
+    .secret-code {
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: var(--muted);
+      word-break: break-all;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <h1>NASDAQ <span>Agent</span></h1>
+  </div>
+
+  <!-- ── Panel: Login ─────────────────────────────────────────────────── -->
+  <div id="panelLogin" class="panel active">
+    <h2>Sign in to continue</h2>
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input id="username" type="text" autocomplete="username" placeholder="your_username">
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="••••••••">
+    </div>
+    <button id="btnLogin">Sign in</button>
+    <div id="loginError" class="error"></div>
+    <div class="link">No account? <a href="#" id="linkRegister">Request access</a></div>
+  </div>
+
+  <!-- ── Panel: MFA ───────────────────────────────────────────────────── -->
+  <div id="panelMFA" class="panel">
+    <h2>Two-factor authentication</h2>
+    <p style="font-size:0.85rem;color:var(--muted);text-align:center;margin-bottom:1rem;">
+      Enter the 6-digit code from your authenticator app.
+    </p>
+    <div class="mfa-digits">
+      <input class="mfa-digit" maxlength="1" type="text" inputmode="numeric">
+      <input class="mfa-digit" maxlength="1" type="text" inputmode="numeric">
+      <input class="mfa-digit" maxlength="1" type="text" inputmode="numeric">
+      <input class="mfa-digit" maxlength="1" type="text" inputmode="numeric">
+      <input class="mfa-digit" maxlength="1" type="text" inputmode="numeric">
+      <input class="mfa-digit" maxlength="1" type="text" inputmode="numeric">
+    </div>
+    <button id="btnMFA">Verify</button>
+    <div id="mfaError" class="error"></div>
+  </div>
+
+  <!-- ── Panel: Change Password ──────────────────────────────────────── -->
+  <div id="panelChangePass" class="panel">
+    <h2>Set a new password</h2>
+    <p style="font-size:0.85rem;color:var(--muted);text-align:center;margin-bottom:1rem;">
+      For security, please set a new password before continuing.
+    </p>
+    <div class="form-group">
+      <label>Current (temporary) password</label>
+      <input id="cpCurrent" type="password" placeholder="Current password">
+    </div>
+    <div class="form-group">
+      <label>New password (min 8 chars)</label>
+      <input id="cpNew" type="password" placeholder="New password">
+    </div>
+    <div class="form-group">
+      <label>Confirm new password</label>
+      <input id="cpConfirm" type="password" placeholder="Confirm new password">
+    </div>
+    <button id="btnChangePass">Set password &amp; continue</button>
+    <div id="cpError" class="error"></div>
+  </div>
+
+  <!-- ── Panel: Register ─────────────────────────────────────────────── -->
+  <div id="panelRegister" class="panel">
+    <h2>Request access</h2>
+    <div class="form-group">
+      <label>Username</label>
+      <input id="regUsername" type="text" placeholder="letters, digits, _ or -">
+    </div>
+    <div class="form-group">
+      <label>Email</label>
+      <input id="regEmail" type="email" placeholder="you@example.com">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input id="regPassword" type="password" placeholder="min 8 characters">
+    </div>
+    <button id="btnRegister">Submit request</button>
+    <div id="regError" class="error"></div>
+    <div id="regSuccess" class="success"></div>
+    <div class="link"><a href="#" id="linkLogin">Back to sign in</a></div>
+  </div>
+</div>
+
+<script>
+  const API = '';   // same origin
+
+  // ── State ────────────────────────────────────────────────────────────────
+  let _mfaToken   = '';
+  let _username   = '';
+  let _loginToken = '';   // set after password change
+
+  // ── Panel switcher ───────────────────────────────────────────────────────
+  function show(id) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+  }
+
+  function showError(id, msg) {
+    const el = document.getElementById(id);
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function hideError(id) {
+    document.getElementById(id).style.display = 'none';
+  }
+
+  // ── Login ────────────────────────────────────────────────────────────────
+  document.getElementById('btnLogin').addEventListener('click', async () => {
+    hideError('loginError');
+    const un = document.getElementById('username').value.trim();
+    const pw = document.getElementById('password').value;
+    if (!un || !pw) { showError('loginError', 'Username and password required'); return; }
+
+    const btn = document.getElementById('btnLogin');
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/auth/login`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: un, password: pw}),
+      });
+      const data = await res.json();
+      if (!res.ok) { showError('loginError', data.detail || 'Login failed'); return; }
+
+      _username = un;
+
+      if (data.action === 'change_password') {
+        document.getElementById('cpCurrent').value = '';
+        document.getElementById('cpNew').value = '';
+        document.getElementById('cpConfirm').value = '';
+        show('panelChangePass');
+        return;
+      }
+
+      if (data.action === 'mfa_required') {
+        _mfaToken = data.mfa_token;
+        show('panelMFA');
+        document.querySelectorAll('.mfa-digit')[0].focus();
+        return;
+      }
+
+      // Fully authenticated
+      localStorage.setItem('refresh_token', data.refresh_token);
+      sessionStorage.setItem('access_token', data.access_token);
+      sessionStorage.setItem('username', data.username);
+      sessionStorage.setItem('role', data.role);
+      window.location.href = '/';
+    } catch (e) {
+      showError('loginError', 'Network error — try again');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('btnLogin').click();
+  });
+
+  // ── MFA ──────────────────────────────────────────────────────────────────
+  const mfaDigits = document.querySelectorAll('.mfa-digit');
+  mfaDigits.forEach((inp, i) => {
+    inp.addEventListener('input', () => {
+      inp.value = inp.value.replace(/\D/g, '').slice(0, 1);
+      if (inp.value && i < mfaDigits.length - 1) mfaDigits[i + 1].focus();
+    });
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Backspace' && !inp.value && i > 0) mfaDigits[i - 1].focus();
+      if (e.key === 'Enter') document.getElementById('btnMFA').click();
+    });
+  });
+
+  document.getElementById('btnMFA').addEventListener('click', async () => {
+    hideError('mfaError');
+    const code = Array.from(mfaDigits).map(d => d.value).join('');
+    if (code.length !== 6) { showError('mfaError', 'Enter all 6 digits'); return; }
+
+    const btn = document.getElementById('btnMFA');
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/auth/mfa/verify`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: _username, totp_code: code, mfa_token: _mfaToken}),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showError('mfaError', data.detail || 'Invalid code');
+        mfaDigits.forEach(d => d.value = '');
+        mfaDigits[0].focus();
+        return;
+      }
+      localStorage.setItem('refresh_token', data.refresh_token);
+      sessionStorage.setItem('access_token', data.access_token);
+      sessionStorage.setItem('username', data.username);
+      sessionStorage.setItem('role', data.role);
+      window.location.href = '/';
+    } catch (e) {
+      showError('mfaError', 'Network error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ── Change Password ──────────────────────────────────────────────────────
+  document.getElementById('btnChangePass').addEventListener('click', async () => {
+    hideError('cpError');
+    const cur = document.getElementById('cpCurrent').value;
+    const nw  = document.getElementById('cpNew').value;
+    const cf  = document.getElementById('cpConfirm').value;
+
+    if (!cur || !nw || !cf) { showError('cpError', 'All fields required'); return; }
+    if (nw !== cf) { showError('cpError', 'Passwords do not match'); return; }
+    if (nw.length < 8) { showError('cpError', 'New password must be at least 8 characters'); return; }
+
+    const btn = document.getElementById('btnChangePass');
+    btn.disabled = true;
+    try {
+      const res = await fetch(
+        `${API}/auth/change-password-forced?username=${encodeURIComponent(_username)}`,
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({current_password: cur, new_password: nw}),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) { showError('cpError', data.detail || 'Password change failed'); return; }
+
+      localStorage.setItem('refresh_token', data.refresh_token);
+      sessionStorage.setItem('access_token', data.access_token);
+      sessionStorage.setItem('username', data.username);
+      sessionStorage.setItem('role', data.role);
+      window.location.href = '/';
+    } catch (e) {
+      showError('cpError', 'Network error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ── Register ─────────────────────────────────────────────────────────────
+  document.getElementById('linkRegister').addEventListener('click', e => {
+    e.preventDefault(); show('panelRegister');
+  });
+  document.getElementById('linkLogin').addEventListener('click', e => {
+    e.preventDefault(); show('panelLogin');
+  });
+
+  document.getElementById('btnRegister').addEventListener('click', async () => {
+    hideError('regError');
+    document.getElementById('regSuccess').style.display = 'none';
+
+    const un = document.getElementById('regUsername').value.trim();
+    const em = document.getElementById('regEmail').value.trim();
+    const pw = document.getElementById('regPassword').value;
+
+    if (!un || !em || !pw) { showError('regError', 'All fields required'); return; }
+
+    const btn = document.getElementById('btnRegister');
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API}/auth/register`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: un, email: em, password: pw}),
+      });
+      const data = await res.json();
+      if (!res.ok) { showError('regError', data.detail || 'Registration failed'); return; }
+      const s = document.getElementById('regSuccess');
+      s.textContent = data.message || 'Request submitted — awaiting admin approval.';
+      s.style.display = 'block';
+    } catch (e) {
+      showError('regError', 'Network error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ── Auto-redirect if already authenticated ───────────────────────────────
+  (async function checkAuth() {
+    const at = sessionStorage.getItem('access_token');
+    if (at) {
+      window.location.href = '/';
+      return;
+    }
+    const rt = localStorage.getItem('refresh_token');
+    if (rt) {
+      try {
+        const res = await fetch(`${API}/auth/refresh`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({refresh_token: rt}),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          sessionStorage.setItem('access_token', data.access_token);
+          window.location.href = '/';
+        }
+      } catch (_) {}
+    }
+  })();
+</script>
+</body>
+</html>

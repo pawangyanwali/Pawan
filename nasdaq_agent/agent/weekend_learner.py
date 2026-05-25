@@ -29,55 +29,59 @@ Manual start: POST /api/weekend-learning/start (admin override).
 from __future__ import annotations
 
 import logging
-import sqlite3
 import threading
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from agent.db import get_conn, _get_pool
+
 logger = logging.getLogger(__name__)
 
-# ── Persistent store for walk-forward records ─────────────────────────────────
-_RECORDS_DB = Path(__file__).parent.parent / "data" / "weekend_learning.db"
-_RECORDS_DB.parent.mkdir(parents=True, exist_ok=True)
+# ── Persistent store for walk-forward records (PostgreSQL) ────────────────────
+
+_SIGNAL_RECORDS_DDL = """
+CREATE TABLE IF NOT EXISTS signal_records (
+    id          SERIAL PRIMARY KEY,
+    weekend_dt  TEXT,
+    ticker      TEXT,
+    bar_dt      TEXT,
+    direction   TEXT,
+    entry_price REAL,
+    target      REAL,
+    stop        REAL,
+    exit_price  REAL,
+    outcome     TEXT,
+    pnl_r       REAL,
+    bars_held   INTEGER,
+    won         INTEGER
+)
+"""
 
 
-def _init_records_db():
-    conn = sqlite3.connect(str(_RECORDS_DB), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signal_records (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            weekend_dt  TEXT,
-            ticker      TEXT,
-            bar_dt      TEXT,
-            direction   TEXT,
-            entry_price REAL,
-            target      REAL,
-            stop        REAL,
-            exit_price  REAL,
-            outcome     TEXT,
-            pnl_r       REAL,
-            bars_held   INTEGER,
-            won         INTEGER
-        )
-    """)
-    conn.commit()
-    return conn
+def _ensure_signal_records_table() -> None:
+    pool = _get_pool()
+    raw = pool.getconn()
+    try:
+        raw.autocommit = True
+        with raw.cursor() as cur:
+            cur.execute(_SIGNAL_RECORDS_DDL.strip())
+    finally:
+        pool.putconn(raw)
 
 
 def _insert_records(records: list[dict], weekend_dt: str):
     if not records:
         return
-    conn = _init_records_db()
-    try:
-        rows = [
-            (weekend_dt, r["ticker"], r["bar_dt"], r["direction"],
-             r["entry_price"], r["target"], r["stop"], r["exit_price"],
-             r["outcome"], r["pnl_r"], r["bars_held"], int(r["won"]))
-            for r in records
-        ]
+    _ensure_signal_records_table()
+    rows = [
+        (weekend_dt, r["ticker"], r["bar_dt"], r["direction"],
+         r["entry_price"], r["target"], r["stop"], r["exit_price"],
+         r["outcome"], r["pnl_r"], r["bars_held"], int(r["won"]))
+        for r in records
+    ]
+    with get_conn() as conn:
         conn.executemany(
             "INSERT INTO signal_records "
             "(weekend_dt,ticker,bar_dt,direction,entry_price,target,stop,"
@@ -85,9 +89,6 @@ def _insert_records(records: list[dict], weekend_dt: str):
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 # ── Shared state (read by /api/weekend-learning/status) ──────────────────────
@@ -571,31 +572,36 @@ def maybe_start(tickers: list[str] | None = None) -> bool:
 
 def historical_performance() -> dict:
     """
-    Query cumulative weekend learning stats from the SQLite records store.
+    Query cumulative weekend learning stats from PostgreSQL signal_records.
     Used by the dashboard /api/weekend-learning/history endpoint.
     """
-    conn = _init_records_db()
     try:
-        rows = conn.execute("""
-            SELECT
-                weekend_dt,
-                COUNT(*)                    AS total,
-                SUM(won)                    AS wins,
-                ROUND(AVG(pnl_r), 3)        AS avg_pnl_r,
-                ROUND(AVG(bars_held), 1)    AS avg_bars,
-                COUNT(DISTINCT ticker)      AS tickers
-            FROM signal_records
-            GROUP BY weekend_dt
-            ORDER BY weekend_dt DESC
-            LIMIT 20
-        """).fetchall()
+        _ensure_signal_records_table()
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT
+                    weekend_dt,
+                    COUNT(*)                    AS total,
+                    SUM(won)                    AS wins,
+                    ROUND(AVG(pnl_r)::numeric, 3)     AS avg_pnl_r,
+                    ROUND(AVG(bars_held)::numeric, 1)  AS avg_bars,
+                    COUNT(DISTINCT ticker)      AS tickers
+                FROM signal_records
+                GROUP BY weekend_dt
+                ORDER BY weekend_dt DESC
+                LIMIT 20
+            """).fetchall()
         return [
-            {"weekend":    r[0], "total": r[1], "wins": r[2],
-             "win_rate":   round(r[2]/r[1]*100, 1) if r[1] else 0,
-             "avg_pnl_r":  r[3], "avg_bars": r[4], "tickers": r[5]}
+            {
+                "weekend":   r["weekend_dt"],
+                "total":     r["total"],
+                "wins":      r["wins"],
+                "win_rate":  round(r["wins"] / r["total"] * 100, 1) if r["total"] else 0,
+                "avg_pnl_r": r["avg_pnl_r"],
+                "avg_bars":  r["avg_bars"],
+                "tickers":   r["tickers"],
+            }
             for r in rows
         ]
     except Exception:
         return []
-    finally:
-        conn.close()

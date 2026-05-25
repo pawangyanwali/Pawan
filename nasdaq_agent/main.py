@@ -482,6 +482,24 @@ _tos_auto_trade: bool = os.getenv("SCHWAB_AUTO_TRADE", "false").lower() == "true
 async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
+
+    # Auth system: init tables + seed admin user
+    try:
+        from auth.models import init_tables as _auth_init_tables
+        from auth.seed import seed_admin
+        from agent.after_hours_monitor import init_db as _ah_init_db
+        from agent.historical_cache import init_db as _hc_init_db
+        from agent.multi_tf_backtest import init_db as _mtf_init_db
+        from historical.store import init_tables as _hist_init_tables
+        _auth_init_tables()
+        seed_admin()
+        _ah_init_db()
+        _hc_init_db()
+        _mtf_init_db()
+        _hist_init_tables()
+    except Exception as _init_err:
+        logging.getLogger(__name__).warning(f"DB init warning: {_init_err}")
+
     _load_signal_cache()   # pre-populate cache before any scan runs
     scanner.register_callback(_on_signals)
     scanner.register_per_ticker_callback(_on_ticker)
@@ -596,13 +614,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NASDAQ Scalping Agent", lifespan=lifespan)
 
-# Allow IIS (port 80) and any other origin to call the FastAPI backend (port 8000)
+# CORS — restrict to same-origin + known frontends
+_CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:8000,http://localhost:3000,http://localhost:80"
+    ).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Auth routers
+from auth.router import router as auth_router
+from auth.admin_router import router as admin_router
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 # Static files (dashboard)
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "web", "static")
@@ -614,6 +647,17 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/login", response_class=HTMLResponse)
+@app.get("/login.html", response_class=HTMLResponse)
+async def login_page():
+    return FileResponse(os.path.join(STATIC_DIR, "login.html"))
+
+
+@app.get("/admin.html", response_class=HTMLResponse)
+async def admin_page():
+    return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
 
 
 @app.get("/api/signals")

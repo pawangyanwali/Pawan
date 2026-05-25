@@ -1,48 +1,31 @@
-"""Database read/write for historical price data."""
+"""Database read/write for historical price data (PostgreSQL only)."""
 
 import logging
-from pathlib import Path
 
 import pandas as pd
 
-from agent.db import get_conn, using_postgres
+from agent.db import get_conn, _get_pool
 from historical.schema import ALL_INTERVALS, get_all_ddl, table_name
 
 logger = logging.getLogger(__name__)
 
-HISTORY_DB_PATH = Path.home() / ".nasdaq_agent" / "history.db"
-
 
 def init_tables() -> None:
-    """Create all hist_* tables if they don't exist."""
-    use_pg = using_postgres()
-    ddl_list = get_all_ddl(use_pg)
-    HISTORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    if use_pg:
-        from agent.db import _get_pool
-        pool = _get_pool()
-        raw = pool.getconn()
-        try:
-            raw.autocommit = True
-            with raw.cursor() as cur:
-                for ddl in ddl_list:
-                    try:
-                        cur.execute(ddl.strip())
-                    except Exception as exc:
-                        logger.warning("DDL warning: %s", exc)
-        finally:
-            pool.putconn(raw)
-    else:
-        with get_conn(HISTORY_DB_PATH) as conn:
+    """Create all hist_* tables in PostgreSQL if they don't exist."""
+    ddl_list = get_all_ddl()
+    pool = _get_pool()
+    raw = pool.getconn()
+    try:
+        raw.autocommit = True
+        with raw.cursor() as cur:
             for ddl in ddl_list:
                 try:
-                    conn.execute(ddl.strip())
-                    conn.commit()
+                    cur.execute(ddl.strip())
                 except Exception as exc:
                     logger.warning("DDL warning: %s", exc)
-
-    logger.info("[HistStore] Tables initialised (%s)", "PostgreSQL" if use_pg else "SQLite")
+    finally:
+        pool.putconn(raw)
+    logger.info("[HistStore] Tables initialised (PostgreSQL)")
 
 
 def upsert_bars(interval: str, ticker: str, df: pd.DataFrame) -> int:
@@ -54,8 +37,6 @@ def upsert_bars(interval: str, ticker: str, df: pd.DataFrame) -> int:
         return 0
 
     tbl = table_name(interval)
-    use_pg = using_postgres()
-
     rows = [
         (
             ticker,
@@ -69,20 +50,13 @@ def upsert_bars(interval: str, ticker: str, df: pd.DataFrame) -> int:
         for idx, row in df.iterrows()
     ]
 
-    if use_pg:
-        sql = (
-            f"INSERT INTO {tbl} (ticker, ts, open, high, low, close, volume) "
-            f"VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (ticker, ts) DO NOTHING"
-        )
-    else:
-        sql = (
-            f"INSERT OR IGNORE INTO {tbl} (ticker, ts, open, high, low, close, volume) "
-            f"VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
+    sql = (
+        f"INSERT INTO {tbl} (ticker, ts, open, high, low, close, volume) "
+        f"VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (ticker, ts) DO NOTHING"
+    )
 
-    with get_conn(HISTORY_DB_PATH) as conn:
+    with get_conn() as conn:
         conn.executemany(sql, rows)
-        conn.commit()
 
     return len(rows)
 
@@ -90,10 +64,10 @@ def upsert_bars(interval: str, ticker: str, df: pd.DataFrame) -> int:
 def get_last_ts(interval: str, ticker: str) -> int | None:
     """Return the most recent stored epoch-ms for a ticker/interval, or None."""
     tbl = table_name(interval)
-    ph = "%s" if using_postgres() else "?"
-    sql = f"SELECT MAX(ts) AS max_ts FROM {tbl} WHERE ticker = {ph}"
-    with get_conn(HISTORY_DB_PATH) as conn:
-        row = conn.execute(sql, (ticker,)).fetchone()
+    with get_conn() as conn:
+        row = conn.execute(
+            f"SELECT MAX(ts) AS max_ts FROM {tbl} WHERE ticker = %s", (ticker,)
+        ).fetchone()
     return row["max_ts"] if row and row["max_ts"] is not None else None
 
 
@@ -103,7 +77,7 @@ def row_counts() -> dict[str, int]:
     for iv in ALL_INTERVALS:
         tbl = table_name(iv)
         try:
-            with get_conn(HISTORY_DB_PATH) as conn:
+            with get_conn() as conn:
                 row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {tbl}").fetchone()
             counts[iv] = row["cnt"] if row else 0
         except Exception:
@@ -115,7 +89,7 @@ def ticker_counts(interval: str) -> dict[str, int]:
     """Return per-ticker bar count for one interval."""
     tbl = table_name(interval)
     try:
-        with get_conn(HISTORY_DB_PATH) as conn:
+        with get_conn() as conn:
             rows = conn.execute(
                 f"SELECT ticker, COUNT(*) AS cnt FROM {tbl} GROUP BY ticker ORDER BY ticker"
             ).fetchall()
@@ -127,13 +101,12 @@ def ticker_counts(interval: str) -> dict[str, int]:
 def read_ticker_bars(interval: str, ticker: str) -> pd.DataFrame:
     """Load all stored bars for one ticker/interval into a DataFrame."""
     tbl = table_name(interval)
-    ph = "%s" if using_postgres() else "?"
-    sql = (
-        f"SELECT ts, open, high, low, close, volume FROM {tbl} "
-        f"WHERE ticker = {ph} ORDER BY ts"
-    )
-    with get_conn(HISTORY_DB_PATH) as conn:
-        rows = conn.execute(sql, (ticker,)).fetchall()
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT ts, open, high, low, close, volume FROM {tbl} "
+            f"WHERE ticker = %s ORDER BY ts",
+            (ticker,),
+        ).fetchall()
 
     if not rows:
         return pd.DataFrame()
