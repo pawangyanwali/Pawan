@@ -2041,26 +2041,7 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str = ""):
-    # Validate the access_token before accepting the connection.
-    # Using the access token directly avoids the extra /auth/ws-ticket
-    # roundtrip that was causing systematic 403 rejections.
-    from auth.utils import decode_token as _dec, is_blacklisted as _blk
-    import jwt as _jwt
-    _reject = False
-    if not token:
-        _reject = True
-    else:
-        try:
-            _pl = _dec(token)
-            if _pl.get("type") != "access" or _blk(_pl.get("jti", "")):
-                _reject = True
-        except _jwt.InvalidTokenError:
-            _reject = True
-    if _reject:
-        await ws.close(code=4001)
-        return
-
+async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     logger.info(f"WebSocket client connected. Total: {len(manager.active)}")
     keepalive = asyncio.create_task(_ws_keepalive(ws))

@@ -1892,10 +1892,7 @@ function connectWS() {
   // Guard: don't stack connections if already open or connecting
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-  const at = sessionStorage.getItem('access_token');
-  if (!at) { window.location.replace('/login'); return; }
-
-  ws = new WebSocket(`${BACKEND_WS}/ws?token=${encodeURIComponent(at)}`);
+  ws = new WebSocket(`${BACKEND_WS}/ws`);
 
   ws.onopen = () => {
     document.getElementById('dot').classList.add('live');
