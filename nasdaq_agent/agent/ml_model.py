@@ -507,8 +507,10 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
     else:
         # ttl=86400 → SQLite check uses 4-day window, so stored history is used
         # instead of live API calls whenever the scan has previously written bars.
-        logger.info(f"[retrain_all] Fetching 1min history for {len(tickers)} tickers (SQLite-first)…")
-        hist_5m = fetch_batch_interval(tickers, "1min", 3900, ttl=86400, background=True)
+        logger.info(f"[retrain_all] Fetching 1min history for {len(tickers)} tickers (SQLite-first, extended hours)…")
+        hist_5m = fetch_batch_interval(
+            tickers, "1min", 3900, ttl=86400, background=True, extended_hours=True
+        )
         logger.info(f"[retrain_all] Got 1min history for {len(hist_5m)}/{len(tickers)} tickers")
 
     # ── 15-min data: ~6 months (swing models + deep BiLSTM) ─────────────────
@@ -516,8 +518,10 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
     if hist_15m is not None:
         logger.info(f"[retrain_all] Using pre-fetched 15min data: {len(hist_15m)} tickers")
     else:
-        logger.info(f"[retrain_all] Fetching 15min history ({len(tickers)} tickers, SQLite-first)…")
-        hist_15m = fetch_batch_interval(tickers, "15min", 5000, ttl=86400, background=True)
+        logger.info(f"[retrain_all] Fetching 15min history ({len(tickers)} tickers, SQLite-first, extended hours)…")
+        hist_15m = fetch_batch_interval(
+            tickers, "15min", 5000, ttl=86400, background=True, extended_hours=True
+        )
         logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
 
     # ── Daily data: ~2 years (DailyMLModel — next-day direction) ─────────────

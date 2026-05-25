@@ -208,10 +208,10 @@ def _try_refresh_md_token() -> bool:
     """
     Refresh the Market Data access token.  Coalesces concurrent refresh attempts:
     only one thread calls Schwab at a time; others wait behind _refresh_lock
-    and hit the 30-second dedup check instead of hammering the token endpoint.
+    and hit the 180-second dedup check instead of hammering the token endpoint.
 
     _refresh_last is stamped BEFORE the attempt (not only on success) so that
-    even a failed refresh prevents re-hammering the token endpoint for 30s.
+    even a failed refresh prevents re-hammering the token endpoint for 180s.
 
     If the refresh itself fails (e.g. the token endpoint is also blocked by
     Akamai), _on_429() is called so that _get() skips subsequent API calls

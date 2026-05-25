@@ -17,7 +17,8 @@ Fixes two bugs present in the original ml_model.py pipeline:
 Public API
 ----------
 FEATURE_COLS_V2 : list[str]
-    The 32 feature names expected by every XGBoost model variant.
+    The 34 feature names expected by every XGBoost model variant.
+    (was 32 before Phase 2 — two session-context features added)
 
 FEATURE_COLS_V3 : list[str]
     40 features = V2 + 8 new professional indicators (kc_squeeze, cvd_5,
@@ -69,17 +70,20 @@ _FEATURE_COLS_V1: list[str] = [
     "vol_trend",
 ]
 
-# 9 new features appended at the end.
+# 11 new features appended at the end.
 _FEATURE_COLS_NEW: list[str] = [
-    "vwap_dev",      # (Close - VWAP) / VWAP, position relative to daily average
-    "adx_14",        # Average Directional Index normalised to 0-1
-    "cmf_20",        # Chaikin Money Flow -1 to +1
-    "roc_5",         # 5-bar Rate of Change %
-    "williams_r",    # Williams %R normalised to 0-1
-    "spread_pct",    # (High - Low) / Close * 100, intrabar volatility
-    "obv_slope",     # OBV z-score vs 10-bar rolling mean/std
-    "ema_ribbon",    # (ema_9 - ema_50) / Close * 100, trend context
-    "gap_open",      # (Open - prev_Close) / prev_Close * 100, overnight gap
+    "vwap_dev",           # (Close - VWAP) / VWAP, position relative to daily average
+    "adx_14",             # Average Directional Index normalised to 0-1
+    "cmf_20",             # Chaikin Money Flow -1 to +1
+    "roc_5",              # 5-bar Rate of Change %
+    "williams_r",         # Williams %R normalised to 0-1
+    "spread_pct",         # (High - Low) / Close * 100, intrabar volatility
+    "obv_slope",          # OBV z-score vs 10-bar rolling mean/std
+    "ema_ribbon",         # (ema_9 - ema_50) / Close * 100, trend context
+    "gap_open",           # (Open - prev_Close) / prev_Close * 100, overnight gap
+    # ── Phase 2: session-context features ─────────────────────────────────────
+    "is_extended_hours",  # 1 for pre-market (<09:30 ET) or after-hours (≥16:00 ET), else 0
+    "session_type",       # 0=regular, 1=pre-market, 2=after-hours
 ]
 
 FEATURE_COLS_V2: list[str] = _FEATURE_COLS_V1 + _FEATURE_COLS_NEW
@@ -160,6 +164,60 @@ def _encode_time_of_day(index: pd.Index) -> tuple[pd.Series, pd.Series]:
     norm = ((minutes - session_start) / session_len).clip(0.0, 1.0)
     angle = 2.0 * np.pi * norm
     return np.sin(angle), np.cos(angle)
+
+
+def _compute_session_features(index: pd.Index) -> tuple[pd.Series, pd.Series]:
+    """
+    Compute session-membership features so the model knows which trading
+    session each bar belongs to.
+
+    Returns
+    -------
+    is_extended_hours : pd.Series of float
+        1.0 for bars outside 09:30–16:00 ET (pre-market or after-hours), 0.0 otherwise.
+    session_type : pd.Series of float
+        0.0 = regular session (09:30–16:00 ET)
+        1.0 = pre-market     (before 09:30 ET)
+        2.0 = after-hours    (16:00 ET and later)
+
+    These two features give the model explicit signal about liquidity context:
+    extended-hours bars have wider spreads, lower volume, and different
+    volatility patterns than regular-session bars.
+    """
+    zeros = pd.Series(0.0, index=index)
+    if not isinstance(index, pd.DatetimeIndex):
+        return zeros, zeros.copy()
+
+    try:
+        import pytz as _tz
+        _ET = _tz.timezone("America/New_York")
+        if index.tz is None:
+            idx_et = index.tz_localize("UTC").tz_convert(_ET)
+        else:
+            idx_et = index.tz_convert(_ET)
+    except Exception:
+        return zeros, zeros.copy()
+
+    time_mins = pd.Series(
+        idx_et.hour * 60 + idx_et.minute, index=index, dtype=float
+    )
+
+    # Regular session: 09:30 (570 min) up to 16:00 (960 min)
+    _REG_START = 9 * 60 + 30   # 570
+    _REG_END   = 16 * 60       # 960
+
+    is_pre     = time_mins < _REG_START
+    is_post    = time_mins >= _REG_END
+    is_regular = ~(is_pre | is_post)
+
+    is_extended = pd.Series(
+        (~is_regular).astype(float).values, index=index
+    )
+    session_type = pd.Series(0.0, index=index)
+    session_type[is_pre]  = 1.0
+    session_type[is_post] = 2.0
+
+    return is_extended, session_type
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +373,13 @@ def compute_features(df: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
     df["gap_open"] = _safe_divide(
         df["Open"] - prev_close, prev_close, fill=0.0
     ).mul(100.0).clip(-5.0, 5.0)
+
+    # -- Phase 2: session-context features ----------------------------
+    # is_extended_hours: 1 for pre-market / after-hours bars, 0 for regular
+    # session_type: 0=regular, 1=pre-market, 2=after-hours
+    is_ext, sess_type = _compute_session_features(df.index)
+    df["is_extended_hours"] = is_ext.values
+    df["session_type"]      = sess_type.values
 
     # ------------------------------------------------------------------
     # V3 features — new professional indicators
