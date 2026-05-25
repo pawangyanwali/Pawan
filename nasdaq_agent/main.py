@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Set
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
