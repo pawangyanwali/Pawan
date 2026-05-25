@@ -829,7 +829,9 @@ async def paper_trading_endpoint():
         }, "open_trades": [], "closed_trades": []})
 
     today_str    = date.today().isoformat()
-    today_trades = [t for t in closed if (t.get("closed_at") or "")[:10] == today_str]
+    # Group by entry date (when the trade was opened), not close date.
+    # A Friday trade closed on Sunday due to stale cleanup must count as Friday's trade.
+    today_trades = [t for t in closed if (t.get("opened_at") or "")[:10] == today_str]
     all_trades   = closed
 
     def _stats(trades):
