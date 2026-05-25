@@ -483,22 +483,21 @@ async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
 
-    # Auth system: init tables + seed admin user
-    try:
-        from auth.models import init_tables as _auth_init_tables
-        from auth.seed import seed_admin
-        from agent.after_hours_monitor import init_db as _ah_init_db
-        from agent.historical_cache import init_db as _hc_init_db
-        from agent.multi_tf_backtest import init_db as _mtf_init_db
-        from historical.store import init_tables as _hist_init_tables
-        _auth_init_tables()
-        seed_admin()
-        _ah_init_db()
-        _hc_init_db()
-        _mtf_init_db()
-        _hist_init_tables()
-    except Exception as _init_err:
-        logging.getLogger(__name__).warning(f"DB init warning: {_init_err}")
+    # Auth system: init tables + seed admin user — must succeed; fail hard if not.
+    # Swallowing this exception would leave the app running without auth tables,
+    # which means every request would 500 on the first DB hit.
+    from auth.models import init_tables as _auth_init_tables
+    from auth.seed import seed_admin
+    from agent.after_hours_monitor import init_db as _ah_init_db
+    from agent.historical_cache import init_db as _hc_init_db
+    from agent.multi_tf_backtest import init_db as _mtf_init_db
+    from historical.store import init_tables as _hist_init_tables
+    _auth_init_tables()
+    seed_admin()
+    _ah_init_db()
+    _hc_init_db()
+    _mtf_init_db()
+    _hist_init_tables()
 
     # Warm the market-hours cache before the first scan so get_market_session()
     # doesn't block on its first call mid-scan.  This runs in the background
@@ -573,8 +572,9 @@ async def lifespan(app: FastAPI):
                 now_et = _dt.now(_zi.ZoneInfo("America/New_York"))
                 hm = now_et.hour * 60 + now_et.minute
                 today = now_et.date()
-                # Fire between 3:45 and 4:00 PM ET on weekdays only
-                if now_et.weekday() < 5 and 225 <= hm < 240 and today not in _fired_on:
+                # Fire between 15:45 and 16:00 ET (945–960 mins) on weekdays only.
+                # Bug note: 225-240 was 3:45-4:00 AM, not PM. 15*60+45=945, 16*60=960.
+                if now_et.weekday() < 5 and 945 <= hm < 960 and today not in _fired_on:
                     _fired_on.add(today)
                     try:
                         from agent.paper_trading import close_all_positions_eod
@@ -679,6 +679,12 @@ app.add_middleware(
 # Auth routers
 from auth.router import router as auth_router
 from auth.admin_router import router as admin_router
+from auth.dependencies import (
+    AuthenticatedUser,
+    require_admin,
+    require_trader,
+    get_current_user,
+)
 app.include_router(auth_router)
 app.include_router(admin_router)
 
@@ -947,6 +953,7 @@ async def api_update_account_config(
     max_trade_pct:     float | None = None,
     max_allocated_pct: float | None = None,
     max_open_trades:   int   | None = None,
+    _current: AuthenticatedUser = Depends(require_trader),
 ):
     """Update paper trading budget and position limits."""
     try:
@@ -1074,7 +1081,9 @@ async def wl_status():
 
 
 @app.post("/api/weekend-learning/start")
-async def wl_start():
+async def wl_start(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Manually kick off the weekend learning pipeline (admin override)."""
     started = weekend_learner.start()
     return {
@@ -1085,7 +1094,9 @@ async def wl_start():
 
 
 @app.post("/api/weekend-learning/stop")
-async def wl_stop():
+async def wl_stop(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Signal the weekend learner to stop after the current phase."""
     weekend_learner.stop()
     return {"status": "stop_requested"}
@@ -1131,7 +1142,10 @@ async def mtf_ticker(ticker: str):
 
 
 @app.post("/api/ml-retrain")
-async def trigger_retrain(background_tasks: BackgroundTasks):
+async def trigger_retrain(
+    background_tasks: BackgroundTasks,
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """
     Manually trigger a full ML retrain cycle (XGBoost + SwingML + Deep BiLSTM).
     Runs in background — check /api/ml-status for progress.
@@ -1153,7 +1167,10 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
 
 
 @app.post("/api/deep-model/train")
-async def trigger_deep_train(background_tasks: BackgroundTasks):
+async def trigger_deep_train(
+    background_tasks: BackgroundTasks,
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """
     Manually trigger Deep BiLSTM training only (faster than full retrain).
     Uses cached 15-min data when available.
@@ -1203,7 +1220,9 @@ def _read_status(path: Path) -> dict:
 
 
 @app.post("/api/historical/retrain")
-async def historical_retrain():
+async def historical_retrain(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Retrain all ML models using 2-year historical bars.
 
     Runs as a detached subprocess — never blocks the web worker.
@@ -1312,7 +1331,10 @@ async def get_watchlist_endpoint():
 
 
 @app.post("/api/watchlist/add")
-async def add_to_watchlist(ticker: str):
+async def add_to_watchlist(
+    ticker: str,
+    _current: AuthenticatedUser = Depends(require_trader),
+):
     """Add a ticker to the watchlist."""
     ticker = ticker.upper().strip()
     wl = load_watchlist()
@@ -1323,7 +1345,10 @@ async def add_to_watchlist(ticker: str):
 
 
 @app.post("/api/watchlist/remove")
-async def remove_from_watchlist(ticker: str):
+async def remove_from_watchlist(
+    ticker: str,
+    _current: AuthenticatedUser = Depends(require_trader),
+):
     """Remove a ticker from the user watchlist (base tickers cannot be removed)."""
     ticker = ticker.upper().strip()
     wl = [t for t in load_watchlist() if t != ticker]
@@ -1466,7 +1491,9 @@ async def walk_forward_stats():
 
 
 @app.post("/api/adaptive-filter/reset")
-async def reset_adaptive_filter():
+async def reset_adaptive_filter(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Reset the adaptive filter to factory defaults (threshold 60%, no blocked contexts)."""
     af_reset_filter()
     return {"ok": True, **af_get_status()}
@@ -1683,7 +1710,9 @@ async def broker_status():
 
 
 @app.post("/api/broker/auth")
-async def broker_auth():
+async def broker_auth(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Initiate Schwab OAuth flow — redirect browser to /schwab/auth instead."""
     from config import SCHWAB_ENABLED
     if not SCHWAB_ENABLED:
@@ -1692,7 +1721,9 @@ async def broker_auth():
 
 
 @app.get("/api/broker/positions")
-async def broker_positions():
+async def broker_positions(
+    _current: AuthenticatedUser = Depends(require_trader),
+):
     """Current open positions in the ThinkorSwim paper account."""
     from config import SCHWAB_ENABLED
     if not SCHWAB_ENABLED:
@@ -1706,7 +1737,9 @@ async def broker_positions():
 
 
 @app.get("/api/broker/orders")
-async def broker_orders():
+async def broker_orders(
+    _current: AuthenticatedUser = Depends(require_trader),
+):
     """Recent working orders."""
     from config import SCHWAB_ENABLED
     if not SCHWAB_ENABLED:
@@ -1720,7 +1753,10 @@ async def broker_orders():
 
 
 @app.post("/api/broker/auto-trade/{enabled}")
-async def broker_auto_trade(enabled: str):
+async def broker_auto_trade(
+    enabled: str,
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Toggle fully-automatic order placement (true/false)."""
     global _tos_auto_trade
     _tos_auto_trade = enabled.lower() == "true"
@@ -1728,7 +1764,10 @@ async def broker_auto_trade(enabled: str):
 
 
 @app.post("/api/broker/order")
-async def broker_manual_order(body: dict):
+async def broker_manual_order(
+    body: dict,
+    _current: AuthenticatedUser = Depends(require_trader),
+):
     """
     Manually trigger a bracket order for a ticker already in the signal list.
     Body: { "ticker": "NVDA" }
@@ -1757,7 +1796,9 @@ async def streamer_status_endpoint():
 
 
 @app.post("/api/market/streamer/start")
-async def streamer_start_endpoint():
+async def streamer_start_endpoint(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Manually (re)start the Schwab WebSocket streamer."""
     import asyncio
     ts = get_token_status()
@@ -1921,7 +1962,10 @@ async def notify_config():
 
 
 @app.post("/api/notify/config")
-async def notify_set_config(body: dict):
+async def notify_set_config(
+    body: dict,
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Save Telegram bot token + chat ID. Persisted to disk across restarts."""
     token   = str(body.get("token",          "")).strip()
     chat_id = str(body.get("chat_id",        "")).strip()
@@ -1931,7 +1975,9 @@ async def notify_set_config(body: dict):
 
 
 @app.post("/api/notify/test")
-async def notify_test():
+async def notify_test(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
     """Send a test Telegram message to verify the config is working."""
     if not _notify_cfg().get("configured"):
         return {"ok": False, "error": "Not configured — set token and chat_id first"}
@@ -1995,7 +2041,24 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket, ticket: str = ""):
+    # Validate the ws_ticket before accepting the connection
+    from auth.utils import decode_token as _dec, is_blacklisted as _blk
+    import jwt as _jwt
+    _reject = False
+    if not ticket:
+        _reject = True
+    else:
+        try:
+            _pl = _dec(ticket)
+            if _pl.get("type") != "ws_ticket" or _blk(_pl.get("jti", "")):
+                _reject = True
+        except _jwt.InvalidTokenError:
+            _reject = True
+    if _reject:
+        await ws.close(code=4001)
+        return
+
     await manager.connect(ws)
     logger.info(f"WebSocket client connected. Total: {len(manager.active)}")
     keepalive = asyncio.create_task(_ws_keepalive(ws))

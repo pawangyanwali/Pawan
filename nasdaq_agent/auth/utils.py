@@ -18,7 +18,24 @@ from agent.db import get_conn
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-JWT_SECRET   = os.environ.get("JWT_SECRET", secrets.token_hex(32))
+_jwt_secret_raw = os.environ.get("JWT_SECRET", "")
+if not _jwt_secret_raw:
+    _env = os.environ.get("APP_ENV", "development").lower()
+    if _env == "production":
+        raise RuntimeError(
+            "JWT_SECRET env var is not set. "
+            "Cannot start in production without a stable signing key — "
+            "add JWT_SECRET=<64-char-hex> to your .env file."
+        )
+    import logging as _log_boot
+    _log_boot.getLogger("auth.utils").warning(
+        "JWT_SECRET not set — using a per-process random key. "
+        "All sessions will be invalidated on restart. "
+        "Set JWT_SECRET in .env for persistence."
+    )
+    _jwt_secret_raw = secrets.token_hex(32)
+
+JWT_SECRET   = _jwt_secret_raw
 JWT_ALGO     = "HS256"
 ACCESS_TTL   = int(os.environ.get("JWT_ACCESS_TTL_MINUTES", "30"))   # minutes
 REFRESH_TTL  = int(os.environ.get("JWT_REFRESH_TTL_DAYS",   "7"))    # days
@@ -104,12 +121,28 @@ def create_ws_ticket(user_id: int, username: str, role: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
 
+def create_mfa_challenge_token(user_id: int, username: str, role: str) -> str:
+    """60-second MFA challenge token — separate type from ws_ticket."""
+    jti = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub":      str(user_id),
+        "username": username,
+        "role":     role,
+        "jti":      jti,
+        "iat":      now,
+        "exp":      now + timedelta(seconds=60),
+        "type":     "mfa_challenge",
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+
 # ── Valkey blacklist ───────────────────────────────────────────────────────────
 
 def _valkey():
     try:
-        from agent.valkey_client import get_client
-        return get_client()
+        from agent.valkey_client import _get_client
+        return _get_client()
     except Exception:
         return None
 

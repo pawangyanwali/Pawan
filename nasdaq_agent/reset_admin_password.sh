@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Reset the pawan_gyanwali admin password back to the temporary password
-# and force a password change on next login.
-# Usage: sudo bash reset_admin_password.sh
+# Reset the pawan_gyanwali admin password and force a change on next login.
+#
+# Usage:
+#   ADMIN_TEMP_PASSWORD=<new-temp-pw> sudo -E bash reset_admin_password.sh
+#
+# If ADMIN_TEMP_PASSWORD is not set, a random password is generated and
+# printed to stdout — record it before the terminal session closes.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,33 +22,38 @@ fi
 
 cd "$SCRIPT_DIR"
 "${VENV:-$SCRIPT_DIR/../venv}/bin/python" - <<'PYEOF'
-import sys, os
+import sys, os, secrets, string
 sys.path.insert(0, os.getcwd())
 
 from agent.db import get_conn
 from auth.utils import hash_password
 
-USERNAME      = "pawan_gyanwali"
-TEMP_PASSWORD = "NasdaqAdmin@2024"
+USERNAME = "pawan_gyanwali"
 
-new_hash = hash_password(TEMP_PASSWORD)
+temp_pw = os.environ.get("ADMIN_TEMP_PASSWORD", "").strip()
+if not temp_pw:
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    temp_pw  = "".join(secrets.choice(alphabet) for _ in range(20))
+    print(f"Generated temporary password: {temp_pw}")
+    print("(Record this now — it will not be shown again.)")
+
+new_hash = hash_password(temp_pw)
 
 with get_conn() as c:
     row = c.execute("SELECT id FROM users WHERE username = ?", (USERNAME,)).fetchone()
     if not row:
-        # User missing — re-insert
         c.execute(
             "INSERT INTO users (username, email, hashed_password, role, status, force_password_change) "
             "VALUES (?, ?, ?, 'ADMIN', 'ACTIVE', TRUE)",
             (USERNAME, "pawangyanwali@gmail.com", new_hash),
         )
-        print(f"Admin user '{USERNAME}' created with temp password.")
+        print(f"Admin user '{USERNAME}' created.")
     else:
         c.execute(
             "UPDATE users SET hashed_password = ?, force_password_change = TRUE WHERE username = ?",
             (new_hash, USERNAME),
         )
-        print(f"Admin user '{USERNAME}' password reset to temp password.")
+        print(f"Admin user '{USERNAME}' password reset.")
 
-print("Done. Login with: pawan_gyanwali / NasdaqAdmin@2024")
+print("Done. Password change will be required on next login.")
 PYEOF

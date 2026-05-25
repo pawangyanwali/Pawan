@@ -1847,6 +1847,17 @@ let _sessionInfo = null, _regimeInfo = null;
 const BACKEND_HTTP = '';
 const BACKEND_WS   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
 
+// ─── Auth helpers ──────────────────────────────────────────────────────────────
+function _authHeaders(extra) {
+  const at = sessionStorage.getItem('access_token');
+  return Object.assign({ 'Authorization': at ? `Bearer ${at}` : '' }, extra || {});
+}
+function _authFetch(url, opts) {
+  const o = Object.assign({}, opts || {});
+  o.headers = _authHeaders(o.headers || {});
+  return fetch(url, o);
+}
+
 // ─── WebSocket — persistent, self-healing connection ─────────────────────────
 // Design goals:
 //   1. Reconnect in ≤1s after any drop (no exponential backoff)
@@ -1877,11 +1888,21 @@ function _resetWatchdog() {
   }, _WS_WATCHDOG_MS);
 }
 
-function connectWS() {
+async function connectWS() {
   // Guard: don't stack connections if already open or connecting
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-  ws = new WebSocket(`${BACKEND_WS}/ws`);
+  // Fetch a short-lived ws_ticket before opening the connection
+  const at = sessionStorage.getItem('access_token');
+  if (!at) { window.location.replace('/login'); return; }
+  let ticket = '';
+  try {
+    const tr = await fetch('/auth/ws-ticket', { headers: { 'Authorization': `Bearer ${at}` } });
+    if (tr.ok) { const td = await tr.json(); ticket = td.ticket || ''; }
+  } catch (_) {}
+  if (!ticket) { console.warn('[WS] Could not obtain ws_ticket — retrying in 5s'); setTimeout(connectWS, 5000); return; }
+
+  ws = new WebSocket(`${BACKEND_WS}/ws?ticket=${encodeURIComponent(ticket)}`);
 
   ws.onopen = () => {
     document.getElementById('dot').classList.add('live');
@@ -2205,7 +2226,7 @@ function _updateSchwabHeaderDot(connected) {
 
 async function _pollSchwabHeaderStatus() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/broker/status`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/broker/status`)).json();
     _updateSchwabHeaderDot(!!d.connected);
   } catch(_) { _updateSchwabHeaderDot(false); }
 }
@@ -2273,7 +2294,7 @@ setTimeout(() => {
 }, 90000);
 async function checkHealth() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/health`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/health`)).json();
     const ht = d.tickers_tracked || 0;
     document.getElementById('loading-health').textContent =
       `Server: ${d.status} | Tickers so far: ${ht}`;
@@ -2284,7 +2305,7 @@ async function checkHealth() {
 setInterval(checkHealth, 5000);
 async function pollPipelineMetrics() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/pipeline-metrics`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/pipeline-metrics`)).json();
     const el = document.getElementById('pipeline-speed');
     if (el && d.last_cycle_ms != null) {
       const tps = d.tickers_per_second ? `${d.tickers_per_second.toFixed(0)}/s` : '';
@@ -2293,7 +2314,7 @@ async function pollPipelineMetrics() {
     }
   } catch {}
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/credit-usage`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/credit-usage`)).json();
     const chip = document.getElementById('api-credit-chip');
     if (chip && d.used != null) {
       const pct = d.pct ?? Math.round(d.used / (d.plan_limit ?? 377) * 100);
@@ -2312,7 +2333,7 @@ async function pollFallback() {
   // while a reconnect attempt is in flight.
   const wsLive = ws && ws.readyState === WebSocket.OPEN;
   if (wsLive && Date.now() - _wsLastMsgAt < 60000) return;
-  try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); if (d.from_cache) { const sub = document.getElementById('loading-sub'); } } } catch {}
+  try { const d = await (await _authFetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); if (d.from_cache) { const sub = document.getElementById('loading-sub'); } } } catch {}
 }
 setInterval(pollFallback, 15000);
 function hideLoading() { const el = document.getElementById('loading'); el.classList.add('hidden'); setTimeout(() => el.style.display='none', 600); }
@@ -3167,7 +3188,7 @@ document.querySelectorAll('.tier-btn').forEach(b => b.addEventListener('click', 
 // Load cluster assignments from backend
 (async () => {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/clusters`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/clusters`)).json();
     if (d.assignments) Object.assign(CLUSTER_MAP, d.assignments);
   } catch {}
 })();
@@ -3294,7 +3315,7 @@ function openAlertModal() {
 
 async function _loadTelegramConfig() {
   try {
-    const d = await fetch('/api/notify/config').then(r => r.json());
+    const d = await _authFetch('/api/notify/config').then(r => r.json());
     const badge = document.getElementById('tg-status-badge');
     if (!badge) return;
     if (d.configured) {
@@ -3316,7 +3337,7 @@ async function saveTelegramConfig() {
   const token   = document.getElementById('tg-token-input').value.trim();
   const chatId  = document.getElementById('tg-chatid-input').value.trim();
   const minConf = parseFloat(document.getElementById('tg-conf-input').value) || 75;
-  const res     = await fetch('/api/notify/config', {
+  const res     = await _authFetch('/api/notify/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({token, chat_id: chatId, min_confidence: minConf}),
@@ -3341,7 +3362,7 @@ async function testTelegram() {
   result.textContent = 'Sending…';
   result.style.color = 'var(--muted)';
   try {
-    const d = await fetch('/api/notify/test', {method: 'POST'}).then(r => r.json());
+    const d = await _authFetch('/api/notify/test', {method: 'POST'}).then(r => r.json());
     result.textContent = d.ok ? '✓ Message sent!' : `✗ ${d.error || 'Failed'}`;
     result.style.color = d.ok ? 'var(--green)' : 'var(--red)';
   } catch(e) {
@@ -3517,7 +3538,7 @@ function calcPS() {
 async function openHistory() {
   document.getElementById('history-modal').classList.add('open');
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/signal-history?limit=50`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/signal-history?limit=50`)).json();
     const st = d.stats;
     document.getElementById('hist-stats').innerHTML = `
       <div class="history-stat"><div style="font-size:9px;color:var(--muted)">Total Signals</div><div style="font-size:18px;font-weight:700;color:var(--blue)">${st.total}</div></div>
@@ -3700,12 +3721,12 @@ async function openPaperTrading() {
   ptTab('open');
   try {
     const [d, ls] = await Promise.all([
-      fetch(`${BACKEND_HTTP}/api/paper-trading`, {signal: AbortSignal.timeout(15000)}).then(async r => {
+      _authFetch(`${BACKEND_HTTP}/api/paper-trading`, {signal: AbortSignal.timeout(15000)}).then(async r => {
         const body = await r.json();
         if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
         return body;
       }),
-      fetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(10000)}).then(r=>r.json()).catch(()=>({})),
+      _authFetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(10000)}).then(r=>r.json()).catch(()=>({})),
     ]);
     _ptData = d; _ptLearn = ls;
     const s = d.summary;
@@ -3956,7 +3977,7 @@ function algoTab(tab) {
 
 async function loadAlgoPerf() {
   try {
-    const r = await fetch('/api/algo-performance');
+    const r = await _authFetch('/api/algo-performance');
     const d = await r.json();
 
     // ── Performance tab ────────────────────────────────────────────────────
@@ -4061,7 +4082,7 @@ async function ptLoadAccountTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading account state…</div>';
   try {
-    const a = await (await fetch(`${BACKEND_HTTP}/api/account-state`, {signal: AbortSignal.timeout(12000)})).json();
+    const a = await (await _authFetch(`${BACKEND_HTTP}/api/account-state`, {signal: AbortSignal.timeout(12000)})).json();
 
     const fmt$   = v => (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
     const fmtPct = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
@@ -4177,7 +4198,7 @@ async function ptLoadBudgetTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const a = await (await fetch(`${BACKEND_HTTP}/api/account-state`, {signal: AbortSignal.timeout(12000)})).json();
+    const a = await (await _authFetch(`${BACKEND_HTTP}/api/account-state`, {signal: AbortSignal.timeout(12000)})).json();
     const budget   = a.starting_balance ?? 100000;
     const maxTrade = a.max_trade_pct    ?? 5;
     const maxAlloc = a.max_allocated_pct ?? 40;
@@ -4280,7 +4301,7 @@ async function ptSaveBudgetConfig(btn) {
   btn.disabled = true;
   const params = new URLSearchParams({ total_budget: budget, max_trade_pct: tradePct, max_allocated_pct: allocPct, max_open_trades: maxOpen });
   try {
-    const r = await fetch(`${BACKEND_HTTP}/api/account-config?${params}`, {method:'POST', signal: AbortSignal.timeout(8000)});
+    const r = await _authFetch(`${BACKEND_HTTP}/api/account-config?${params}`, {method:'POST', signal: AbortSignal.timeout(8000)});
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
     if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
@@ -4300,7 +4321,7 @@ function closeWatchlist() { document.getElementById('watchlist-modal').classList
 
 async function refreshWatchlistUI() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/watchlist`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/watchlist`)).json();
     document.getElementById('wl-base').innerHTML = d.base.map(t=>
       `<span class="wl-tag">${t}</span>`
     ).join('');
@@ -4318,14 +4339,14 @@ async function addWatchlistTicker() {
   if (!ticker) return;
   input.value = '';
   try {
-    await fetch(`${BACKEND_HTTP}/api/watchlist/add?ticker=${ticker}`, {method:'POST'});
+    await _authFetch(`${BACKEND_HTTP}/api/watchlist/add?ticker=${ticker}`, {method:'POST'});
     await refreshWatchlistUI();
   } catch {}
 }
 
 async function removeWatchlistTicker(ticker) {
   try {
-    await fetch(`${BACKEND_HTTP}/api/watchlist/remove?ticker=${ticker}`, {method:'POST'});
+    await _authFetch(`${BACKEND_HTTP}/api/watchlist/remove?ticker=${ticker}`, {method:'POST'});
     await refreshWatchlistUI();
   } catch {}
 }
@@ -4360,7 +4381,7 @@ function switchPnlTab(tab) {
 
 async function loadPnlData() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/paper-trading/performance`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/paper-trading/performance`)).json();
     _pnlData = d;
     renderPnlKpis(d.summary, d.today);
     renderDailyPnl(d.daily);
@@ -4536,7 +4557,7 @@ function switchBtTab(el, tab) {
 async function loadBtHeatmap() {
   const days = document.getElementById('bt-lookback').value;
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/stats?lookback_days=${days}`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/backtest/stats?lookback_days=${days}`)).json();
     renderBtHeatmap(d.stats);
   } catch(e) {
     document.getElementById('bt-heatmap-wrap').innerHTML = `<div style="color:var(--muted);padding:20px">No data yet</div>`;
@@ -4598,7 +4619,7 @@ async function loadBacktestData() {
   document.getElementById('bt-kpis').innerHTML = loadMsg;
   document.getElementById('bt-attr-grids').innerHTML = loadMsg;
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/stats?lookback_days=${days}`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/backtest/stats?lookback_days=${days}`)).json();
     if (!d || !d.stats) throw new Error('no stats');
     renderBtKpis(d.stats);
     renderBtAttribution(d.stats);
@@ -4674,7 +4695,7 @@ function renderBtAttribution(stats) {
 
 async function loadBtTracking() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/tracking`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/backtest/tracking`)).json();
     const list = d.tracking || [];
     document.getElementById('bt-tracking-count').textContent = list.length;
     if (!list.length) {
@@ -4702,7 +4723,7 @@ async function loadBtTracking() {
 
 async function loadBtRecent() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/backtest/recent?limit=50`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/backtest/recent?limit=50`)).json();
     const list = d.recent || [];
     if (!list.length) {
       document.getElementById('bt-recent-table').innerHTML = `<div style="color:var(--muted);font-size:11px;padding:8px">No resolved signals yet.</div>`;
@@ -4897,10 +4918,10 @@ async function openWeekendLearning() {
   document.getElementById('wl-modal').style.display = 'flex';
   try {
     const [status, history, cache, mtf] = await Promise.all([
-      fetch(`${BACKEND_HTTP}/api/weekend-learning/status`).then(r => r.json()),
-      fetch(`${BACKEND_HTTP}/api/weekend-learning/history`).then(r => r.json()),
-      fetch(`${BACKEND_HTTP}/api/weekend-learning/cache-stats`).then(r => r.json()),
-      fetch(`${BACKEND_HTTP}/api/backtest/mtf`).then(r => r.json()).catch(() => null),
+      _authFetch(`${BACKEND_HTTP}/api/weekend-learning/status`).then(r => r.json()),
+      _authFetch(`${BACKEND_HTTP}/api/weekend-learning/history`).then(r => r.json()),
+      _authFetch(`${BACKEND_HTTP}/api/weekend-learning/cache-stats`).then(r => r.json()),
+      _authFetch(`${BACKEND_HTTP}/api/backtest/mtf`).then(r => r.json()).catch(() => null),
     ]);
     status.cache_stats = cache;
     _updateWlModal(status);
@@ -4918,7 +4939,7 @@ async function openWeekendLearning() {
 
 async function wlManualStart() {
   try {
-    const r = await fetch(`${BACKEND_HTTP}/api/weekend-learning/start`, {method:'POST'}).then(r=>r.json());
+    const r = await _authFetch(`${BACKEND_HTTP}/api/weekend-learning/start`, {method:'POST'}).then(r=>r.json());
     console.log('Weekend learning start:', r);
   } catch(e) { console.warn(e); }
 }
@@ -4946,7 +4967,7 @@ function closeAfterHours() { document.getElementById('ah-modal').classList.remov
 
 async function loadAfterHours() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/after-hours`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/after-hours`)).json();
     renderAfterHours(d.snapshots || []);
   } catch(e) {
     document.getElementById('ah-table-wrap').innerHTML = `<div style="color:var(--muted);font-size:11px;padding:20px;text-align:center">No after-hours data yet — data is collected during AFTER_HOURS and PRE_MARKET sessions.</div>`;
@@ -5036,7 +5057,7 @@ function closeLearning() {
 
 async function loadLearningLog() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/learning-log?limit=100`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/learning-log?limit=100`)).json();
     const eng = d.engine || {};
     const engEl = document.getElementById('learn-engine-status');
     if (engEl) {
@@ -5065,7 +5086,7 @@ async function loadLearningLog() {
 
 async function loadLearningStatus() {
   try {
-    const r = await fetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(12000)});
+    const r = await _authFetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(12000)});
     const d = await r.json();
     renderLearningStatus(d);
   } catch(e) {
@@ -5230,7 +5251,7 @@ function nnTab(name) {
 
 async function loadNeuralStatus() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/ml-status`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/ml-status`)).json();
     _nnData = d;
     renderNeuralPanel(d);
   } catch(e) {
@@ -5594,7 +5615,7 @@ function renderLossChart(history) {
 
 async function loadRiskStatus() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/risk-status`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/risk-status`)).json();
     const el = document.getElementById('nn-panel-risk');
     const cbColor = d.circuit_open ? 'var(--red)' : 'var(--green)';
     el.innerHTML = `
@@ -5662,7 +5683,7 @@ async function triggerDeepTrain(btn) {
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
-    const r = await (await fetch(`${BACKEND_HTTP}/api/deep-model/train`, { method: 'POST' })).json();
+    const r = await (await _authFetch(`${BACKEND_HTTP}/api/deep-model/train`, { method: 'POST' })).json();
     btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '✓ Started';
     btn.style.background = '#16a34a';
     // Begin polling for progress automatically
@@ -5686,7 +5707,7 @@ async function triggerFullRetrain(btn) {
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
-    const r = await (await fetch(`${BACKEND_HTTP}/api/ml-retrain`, { method: 'POST' })).json();
+    const r = await (await _authFetch(`${BACKEND_HTTP}/api/ml-retrain`, { method: 'POST' })).json();
     btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '✓ Started';
     btn.style.color = 'var(--green)';
     setTimeout(() => { loadNeuralStatus(); }, 3000);
@@ -5722,8 +5743,8 @@ function _progressBar(done, total) {
 async function loadHistoricalStatus() {
   try {
     const [rt, bt] = await Promise.all([
-      fetch(`${BACKEND_HTTP}/api/historical/retrain/status`).then(r => r.json()),
-      fetch(`${BACKEND_HTTP}/api/historical/backtest/results`).then(r => r.json()),
+      _authFetch(`${BACKEND_HTTP}/api/historical/retrain/status`).then(r => r.json()),
+      _authFetch(`${BACKEND_HTTP}/api/historical/backtest/results`).then(r => r.json()),
     ]);
 
     // ── Retrain status ───────────────────────────────────────────────────────
@@ -5806,7 +5827,7 @@ async function triggerHistRetrain(btn) {
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
-    const r = await (await fetch(`${BACKEND_HTTP}/api/historical/retrain`, { method: 'POST' })).json();
+    const r = await (await _authFetch(`${BACKEND_HTTP}/api/historical/retrain`, { method: 'POST' })).json();
     btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '✓ Started';
     btn.style.background = r.status === 'already_running' ? '#b45309' : '#15803d';
     document.getElementById('hist-retrain-status').innerHTML = '<span style="color:#f59e0b">⏳ Running…</span>';
@@ -5825,7 +5846,7 @@ async function triggerHistBacktest(btn) {
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
-    const r = await (await fetch(`${BACKEND_HTTP}/api/historical/backtest/run?interval=${interval}`, { method: 'POST' })).json();
+    const r = await (await _authFetch(`${BACKEND_HTTP}/api/historical/backtest/run?interval=${interval}`, { method: 'POST' })).json();
     btn.textContent = r.status === 'already_running' ? '⏳ In progress…' : '✓ Started';
     _startHistPoll();
     setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 600000);
@@ -5940,12 +5961,12 @@ try {
   if (cached && cached.win_rate > 0) updateLearnPill(cached);
 } catch(e) {}
 connectWS();
-(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
+(async () => { try { const d = await (await _authFetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
 
 // Load paper trading stats immediately on page load and refresh every 30s
 async function fetchPtStats() {
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/paper-trading`, {signal: AbortSignal.timeout(12000)})).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/paper-trading`, {signal: AbortSignal.timeout(12000)})).json();
     if (d.summary) {
       // Build open_trades map for the open count
       const openMap = {};
@@ -5957,11 +5978,11 @@ async function fetchPtStats() {
 fetchPtStats();
 setInterval(fetchPtStats, 30000);
 // Load session/regime on startup
-(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/regime`)).json(); if(d.session) updateSessionBanner(d.session); if(d.regime) updateRegimeBanner(d.regime); } catch {} })();
+(async () => { try { const d = await (await _authFetch(`${BACKEND_HTTP}/api/regime`)).json(); if(d.session) updateSessionBanner(d.session); if(d.regime) updateRegimeBanner(d.regime); } catch {} })();
 // Pre-populate Self-Learning pill and header button in a single fetch
-(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/learning-status`)).json(); if (d) { updateLearnPill(d); _updateLearnHeaderBtn(d.current_win_rate??0, d.dynamic_threshold??65, d.is_learning??false); } } catch {} })();
+(async () => { try { const d = await (await _authFetch(`${BACKEND_HTTP}/api/learning-status`)).json(); if (d) { updateLearnPill(d); _updateLearnHeaderBtn(d.current_win_rate??0, d.dynamic_threshold??65, d.is_learning??false); } } catch {} })();
 // Load macro calendar on startup
-(async () => { try { const d = await (await fetch(`${BACKEND_HTTP}/api/macro-calendar`)).json(); if(d.current) updateMacroBanner(d.current); } catch {} })();
+(async () => { try { const d = await (await _authFetch(`${BACKEND_HTTP}/api/macro-calendar`)).json(); if(d.current) updateMacroBanner(d.current); } catch {} })();
 // Register service worker for PWA
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/static/sw.js').catch(()=>{});
@@ -5994,7 +6015,7 @@ function _setBadge(id, connected, label) {
 async function loadBrokerStatus() {
   const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/broker/status`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/broker/status`)).json();
 
     // ① Accounts & Trading
     const connected = !!d.connected;
@@ -6047,7 +6068,7 @@ async function loadBrokerStatus() {
 
   // ③ Twelve Data credits
   try {
-    const cr = await (await fetch(`${BACKEND_HTTP}/api/credit-usage`)).json();
+    const cr = await (await _authFetch(`${BACKEND_HTTP}/api/credit-usage`)).json();
     const used = cr.credits_used_60s ?? cr.used ?? '—';
     const el = document.getElementById('broker-td-credits');
     if (el) el.textContent = used + ' / 377';
@@ -6064,7 +6085,7 @@ async function loadBrokerPositions() {
   const el = document.getElementById('broker-positions');
   if (!el) return;
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/broker/positions`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/broker/positions`)).json();
     const positions = d.positions || [];
     if (!positions.length) { el.innerHTML = '<span style="color:var(--muted)">No open positions</span>'; return; }
     el.innerHTML = `<table style="width:100%;border-collapse:collapse">
@@ -6104,7 +6125,7 @@ async function refreshInfraStatus() {
     if (el) el.textContent = text;
   }
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/services`)).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/services`)).json();
 
     // Valkey
     const vk = d.valkey || {};
@@ -6161,7 +6182,7 @@ async function brokerAuth() {
   btn.disabled = true;
   if (msg) msg.textContent = 'Your browser will open. Log in to Schwab, complete MFA, then return here.';
   try {
-    const d = await (await fetch(`${BACKEND_HTTP}/api/broker/auth`, { method:'POST' })).json();
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/broker/auth`, { method:'POST' })).json();
     if (d.success) {
       if (msg) msg.textContent = '✅ Connected successfully!';
       await loadBrokerStatus();
@@ -6178,7 +6199,7 @@ async function brokerAuth() {
 async function brokerToggleAuto() {
   const newVal = !_brokerAutoTrade;
   try {
-    await fetch(`${BACKEND_HTTP}/api/broker/auto-trade/${newVal}`, { method:'POST' });
+    await _authFetch(`${BACKEND_HTTP}/api/broker/auto-trade/${newVal}`, { method:'POST' });
     await loadBrokerStatus();
   } catch(e) {}
 }
@@ -6210,7 +6231,7 @@ function _lpFmtVal(val, param) {
 async function refreshLearningPanel() {
   // 1. Fetch params
   try {
-    const pd = await fetch(`${BACKEND_HTTP}/api/learning/params`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
+    const pd = await _authFetch(`${BACKEND_HTTP}/api/learning/params`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
     const tbody = document.getElementById('lp-params-tbody');
     if (tbody) {
       if (!pd.available) {
@@ -6236,7 +6257,7 @@ async function refreshLearningPanel() {
 
   // 2. Fetch phase2 — deployment mode + drift alerts
   try {
-    const p2 = await fetch(`${BACKEND_HTTP}/api/learning/phase2`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
+    const p2 = await _authFetch(`${BACKEND_HTTP}/api/learning/phase2`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
     const mode = (p2.deployment || {}).current_mode || (p2.available === false ? 'N/A' : 'SHADOW');
     const drifts = ((p2.drift || {}).material_drifts || []).length;
 
@@ -6271,7 +6292,7 @@ async function refreshLearningPanel() {
 
   // 3. Fetch learning log — filter for param changes
   try {
-    const ld = await fetch(`${BACKEND_HTTP}/api/learning-log?limit=50`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
+    const ld = await _authFetch(`${BACKEND_HTTP}/api/learning-log?limit=50`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
     const entries = (ld.log || []).filter(e => e.message && /param/i.test(e.message)).slice(-5).reverse();
     const logEl = document.getElementById('lp-param-log');
     if (logEl) {

@@ -29,12 +29,14 @@ from auth.utils import (
     audit,
     blacklist_jti,
     create_access_token,
+    create_mfa_challenge_token,
     create_refresh_token,
     create_ws_ticket,
     decode_token,
     generate_mfa_secret,
     get_qr_data_url,
     hash_password,
+    hash_token,
     invalidate_user_cache,
     verify_password,
     verify_totp,
@@ -193,8 +195,8 @@ async def login(body: LoginRequest, request: Request):
 
     if user["mfa_enabled"]:
         if not body.totp_code:
-            # Issue a short-lived MFA challenge token (not a full access token)
-            mfa_token = create_ws_ticket(user["id"], user["username"], user["role"])
+            # Issue a short-lived MFA challenge token (distinct from ws_ticket)
+            mfa_token = create_mfa_challenge_token(user["id"], user["username"], user["role"])
             return {"action": "mfa_required", "mfa_token": mfa_token}
         # MFA code provided inline
         if not user["mfa_secret"] or not verify_totp(user["mfa_secret"], body.totp_code):
@@ -228,7 +230,7 @@ async def mfa_verify(body: MFAVerifyRequest, request: Request):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid or expired MFA token")
 
-    if payload.get("type") != "ws_ticket":
+    if payload.get("type") != "mfa_challenge":
         raise HTTPException(status_code=401, detail="Invalid token type")
 
     user_id = int(payload["sub"])
@@ -275,11 +277,14 @@ async def refresh_token(body: RefreshRequest):
 
     with get_conn() as c:
         row = c.execute(
-            "SELECT id, revoked FROM refresh_tokens WHERE jti = ?", (jti,)
+            "SELECT id, revoked, token_hash FROM refresh_tokens WHERE jti = ?", (jti,)
         ).fetchone()
 
     if not row or row["revoked"]:
         raise HTTPException(status_code=401, detail="Refresh token revoked")
+
+    if row["token_hash"] != hash_token(body.refresh_token):
+        raise HTTPException(status_code=401, detail="Refresh token invalid")
 
     user = _get_user_by_id(user_id)
     if not user or user["status"] != "ACTIVE":

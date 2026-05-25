@@ -1,16 +1,17 @@
 """
 Seed the initial admin user if no users exist.
 
-Admin: pawan_gyanwali
-  - Temp password:  NasdaqAdmin@2024  (must be changed on first login)
-  - Role:           ADMIN
-  - Status:         ACTIVE
-  - force_password_change: TRUE
-  - MFA:            disabled (admin enables it after first login)
+The bootstrap password is read from the ADMIN_TEMP_PASSWORD environment
+variable. If not set, a random 16-character password is generated and
+logged as a WARNING — the admin must retrieve it from the service logs
+on first startup and change it immediately.
 """
 from __future__ import annotations
 
 import logging
+import os
+import secrets
+import string
 
 from agent.db import get_conn
 from auth.utils import hash_password
@@ -19,7 +20,22 @@ logger = logging.getLogger(__name__)
 
 _ADMIN_USERNAME = "pawan_gyanwali"
 _ADMIN_EMAIL    = "pawangyanwali@gmail.com"
-_TEMP_PASSWORD  = "NasdaqAdmin@2024"   # forced change on first login
+
+
+def _get_temp_password() -> str:
+    pw = os.environ.get("ADMIN_TEMP_PASSWORD", "").strip()
+    if pw:
+        return pw
+    # Generate a strong random password and warn loudly — admin reads it from logs
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    pw = "".join(secrets.choice(alphabet) for _ in range(20))
+    logger.warning(
+        "[Auth] ADMIN_TEMP_PASSWORD not set. "
+        "Generated one-time bootstrap password: %s  "
+        "(Change it immediately after first login — it will NOT be shown again.)",
+        pw,
+    )
+    return pw
 
 
 def seed_admin() -> None:
@@ -33,7 +49,8 @@ def seed_admin() -> None:
         logger.debug("[Auth] Admin user already exists — skipping seed")
         return
 
-    hashed = hash_password(_TEMP_PASSWORD)
+    temp_pw = _get_temp_password()
+    hashed  = hash_password(temp_pw)
     with get_conn() as c:
         c.execute(
             "INSERT INTO users "
@@ -42,7 +59,8 @@ def seed_admin() -> None:
             (_ADMIN_USERNAME, _ADMIN_EMAIL, hashed),
         )
 
-    logger.info(
-        "[Auth] Admin user created: %s — temp password must be changed on first login",
+    logger.warning(
+        "[Auth] Admin user '%s' created. "
+        "Temporary password was logged above — change it on first login.",
         _ADMIN_USERNAME,
     )
