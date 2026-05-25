@@ -409,6 +409,10 @@ def maybe_open_trade(
         except Exception:
             pass
 
+    # Confidence floors for extended hours: HIGH tier → 70.0%, MODERATE → 60.0%.
+    # Defined here so both values are visible for static analysis and tests.
+    _EXT_CONF_FLOOR: dict[str, float] = {"HIGH": 70.0, "MODERATE": 60.0}
+
     if _live_session == "CLOSED":
         logger.debug(f"[PAPER] {ticker} skip: market CLOSED — no trades on weekends/overnight")
         return None
@@ -427,9 +431,7 @@ def maybe_open_trade(
             else round(price + risk_dist_orig * _stop_mult, 4)
         )
 
-    # Extended-hours confidence floors and tier gate.
-    # REGULAR-tier stocks lack the liquidity for AH/PM trades; HIGH/MODERATE allowed with higher bar.
-    _EXT_CONF_FLOOR: dict[str, float] = {"HIGH": 70.0, "MODERATE": 60.0}
+    # Tier gate: REGULAR-tier stocks lack liquidity for AH/PM trades.
     if _live_session in ("PRE_MARKET", "AFTER_HOURS"):
         _ext_floor = _EXT_CONF_FLOOR.get(trading_tier)
         if _ext_floor is None:

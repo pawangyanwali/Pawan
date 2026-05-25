@@ -41,8 +41,11 @@ def fake_prepared(n: int = 300, n_feat: int = 32) -> tuple:
     """Synthetic (X_train, y_train, X_test, y_test) for model training tests."""
     rng = np.random.default_rng(42)
     X = rng.standard_normal((n, n_feat))
-    # ~55% positive class — balanced enough to pass the 0.85 homogeneity check
-    y = (rng.random(n) > 0.45).astype(int)
+    # Label is driven by a linear combination of features so XGBoost can learn
+    # a signal and pass the accuracy gate (≥0.52 on holdout).
+    # Balanced ~50/50 so it also passes the 0.85 homogeneity check.
+    signal = X[:, 0] * 2.0 + X[:, 1] * 1.5 + X[:, 2] * 1.0
+    y = (signal > 0).astype(int)
     split = int(n * 0.7)
     return X[:split], y[:split], X[split:], y[split:]
 
