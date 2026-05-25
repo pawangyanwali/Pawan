@@ -509,11 +509,27 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # ── Service enable/disable gates (Priority 1 — service split readiness) ─────
+    # Each service can be disabled independently via environment variables.
+    # This allows running multiple EC2/ECS instances with different roles:
+    #   NASDAQ_SCANNER_ENABLED=0  → API-only instance (serves HTTP, no scanning)
+    #   NASDAQ_LEARNER_ENABLED=0  → scanner-only instance (no ML retraining)
+    # Default: all services enabled (preserves existing single-process behavior).
+    _scanner_enabled = os.getenv("NASDAQ_SCANNER_ENABLED", "1") != "0"
+    _learner_enabled = os.getenv("NASDAQ_LEARNER_ENABLED", "1") != "0"
+
     _load_signal_cache()   # pre-populate cache before any scan runs
     scanner.register_callback(_on_signals)
     scanner.register_per_ticker_callback(_on_ticker)
-    scanner.start_background()
-    learning_engine.start()
+    if _scanner_enabled:
+        scanner.start_background()
+    else:
+        logging.getLogger(__name__).info("[Startup] Scanner disabled (NASDAQ_SCANNER_ENABLED=0)")
+
+    if _learner_enabled:
+        learning_engine.start()
+    else:
+        logging.getLogger(__name__).info("[Startup] Learning engine disabled (NASDAQ_LEARNER_ENABLED=0)")
 
     # Weekend learner — give it a broadcast handle, then auto-start if it's a weekend
     def _wl_broadcast(payload: dict) -> None:
@@ -547,7 +563,17 @@ async def lifespan(app: FastAPI):
             pass
     from agent.paper_trading import register_trade_callback as _reg_trade_cb
     _reg_trade_cb(_on_trade_event)
-    weekend_learner.maybe_start()
+    if _learner_enabled:
+        weekend_learner.maybe_start()
+
+    # ── Data-quality startup checks (Priority 10) ─────────────────────────────
+    # Non-blocking — runs after all services start so DB tables exist.
+    try:
+        from agent.startup_checks import run_startup_checks as _dq_checks
+        import threading as _th
+        _th.Thread(target=_dq_checks, name="StartupChecks", daemon=True).start()
+    except Exception as _dqe:
+        logging.getLogger(__name__).warning(f"[Startup] Data-quality checks skipped: {_dqe}")
     # Sweep any trades that were left open from a previous session
     try:
         from agent.paper_trading import close_stale_positions

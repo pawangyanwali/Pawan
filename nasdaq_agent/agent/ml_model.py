@@ -325,32 +325,55 @@ class StockMLModel:
         new_scaler = StandardScaler()
         new_scaler.fit(X_train)
         X_tr_s = new_scaler.transform(X_train)
-        X_te_s = new_scaler.transform(X_test)
+        X_te_s = new_scaler.transform(X_test)   # true holdout — never used for fitting
 
-        # Baseline: score existing model on the same holdout before training
+        # Proper time-series holdout: split the 80% training portion into
+        # inner-train (64%) for XGBoost fitting and inner-val (16%) for early
+        # stopping + calibration.  X_te_s (outer 20%) is the true holdout.
+        _inner_split = int(len(X_tr_s) * 0.8) if len(X_tr_s) >= 60 else len(X_tr_s)
+        X_fit, X_es  = X_tr_s[:_inner_split], X_tr_s[_inner_split:]
+        y_fit, y_es  = y_train[:_inner_split], y_train[_inner_split:]
+        if len(X_es) < 5:   # too few validation samples — fall back to full train set
+            X_fit, X_es, y_fit, y_es = X_tr_s, X_te_s, y_train, y_test
+
+        # Baseline: score existing model on the true holdout before training
         old_acc: float = 0.0
         if self.trained and self.model is not None and self.scaler is not None:
             try:
-                X_te_old = self.scaler.transform(X_test)
-                old_acc = float(self.model.score(X_te_old, y_test))
+                old_acc = float(self.model.score(self.scaler.transform(X_test), y_test))
             except Exception:
                 old_acc = 0.0
 
-        candidate = _fast_xgb_fit(X_tr_s, y_train, X_te_s, y_test,
+        candidate = _fast_xgb_fit(X_fit, y_fit, X_es, y_es,
                                    n_estimators=400, max_depth=4,
                                    learning_rate=0.05, subsample=0.8,
                                    colsample_bytree=0.8)
 
-        new_acc = float(candidate.score(X_te_s, y_test))
+        new_acc = float(candidate.score(X_te_s, y_test))   # evaluate on true holdout
         n_trees = getattr(candidate.estimator, "best_iteration", "?")
 
-        # Model promotion gate: new model must clear a minimum accuracy floor
-        # AND must not be more than 3 pp worse than the incumbent.
+        # Gate 1: classification accuracy floor + no regression vs incumbent
         _MIN_ACC = 0.52
         _MAX_REGRESSION = 0.03
-        promoted = new_acc >= _MIN_ACC and (
-            old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION
-        )
+        acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+
+        # Gate 2: economic validity — positive expectancy in live backtest.
+        # Only applied once we have ≥10 resolved outcomes for this ticker.
+        # Bootstrap phase (< 10 outcomes): accuracy gate alone is sufficient.
+        econ_ok = True
+        econ_note = "bootstrap"
+        try:
+            from agent.live_backtest import get_ticker_performance
+            perf = get_ticker_performance(self.ticker, min_resolved=10)
+            if perf is not None:
+                exp = perf["expectancy"]
+                pf  = perf["profit_factor"]
+                econ_ok = exp > 0 and pf > 1.0
+                econ_note = f"exp={exp:.3f} pf={pf:.3f} n={perf['n_resolved']}"
+        except Exception:
+            pass
+
+        promoted = acc_ok and econ_ok
 
         if promoted:
             self.model   = candidate
@@ -359,14 +382,14 @@ class StockMLModel:
             self._save()
             logger.info(
                 f"[{self.ticker}] ScalpML promoted | acc={new_acc:.3f} "
-                f"(prev={old_acc:.3f}) | trees={n_trees} | samples={len(X_train)}"
+                f"(prev={old_acc:.3f}) | {econ_note} | trees={n_trees} | samples={len(X_train)}"
             )
         else:
-            logger.warning(
-                f"[{self.ticker}] ScalpML candidate rejected — "
-                f"new_acc={new_acc:.3f} < floor={_MIN_ACC} or "
-                f"regressed vs old={old_acc:.3f} | samples={len(X_train)}"
+            reason = (
+                f"acc={new_acc:.3f} < floor={_MIN_ACC}" if not acc_ok
+                else f"econ rejected: {econ_note}"
             )
+            logger.warning(f"[{self.ticker}] ScalpML candidate rejected — {reason}")
         return promoted
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -411,7 +434,8 @@ def get_or_create(ticker: str) -> StockMLModel:
 
 
 def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
-                hist_5m: dict = None, hist_15m: dict = None) -> None:
+                hist_5m: dict = None, hist_15m: dict = None,
+                skip_deep: bool = False) -> None:
     """Train/retrain all models using a single batch historical fetch.
 
     XGBoost scalp/ensemble/reversal models train on 1-min bars (Schwab provides
@@ -437,7 +461,7 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
     _is_retraining = True
     try:
         _retrain_all_locked(tickers, delay=delay, daily_data=daily_data,
-                            hist_5m=hist_5m, hist_15m=hist_15m)
+                            hist_5m=hist_5m, hist_15m=hist_15m, skip_deep=skip_deep)
     finally:
         _is_retraining = False
         _retrain_lock.release()
@@ -514,7 +538,8 @@ def _train_one_ticker(
 
 
 def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = None,
-                        hist_5m: dict = None, hist_15m: dict = None) -> None:
+                        hist_5m: dict = None, hist_15m: dict = None,
+                        skip_deep: bool = False) -> None:
     """Internal retrain — only called while _retrain_lock is held."""
     import time as _t
     from agent.data_fetcher import fetch_batch_interval
@@ -597,14 +622,19 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
     gc.collect()
 
     # ── Deep BiLSTM model: universal, trained across all tickers ─────────────
-    _rp_set(phase="deep", phase_label="Training Deep BiLSTM…",
-            current_ticker="all tickers", current_model="bilstm")
-    try:
-        from agent.deep_model import retrain_deep_all
-        logger.info(f"[retrain_all] Training deep BiLSTM on {len(hist_15m)} tickers…")
-        retrain_deep_all(hist_15m)
-    except Exception as e:
-        logger.warning(f"[retrain_all] Deep model training failed: {e}")
+    # Caller passes skip_deep=True during market hours so the scanner and web API
+    # are not starved of CPU.  The deep phase is the most expensive step (~5 min).
+    if skip_deep:
+        logger.info("[retrain_all] Deep BiLSTM training deferred — market session active")
+    else:
+        _rp_set(phase="deep", phase_label="Training Deep BiLSTM…",
+                current_ticker="all tickers", current_model="bilstm")
+        try:
+            from agent.deep_model import retrain_deep_all
+            logger.info(f"[retrain_all] Training deep BiLSTM on {len(hist_15m)} tickers…")
+            retrain_deep_all(hist_15m)
+        except Exception as e:
+            logger.warning(f"[retrain_all] Deep model training failed: {e}")
 
     _rp_set(phase="done", phase_label="Complete", is_running=False,
             current_ticker="", current_model="")
@@ -698,6 +728,12 @@ class DailyMLModel:
         X_train_s = new_scaler.transform(X_train)
         X_test_s  = new_scaler.transform(X_test)
 
+        _inner = int(len(X_train_s) * 0.8) if len(X_train_s) >= 60 else len(X_train_s)
+        X_fit_d, X_es_d = X_train_s[:_inner], X_train_s[_inner:]
+        y_fit_d, y_es_d = y_train[:_inner], y_train[_inner:]
+        if len(X_es_d) < 5:
+            X_fit_d, X_es_d, y_fit_d, y_es_d = X_train_s, X_test_s, y_train, y_test
+
         old_acc: float = 0.0
         if self.trained and self.model is not None and self.scaler is not None:
             try:
@@ -705,7 +741,7 @@ class DailyMLModel:
             except Exception:
                 old_acc = 0.0
 
-        candidate = _fast_xgb_fit(X_train_s, y_train, X_test_s, y_test,
+        candidate = _fast_xgb_fit(X_fit_d, y_fit_d, X_es_d, y_es_d,
                                    n_estimators=300, max_depth=4,
                                    learning_rate=0.05, subsample=0.8,
                                    colsample_bytree=0.8)
@@ -713,7 +749,19 @@ class DailyMLModel:
         n_trees = getattr(candidate.estimator, "best_iteration", "?")
 
         _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
-        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+
+        econ_ok, econ_note = True, "bootstrap"
+        try:
+            from agent.live_backtest import get_ticker_performance
+            perf = get_ticker_performance(self.ticker, min_resolved=10)
+            if perf is not None:
+                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+        except Exception:
+            pass
+
+        promoted = acc_ok and econ_ok
         if promoted:
             self.model   = candidate
             self.scaler  = new_scaler
@@ -721,13 +769,11 @@ class DailyMLModel:
             self._save()
             logger.info(
                 f"[{self.ticker}] DailyML promoted | acc={new_acc:.3f} "
-                f"(prev={old_acc:.3f}) | trees={n_trees} | samples={len(X_train)}"
+                f"(prev={old_acc:.3f}) | {econ_note} | trees={n_trees} | samples={len(X_train)}"
             )
         else:
-            logger.warning(
-                f"[{self.ticker}] DailyML candidate rejected — "
-                f"new_acc={new_acc:.3f} vs old={old_acc:.3f} | samples={len(X_train)}"
-            )
+            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
+            logger.warning(f"[{self.ticker}] DailyML candidate rejected — {reason}")
         return promoted
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -891,6 +937,12 @@ class ReversalMLModel:
         X_tr = new_scaler.transform(X_train)
         X_te = new_scaler.transform(X_test)
 
+        _inner_r = int(len(X_tr) * 0.8) if len(X_tr) >= 60 else len(X_tr)
+        X_fit_r, X_es_r = X_tr[:_inner_r], X_tr[_inner_r:]
+        y_fit_r, y_es_r = y_train[:_inner_r], y_train[_inner_r:]
+        if len(X_es_r) < 5:
+            X_fit_r, X_es_r, y_fit_r, y_es_r = X_tr, X_te, y_train, y_test
+
         old_acc: float = 0.0
         if self.trained and self.model is not None and self.scaler is not None:
             try:
@@ -899,7 +951,7 @@ class ReversalMLModel:
                 old_acc = 0.0
 
         spw = float((y == 0).sum()) / max(float((y == 1).sum()), 1)
-        candidate = _fast_xgb_fit(X_tr, y_train, X_te, y_test,
+        candidate = _fast_xgb_fit(X_fit_r, y_fit_r, X_es_r, y_es_r,
                                    n_estimators=300, max_depth=4,
                                    learning_rate=0.05, subsample=0.8,
                                    colsample_bytree=0.7, min_child_weight=3,
@@ -908,7 +960,19 @@ class ReversalMLModel:
         n_trees = getattr(candidate.estimator, "best_iteration", "?")
 
         _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
-        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+
+        econ_ok, econ_note = True, "bootstrap"
+        try:
+            from agent.live_backtest import get_ticker_performance
+            perf = get_ticker_performance(self.ticker, min_resolved=10)
+            if perf is not None:
+                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+        except Exception:
+            pass
+
+        promoted = acc_ok and econ_ok
         if promoted:
             self.model   = candidate
             self.scaler  = new_scaler
@@ -916,14 +980,12 @@ class ReversalMLModel:
             self._save()
             logger.info(
                 f"[{self.ticker}] ReversalML promoted | acc={new_acc:.3f} "
-                f"(prev={old_acc:.3f}) | trees={n_trees} | reversals={y.sum()}/{len(y)} "
-                f"({y.mean()*100:.1f}%)"
+                f"(prev={old_acc:.3f}) | {econ_note} | trees={n_trees} | "
+                f"reversals={y.sum()}/{len(y)} ({y.mean()*100:.1f}%)"
             )
         else:
-            logger.warning(
-                f"[{self.ticker}] ReversalML candidate rejected — "
-                f"new_acc={new_acc:.3f} vs old={old_acc:.3f}"
-            )
+            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
+            logger.warning(f"[{self.ticker}] ReversalML candidate rejected — {reason}")
         return promoted
 
     def predict_proba(self, df: pd.DataFrame) -> float:
@@ -1039,6 +1101,12 @@ class SwingMLModel:
         X_tr_s = new_scaler.transform(X_train)
         X_te_s = new_scaler.transform(X_test)
 
+        _inner_s = int(len(X_tr_s) * 0.8) if len(X_tr_s) >= 60 else len(X_tr_s)
+        X_fit_s, X_es_s = X_tr_s[:_inner_s], X_tr_s[_inner_s:]
+        y_fit_s, y_es_s = y_train[:_inner_s], y_train[_inner_s:]
+        if len(X_es_s) < 5:
+            X_fit_s, X_es_s, y_fit_s, y_es_s = X_tr_s, X_te_s, y_train, y_test
+
         old_acc: float = 0.0
         if self.trained and self.model is not None and self.scaler is not None:
             try:
@@ -1046,7 +1114,7 @@ class SwingMLModel:
             except Exception:
                 old_acc = 0.0
 
-        candidate = _fast_xgb_fit(X_tr_s, y_train, X_te_s, y_test,
+        candidate = _fast_xgb_fit(X_fit_s, y_fit_s, X_es_s, y_es_s,
                                    n_estimators=300, max_depth=4,
                                    learning_rate=0.05, subsample=0.8,
                                    colsample_bytree=0.8, min_child_weight=3)
@@ -1054,7 +1122,19 @@ class SwingMLModel:
         n_trees = getattr(candidate.estimator, "best_iteration", "?")
 
         _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
-        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+
+        econ_ok, econ_note = True, "bootstrap"
+        try:
+            from agent.live_backtest import get_ticker_performance
+            perf = get_ticker_performance(self.ticker, min_resolved=10)
+            if perf is not None:
+                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+        except Exception:
+            pass
+
+        promoted = acc_ok and econ_ok
         if promoted:
             self.model   = candidate
             self.scaler  = new_scaler
@@ -1062,13 +1142,11 @@ class SwingMLModel:
             self._save()
             logger.info(
                 f"[{self.ticker}] SwingML promoted | acc={new_acc:.3f} "
-                f"(prev={old_acc:.3f}) | trees={n_trees} | samples={len(X_train)} (15min, 2h)"
+                f"(prev={old_acc:.3f}) | {econ_note} | trees={n_trees} | samples={len(X_train)} (15min, 2h)"
             )
         else:
-            logger.warning(
-                f"[{self.ticker}] SwingML candidate rejected — "
-                f"new_acc={new_acc:.3f} vs old={old_acc:.3f}"
-            )
+            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
+            logger.warning(f"[{self.ticker}] SwingML candidate rejected — {reason}")
         return promoted
 
     def predict_proba(self, df_15m: pd.DataFrame) -> float:
@@ -1193,6 +1271,12 @@ class EnsembleMLModel:
         Xtr = new_scaler.transform(X_train)
         Xte = new_scaler.transform(X_test)
 
+        _inner_e = int(len(Xtr) * 0.8) if len(Xtr) >= 100 else len(Xtr)
+        Xtr_fit, Xtr_es = Xtr[:_inner_e], Xtr[_inner_e:]
+        ytr_fit, ytr_es = y_train[:_inner_e], y_train[_inner_e:]
+        if len(Xtr_es) < 5:
+            Xtr_fit, Xtr_es, ytr_fit, ytr_es = Xtr, Xte, y_train, y_test
+
         # Baseline: score existing ensemble on holdout before retraining
         old_acc: float = 0.0
         if self.trained and self.models and self.scaler is not None:
@@ -1207,7 +1291,7 @@ class EnsembleMLModel:
         # Train each member in its own thread (3 × independent XGBoost fits)
         def _fit_member(args):
             i, cfg = args
-            return _fast_xgb_fit(Xtr, y_train, Xte, y_test, **cfg)
+            return _fast_xgb_fit(Xtr_fit, ytr_fit, Xtr_es, ytr_es, **cfg)
 
         with ThreadPoolExecutor(max_workers=len(self._CONFIGS)) as ex:
             candidate_models = list(ex.map(_fit_member, enumerate(self._CONFIGS)))
@@ -1217,7 +1301,19 @@ class EnsembleMLModel:
         new_acc = float((majority == y_test).mean())
 
         _MIN_ACC, _MAX_REGRESSION = 0.52, 0.03
-        promoted = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+        acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
+
+        econ_ok, econ_note = True, "bootstrap"
+        try:
+            from agent.live_backtest import get_ticker_performance
+            perf = get_ticker_performance(self.ticker, min_resolved=10)
+            if perf is not None:
+                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+        except Exception:
+            pass
+
+        promoted = acc_ok and econ_ok
         if promoted:
             self.models  = candidate_models
             self.scaler  = new_scaler
@@ -1225,13 +1321,11 @@ class EnsembleMLModel:
             self._save()
             logger.info(
                 f"[{self.ticker}] Ensemble promoted | acc={new_acc:.3f} "
-                f"(prev={old_acc:.3f}) | members={len(self.models)} | samples={len(X_train)}"
+                f"(prev={old_acc:.3f}) | {econ_note} | members={len(self.models)} | samples={len(X_train)}"
             )
         else:
-            logger.warning(
-                f"[{self.ticker}] Ensemble candidate rejected — "
-                f"new_acc={new_acc:.3f} vs old={old_acc:.3f}"
-            )
+            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
+            logger.warning(f"[{self.ticker}] Ensemble candidate rejected — {reason}")
         return promoted
 
     def predict(self, df: pd.DataFrame) -> tuple[float, float]:

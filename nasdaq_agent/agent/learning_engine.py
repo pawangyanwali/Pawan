@@ -474,7 +474,20 @@ class LearningEngine:
                     _log_attribution(outcomes_df)
                     _update_confidence_calibration(outcomes_df)
 
-                retrain_all(TRAINING_TICKERS)
+                # Defer heavy BiLSTM training during active market sessions to
+                # avoid CPU contention with live scanning/signal generation.
+                try:
+                    from agent.market_hours import get_session
+                    _session = get_session()
+                    _skip_deep = _session in ("OPEN", "PRE_MARKET")
+                except Exception:
+                    _skip_deep = False
+                if _skip_deep:
+                    _log(
+                        f"Deep BiLSTM training deferred — session={_session}",
+                        level="INFO",
+                    )
+                retrain_all(TRAINING_TICKERS, skip_deep=_skip_deep)
                 _log("ML retrain complete", significant=True)
             except Exception as e:
                 _log(f"ML retrain failed: {e}", level="ERROR", significant=True)

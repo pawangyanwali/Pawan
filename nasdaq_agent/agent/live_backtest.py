@@ -579,6 +579,62 @@ def _empty_stats() -> dict:
     }
 
 
+def get_ticker_performance(
+    ticker: str,
+    min_resolved: int = 10,
+    lookback_days: int = 30,
+) -> dict | None:
+    """
+    Return economic performance stats for a single ticker.
+
+    Returns None when fewer than `min_resolved` outcomes exist (bootstrap phase).
+    Otherwise returns:
+      expectancy    — win_rate * avg_win_R − loss_rate * avg_loss_R
+      profit_factor — gross_win_R / gross_loss_R  (>1 = profitable)
+      win_rate      — fraction of resolved trades that are WIN
+      n_resolved    — number of resolved trades for this ticker
+    """
+    try:
+        with _lock:
+            with _conn() as c:
+                rows = c.execute("""
+                    SELECT status, r_multiple, pnl_pct
+                    FROM bt_signals
+                    WHERE ticker = ?
+                      AND status IN ('WIN','LOSS','TIMEOUT')
+                      AND r_multiple IS NOT NULL
+                      AND abs(r_multiple) > 0
+                      AND fired_at >= datetime('now', ? || ' days')
+                """, (ticker, f"-{lookback_days}")).fetchall()
+
+        rows = [dict(r) for r in rows]
+        n = len(rows)
+        if n < min_resolved:
+            return None
+
+        wins   = [r for r in rows if r["status"] == "WIN"]
+        losses = [r for r in rows if r["status"] != "WIN"]
+
+        wr          = len(wins) / n
+        avg_win_r   = sum(r["r_multiple"] for r in wins)   / max(len(wins),  1)
+        avg_loss_r  = sum(abs(r["r_multiple"]) for r in losses) / max(len(losses), 1)
+        expectancy  = round(wr * avg_win_r - (1 - wr) * avg_loss_r, 4)
+        gross_wins  = sum(r["r_multiple"] for r in wins)
+        gross_loss  = sum(abs(r["r_multiple"]) for r in losses) or 1e-9
+        profit_factor = round(gross_wins / gross_loss, 4)
+
+        return {
+            "n_resolved":    n,
+            "win_rate":      round(wr, 4),
+            "expectancy":    expectancy,
+            "profit_factor": profit_factor,
+            "avg_win_r":     round(avg_win_r,  4),
+            "avg_loss_r":    round(avg_loss_r, 4),
+        }
+    except Exception:
+        return None
+
+
 def get_outcomes_for_ml(min_count: int = 30) -> Optional[pd.DataFrame]:
     """
     Return a DataFrame of resolved signals suitable for ML retraining feedback.

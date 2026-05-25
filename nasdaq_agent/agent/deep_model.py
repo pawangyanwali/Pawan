@@ -382,7 +382,11 @@ def _train_one_cluster(
         f"{len(cluster_dfs)} tickers…"
     )
 
-    all_X, all_y, all_w, all_ids = [], [], [], []
+    # Per-ticker chronological 80/20 split to avoid scaler data-leakage.
+    # Sequences within each ticker are already ordered (oldest → newest) because
+    # _make_sequences slides a window over a time-ordered DataFrame.
+    train_X, train_y, train_w, train_ids = [], [], [], []
+    val_X,   val_y,   val_w,   val_ids   = [], [], [], []
 
     for ticker, df_raw in cluster_dfs.items():
         if df_raw is None or len(df_raw) < SEQ_LEN + LOOKAHEAD_BARS + 20:
@@ -390,49 +394,63 @@ def _train_one_cluster(
         df = _prepare_df(df_raw, ticker)
         if df.empty:
             continue
-        w  = bt_weights.get(ticker, 1.0)
-        tid = ticker_idx_map.get(ticker, 0)   # 0 = unknown
+        w   = bt_weights.get(ticker, 1.0)
+        tid = ticker_idx_map.get(ticker, 0)
         X, y, weights, ids = _make_sequences(df, ticker_id=tid, sample_weight=w)
         if len(X) < 10:
             continue
-        all_X.append(X)
-        all_y.append(y)
-        all_w.append(weights)
-        all_ids.append(ids)
+        # Chronological split — no shuffle to preserve time order
+        split = max(1, int(len(X) * 0.8))
+        train_X.append(X[:split]);   val_X.append(X[split:])
+        train_y.append(y[:split]);   val_y.append(y[split:])
+        train_w.append(weights[:split]); val_w.append(weights[split:])
+        train_ids.append(ids[:split]); val_ids.append(ids[split:])
 
-    if not all_X:
+    if not train_X:
         logger.warning(f"[DeepModel] Cluster {cluster_name}: no training sequences — skipping")
         return False
 
-    X_all  = np.concatenate(all_X,  axis=0)
-    y_all  = np.concatenate(all_y,  axis=0)
-    w_all  = np.concatenate(all_w,  axis=0)
-    id_all = np.concatenate(all_ids, axis=0)
+    X_tr   = np.concatenate(train_X,   axis=0)
+    y_tr   = np.concatenate(train_y,   axis=0)
+    w_tr   = np.concatenate(train_w,   axis=0)
+    id_tr  = np.concatenate(train_ids, axis=0)
+    X_val  = np.concatenate(val_X,     axis=0) if val_X  else np.empty((0, SEQ_LEN, N_FEATURES))
+    y_val  = np.concatenate(val_y,     axis=0) if val_y  else np.empty(0)
+    w_val  = np.concatenate(val_w,     axis=0) if val_w  else np.empty(0)
+    id_val = np.concatenate(val_ids,   axis=0) if val_ids else np.empty(0, dtype=np.int64)
 
-    if len(X_all) < MIN_TRAIN_SAMPLES:
+    if len(X_tr) < MIN_TRAIN_SAMPLES:
         logger.warning(
-            f"[DeepModel] Cluster {cluster_name}: only {len(X_all)} sequences "
+            f"[DeepModel] Cluster {cluster_name}: only {len(X_tr)} train sequences "
             f"— need {MIN_TRAIN_SAMPLES}"
         )
         return False
 
+    has_val = len(X_val) >= 32
+
     logger.info(
-        f"[DeepModel] Cluster {cluster_name}: {len(X_all):,} sequences "
-        f"from {len(cluster_dfs)} tickers"
+        f"[DeepModel] Cluster {cluster_name}: {len(X_tr):,} train / "
+        f"{len(X_val):,} val sequences from {len(cluster_dfs)} tickers"
     )
 
-    # ── Scale features ────────────────────────────────────────────────────────
-    flat     = X_all.reshape(-1, N_FEATURES)
-    scaler   = StandardScaler()
-    scaler.fit(flat)
-    X_scaled = scaler.transform(flat).reshape(X_all.shape).astype(np.float32)
+    # ── Scale features (fit on TRAIN only — prevents future-data leakage) ─────
+    scaler = StandardScaler()
+    scaler.fit(X_tr.reshape(-1, N_FEATURES))
+    X_tr_sc = scaler.transform(X_tr.reshape(-1, N_FEATURES)).reshape(X_tr.shape).astype(np.float32)
+    if has_val:
+        X_val_sc = scaler.transform(X_val.reshape(-1, N_FEATURES)).reshape(X_val.shape).astype(np.float32)
     _save_scaler(scaler, cfg["scaler"])
 
     # ── Build tensors + dataset ───────────────────────────────────────────────
-    X_t  = torch.from_numpy(X_scaled)
-    y_t  = torch.from_numpy(y_all)
-    w_t  = torch.from_numpy(w_all)
-    id_t = torch.from_numpy(id_all)
+    X_t  = torch.from_numpy(X_tr_sc)
+    y_t  = torch.from_numpy(y_tr)
+    w_t  = torch.from_numpy(w_tr)
+    id_t = torch.from_numpy(id_tr)
+
+    if has_val:
+        X_vt  = torch.from_numpy(X_val_sc)
+        y_vt  = torch.from_numpy(y_val.astype(np.float32))
+        id_vt = torch.from_numpy(id_val)
 
     dataset = TensorDataset(X_t, y_t, w_t, id_t)
     loader  = DataLoader(
@@ -462,10 +480,11 @@ def _train_one_cluster(
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
     model.train()
-    best_loss  = float("inf")
-    best_state = None
+    best_val_loss  = float("inf")
+    best_state     = None
 
     for epoch in range(n_epochs):
+        model.train()
         epoch_loss = 0.0
         n_batches  = 0
         for xb, yb, wb, idb in loader:
@@ -478,19 +497,34 @@ def _train_one_cluster(
             epoch_loss += loss.item()
             n_batches  += 1
         scheduler.step()
-        avg_loss = epoch_loss / max(n_batches, 1)
-        if avg_loss < best_loss:
-            best_loss  = avg_loss
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        avg_train_loss = epoch_loss / max(n_batches, 1)
+
+        # Evaluate on held-out validation set (no gradients, no data leakage)
+        if has_val:
+            model.eval()
+            with torch.no_grad():
+                val_pred = model(X_vt, id_vt)
+                val_loss = criterion(val_pred, y_vt).mean().item()
+            track_loss = val_loss
+            loss_label = f"train={avg_train_loss:.4f}  val={val_loss:.4f}"
+        else:
+            track_loss = avg_train_loss
+            loss_label = f"loss={avg_train_loss:.4f}  (no val split)"
+
+        if track_loss < best_val_loss:
+            best_val_loss = track_loss
+            best_state    = {k: v.clone() for k, v in model.state_dict().items()}
+
         logger.info(
             f"[DeepModel] Cluster {cluster_name} — "
-            f"Epoch {epoch+1}/{n_epochs} — loss={avg_loss:.4f}"
+            f"Epoch {epoch+1}/{n_epochs} — {loss_label}"
         )
         with _lock:
             _training_history.append({
                 "epoch":        epoch + 1,
                 "total_epochs": n_epochs,
-                "loss":         round(avg_loss, 6),
+                "loss":         round(avg_train_loss, 6),
+                "val_loss":     round(track_loss, 6),
                 "ts":           time.time(),
                 "tickers":      len(cluster_dfs),
                 "mode":         "full" if is_first_train else "finetune",
@@ -499,33 +533,49 @@ def _train_one_cluster(
             if len(_training_history) > _MAX_HISTORY:
                 del _training_history[:-_MAX_HISTORY]
 
-    # ── Save best checkpoint ──────────────────────────────────────────────────
+    # ── Restore best checkpoint (chosen by val loss, not train loss) ──────────
     if best_state:
         model.load_state_dict(best_state)
 
     model.eval()
-    torch.save(model.state_dict(), cfg["path"])
 
-    with _lock:
-        _cluster_models[cluster_name]  = model
-        _cluster_scalers[cluster_name] = scaler
-        _cluster_trained[cluster_name] = True
-
-    # Quick sanity check on training set accuracy
+    # Accuracy on held-out val split (if available) else training set
     with torch.no_grad():
-        preds = model(X_t, id_t).numpy()
-    acc = float(((preds >= 0.5).astype(int) == y_all.astype(int)).mean())
+        if has_val:
+            eval_preds = model(X_vt, id_vt).numpy()
+            eval_labels = y_val.astype(int)
+            acc_label = "val"
+        else:
+            eval_preds = model(X_t, id_t).numpy()
+            eval_labels = y_tr.astype(int)
+            acc_label = "train"
+    acc = float(((eval_preds >= 0.5).astype(int) == eval_labels).mean())
 
-    # Free large training tensors/arrays — model weights are kept in _cluster_models
-    del X_t, y_t, w_t, id_t, X_scaled, flat, X_all, y_all, w_all, id_all, best_state
+    # Only persist the model if it improved on the held-out split
+    if best_val_loss < float("inf"):
+        torch.save(model.state_dict(), cfg["path"])
+        with _lock:
+            _cluster_models[cluster_name]  = model
+            _cluster_scalers[cluster_name] = scaler
+            _cluster_trained[cluster_name] = True
+        saved = True
+    else:
+        saved = False
+
+    # Free large training tensors/arrays — model weights kept in _cluster_models
+    del X_t, y_t, w_t, id_t, X_tr_sc, X_tr, y_tr, w_tr, id_tr
+    if has_val:
+        del X_vt, y_vt, id_vt, X_val_sc, X_val, y_val, w_val, id_val
+    if best_state:
+        del best_state
     gc.collect()
 
-    n_samples = len(preds)
     logger.info(
         f"[DeepModel] Cluster {cluster_name} done — "
-        f"acc={acc:.3f}  samples={n_samples:,}  best_loss={best_loss:.4f}"
+        f"{acc_label}_acc={acc:.3f}  best_val_loss={best_val_loss:.4f}"
+        f"  saved={saved}"
     )
-    return True
+    return saved
 
 
 def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
