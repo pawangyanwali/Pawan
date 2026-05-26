@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Data Integrity Tests — validates that all data produced and consumed by the
 system satisfies its mathematical and logical invariants.
@@ -21,7 +20,7 @@ Run:
     cd nasdaq_agent
     pytest tests/test_data_integrity.py -v --tb=short
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import math
 import sqlite3

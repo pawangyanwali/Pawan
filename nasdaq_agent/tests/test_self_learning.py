@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Section A — Self-Learning System Tests
 
@@ -16,7 +15,7 @@ Run:
     cd nasdaq_agent
     pytest tests/test_self_learning.py -v --tb=short
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import sys
 import threading

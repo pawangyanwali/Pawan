@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Section B — ML / Neural Model Tests
 
@@ -13,7 +12,7 @@ Run:
     cd nasdaq_agent
     pytest tests/test_ml_neural.py -v --tb=short
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import sys
 import tempfile

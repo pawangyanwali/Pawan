@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Tests for Gap 2 (routing wire in scanner.py) and Gap 3 (Phase 2 API endpoints in main.py).
 
@@ -10,7 +9,7 @@ Gap 2: StagedDeploymentController.get_routing() is now consulted before calling
 Gap 3: /api/learning/phase2 endpoint returns Phase 2 status.
        /api/learning-status now includes deployment_mode and drift_alerts.
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import sys
 import types

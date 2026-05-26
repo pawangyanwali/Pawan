@@ -93,8 +93,6 @@ except (ImportError, Exception):
     _P2_AVAILABLE = False
 
 try:
-    if not _LEARNER_ENABLED:
-        raise ImportError("learner disabled")
     from agent.algo_learning_engine import get_algo_params as _get_algo_params
     _ALE_AVAILABLE = True
 except (ImportError, Exception):
@@ -2153,6 +2151,20 @@ async def learning_status():
 async def learning_phase2_status():
     """Phase 2 status: concept drift, staged deployment, walk-forward validation, transfer tier."""
     if not _P2_AVAILABLE:
+        if not _LEARNER_ENABLED:
+            try:
+                from agent.valkey_client import _get_client as _vk_client
+                _vk = _vk_client()
+                if _vk:
+                    _raw = _vk.get("learner:status")
+                    if _raw:
+                        _d = json.loads(_raw)
+                        if time.time() - _d.get("ts", 0) < 300:
+                            p2 = _d.get("phase2", {})
+                            if p2:
+                                return {"available": True, **p2}
+            except Exception:
+                pass
         return {"available": False}
     try:
         status = _get_p2_engine().get_status()
@@ -2188,10 +2200,24 @@ async def reset_adaptive_filter(
 @app.get("/api/learning-log")
 async def learning_log_endpoint(limit: int = 100):
     """Last N learning engine log entries for the dashboard live feed."""
-    return {
-        "log":    get_learning_log(limit=limit),
-        "engine": learning_engine.get_status(),
-    }
+    log_entries   = get_learning_log(limit=limit)
+    engine_status = learning_engine.get_status()
+
+    if not _LEARNER_ENABLED:
+        try:
+            from agent.valkey_client import _get_client as _vk_client
+            _vk = _vk_client()
+            if _vk:
+                _raw = _vk.get("learner:status")
+                if _raw:
+                    _d = json.loads(_raw)
+                    if time.time() - _d.get("ts", 0) < 300:
+                        log_entries   = _d.get("log", log_entries)[:limit]
+                        engine_status = _d.get("engine", engine_status)
+        except Exception:
+            pass
+
+    return {"log": log_entries, "engine": engine_status}
 
 
 @app.get("/api/after-hours")

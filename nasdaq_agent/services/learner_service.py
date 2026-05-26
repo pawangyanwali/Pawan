@@ -50,7 +50,7 @@ def _is_market_hours() -> bool:
     try:
         from agent.market_hours import get_market_session
         session = get_market_session()
-        return session in ("OPEN", "PRE_MARKET", "POST_MARKET")
+        return session in ("REGULAR", "PRE_MARKET", "AFTER_HOURS")
     except Exception:
         return True   # fail-safe: assume market open, block training
 
@@ -97,12 +97,22 @@ def _publish_status_loop() -> None:
         try:
             client = _get_client()
             if client:
-                from agent.learning_engine import learning_engine
+                from agent.learning_engine import learning_engine, get_learning_log
                 from agent.adaptive_filter import get_status as af_status
+
+                phase2_status: dict = {}
+                try:
+                    from agent.algo_learning_p2 import get_phase2_engine
+                    phase2_status = get_phase2_engine().get_status()
+                except Exception:
+                    pass
+
                 payload = json.dumps({
                     "ts":             time.time(),
                     "engine":         learning_engine.get_status(),
                     "adaptive_filter": af_status(),
+                    "log":            get_learning_log(limit=50),
+                    "phase2":         phase2_status,
                 })
                 client.setex("learner:status", 300, payload)
                 _log.debug("learner:status published to Valkey")

@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Comprehensive system test — covers every API endpoint, ML/model layer,
 signal logic, backtest accuracy, P&L math, and data integrity.
@@ -9,7 +8,7 @@ Run:
     cd nasdaq_agent
     pytest tests/test_comprehensive.py -v --tb=short
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import math
 import sys

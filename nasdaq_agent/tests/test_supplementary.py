@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Supplementary tests covering smaller untested modules:
   - agent/relative_strength.py
@@ -9,7 +8,7 @@ Supplementary tests covering smaller untested modules:
   - agent/walk_forward.py
   - agent/ticker_universe.py
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import sys
 from pathlib import Path

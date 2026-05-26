@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Comprehensive tests for Phase 3 Part 1: WalkForwardTrainer.
 
@@ -17,7 +16,7 @@ Tests cover:
  10. Singleton pattern works correctly
  11+ Additional edge-case coverage
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import json
 import threading

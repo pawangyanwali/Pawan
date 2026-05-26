@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 test_data_pipeline.py
 ─────────────────────
@@ -16,7 +15,7 @@ Tests requiring the real ``ta`` library are automatically skipped when the
 stub is active (which is the case in CI where ta cannot be built).
 """
 
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import sys
 import numpy as np

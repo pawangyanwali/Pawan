@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Comprehensive tests for Phase 1 (market session detection) and Phase 2
 (extended-hours training data + session-aware ML features).
@@ -23,7 +22,7 @@ Bug-fix regression tests:
   - schwab_market_data.py: _try_refresh_md_token dedup raised 30s → 180s
   - schwab_market_data.py: _fetch_one_async applies CDN-block detection before refresh
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 import sys
 import os

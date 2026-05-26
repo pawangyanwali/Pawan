@@ -1,6 +1,5 @@
+from __future__ import annotations
 import pytest
-pytestmark = pytest.mark.slow
-
 """
 Tests for Phase 3 Part 3 — auto-tuning EWMA alpha in ParameterAdapter.
 
@@ -12,7 +11,7 @@ The effective learning rate now scales with Phase 2 drift severity:
 All fixed increments (conf_gate +1.0, rvol_gate +0.05) are also scaled
 proportionally so adaptation is uniformly faster under drift.
 """
-from __future__ import annotations
+pytestmark = pytest.mark.slow
 
 from unittest.mock import MagicMock, patch
 
