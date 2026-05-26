@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
     _SSE_AVAILABLE = False
 
 from agent.scanner import scanner, StockSignal
-from agent.market_hours import get_session_info, refresh_market_hours_cache
+from agent.market_hours import get_session_info, get_market_session, refresh_market_hours_cache
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals, get_observation_summary
 from agent.position_sizing import calculate as calc_position
@@ -1470,6 +1470,16 @@ async def trigger_retrain(
     if _is_retraining:
         return {"status": "already_running", "message": "Retrain already in progress."}
 
+    try:
+        session = get_market_session()
+    except Exception:
+        session = "UNKNOWN"
+    if session != "CLOSED":
+        return {
+            "status": "deferred",
+            "message": f"ML retrain deferred during {session}; run it in the CLOSED window.",
+        }
+
     def _run():
         try:
             retrain_all(TRAINING_TICKERS)
@@ -1495,6 +1505,16 @@ async def trigger_deep_train(
 
     if is_training_active():
         return {"status": "already_running", "message": "Deep model training already in progress."}
+
+    try:
+        session = get_market_session()
+    except Exception:
+        session = "UNKNOWN"
+    if session != "CLOSED":
+        return {
+            "status": "deferred",
+            "message": f"Deep model training deferred during {session}; run it in the CLOSED window.",
+        }
 
     def _run():
         try:
@@ -1709,11 +1729,25 @@ async def backtest_path(signal_id: str):
     return {"signal_id": signal_id, "path": get_price_path(signal_id)}
 
 
+_LEARNING_PARAMS_CACHE_TTL_SECS = 2.0
+_learning_params_cache: dict | None = None
+_learning_params_cache_ts: float = 0.0
+
+
 @app.get("/api/learning/params")
 async def learning_params_status():
     """Per-family learned parameter values for dashboard display."""
+    global _learning_params_cache, _learning_params_cache_ts
+
     if not _ALE_AVAILABLE:
         return {"available": False, "families": {}, "defaults": {}}
+
+    now = time.monotonic()
+    if (
+        _learning_params_cache is not None
+        and now - _learning_params_cache_ts < _LEARNING_PARAMS_CACHE_TTL_SECS
+    ):
+        return _learning_params_cache
 
     # Representative algo per family — used to look up current tuned params
     _FAMILY_REPRESENTATIVES = {
@@ -1733,23 +1767,23 @@ async def learning_params_status():
         "stop_mult": 1.0,
         "entry_window_bars": 3,
     }
-    loop = asyncio.get_running_loop()
-
     def _safe_params(algo_name: str) -> dict:
         try:
             return _get_algo_params(algo_name)
         except Exception:
             return {}
 
-    results = await asyncio.gather(
-        *[loop.run_in_executor(None, _safe_params, algo) for algo in _FAMILY_REPRESENTATIVES.values()],
-        return_exceptions=True,
-    )
+    # These are tiny in-memory reads. Keep them on the request path instead of
+    # queueing eight executor jobs behind scanner/model-training work.
+    results = [_safe_params(algo) for algo in _FAMILY_REPRESENTATIVES.values()]
     families = {
         family: {k: (r.get(k, defaults[k]) if isinstance(r, dict) else defaults[k]) for k in defaults}
         for family, r in zip(_FAMILY_REPRESENTATIVES.keys(), results)
     }
-    return {"available": True, "families": families, "defaults": defaults}
+    payload = {"available": True, "families": families, "defaults": defaults}
+    _learning_params_cache = payload
+    _learning_params_cache_ts = now
+    return payload
 
 
 @app.get("/api/learning-status")
@@ -1782,9 +1816,8 @@ async def learning_phase2_status():
     """Phase 2 status: concept drift, staged deployment, walk-forward validation, transfer tier."""
     if not _P2_AVAILABLE:
         return {"available": False}
-    loop = asyncio.get_running_loop()
     try:
-        status = await loop.run_in_executor(None, lambda: _get_p2_engine().get_status())
+        status = _get_p2_engine().get_status()
         return {"available": True, **status}
     except Exception as exc:
         logger.warning("phase2 status error: %s", exc)

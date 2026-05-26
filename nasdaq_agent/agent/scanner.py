@@ -47,7 +47,7 @@ from agent.support_resistance import (
     calculate_value_area,
 )
 from agent.mtf_analysis import multi_timeframe_analysis
-from agent.market_hours import get_session_info, confidence_multiplier
+from agent.market_hours import get_session_info, get_market_session, confidence_multiplier
 from agent.market_regime import update_regime, get_regime, apply_regime, classify_day_type
 from agent.opening_range import compute_opening_range
 from agent.earnings import earnings_blackout
@@ -1377,6 +1377,7 @@ class Scanner:
         self._first_scan_done:    threading.Event   = threading.Event()
         self._second_scan_done:   threading.Event   = threading.Event()
         self._scan_count:         int               = 0
+        self._last_training_defer_log: float        = 0.0
 
     def register_callback(self, fn: Callable) -> None:
         self._callbacks.append(fn)
@@ -1401,16 +1402,48 @@ class Scanner:
             except Exception as e:
                 logger.debug(f"Per-ticker callback error: {e}")
 
+    def _training_session(self) -> str:
+        """Return broad market session for heavy training gates."""
+        try:
+            return get_market_session()
+        except Exception as exc:
+            logger.warning(f"[ML-Retrain] Session check failed ({exc}) — deferring training")
+            return "UNKNOWN"
+
+    def _training_allowed_now(self) -> bool:
+        # Heavy model training competes with scanner/API threads. Keep it out of
+        # REGULAR, PRE_MARKET, and AFTER_HOURS so the dashboard can stay live.
+        return self._training_session() == "CLOSED"
+
+    def _log_training_deferred(self, reason: str, session: str) -> None:
+        now = time.time()
+        if now - self._last_training_defer_log < 300:
+            return
+        self._last_training_defer_log = now
+        logger.info(f"[ML-Retrain] {reason} deferred — session={session}; waiting for CLOSED window")
+
     def _should_retrain(self) -> bool:
         if self._last_retrain == 0.0:
             return False  # startup training running in background
-        return (time.time() - self._last_retrain) > ML_RETRAIN_INTERVAL
+        if (time.time() - self._last_retrain) <= ML_RETRAIN_INTERVAL:
+            return False
+        session = self._training_session()
+        if session != "CLOSED":
+            self._log_training_deferred("Scheduled retrain", session)
+            return False
+        return True
 
     def _should_finetune_deep(self) -> bool:
         """True when 1 hour has passed since last Deep BiLSTM fine-tune."""
         if self._last_deep_finetune == 0.0:
             return False  # avoid racing with startup full train
-        return (time.time() - self._last_deep_finetune) > DEEP_FINETUNE_INTERVAL
+        if (time.time() - self._last_deep_finetune) <= DEEP_FINETUNE_INTERVAL:
+            return False
+        session = self._training_session()
+        if session != "CLOSED":
+            self._log_training_deferred("Deep BiLSTM fine-tune", session)
+            return False
+        return True
 
     # ── ML training ───────────────────────────────────────────────────────────
 
@@ -1427,6 +1460,14 @@ class Scanner:
         logger.info("ML training: waiting for first two completed scan cycles to warm data cache…")
         self._first_scan_done.wait(timeout=600)
         self._second_scan_done.wait(timeout=900)
+
+        while not self._training_allowed_now():
+            session = self._training_session()
+            self._log_training_deferred("Startup retrain", session)
+            time.sleep(300)
+            if not self.is_running:
+                logger.info("[ML-Retrain] Startup retrain cancelled — scanner stopped")
+                return
 
         logger.info(f"ML training starting ({len(TRAINING_TICKERS)} Tier-1 tickers)…")
         daily_data = fetch_batch_interval(TRAINING_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
