@@ -1833,7 +1833,7 @@ TRADING_MAX_POSITION_PCT=10
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
 let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL', tierFilter = 'ALL';
-let _wsLastMsgAt = 0;  // epoch ms of last WS scan_complete message
+let _wsLastMsgAt = 0;  // epoch ms of last server WebSocket message
 let _lastPriceAt = 0;  // epoch ms of last live price update (prices or tick message)
 const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
@@ -1925,6 +1925,7 @@ function connectWS() {
     _resetWatchdog();   // any server message = connection is alive
     let m;
     try { m = JSON.parse(e.data); } catch(_) { return; }
+    _wsLastMsgAt = Date.now();
 
     // Server keepalive ping — reply immediately so server knows we're alive
     if (m.type === 'ping') {
