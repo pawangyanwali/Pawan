@@ -525,19 +525,40 @@ def _load_signal_cache() -> None:
 
 def _current_signal_snapshot() -> tuple[list[dict], str | None, bool]:
     """
-    Return signals for dashboard/API consumers.
+    Return (signals, last_scan_ts, from_cache) for dashboard/API consumers.
 
-    Live scanner results win. If the scanner has not produced signals yet
-    (common immediately after a restart during holidays/overnight), use the
-    persisted snapshot loaded by _load_signal_cache().
+    Source priority:
+      1. In-process scanner.signals — freshest, used when scanner runs here
+      2. Valkey scan:latest key    — durable cross-container snapshot
+      3. Disk signal cache          — local fallback (survives Valkey outage)
+      4. Live-quote observations    — last resort when no scan data exists
     """
-    if scanner.signals:
+    # Priority 1: in-process scanner (monolith / scanner-enabled container)
+    if _SCANNER_ENABLED and scanner.signals:
         return [s.to_dict() for s in scanner.signals], scanner.last_scan, False
+
+    # Priority 2: Valkey snapshot (written by scanner container after every cycle)
+    try:
+        from agent.signal_snapshot import read_latest as _snap_read
+        snap = _snap_read()
+        if snap and snap.get("signals"):
+            raw_ts = snap.get("ts")
+            ts_str = (
+                datetime.fromtimestamp(float(raw_ts), timezone.utc).isoformat()
+                if raw_ts else None
+            )
+            return snap["signals"], ts_str, True
+    except Exception:
+        pass
+
+    # Priority 3: disk cache (survives Valkey outage or cold start)
     if _last_signals_dicts:
         age = _loaded_signal_cache_age_seconds()
         if age is None or age <= _signal_cache_max_age_seconds():
             rows, observation_ts = _merge_observation_rows(_last_signals_dicts)
             return rows, observation_ts or _last_signals_ts or scanner.last_scan, True
+
+    # Priority 4: live-quote observations only (no scan data at all)
     observation_rows, observation_ts = _build_observation_rows()
     if observation_rows:
         return observation_rows, observation_ts or scanner.last_scan, False
@@ -790,6 +811,104 @@ def _on_signals(signals: list[StockSignal]) -> None:
             asyncio.run_coroutine_threadsafe(manager.broadcast(_pp_payload), _event_loop)
 
 
+def _on_valkey_scan(snap: dict) -> None:
+    """Broadcast scan results from Valkey (scanner running in a separate container)."""
+    if _event_loop is None:
+        return
+    try:
+        sigs_dicts = snap.get("signals", [])
+        regime     = snap.get("regime", {})
+        session    = snap.get("session", {})
+
+        _above_vwap      = sum(1 for s in sigs_dicts if s.get("vwap_event") in ("ABOVE", "RECLAIM", "EXTENDED_UP"))
+        _below_vwap      = sum(1 for s in sigs_dicts if s.get("vwap_event") in ("BELOW", "REJECTION", "EXTENDED_DOWN"))
+        _bullish_signals = sum(1 for s in sigs_dicts if s.get("prediction") in ("BUY", "STRONG BUY"))
+        _bearish_signals = sum(1 for s in sigs_dicts if s.get("prediction") in ("SELL", "STRONG SELL"))
+        _total = len(sigs_dicts) or 1
+        breadth = {
+            "above_vwap":     _above_vwap,
+            "below_vwap":     _below_vwap,
+            "pct_above_vwap": round(_above_vwap / _total * 100, 1),
+            "bullish":        _bullish_signals,
+            "bearish":        _bearish_signals,
+            "bias":           ("BULLISH" if _bullish_signals > _bearish_signals
+                               else "BEARISH" if _bearish_signals > _bullish_signals
+                               else "NEUTRAL"),
+        }
+        alerts = [
+            {"ticker": s["ticker"], "direction": s["prediction"],
+             "confidence": s.get("confidence"), "price": s.get("price"),
+             "session": s.get("session"), "regime": s.get("regime")}
+            for s in sigs_dicts
+            if s.get("prediction") in ("BUY", "SELL")
+               and (s.get("confidence") or 0) >= 70
+               and s.get("rr_qualifies") and not s.get("earnings_blocked")
+        ]
+        try:
+            macro = check_macro_event()
+        except Exception:
+            macro = {}
+        try:
+            bt_summary = get_broadcast_summary()
+        except Exception:
+            bt_summary = {}
+        try:
+            learn_summary = af_get_status()
+            learn_compact = {
+                "win_rate":          learn_summary.get("current_win_rate", 0.0),
+                "target_win_rate":   learn_summary.get("target_win_rate", 62.0),
+                "dynamic_threshold": learn_summary.get("dynamic_threshold", 60.0),
+                "suppressed_count":  learn_summary.get("suppressed_count", 0),
+                "blocked_count":     len(learn_summary.get("blocked_contexts", {})),
+                "is_learning":       learn_summary.get("is_learning", False),
+            }
+        except Exception:
+            learn_compact = {}
+        try:
+            from agent.paper_trading import get_summary as _pt_sum2, get_open_trades as _pt_open2
+            open_trades = {t["ticker"]: t for t in _pt_open2()}
+            pt_stats    = _pt_sum2()
+        except Exception:
+            open_trades = {}
+            pt_stats    = {}
+
+        payload = _dumps({
+            "type":           "update",
+            "signals":        sigs_dicts,
+            "regime":         regime,
+            "session":        session,
+            "alerts":         alerts,
+            "macro":          macro,
+            "backtest":       bt_summary,
+            "learning":       learn_compact,
+            "open_trades":    open_trades,
+            "pt_stats":       pt_stats,
+            "breadth":        breadth,
+            "universe_total": _get_universe_total(),
+            "scanned_count":  len(sigs_dicts),
+        })
+        asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
+
+        # Price patch so the surgical DOM update fires
+        if manager.active:
+            _price_patch = {
+                s["ticker"]: {
+                    "last":       s.get("price", 0),
+                    "open":       s.get("open_price", 0) or 0,
+                    "pct_change": s.get("change_pct", 0) or 0,
+                }
+                for s in sigs_dicts
+                if (s.get("price") or 0) > 0
+            }
+            if _price_patch:
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast(_dumps({"type": "prices", "p": _price_patch})),
+                    _event_loop,
+                )
+    except Exception as _ve:
+        logging.getLogger(__name__).debug("[Valkey] scan broadcast error: %s", _ve)
+
+
 # ── Ticker-update batch accumulator ───────────────────────────────────────────
 # A 477-ticker scan fires _on_ticker once per result, nearly simultaneously.
 # Scheduling 477 individual manager.broadcast() coroutines on the event loop
@@ -865,6 +984,12 @@ async def lifespan(app: FastAPI):
         scanner.start_background()
     else:
         logging.getLogger(__name__).info("[Startup] Scanner disabled (NASDAQ_SCANNER_ENABLED=0)")
+        try:
+            from agent.signal_snapshot import subscribe_scan_results as _sub_scan
+            _sub_scan(_on_valkey_scan)
+            logging.getLogger(__name__).info("[Startup] Valkey scan subscription started (API-only mode)")
+        except Exception as _sub_e:
+            logging.getLogger(__name__).warning("[Startup] Valkey scan subscription failed: %s", _sub_e)
 
     if _LEARNER_ENABLED:
         learning_engine.start()
@@ -2178,6 +2303,18 @@ async def broker_manual_order(
     """
     ticker = body.get("ticker", "").upper()
     sig = next((s for s in scanner.signals if s.ticker == ticker), None)
+    if sig is None and not _SCANNER_ENABLED:
+        # Scanner runs in another container — look up from Valkey snapshot
+        try:
+            from agent.signal_snapshot import read_latest as _snap_read2
+            import types as _types
+            snap2 = _snap_read2()
+            if snap2:
+                match = next((s for s in snap2.get("signals", []) if s.get("ticker") == ticker), None)
+                if match:
+                    sig = _types.SimpleNamespace(**match)
+        except Exception:
+            pass
     if not sig:
         return {"placed": False, "reason": f"{ticker} not in current scan"}
     result = maybe_place_tos_order(sig)
