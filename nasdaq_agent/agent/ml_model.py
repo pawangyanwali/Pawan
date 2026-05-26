@@ -702,8 +702,13 @@ class DailyMLModel:
         df = add_live_features(df, ticker=self.ticker)
         df = df.dropna(subset=_DAILY_FEATURE_COLS)
 
-        # Label: 1 if next-day close > today's close
-        df["label"] = (df["Close"].shift(-1) > df["Close"]).astype(int)
+        # Label: 1 if next-day close > today's close.
+        # Build future_close first and drop rows where it is NaN (last row has no
+        # future) so the shift-NaN comparison never produces a false-negative 0.
+        df["future_close"] = df["Close"].shift(-1)
+        df = df.dropna(subset=["future_close"])
+        df["label"] = (df["future_close"] > df["Close"]).astype(int)
+        df.drop(columns=["future_close"], inplace=True)
         df.dropna(inplace=True)
 
         X = df[_DAILY_FEATURE_COLS].values
@@ -901,9 +906,14 @@ class ReversalMLModel:
 
         df = self._prepare(raw)
 
-        # Label: 1 if price rises ≥ 0.8% within next 5 bars (bullish reversal)
-        future_high = df["Close"].rolling(self._LOOKAHEAD).max().shift(-self._LOOKAHEAD)
-        df["label"] = ((future_high - df["Close"]) / df["Close"] >= self._MOVE_PCT).astype(int)
+        # Label: 1 if price rises ≥ 0.8% within next _LOOKAHEAD bars (bullish reversal).
+        # Materialise future_high as a column and drop rows where it is NaN (the
+        # last _LOOKAHEAD rows have no complete future window) so the NaN comparison
+        # never silently becomes False and pollutes training with false negatives.
+        df["future_high"] = df["Close"].rolling(self._LOOKAHEAD).max().shift(-self._LOOKAHEAD)
+        df = df.dropna(subset=["future_high"])
+        df["label"] = ((df["future_high"] - df["Close"]) / df["Close"] >= self._MOVE_PCT).astype(int)
+        df.drop(columns=["future_high"], inplace=True)
         df = df.dropna(subset=REVERSAL_FEATURE_COLS + ["label"])
 
         X = df[REVERSAL_FEATURE_COLS].values

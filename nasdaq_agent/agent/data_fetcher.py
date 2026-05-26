@@ -86,23 +86,17 @@ def _sqlite_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
     if interval not in _SQLITE_TRAIN_INTERVALS or ttl <= 0:
         return None
     try:
-        from agent.historical_cache import _get_conn, get_bars
-        conn = _get_conn()
-        try:
-            row = conn.execute(
-                "SELECT MAX(dt) FROM ohlcv_bars WHERE ticker=? AND interval=?",
-                (ticker, interval),
-            ).fetchone()
-        finally:
-            conn.close()
-        if not row or not row[0]:
-            return None
-        newest = pd.Timestamp(row[0])
-        mult = _SQLITE_TTL_BY_INTERVAL.get(interval, _SQLITE_TTL_MULT)
-        if (pd.Timestamp.now() - newest).total_seconds() > ttl * mult:
-            return None
+        from agent.historical_cache import get_bars
         df = get_bars(ticker, interval, min_bars=50)
         if df is None or df.empty:
+            return None
+        # Freshness check: compare newest bar against TTL with per-interval multiplier.
+        # historical_cache stores tz-naive UTC datetimes; use utcnow for comparison.
+        newest = df.index[-1]
+        if hasattr(newest, "tzinfo") and newest.tzinfo is not None:
+            newest = newest.tz_convert("UTC").tz_localize(None)
+        mult = _SQLITE_TTL_BY_INTERVAL.get(interval, _SQLITE_TTL_MULT)
+        if (pd.Timestamp.utcnow().tz_localize(None) - newest).total_seconds() > ttl * mult:
             return None
         return df.rename(columns={
             "open": "Open", "high": "High",
@@ -116,12 +110,8 @@ def _sqlite_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
     if interval not in _SQLITE_TRAIN_INTERVALS or df is None or df.empty:
         return
     try:
-        from agent.historical_cache import _get_conn, _upsert_bars
-        conn = _get_conn()
-        try:
-            _upsert_bars(conn, ticker, interval, df)
-        finally:
-            conn.close()
+        from agent.historical_cache import _upsert_bars
+        _upsert_bars(ticker, interval, df)
     except Exception:
         pass
 

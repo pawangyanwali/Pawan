@@ -472,7 +472,7 @@ def _train_one_cluster(
     mode_label = "full training" if is_first_train else f"fine-tuning ({n_epochs} epochs)"
     logger.info(
         f"[DeepModel] Cluster {cluster_name}: starting {mode_label} "
-        f"on {len(X_all):,} sequences…"
+        f"on {len(X_tr):,} train / {len(X_val):,} val sequences…"
     )
 
     criterion = nn.BCELoss(reduction="none")

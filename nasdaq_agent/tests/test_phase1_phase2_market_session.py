@@ -1206,20 +1206,37 @@ class TestPhase3MaybeOpenTradeSessionGate:
         assert result is None
 
     def test_regular_session_uses_normal_floor(self):
-        """Regular session must NOT apply the extended-hours 70% floor (structural check)."""
-        import pathlib, os
-        src = pathlib.Path(
-            os.path.dirname(os.path.dirname(__file__))
-        ).joinpath("agent/paper_trading.py").read_text()
-        fn_start = src.index("def maybe_open_trade")
-        fn_body   = src[fn_start:fn_start + 3000]
-        # The floor must only apply inside the extended-hours branch
-        assert 'PRE_MARKET' in fn_body and 'AFTER_HOURS' in fn_body, (
-            "Extended-hours floor must reference PRE_MARKET / AFTER_HOURS session strings"
-        )
-        # REGULAR session must NOT appear as a blocked session
-        assert '"REGULAR"' not in fn_body.split("_live_session == \"CLOSED\"")[1][:200], (
-            "REGULAR session must not be listed as a blocked session"
+        """Regular session must NOT apply the extended-hours 70% floor (behavior check).
+
+        A HIGH-tier trade with confidence 60% (above normal floor, below ext-hours
+        floor of 70%) must NOT be rejected during REGULAR session.  If the extended-
+        hours 70% floor were applied here, position_sizing.calculate would never be
+        called because the function would return None.
+        """
+        from unittest.mock import patch, MagicMock
+        import agent.paper_trading as pt
+
+        called = {}
+
+        def _capture_calc(account_size, entry, stop, **kw):
+            called["reached"] = True
+            m = MagicMock(); m.shares = 5
+            return m
+
+        mock_conn = _make_paper_trade_db_mock(200.0)
+        with patch("agent.paper_trading._get_min_confidence", return_value=50.0), \
+             patch("agent.paper_trading._conn", return_value=mock_conn), \
+             patch("agent.paper_trading._lock", MagicMock()), \
+             patch("agent.paper_trading.logger"), \
+             patch("agent.position_sizing.calculate", side_effect=_capture_calc):
+            pt.maybe_open_trade(
+                ticker="AAPL", direction="BUY", price=200.0, target=202.0,
+                stop=198.0, confidence=60.0,
+                session="REGULAR", trading_tier="HIGH",
+            )
+        assert called.get("reached"), (
+            "REGULAR session with confidence=60% (above normal floor=50%) must not "
+            "be blocked by the extended-hours 70% floor"
         )
 
     def _make_db_mock(self, price: float = 200.0):
@@ -1432,6 +1449,38 @@ class TestPhase3ScannerAlgoSignalGate:
         )
 
 
+def _make_paper_trade_db_mock(price: float = 200.0):
+    """Module-level helper: minimal DB mock for maybe_open_trade() tests."""
+    from unittest.mock import MagicMock
+
+    def _execute(sql, *args, **kwargs):
+        m = MagicMock()
+        sql_up = sql.upper()
+        if "WHERE TICKER" in sql_up or "WHERE ticker" in sql:
+            m.fetchone.return_value = None
+        elif "COUNT(*)" in sql_up:
+            m.fetchone.return_value = {"n": 0}
+        elif "ACCOUNT_CONFIG" in sql_up:
+            m.fetchone.return_value = None
+        elif "COALESCE(SUM(pnl_dollar)" in sql or "rpnl" in sql:
+            m.fetchone.return_value = {"rpnl": 0.0}
+        elif "COALESCE(SUM(COALESCE(cost_basis" in sql or "alloc" in sql:
+            m.fetchone.return_value = {"alloc": 0.0}
+        elif sql.strip().upper().startswith("INSERT"):
+            m.lastrowid = 42
+        else:
+            m.fetchone.return_value = None
+            m.fetchall.return_value = []
+        return m
+
+    conn = MagicMock()
+    conn.__enter__ = lambda s: conn
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.execute.side_effect = _execute
+    conn.commit = MagicMock()
+    return conn
+
+
 class TestPhase3SessionGateIntegration:
     """End-to-end: is_ah_eod_close_window() exported and maybe_open_trade blocks CLOSED."""
 
@@ -1452,27 +1501,65 @@ class TestPhase3SessionGateIntegration:
         )
 
     def test_maybe_open_trade_has_ext_hours_floor(self):
-        """maybe_open_trade must apply a higher confidence floor for extended hours."""
-        import pathlib, os
-        src = pathlib.Path(
-            os.path.dirname(os.path.dirname(__file__))
-        ).joinpath("agent/paper_trading.py").read_text()
-        fn_start = src.index("def maybe_open_trade")
-        fn_body   = src[fn_start:fn_start + 3000]
-        assert "70.0" in fn_body and ("PRE_MARKET" in fn_body or "AFTER_HOURS" in fn_body), (
-            "maybe_open_trade must define a 70% confidence floor for extended hours"
+        """maybe_open_trade must reject a HIGH-tier trade below the 70% AH confidence floor.
+
+        Replaced char-offset scan (CRLF-sensitive) with a behavior check: a HIGH-tier
+        AFTER_HOURS trade at confidence=65% must be rejected (returns None) because it
+        falls below the 70.0% extended-hours floor.
+        """
+        from unittest.mock import patch, MagicMock
+        import agent.paper_trading as pt
+
+        mock_conn = _make_paper_trade_db_mock(200.0)
+        with patch("agent.paper_trading._get_min_confidence", return_value=50.0), \
+             patch("agent.paper_trading._conn", return_value=mock_conn), \
+             patch("agent.paper_trading._lock", MagicMock()), \
+             patch("agent.paper_trading.logger"):
+            result = pt.maybe_open_trade(
+                ticker="AAPL", direction="BUY", price=200.0, target=202.0,
+                stop=198.0, confidence=65.0,
+                session="AFTER_HOURS", trading_tier="HIGH",
+            )
+        assert result is None, (
+            "AFTER_HOURS HIGH-tier trade at confidence=65% must be rejected "
+            "by the 70% extended-hours floor"
         )
 
     def test_maybe_open_trade_has_stop_widening(self):
-        """maybe_open_trade must widen the stop in extended hours."""
-        import pathlib, os
-        src = pathlib.Path(
-            os.path.dirname(os.path.dirname(__file__))
-        ).joinpath("agent/paper_trading.py").read_text()
-        fn_start = src.index("def maybe_open_trade")
-        fn_body   = src[fn_start:fn_start + 3000]
-        assert "_stop_mult" in fn_body and "2.0" in fn_body, (
-            "maybe_open_trade must multiply the stop distance in extended hours"
+        """AFTER_HOURS BUY stop must be widened 2× risk distance (behavior check).
+
+        Replaced char-offset scan (CRLF-sensitive) with a behavior check: verifies
+        that the stop passed to position_sizing.calculate is widened to 2× the
+        original risk distance from entry when session is AFTER_HOURS.
+        """
+        from unittest.mock import patch, MagicMock
+        import agent.paper_trading as pt
+
+        entry = 200.0
+        original_stop = 198.0
+        expected_wide_stop = round(entry - (entry - original_stop) * 2.0, 4)  # 196.0
+
+        _recorded = {}
+
+        def _capture(account_size, entry, stop, **kw):
+            _recorded["stop"] = stop
+            m = MagicMock(); m.shares = 5
+            return m
+
+        mock_conn = _make_paper_trade_db_mock(entry)
+        with patch("agent.paper_trading._get_min_confidence", return_value=45.0), \
+             patch("agent.paper_trading._conn", return_value=mock_conn), \
+             patch("agent.paper_trading._lock", MagicMock()), \
+             patch("agent.paper_trading.logger"), \
+             patch("agent.position_sizing.calculate", side_effect=_capture):
+            pt.maybe_open_trade(
+                ticker="AAPL", direction="BUY", price=entry, target=202.0,
+                stop=original_stop, confidence=88.0,
+                session="AFTER_HOURS", trading_tier="HIGH",
+            )
+        assert _recorded.get("stop") == expected_wide_stop, (
+            f"AFTER_HOURS BUY stop must be widened to {expected_wide_stop}, "
+            f"got {_recorded.get('stop')}"
         )
 
 
