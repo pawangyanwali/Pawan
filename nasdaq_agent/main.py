@@ -1088,6 +1088,9 @@ async def lifespan(app: FastAPI):
 
     if not _MARKET_DATA_ENABLED:
         logging.getLogger(__name__).info("[Startup] Market data disabled (NASDAQ_MARKET_DATA_ENABLED=0) — Schwab streamer/poller not started")
+        # Still subscribe to Valkey md:prices so the WebSocket price bridge is
+        # live when prices are published by the scanner container's streamer.
+        _ensure_tick_broadcast_registered()
     from config import SCHWAB_ENABLED
     if _MARKET_DATA_ENABLED and SCHWAB_ENABLED:
         from config import NASDAQ_TICKERS as _nq_tickers
