@@ -10,9 +10,13 @@ on:
 
 jobs:
   test:
-    name: Run tests
+    name: Run tests (shard ${{ matrix.group }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
 
     steps:
       - name: Checkout code
@@ -30,12 +34,16 @@ jobs:
           pip install --upgrade pip
           pip install -r nasdaq_agent/requirements.txt
 
-      - name: Run tests
+      - name: Run tests (shard ${{ matrix.group }}/4)
         working-directory: nasdaq_agent
         env:
           APP_ENV: test
           JWT_SECRET: test-secret-for-ci-only
-        run: python -m pytest tests/ -v --tb=short -q
+        run: |
+          python -m pytest tests/ \
+            --splits 4 --group ${{ matrix.group }} \
+            -n auto \
+            --tb=short -q
 
   deploy:
     name: SSH deploy & reload
