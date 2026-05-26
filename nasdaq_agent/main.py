@@ -33,7 +33,29 @@ except ImportError:  # pragma: no cover
     _EventSourceResponse = None
     _SSE_AVAILABLE = False
 
-from agent.scanner import scanner, StockSignal
+# ── Service mode flags ────────────────────────────────────────────────────────
+# Defined before agent imports so heavy subsystems are never loaded in containers
+# that don't run them.  All default to enabled — preserves single-process behaviour.
+_SCANNER_ENABLED     = os.getenv("NASDAQ_SCANNER_ENABLED",     "1") != "0"
+_MARKET_DATA_ENABLED = os.getenv("NASDAQ_MARKET_DATA_ENABLED", "1") != "0"
+_LEARNER_ENABLED     = os.getenv("NASDAQ_LEARNER_ENABLED",     "1") != "0"
+_SCHEDULER_ENABLED   = os.getenv("NASDAQ_SCHEDULER_ENABLED",   "1") != "0"
+
+if _SCANNER_ENABLED:
+    from agent.scanner import scanner, StockSignal
+else:
+    class _NoopScanner:  # type: ignore[no-redef]
+        signals: list    = []
+        last_scan        = None
+        is_running: bool = False
+        def register_callback(self, *a): pass
+        def register_per_ticker_callback(self, *a): pass
+        def start_background(self): pass
+        def stop(self): pass
+        def get_last_signals(self): return []
+    scanner     = _NoopScanner()  # type: ignore[assignment]
+    StockSignal = object          # type: ignore[assignment,misc]
+
 from agent.market_hours import get_session_info, get_market_session, refresh_market_hours_cache
 from agent.market_regime import get_regime
 from agent.signal_tracker import get_stats, get_recent_signals, get_observation_summary
@@ -44,28 +66,47 @@ from agent.live_backtest import get_performance_stats, get_tracking_signals, get
 from agent.backtest_reporter import get_broadcast_summary, get_full_report
 from agent.adaptive_filter import get_status as af_get_status, reset_filter as af_reset_filter
 from agent.after_hours_monitor import get_all_biases as ah_get_all
-from agent.learning_engine import learning_engine, get_learning_log
-import agent.weekend_learner as weekend_learner
+if _LEARNER_ENABLED:
+    from agent.learning_engine import learning_engine, get_learning_log
+    import agent.weekend_learner as weekend_learner
+else:
+    class _NoopLearner:  # type: ignore[no-redef]
+        def start(self): pass
+        def stop(self): pass
+        def get_status(self): return {}
+    learning_engine = _NoopLearner()  # type: ignore[assignment]
+    def get_learning_log(limit: int = 100): return []  # type: ignore[misc]
+    class _NoopWeekendLearner:  # type: ignore[no-redef]
+        def register_broadcast(self, *a): pass
+        def maybe_start(self): pass
+        def get_status(self): return {}
+    weekend_learner = _NoopWeekendLearner()  # type: ignore[assignment]
 from auth.dependencies import require_viewer, require_analyst, AuthenticatedUser
 
 try:
+    if not _LEARNER_ENABLED:
+        raise ImportError("learner disabled")
     from agent.algo_learning_p2 import get_phase2_engine as _get_p2_engine
     _P2_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception):
     _get_p2_engine = None  # type: ignore[assignment]
     _P2_AVAILABLE = False
 
 try:
+    if not _LEARNER_ENABLED:
+        raise ImportError("learner disabled")
     from agent.algo_learning_engine import get_algo_params as _get_algo_params
     _ALE_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception):
     _get_algo_params = None  # type: ignore[assignment]
     _ALE_AVAILABLE = False
 
 try:
+    if not _LEARNER_ENABLED:
+        raise ImportError("learner disabled")
     from agent.walk_forward_trainer import get_walk_forward_trainer as _get_wf_trainer
     _WFT_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception):
     _get_wf_trainer = None  # type: ignore[assignment]
     _WFT_AVAILABLE = False
 from agent.broker.schwab_auth import (
@@ -74,11 +115,20 @@ from agent.broker.schwab_auth import (
     build_auth_url, exchange_auth_code,
     build_md_auth_url, exchange_md_auth_code,
 )
-from agent.broker.schwab_streamer import (
-    start_streamer, start_md_poller, get_streamer_status,
-    register_tick_callback, register_bulk_price_callback,
-    is_md_poller_running, get_live_quotes_snapshot,
-)
+if _MARKET_DATA_ENABLED:
+    from agent.broker.schwab_streamer import (
+        start_streamer, start_md_poller, get_streamer_status,
+        register_tick_callback, register_bulk_price_callback,
+        is_md_poller_running, get_live_quotes_snapshot,
+    )
+else:
+    def start_streamer(*a, **kw): pass          # type: ignore[misc]
+    def start_md_poller(*a, **kw): pass         # type: ignore[misc]
+    def get_streamer_status() -> dict: return {"connected": False, "disabled": True}  # type: ignore[misc]
+    def register_tick_callback(*a): pass        # type: ignore[misc]
+    def register_bulk_price_callback(*a): pass  # type: ignore[misc]
+    def is_md_poller_running() -> bool: return False   # type: ignore[misc]
+    def get_live_quotes_snapshot() -> dict: return {}  # type: ignore[misc]
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
 from agent.notifier import notify_signal as _notify_signal, get_config as _notify_cfg, configure as _notify_configure, send_telegram as _send_telegram
@@ -672,6 +722,19 @@ def _on_signals(signals: list[StockSignal]) -> None:
 
     sigs_dicts = [s.to_dict() for s in signals]
 
+    # Write durable snapshot to Valkey — web-api reads this on restart instead
+    # of waiting for the next scan cycle (Step 3 of the containerisation plan).
+    try:
+        from agent.signal_snapshot import write_latest as _snap_write
+        _snap_write(
+            signals       = sigs_dicts,
+            regime        = regime.to_dict(),
+            session       = session,
+            scanned_count = len(signals),
+        )
+    except Exception:
+        pass
+
     # Persist to disk cache so the next page load is instantaneous
     _save_signal_cache(sigs_dicts, scanner.last_scan or "")
 
@@ -795,24 +858,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # ── Service enable/disable gates (Priority 1 — service split readiness) ─────
-    # Each service can be disabled independently via environment variables.
-    # This allows running multiple EC2/ECS instances with different roles:
-    #   NASDAQ_SCANNER_ENABLED=0  → API-only instance (serves HTTP, no scanning)
-    #   NASDAQ_LEARNER_ENABLED=0  → scanner-only instance (no ML retraining)
-    # Default: all services enabled (preserves existing single-process behavior).
-    _scanner_enabled = os.getenv("NASDAQ_SCANNER_ENABLED", "1") != "0"
-    _learner_enabled = os.getenv("NASDAQ_LEARNER_ENABLED", "1") != "0"
-
     _load_signal_cache()   # pre-populate cache before any scan runs
     scanner.register_callback(_on_signals)
     scanner.register_per_ticker_callback(_on_ticker)
-    if _scanner_enabled:
+    if _SCANNER_ENABLED:
         scanner.start_background()
     else:
         logging.getLogger(__name__).info("[Startup] Scanner disabled (NASDAQ_SCANNER_ENABLED=0)")
 
-    if _learner_enabled:
+    if _LEARNER_ENABLED:
         learning_engine.start()
     else:
         logging.getLogger(__name__).info("[Startup] Learning engine disabled (NASDAQ_LEARNER_ENABLED=0)")
@@ -849,7 +903,7 @@ async def lifespan(app: FastAPI):
             pass
     from agent.paper_trading import register_trade_callback as _reg_trade_cb
     _reg_trade_cb(_on_trade_event)
-    if _learner_enabled:
+    if _LEARNER_ENABLED:
         weekend_learner.maybe_start()
 
     # ── Data-quality startup checks (Priority 10) ─────────────────────────────
@@ -873,42 +927,44 @@ async def lifespan(app: FastAPI):
 
     # ── EOD watchdog — fires at 3:45 PM ET independent of the scanner ────────
     # Guarantees positions are closed even if the scanner loop is stalled.
-    import threading as _threading
-    def _eod_watchdog():
-        import time as _time
-        import zoneinfo as _zi
-        from datetime import datetime as _dt
-        _log = logging.getLogger("eod_watchdog")
-        _fired_on: set = set()   # track dates we already fired to avoid double-close
-        while True:
-            try:
-                now_et = _dt.now(_zi.ZoneInfo("America/New_York"))
-                hm = now_et.hour * 60 + now_et.minute
-                today = now_et.date()
-                # Fire between 15:45 and 16:00 ET (945–960 mins) on weekdays only.
-                # Bug note: 225-240 was 3:45-4:00 AM, not PM. 15*60+45=945, 16*60=960.
-                if now_et.weekday() < 5 and 945 <= hm < 960 and today not in _fired_on:
-                    _fired_on.add(today)
-                    try:
-                        from agent.paper_trading import close_all_positions_eod
-                        n = close_all_positions_eod(reason="EOD_WATCHDOG_3:45PM")
-                        if n:
-                            _log.warning(f"[EOD Watchdog] Force-closed {n} position(s) at 3:45 PM ET")
-                    except Exception as _e:
-                        _log.error(f"[EOD Watchdog] Close failed: {_e}", exc_info=True)
-                # Prune old dates so the set doesn't grow forever
-                if len(_fired_on) > 10:
-                    _fired_on = set(sorted(_fired_on)[-5:])
-            except Exception:
-                pass
-            _time.sleep(30)
+    # Gated by NASDAQ_SCHEDULER_ENABLED so it can move to the scheduler container.
+    if _SCHEDULER_ENABLED:
+        def _eod_watchdog():
+            import time as _time
+            import zoneinfo as _zi
+            from datetime import datetime as _dt
+            _log = logging.getLogger("eod_watchdog")
+            _fired_on: set = set()
+            while True:
+                try:
+                    now_et = _dt.now(_zi.ZoneInfo("America/New_York"))
+                    hm = now_et.hour * 60 + now_et.minute
+                    today = now_et.date()
+                    if now_et.weekday() < 5 and 945 <= hm < 960 and today not in _fired_on:
+                        _fired_on.add(today)
+                        try:
+                            from agent.paper_trading import close_all_positions_eod
+                            n = close_all_positions_eod(reason="EOD_WATCHDOG_3:45PM")
+                            if n:
+                                _log.warning(f"[EOD Watchdog] Force-closed {n} position(s) at 3:45 PM ET")
+                        except Exception as _e:
+                            _log.error(f"[EOD Watchdog] Close failed: {_e}", exc_info=True)
+                    if len(_fired_on) > 10:
+                        _fired_on = set(sorted(_fired_on)[-5:])
+                except Exception:
+                    pass
+                _time.sleep(30)
 
-    _wd = _threading.Thread(target=_eod_watchdog, daemon=True, name="eod-watchdog")
-    _wd.start()
-    logging.getLogger(__name__).info("EOD watchdog started — will force-close all positions at 3:45 PM ET")
+        _wd = _threading.Thread(target=_eod_watchdog, daemon=True, name="eod-watchdog")
+        _wd.start()
+        logging.getLogger(__name__).info("EOD watchdog started — will force-close all positions at 3:45 PM ET")
+    else:
+        logging.getLogger(__name__).info("[Startup] Scheduler disabled (NASDAQ_SCHEDULER_ENABLED=0) — EOD watchdog not started")
 
+    if not _MARKET_DATA_ENABLED:
+        logging.getLogger(__name__).info("[Startup] Market data disabled (NASDAQ_MARKET_DATA_ENABLED=0) — Schwab streamer/poller not started")
     from config import SCHWAB_ENABLED
-    if SCHWAB_ENABLED:
+    if _MARKET_DATA_ENABLED and SCHWAB_ENABLED:
         from config import NASDAQ_TICKERS as _nq_tickers
         _streamer_started = False
 
