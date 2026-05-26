@@ -2300,6 +2300,14 @@ _PING_TIMEOUT        = 10   # if we can't write the ping within N seconds → pr
 _PING_RETRY_INTERVAL =  5   # after a timeout (event loop busy), retry after this many seconds
 
 
+async def _safe_ws_close(ws: WebSocket, *, code: int, reason: str = "") -> None:
+    """Best-effort WebSocket close that never escapes protocol-race errors."""
+    try:
+        await ws.close(code=code, reason=reason)
+    except Exception as exc:
+        logger.debug("WebSocket close ignored: %s", exc)
+
+
 async def _ws_keepalive(ws: WebSocket) -> None:
     """
     Background task: sends a server-side ping every _PING_INTERVAL seconds.
@@ -2366,10 +2374,7 @@ async def websocket_endpoint(ws: WebSocket):
             pass
 
     if not _authed:
-        try:
-            await ws.close(code=4001)
-        except RuntimeError:
-            pass   # client already disconnected before we could send the close frame
+        await _safe_ws_close(ws, code=4001)
         return
 
     await manager.connect(ws)

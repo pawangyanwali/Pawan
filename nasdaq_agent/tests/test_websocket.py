@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # We isolate it so tests are fast and don't require a running server.
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from main import ConnectionManager
+from main import ConnectionManager, _safe_ws_close
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -47,6 +47,17 @@ def _make_dead_ws():
     ws.accept = AsyncMock(return_value=None)
     ws.send_text = AsyncMock(side_effect=RuntimeError("connection closed"))
     return ws
+
+
+@pytest.mark.asyncio
+async def test_safe_ws_close_suppresses_protocol_race():
+    """Auth rejection must not become an ASGI error if the client already closed."""
+    ws = AsyncMock()
+    ws.close = AsyncMock(side_effect=AttributeError("'WebSocketProtocol' object has no attribute 'transfer_data_task'"))
+
+    await _safe_ws_close(ws, code=4001)
+
+    ws.close.assert_awaited_once_with(code=4001, reason="")
 
 
 # ── ConnectionManager unit tests ──────────────────────────────────────────────
