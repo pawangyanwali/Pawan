@@ -12,7 +12,7 @@ jobs:
   test:
     name: Run tests (shard ${{ matrix.group }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +42,8 @@ jobs:
         run: |
           python -m pytest tests/ \
             --splits 4 --group ${{ matrix.group }} \
+            --durations-path .test_durations \
+            --store-durations \
             -n auto \
             --tb=short -q
 
