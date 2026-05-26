@@ -10,17 +10,29 @@ on:
 
 jobs:
   test:
-    name: Run tests (shard ${{ matrix.group }}/4)
+    name: Run tests (shard ${{ matrix.group }}/16)
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6, 7, 8]
+        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # Restore timing data from a previous CI run (GitHub-accurate durations).
+      # Using run_id in the key guarantees a miss on the exact key so restore-keys
+      # always picks up the latest saved cache from a previous run.
+      - name: Restore test-duration cache
+        uses: actions/cache/restore@v4
+        with:
+          path: nasdaq_agent/.test_durations
+          key: test-durations-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            test-durations-${{ github.ref }}-
+            test-durations-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,18 +46,67 @@ jobs:
           pip install --upgrade pip
           pip install -r nasdaq_agent/requirements.txt
 
-      - name: Run tests (shard ${{ matrix.group }}/4)
+      - name: Run tests (shard ${{ matrix.group }}/16)
         working-directory: nasdaq_agent
         env:
           APP_ENV: test
           JWT_SECRET: test-secret-for-ci-only
         run: |
           python -m pytest tests/ \
-            --splits 8 --group ${{ matrix.group }} \
+            --splits 16 --group ${{ matrix.group }} \
             --durations-path .test_durations \
             --store-durations \
             -n auto \
             --tb=short -q
+
+      - name: Upload shard timing data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations-shard-${{ matrix.group }}
+          path: nasdaq_agent/.test_durations
+
+  # Runs after all shards (pass or fail) to merge per-shard timing files into
+  # a single cache entry.  Next run restores this for balanced duration splits.
+  update-duration-cache:
+    name: Merge shard timings into cache
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all shard timing artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-durations-shard-*
+          path: shard-durations/
+
+      - name: Merge timing data
+        run: |
+          python3 - <<'PYEOF'
+          import json, pathlib
+
+          base = pathlib.Path('nasdaq_agent/.test_durations')
+          merged = json.loads(base.read_text()) if base.exists() else {}
+
+          # CI-measured timings override local baseline
+          for f in sorted(pathlib.Path('shard-durations').rglob('.test_durations')):
+              try:
+                  merged.update(json.loads(f.read_text()))
+              except Exception as e:
+                  print(f'Skip {f}: {e}')
+
+          base.write_text(json.dumps(merged, sort_keys=True, indent=2))
+          print(f'Saved {len(merged)} test durations')
+          PYEOF
+
+      - name: Save merged timings to cache
+        uses: actions/cache/save@v4
+        with:
+          path: nasdaq_agent/.test_durations
+          key: test-durations-${{ github.ref }}-${{ github.run_id }}
 
   deploy:
     name: SSH deploy & reload
@@ -85,7 +146,7 @@ jobs:
               PATCHED=1
             fi
             if ! grep -q "ExecReload" "$SERVICE_FILE"; then
-              sudo sed -i '/^ExecStart=/a ExecReload=/bin/kill -s HUP $MAINPID' "$SERVICE_FILE"
+              sudo sed -i '/^ExecReload=/d; /^ExecStart=/a ExecReload=/bin/kill -s HUP $MAINPID' "$SERVICE_FILE"
               echo "Patched service file with ExecReload"
               PATCHED=1
             fi
