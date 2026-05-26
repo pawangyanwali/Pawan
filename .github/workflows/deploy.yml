@@ -6,13 +6,14 @@ on:
       - claude/nasdaq-stock-prediction-agent-kDe60
     paths:
       - 'nasdaq_agent/**'
+      - 'docker-compose.yml'
       - '.github/workflows/deploy.yml'
 
 jobs:
   deploy:
     name: SSH deploy & reload
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Deploy to server
@@ -22,74 +23,134 @@ jobs:
           username:        ${{ secrets.DEPLOY_USER }}
           key:             ${{ secrets.DEPLOY_SSH_KEY }}
           port:            22
-          command_timeout: 10m
+          command_timeout: 15m
           script: |
             set -e
             APP_DIR="/opt/nasdaq-agent"
-            VENV="$APP_DIR/venv"
-            SERVICE="nasdaq-agent"
             APP_USER="nasdaq"
 
             echo "=== Pulling latest code ==="
             sudo -u "$APP_USER" git -C "$APP_DIR" fetch origin
             sudo -u "$APP_USER" git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
 
-            echo "=== Installing any new dependencies ==="
-            sudo -u "$APP_USER" "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
+            # ── Docker Compose path ────────────────────────────────────────────
+            # Used when Docker is installed on the EC2 instance.
+            # Activate by running: sudo apt-get install -y docker.io docker-compose-plugin
+            # then: sudo usermod -aG docker $APP_USER
+            if command -v docker &>/dev/null && sudo -u "$APP_USER" docker info &>/dev/null; then
+              echo "=== Docker detected — building and restarting services ==="
+              cd "$APP_DIR"
 
-            echo "=== Ensure service file has required directives ==="
-            SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
-            PATCHED=0
-            if ! grep -q "ExecStartPre" "$SERVICE_FILE"; then
-              sudo sed -i '/^ExecStart=/i ExecStartPre=/bin/truncate -s 0 /opt/nasdaq-agent/logs/agent.err' "$SERVICE_FILE"
-              echo "Patched service file with ExecStartPre"
-              PATCHED=1
-            fi
-            if ! grep -q "ExecReload" "$SERVICE_FILE"; then
-              sudo sed -i '/^ExecReload=/d; /^ExecStart=/a ExecReload=/bin/kill -s HUP $MAINPID' "$SERVICE_FILE"
-              echo "Patched service file with ExecReload"
-              PATCHED=1
-            fi
-            if [ "$PATCHED" = "1" ]; then
-              sudo systemctl daemon-reload
-            fi
-
-            echo "=== Reloading service (zero-downtime) ==="
-            if sudo systemctl reload "$SERVICE" 2>/dev/null; then
-              echo "Graceful reload sent"
-            else
-              echo "Reload not supported, falling back to restart"
-              sudo systemctl restart "$SERVICE"
-            fi
-
-            echo "=== Waiting for service to come up ==="
-            for i in $(seq 1 12); do
-              sleep 5
-              status=$(systemctl is-active "$SERVICE" 2>/dev/null || echo "unknown")
-              if [ "$status" = "active" ]; then
-                echo "Service is active after $((i*5))s"
-                break
-              fi
-              echo "  Attempt $i/12: status=$status"
-              if [ $i -eq 12 ]; then
-                echo "ERROR: Service failed to start within 60s"
-                sudo journalctl -u "$SERVICE" --no-pager -n 50
+              # Ensure .env exists (operator must place this on the server; never committed)
+              if [ ! -f "$APP_DIR/.env" ]; then
+                echo "ERROR: $APP_DIR/.env not found — create it from .env.example before deploying with Docker"
                 exit 1
               fi
-            done
 
-            echo "=== Health check (internal) ==="
-            for i in 1 2 3; do
-              if curl -sf --max-time 10 http://localhost:8000/api/health \
-                   | python3 -c "import sys,json; d=json.load(sys.stdin); \
-                     print('Health:', d.get('status','?'), '| Tickers:', d.get('tickers','?'))"; then
-                break
+              # Build the new image (uses layer cache; only rebuilds changed layers)
+              sudo -u "$APP_USER" docker compose build --pull
+
+              # Rolling update: bring up new containers; remove old ones when healthy
+              sudo -u "$APP_USER" docker compose up -d --remove-orphans
+
+              echo "=== Waiting for web-api to become healthy ==="
+              for i in $(seq 1 18); do
+                sleep 10
+                status=$(sudo -u "$APP_USER" docker compose ps --format json web-api 2>/dev/null \
+                         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health','?'))" 2>/dev/null \
+                         || echo "unknown")
+                if [ "$status" = "healthy" ]; then
+                  echo "web-api healthy after $((i*10))s"
+                  break
+                fi
+                echo "  Attempt $i/18: health=$status"
+                if [ $i -eq 18 ]; then
+                  echo "ERROR: web-api did not become healthy within 3 min"
+                  sudo -u "$APP_USER" docker compose logs --tail=60 web-api
+                  exit 1
+                fi
+              done
+
+              echo "=== Health check (internal) ==="
+              for i in 1 2 3; do
+                if curl -sf --max-time 10 http://localhost:8000/api/health \
+                     | python3 -c "import sys,json; d=json.load(sys.stdin); \
+                       print('Health:', d.get('status','?'), '| Tickers:', d.get('tickers','?'))"; then
+                  break
+                fi
+                echo "Health check attempt $i failed, retrying..."
+                sleep 5
+              done
+
+              echo "=== Service status ==="
+              sudo -u "$APP_USER" docker compose ps
+
+              echo "=== Deployed via Docker Compose successfully ==="
+
+            else
+              # ── Systemd fallback ─────────────────────────────────────────────
+              # Used when Docker is not yet installed on the EC2 instance.
+              echo "=== Docker not available — falling back to systemd deploy ==="
+              VENV="$APP_DIR/venv"
+              SERVICE="nasdaq-agent"
+
+              echo "=== Installing any new dependencies ==="
+              sudo -u "$APP_USER" "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
+
+              echo "=== Ensure service file has required directives ==="
+              SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+              PATCHED=0
+              if ! grep -q "ExecStartPre" "$SERVICE_FILE"; then
+                sudo sed -i '/^ExecStart=/i ExecStartPre=/bin/truncate -s 0 /opt/nasdaq-agent/logs/agent.err' "$SERVICE_FILE"
+                echo "Patched service file with ExecStartPre"
+                PATCHED=1
               fi
-              echo "Health check attempt $i failed, retrying..."
-              sleep 5
-            done
+              if ! grep -q "ExecReload" "$SERVICE_FILE"; then
+                sudo sed -i '/^ExecReload=/d; /^ExecStart=/a ExecReload=/bin/kill -s HUP $MAINPID' "$SERVICE_FILE"
+                echo "Patched service file with ExecReload"
+                PATCHED=1
+              fi
+              if [ "$PATCHED" = "1" ]; then
+                sudo systemctl daemon-reload
+              fi
 
-            echo "=== Deployed successfully ==="
+              echo "=== Reloading service (zero-downtime) ==="
+              if sudo systemctl reload "$SERVICE" 2>/dev/null; then
+                echo "Graceful reload sent"
+              else
+                echo "Reload not supported, falling back to restart"
+                sudo systemctl restart "$SERVICE"
+              fi
+
+              echo "=== Waiting for service to come up ==="
+              for i in $(seq 1 12); do
+                sleep 5
+                status=$(systemctl is-active "$SERVICE" 2>/dev/null || echo "unknown")
+                if [ "$status" = "active" ]; then
+                  echo "Service is active after $((i*5))s"
+                  break
+                fi
+                echo "  Attempt $i/12: status=$status"
+                if [ $i -eq 12 ]; then
+                  echo "ERROR: Service failed to start within 60s"
+                  sudo journalctl -u "$SERVICE" --no-pager -n 50
+                  exit 1
+                fi
+              done
+
+              echo "=== Health check (internal) ==="
+              for i in 1 2 3; do
+                if curl -sf --max-time 10 http://localhost:8000/api/health \
+                     | python3 -c "import sys,json; d=json.load(sys.stdin); \
+                       print('Health:', d.get('status','?'), '| Tickers:', d.get('tickers','?'))"; then
+                  break
+                fi
+                echo "Health check attempt $i failed, retrying..."
+                sleep 5
+              done
+
+              echo "=== Deployed via systemd successfully ==="
+            fi
 
       - name: Notify on failure
         if: failure()

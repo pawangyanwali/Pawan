@@ -1,0 +1,38 @@
+# Secrets — never bake into image
+.env
+*.env
+secrets/
+*.pem
+*.key
+*.crt
+
+# Python runtime artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Tests — not needed in production image
+tests/
+pytest.ini
+.pytest_cache/
+.pytest_split_durations
+
+# Large data / model files — mounted as Docker volumes at runtime
+data/
+logs/
+
+# Version control
+.git/
+.github/
+
+# Local dev tools
+.venv/
+venv/
+*.log
+*.bak
