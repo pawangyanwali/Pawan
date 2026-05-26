@@ -1260,7 +1260,7 @@ def _container_health(valkey_connected: bool) -> dict:
 
     Each container writes a key with a short TTL so expiry = container down:
       web-api    — always "up" (this process is answering the request)
-      scanner    — scan:latest key; written after every scan cycle (TTL 300s)
+      scanner    — scan:latest key; written after every scan cycle (can take up to ~400s)
       learner    — learner:status key; written every 60s (TTL 300s)
       scheduler  — scheduler:heartbeat key; written every 30s (TTL 90s)
 
@@ -1268,6 +1268,9 @@ def _container_health(valkey_connected: bool) -> dict:
       up (bool), last_seen_ago_s (float|None), detail (str)
     """
     now = time.time()
+    # Scanner scan cycle can take up to ~400s on 477-ticker universe with 8 workers.
+    # Allow 660s (one full cycle + 270s buffer) before marking it down.
+    _SCANNER_STALE_S = 660
     result: dict = {
         "web-api": {"up": True, "last_seen_ago_s": 0.0, "detail": "serving this response"},
     }
@@ -1292,7 +1295,7 @@ def _container_health(valkey_connected: bool) -> dict:
                 d = json.loads(raw)
                 scan_ts = float(d.get("ts", 0))
                 ago = round(now - scan_ts, 1) if scan_ts else None
-                up = ago is not None and ago < 300
+                up = ago is not None and ago < _SCANNER_STALE_S
                 result["scanner"] = {
                     "up": up,
                     "last_seen_ago_s": ago,
@@ -1355,8 +1358,23 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     from agent.valkey_client import health_status as vk_health
     from agent.broker.schwab_streamer import get_streamer_status
 
-    streamer = get_streamer_status()
     vk = vk_health()
+
+    # When scanner runs in its own container, read streamer/poller status from
+    # Valkey (written by scanner_service every 15s) instead of the local noop state.
+    streamer = get_streamer_status()
+    if not _MARKET_DATA_ENABLED and vk.get("connected"):
+        try:
+            from agent.valkey_client import _get_client as _vk_c
+            _vc = _vk_c()
+            if _vc:
+                _raw = _vc.get("scanner:streamer")
+                if _raw:
+                    _sd = json.loads(_raw)
+                    if time.time() - _sd.get("ts", 0) < 60:
+                        streamer = _sd
+        except Exception:
+            pass
 
     # RDS check — lightweight: just try to get a connection from the pool
     rds_ok = False

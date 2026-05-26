@@ -104,6 +104,33 @@ def _start_market_data() -> None:
             _log.warning("Schwab MD poller not started: %s", exc)
 
 
+# ── Streamer status publisher ─────────────────────────────────────────────────
+
+def _publish_streamer_status_loop() -> None:
+    """
+    Publish Schwab streamer + MD poller status to Valkey key scanner:streamer
+    every 15s so the web-api can display accurate streamer/poller state in the
+    Infrastructure panel (the web-api has no local streamer).
+    """
+    import json as _json
+
+    try:
+        from agent.valkey_client import _get_client
+    except ImportError:
+        return
+
+    while not _runner.stopped:
+        try:
+            client = _get_client()
+            if client:
+                from agent.broker.schwab_streamer import get_streamer_status
+                payload = _json.dumps({"ts": time.time(), **get_streamer_status()})
+                client.setex("scanner:streamer", 60, payload)
+        except Exception as exc:
+            _log.debug("scanner:streamer publish failed: %s", exc)
+        time.sleep(15)
+
+
 # ── Schwab token hot-reload ───────────────────────────────────────────────────
 
 def _token_reload_loop() -> None:
@@ -174,7 +201,9 @@ def main() -> None:
         _log.info("Market data disabled (NASDAQ_MARKET_DATA_ENABLED=0)")
 
     # Hot-reload: restart market data when new Schwab tokens arrive via OAuth
-    threading.Thread(target=_token_reload_loop, daemon=True, name="token-reload").start()
+    threading.Thread(target=_token_reload_loop,            daemon=True, name="token-reload").start()
+    # Publish streamer/poller status to Valkey for web-api Infrastructure panel
+    threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="streamer-status-pub").start()
 
     scanner.start_background()
     _log.info("Scan loop running — waiting for SIGTERM/SIGINT …")
