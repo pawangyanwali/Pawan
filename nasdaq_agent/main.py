@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import numpy as np
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -185,6 +186,8 @@ _event_loop: asyncio.AbstractEventLoop | None = None
 _SIGNAL_CACHE_FILE = os.path.join(
     os.path.expanduser("~"), ".nasdaq_agent", "signal_cache.json"
 )
+_SIGNAL_CACHE_ACTIVE_MAX_AGE_SECS = 4 * 3600
+_SIGNAL_CACHE_CLOSED_MAX_AGE_SECS = 5 * 24 * 3600
 _last_signals_dicts: list[dict] = []   # in-memory fast path
 _last_signals_ts:    str        = ""   # ISO timestamp of the cached scan
 
@@ -204,14 +207,58 @@ def _save_signal_cache(signals_dicts: list[dict], ts: str) -> None:
         logger.debug("Signal cache write failed: %s", _ce)
 
 
+def _signal_cache_max_age_seconds() -> int:
+    """
+    Return the allowed age for the persisted signal cache.
+
+    During active trading sessions we keep the cache tight so stale signals do
+    not masquerade as live scans. During closed/weekend/holiday windows we keep
+    the last scan for several days so a restart on a long weekend still has a
+    useful dashboard instead of a blank table.
+    """
+    try:
+        info = get_session_info()
+        if (
+            info.get("is_weekend")
+            or info.get("is_holiday")
+            or info.get("session") == "CLOSED"
+        ):
+            return _SIGNAL_CACHE_CLOSED_MAX_AGE_SECS
+    except Exception:
+        pass
+    return _SIGNAL_CACHE_ACTIVE_MAX_AGE_SECS
+
+
+def _loaded_signal_cache_age_seconds() -> float | None:
+    """Return the age of the loaded signal snapshot, preferring its scan time."""
+    if _last_signals_ts:
+        try:
+            ts = _last_signals_ts.replace("Z", "+00:00")
+            scan_dt = datetime.fromisoformat(ts)
+            if scan_dt.tzinfo is None:
+                scan_dt = scan_dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - scan_dt.astimezone(timezone.utc)).total_seconds()
+        except Exception:
+            pass
+    try:
+        return time.time() - os.path.getmtime(_SIGNAL_CACHE_FILE)
+    except Exception:
+        return None
+
+
 def _load_signal_cache() -> None:
-    """Load the on-disk signal cache at startup (max 4 h old)."""
+    """Load the on-disk signal cache at startup when it is session-appropriate."""
     global _last_signals_dicts, _last_signals_ts
     try:
         if not os.path.exists(_SIGNAL_CACHE_FILE):
             return
         age = time.time() - os.path.getmtime(_SIGNAL_CACHE_FILE)
-        if age > 14400:   # discard if older than 4 hours
+        max_age = _signal_cache_max_age_seconds()
+        if age > max_age:
+            logger.info(
+                "[Cache] Signal cache too old (age %.0fs > max %.0fs); not loading",
+                age, max_age,
+            )
             return
         with open(_SIGNAL_CACHE_FILE) as f:
             data = json.load(f)
@@ -224,6 +271,23 @@ def _load_signal_cache() -> None:
             )
     except Exception as _ce:
         logger.debug("Signal cache read failed: %s", _ce)
+
+
+def _current_signal_snapshot() -> tuple[list[dict], str | None, bool]:
+    """
+    Return signals for dashboard/API consumers.
+
+    Live scanner results win. If the scanner has not produced signals yet
+    (common immediately after a restart during holidays/overnight), use the
+    persisted snapshot loaded by _load_signal_cache().
+    """
+    if scanner.signals:
+        return [s.to_dict() for s in scanner.signals], scanner.last_scan, False
+    if _last_signals_dicts:
+        age = _loaded_signal_cache_age_seconds()
+        if age is None or age <= _signal_cache_max_age_seconds():
+            return _last_signals_dicts, _last_signals_ts or scanner.last_scan, True
+    return [], _last_signals_ts or scanner.last_scan, False
 
 # ── Schwab price → WebSocket broadcast ───────────────────────────────────────
 _schwab_tick_registered: bool = False
@@ -745,20 +809,13 @@ async def get_signals(_user: AuthenticatedUser = Depends(require_viewer)):
     Serves live in-memory signals when a scan has completed, otherwise falls
     back to the disk cache so the page is never blank on a warm restart.
     """
-    if scanner.signals:
-        sigs      = [s.to_dict() for s in scanner.signals]
-        last_scan = scanner.last_scan
-        from_cache = False
-    else:
-        sigs      = _last_signals_dicts
-        last_scan = _last_signals_ts or scanner.last_scan
-        from_cache = bool(sigs)
+    sigs, last_scan, from_cache = _current_signal_snapshot()
     return {
         "last_scan":  last_scan,
         "count":      len(sigs),
         "signals":    sigs,
         "from_cache": from_cache,
-        "scanning":   scanner.is_running and not scanner.signals,
+        "scanning":   scanner.is_running and not sigs,
     }
 
 
@@ -766,11 +823,13 @@ async def get_signals(_user: AuthenticatedUser = Depends(require_viewer)):
 async def health():
     from agent.data_fetcher import get_credit_usage
     from agent.valkey_client import health_status as vk_health
+    sigs, last_scan, from_cache = _current_signal_snapshot()
     return {
         "status": "ok",
         "is_running": scanner.is_running,
-        "last_scan": scanner.last_scan,
-        "tickers_tracked": len(scanner.signals),
+        "last_scan": last_scan,
+        "tickers_tracked": len(sigs),
+        "from_cache": from_cache,
         "ws_clients": len(manager.active),
         "api_credits": get_credit_usage(),
         "valkey": vk_health(),
@@ -809,12 +868,14 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
 
     ws_st  = streamer.get("ws_streamer", {})
     md_st  = streamer.get("md_poller", {})
+    sigs, last_scan, from_cache = _current_signal_snapshot()
 
     return {
         "scanner": {
             "running":    scanner.is_running,
-            "last_scan":  scanner.last_scan,
-            "tickers":    len(scanner.signals),
+            "last_scan":  last_scan,
+            "tickers":    len(sigs),
+            "from_cache": from_cache,
             "ws_clients": len(manager.active),
         },
         "ws_streamer": {
@@ -2117,16 +2178,8 @@ async def websocket_endpoint(ws: WebSocket):
         regime  = get_regime()
         session = get_session_info()
 
-        # Choose best available signals: live > in-memory cache > disk cache
-        if scanner.signals:
-            live_sigs   = [s.to_dict() for s in scanner.signals]
-            from_cache  = False
-        elif _last_signals_dicts:
-            live_sigs   = _last_signals_dicts
-            from_cache  = True
-        else:
-            live_sigs   = []
-            from_cache  = False
+        # Choose best available signals: live > loaded persisted snapshot
+        live_sigs, _last_scan, from_cache = _current_signal_snapshot()
 
         if live_sigs:
             # Full update so the tab is immediately usable

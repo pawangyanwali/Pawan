@@ -290,7 +290,7 @@ class TestAlphaMonotonicity:
 class TestSourceChanges:
     def _src(self) -> str:
         import pathlib
-        return (pathlib.Path(__file__).parent.parent / "agent" / "algo_learning_engine.py").read_text()
+        return (pathlib.Path(__file__).parent.parent / "agent" / "algo_learning_engine.py").read_text(encoding="utf-8")
 
     def test_ewma_alpha_base_constant_present(self):
         assert "_EWMA_ALPHA_BASE" in self._src()

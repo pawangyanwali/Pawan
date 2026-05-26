@@ -414,26 +414,26 @@ from agent.signal_blender import DynamicBlender, ModelOutcome, MODELS
 
 
 class TestSignalBlender:
-    def test_weights_sum_to_one(self):
-        blender = DynamicBlender(persist_path=Path("/tmp/test_blend.json"))
+    def test_weights_sum_to_one(self, tmp_path):
+        blender = DynamicBlender(persist_path=tmp_path / "test_blend.json")
         weights = blender.get_weights()
         total = sum(weights.values())
         assert abs(total - 1.0) < 1e-6, f"weights sum {total} ≠ 1.0"
 
-    def test_all_models_have_weights(self):
-        blender = DynamicBlender(persist_path=Path("/tmp/test_blend2.json"))
+    def test_all_models_have_weights(self, tmp_path):
+        blender = DynamicBlender(persist_path=tmp_path / "test_blend2.json")
         weights = blender.get_weights()
         for model in MODELS:
             assert model in weights, f"model {model} missing from weights"
 
-    def test_weights_all_non_negative(self):
-        blender = DynamicBlender(persist_path=Path("/tmp/test_blend3.json"))
+    def test_weights_all_non_negative(self, tmp_path):
+        blender = DynamicBlender(persist_path=tmp_path / "test_blend3.json")
         weights = blender.get_weights()
         for m, w in weights.items():
             assert w >= 0, f"model {m} has negative weight {w}"
 
-    def test_accurate_model_gets_higher_weight(self):
-        blender = DynamicBlender(persist_path=Path("/tmp/test_blend4.json"))
+    def test_accurate_model_gets_higher_weight(self, tmp_path):
+        blender = DynamicBlender(persist_path=tmp_path / "test_blend4.json")
         # record_outcome(model, ticker, prob, correct)
         for _ in range(10):
             blender.record_outcome("scalp", "AAPL", 0.8, True)
@@ -442,9 +442,9 @@ class TestSignalBlender:
         assert weights["scalp"] >= weights["reversal"], \
             f"accurate scalp ({weights['scalp']:.3f}) should outweigh reversal ({weights['reversal']:.3f})"
 
-    def test_blend_probability_in_range(self):
+    def test_blend_probability_in_range(self, tmp_path):
         # blend(scalp_p, ensemble_p, reversal_p, ...) — positional args
-        blender = DynamicBlender(persist_path=Path("/tmp/test_blend5.json"))
+        blender = DynamicBlender(persist_path=tmp_path / "test_blend5.json")
         prob = blender.blend(scalp_p=0.7, ensemble_p=0.6, reversal_p=0.4)
         assert 0.0 <= prob <= 1.0, f"blended probability {prob} out of range"
 
