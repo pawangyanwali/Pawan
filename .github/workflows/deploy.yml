@@ -47,6 +47,11 @@ jobs:
                 exit 1
               fi
 
+              # Ensure log directory exists and is writable by container UID 1000
+              # (the 'nasdaq' user inside Docker is always created with UID 1000)
+              sudo mkdir -p "$APP_DIR/logs"
+              sudo chown -R 1000:1000 "$APP_DIR/logs"
+
               # Build the new image (uses layer cache; only rebuilds changed layers)
               sudo -u "$APP_USER" docker compose build --pull
 
