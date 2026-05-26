@@ -1091,6 +1091,15 @@ async def lifespan(app: FastAPI):
         # Still subscribe to Valkey md:prices so the WebSocket price bridge is
         # live when prices are published by the scanner container's streamer.
         _ensure_tick_broadcast_registered()
+        # Load stored tokens into memory so /api/broker/status reflects real
+        # token state even though we don't start the streamer here.
+        try:
+            if os.getenv("SCHWAB_CLIENT_ID"):
+                load_stored_tokens()
+            if os.getenv("SCHWAB_MD_CLIENT_ID"):
+                load_stored_md_tokens()
+        except Exception as _tl_err:
+            logging.getLogger(__name__).debug("Token pre-load (status-only): %s", _tl_err)
     from config import SCHWAB_ENABLED
     if _MARKET_DATA_ENABLED and SCHWAB_ENABLED:
         from config import NASDAQ_TICKERS as _nq_tickers
