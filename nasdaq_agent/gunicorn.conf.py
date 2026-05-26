@@ -19,6 +19,11 @@ graceful_timeout = 120
 keepalive = 65
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-accesslog = "-"
-errorlog  = "-"
+# Write to /app/logs/ which is bind-mounted to /opt/nasdaq-agent/logs on the host.
+# Stdout ("-") is kept as a fallback for 'docker compose logs'.
+import os as _os
+_log_dir = _os.getenv("LOG_DIR", "/app/logs")
+_os.makedirs(_log_dir, exist_ok=True)
+accesslog = f"{_log_dir}/web-api-access.log"
+errorlog  = f"{_log_dir}/web-api.log"
 loglevel  = "info"

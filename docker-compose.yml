@@ -14,8 +14,22 @@
 # t3.large resource budget: 2 vCPU / 8 GB RAM
 #   market hours  (scanner + web-api + scheduler)  ≈ 6 GB RAM
 #   off-hours     (learner + web-api + scheduler)   ≈ 3.5 GB RAM
+#
+# Logging:
+#   All containers write to /app/logs (bind-mounted → /opt/nasdaq-agent/logs).
+#   Docker's own stdout capture is capped at 10 MB × 3 files per container
+#   to prevent /var/lib/docker from filling the disk.
 
-# Shared settings — referenced via YAML anchors in each service
+# ── Shared Docker log driver ─────────────────────────────────────────────────
+# Applied to every service via the anchor below.
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+    tag: "{{.Name}}"
+
+# ── Shared service settings ──────────────────────────────────────────────────
 x-common: &common
   build:
     context: ./nasdaq_agent
@@ -26,11 +40,14 @@ x-common: &common
   restart: unless-stopped
   networks:
     - nasdaq-net
+  logging: *logging
   volumes:
     # Persist model files and runtime data across restarts
     - nasdaq-data:/app/data
-    - nasdaq-logs:/app/logs
-    # Schwab auth tokens must survive restarts; stored at app root by default
+    # Bind-mount host log directory so all service logs appear in one place
+    # on the host at /opt/nasdaq-agent/logs
+    - /opt/nasdaq-agent/logs:/app/logs
+    # Schwab auth tokens must survive restarts
     - nasdaq-tokens:/app/tokens
 
 networks:
@@ -39,7 +56,6 @@ networks:
 
 volumes:
   nasdaq-data:    # model files, SQLite state, backtest cache
-  nasdaq-logs:    # structured service logs
   nasdaq-tokens:  # Schwab OAuth token files
 
 services:
@@ -56,6 +72,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "0"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      LOG_DIR:                     "/app/logs"
     command: ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]
     # HEALTHCHECK is defined in Dockerfile — hits /api/health
     mem_limit: 1500m
@@ -75,6 +92,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "1"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.scanner_service"]
     # Override HEALTHCHECK — scanner has no HTTP; considered healthy if running
     healthcheck:
@@ -98,6 +116,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "0"
       NASDAQ_LEARNER_ENABLED:      "1"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.learner_service"]
     healthcheck:
       test: ["CMD", "python3", "-c", "print('ok')"]
@@ -119,6 +138,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "0"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "1"
+      LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.scheduler_service"]
     healthcheck:
       test: ["CMD", "python3", "-c",
