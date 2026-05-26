@@ -1398,9 +1398,24 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     md_st  = streamer.get("md_poller", {})
     sigs, last_scan, from_cache = _current_signal_snapshot()
 
+    # When scanner runs in its own container, derive running state from the
+    # Valkey scan:latest key age rather than the local scanner.is_running (always False).
+    scanner_running = scanner.is_running
+    if not _SCANNER_ENABLED and not scanner_running:
+        try:
+            from agent.valkey_client import _get_client as _vk_sc
+            _vc = _vk_sc()
+            if _vc:
+                _raw = _vc.get("scan:latest")
+                if _raw:
+                    _ts = json.loads(_raw).get("ts", 0)
+                    scanner_running = bool(_ts and (time.time() - float(_ts)) < 660)
+        except Exception:
+            pass
+
     return {
         "scanner": {
-            "running":    scanner.is_running,
+            "running":    scanner_running,
             "last_scan":  last_scan,
             "tickers":    len(sigs),
             "from_cache": from_cache,
@@ -2359,6 +2374,13 @@ async def broker_status(_user: AuthenticatedUser = Depends(require_viewer)):
             except Exception:
                 pass
         daily = get_daily_status()
+        # Merge paper trading today P&L so the broker panel shows real activity
+        # even when Schwab live trading is off / in paper mode.
+        try:
+            pt_today = get_today_pnl()
+            daily = {**daily, "pnl": pt_today.get("total_pnl_dollar", daily.get("pnl", 0.0))}
+        except Exception:
+            pass
         streamer = get_streamer_status()
         ws_st = streamer.get("ws_streamer", {})
         md_st = streamer.get("md_poller", {})

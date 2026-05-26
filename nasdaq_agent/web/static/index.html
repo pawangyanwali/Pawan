@@ -6319,7 +6319,7 @@ async function refreshInfraStatus() {
     // MD Poller (REST fallback)
     const mdp = d.md_poller || {};
     const mdpOk = !!mdp.running;
-    const mdpLabel = mdpOk ? (wssOk ? 'FALLBACK' : 'ACTIVE') : 'OFFLINE';
+    const mdpLabel = mdpOk ? 'ACTIVE' : 'OFFLINE';
     setInfraBadge('infra-mdp-badge', mdpOk, mdpLabel);
     if (mdpOk) {
       const ago = mdp.last_ok_ago_s != null ? `${mdp.last_ok_ago_s}s ago` : '—';
