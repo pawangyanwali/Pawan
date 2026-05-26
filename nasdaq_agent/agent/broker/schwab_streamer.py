@@ -490,7 +490,7 @@ async def _streamer_main(tickers: list[str]) -> None:
             _ws_error = str(e)
             logger.warning(f"[Streamer] Disconnected: {e} — retrying in {retry_delay}s")
             await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)
+            retry_delay = min(retry_delay * 2, 15)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

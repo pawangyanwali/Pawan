@@ -11,6 +11,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading as _threading
 import time
 import numpy as np
 from datetime import datetime, timezone
@@ -162,12 +163,16 @@ class ConnectionManager:
 
         async def _send(ws: WebSocket) -> WebSocket | None:
             try:
-                # Per-client timeout: one frozen browser can't stall all others.
-                await asyncio.wait_for(ws.send_text(message), timeout=5.0)
+                # 2s timeout: dead clients cleaned up quickly so they don't delay
+                # subsequent broadcasts (keepalive pings, price messages).
+                await asyncio.wait_for(ws.send_text(message), timeout=2.0)
                 return None
             except Exception:
                 return ws
 
+        # Yield once before sending so keepalive pings and price messages can
+        # interleave with scanner ticker_update batches on the event loop.
+        await asyncio.sleep(0)
         # Send to all clients in parallel — a slow client no longer blocks fast ones.
         dead = await asyncio.gather(*[_send(ws) for ws in snapshot])
         for ws in dead:
@@ -722,18 +727,37 @@ def _on_signals(signals: list[StockSignal]) -> None:
             asyncio.run_coroutine_threadsafe(manager.broadcast(_pp_payload), _event_loop)
 
 
+# ── Ticker-update batch accumulator ───────────────────────────────────────────
+# A 477-ticker scan fires _on_ticker once per result, nearly simultaneously.
+# Scheduling 477 individual manager.broadcast() coroutines on the event loop
+# delays keepalive pings and real-time price messages.  This coalesces updates
+# into one ticker_batch message per 100ms window — typically 1-2 per scan cycle.
+_ticker_batch: list[dict] = []
+_ticker_batch_lock = _threading.Lock()
+_ticker_batch_pending: bool = False
+
+
+async def _flush_ticker_batch() -> None:
+    global _ticker_batch_pending
+    await asyncio.sleep(0.1)     # 100ms coalescing window; yields to event loop
+    with _ticker_batch_lock:
+        batch = _ticker_batch[:]
+        _ticker_batch.clear()
+        _ticker_batch_pending = False
+    if batch and manager.active:
+        await manager.broadcast(_dumps({"type": "ticker_batch", "updates": batch}))
+
+
 def _on_ticker(sig: StockSignal, n_done: int, n_total: int) -> None:
-    """Per-ticker callback — streams each result as it completes so the dashboard
-    fills progressively instead of waiting for the full scan batch."""
+    """Per-ticker callback — coalesced into batches to avoid event-loop flooding."""
+    global _ticker_batch_pending
     if _event_loop is None:
         return
-    payload = _dumps({
-        "type":    "ticker_update",
-        "signal":  sig.to_dict(),
-        "n_done":  n_done,
-        "n_total": n_total,
-    })
-    asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
+    with _ticker_batch_lock:
+        _ticker_batch.append({"signal": sig.to_dict(), "n_done": n_done, "n_total": n_total})
+        if not _ticker_batch_pending:
+            _ticker_batch_pending = True
+            asyncio.run_coroutine_threadsafe(_flush_ticker_batch(), _event_loop)
 
 
 # ── ThinkorSwim auto-trade toggle ────────────────────────────────────────────

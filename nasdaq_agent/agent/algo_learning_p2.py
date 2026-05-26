@@ -159,8 +159,37 @@ class ConceptDriftDetector:
                 raw = json.loads(self._PATH.read_text())
                 with self._lock:
                     self._state.update(raw)
+                if self._validate_reference():
+                    self.save()   # persist the cleared state immediately
         except Exception as exc:
             logger.warning(f"[DriftDetector] load error: {exc}")
+
+    def _validate_reference(self) -> bool:
+        """Reset reference if arrays are corrupt (all-zero or zero-variance). Returns True if reset."""
+        with self._lock:
+            if not self._state.get("reference_built"):
+                return False
+            arrays = self._state.get("reference_arrays", {})
+            corrupt = False
+            for feat, vals in arrays.items():
+                if not vals:
+                    corrupt = True
+                    break
+                arr = np.array(vals, dtype=float)
+                if np.std(arr) < 1e-6:
+                    corrupt = True
+                    logger.warning(
+                        f"[DriftDetector] Corrupt reference for '{feat}' "
+                        f"(std={np.std(arr):.6f}) — resetting drift reference"
+                    )
+                    break
+            if corrupt:
+                self._state["reference_built"]  = False
+                self._state["reference_n"]      = 0
+                self._state["reference_arrays"] = {}
+                self._state["last_psi"]         = {}
+                self._state["drift_events"]     = []
+            return corrupt
 
     def save(self) -> None:
         try:

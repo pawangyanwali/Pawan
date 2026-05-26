@@ -1925,7 +1925,7 @@ let _wsDeadTimer = null;
 let _wsAuthRetrying = false;
 let _wsAuthRetryCount = 0;
 const _WS_RECONNECT_MS  = 1000;   // always reconnect after 1 second
-const _WS_WATCHDOG_MS   = 60000;  // reconnect if no server message for 60s
+const _WS_WATCHDOG_MS   = 45000;  // reconnect if no server message for 45s
 const _WS_HEARTBEAT_MS  = 20000;  // send heartbeat to server every 20s
 
 function _wsSend(obj) {
@@ -2019,6 +2019,28 @@ async function connectWS() {
       // Update loading sub-text with scan progress
       const sub = document.getElementById('loading-sub');
       if (sub) sub.textContent = `Scanning… ${m.n_done}/${m.n_total} tickers complete`;
+      hideLoading();
+      _scheduleRender();
+      return;
+    }
+
+    // Batched ticker updates — server coalesces 477 per-ticker callbacks into
+    // one message per 100ms to prevent event-loop flooding.
+    if (m.type === 'ticker_batch') {
+      let lastDone = 0, lastTotal = 0;
+      for (const u of (m.updates || [])) {
+        const sig = u.signal;
+        const idx = allSignals.findIndex(s => s.ticker === sig.ticker);
+        if (idx >= 0) allSignals[idx] = sig;
+        else allSignals.push(sig);
+        lastDone = u.n_done; lastTotal = u.n_total;
+      }
+      if (lastTotal) {
+        const sc = document.getElementById('scan-count');
+        if (sc) sc.textContent = `${lastDone}/${lastTotal} scanned`;
+        const sub = document.getElementById('loading-sub');
+        if (sub) sub.textContent = `Scanning… ${lastDone}/${lastTotal} tickers complete`;
+      }
       hideLoading();
       _scheduleRender();
       return;
@@ -2346,6 +2368,12 @@ setInterval(() => {
     el.textContent = `● STALE ${age}s`;
     el.style.color = 'var(--red, #e74c3c)';
     el.style.borderColor = 'var(--red, #e74c3c)';
+    // Force reconnect if stale >45s and WS appears open — covers silent proxy drops
+    // that haven't tripped the watchdog yet
+    if (age > 45 && ws && ws.readyState === WebSocket.OPEN) {
+      console.warn(`[WS] Price stale ${age}s — forcing reconnect`);
+      try { ws.close(); } catch(_) {}
+    }
   }
 }, 1000);
 
@@ -6360,8 +6388,19 @@ async function refreshLearningPanel() {
       }
     }
   } catch(e) {
+    // API unavailable — show defaults so panel is still usable
     const tbody = document.getElementById('lp-params-tbody');
-    if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:10px">Unavailable</td></tr>';
+    if (tbody) {
+      const families = ['ORB','GAP_TREND','GAP_FADE','BREAKOUT','FLAG','VWAP_SCALP','LEVEL_SCALP','RS_REGIME'];
+      const def = {rvol_gate:1.5, conf_gate:55.0, entry_window_bars:3, target_mult:1.5};
+      tbody.innerHTML = families.map(f => `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:3px 6px;font-weight:600;color:var(--text);white-space:nowrap">${f}</td>
+        <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.rvol_gate.toFixed(2)}</td>
+        <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.conf_gate.toFixed(1)}</td>
+        <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.entry_window_bars.toFixed(0)}</td>
+        <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.target_mult.toFixed(2)}</td>
+      </tr>`).join('') + '<tr><td colspan="5" style="text-align:center;color:var(--muted);font-size:10px;padding:4px">Showing defaults — engine unreachable</td></tr>';
+    }
   }
 
   // 2. Fetch phase2 — deployment mode + drift alerts
