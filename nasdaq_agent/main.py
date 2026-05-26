@@ -1245,6 +1245,98 @@ async def health():
     }
 
 
+def _container_health(valkey_connected: bool) -> dict:
+    """
+    Derive container liveness from Valkey heartbeat keys.
+
+    Each container writes a key with a short TTL so expiry = container down:
+      web-api    — always "up" (this process is answering the request)
+      scanner    — scan:latest key; written after every scan cycle (TTL 300s)
+      learner    — learner:status key; written every 60s (TTL 300s)
+      scheduler  — scheduler:heartbeat key; written every 30s (TTL 90s)
+
+    Returns a dict keyed by container name with:
+      up (bool), last_seen_ago_s (float|None), detail (str)
+    """
+    now = time.time()
+    result: dict = {
+        "web-api": {"up": True, "last_seen_ago_s": 0.0, "detail": "serving this response"},
+    }
+
+    if not valkey_connected:
+        for name in ("scanner", "learner", "scheduler"):
+            result[name] = {"up": None, "last_seen_ago_s": None, "detail": "Valkey unreachable"}
+        return result
+
+    try:
+        from agent.valkey_client import _get_client
+        client = _get_client()
+        if client is None:
+            for name in ("scanner", "learner", "scheduler"):
+                result[name] = {"up": None, "last_seen_ago_s": None, "detail": "no Valkey client"}
+            return result
+
+        # scanner — scan:latest written after each cycle; JSON with optional "ts" field
+        try:
+            raw = client.get("scan:latest")
+            if raw:
+                d = json.loads(raw)
+                scan_ts = float(d.get("ts", 0))
+                ago = round(now - scan_ts, 1) if scan_ts else None
+                up = ago is not None and ago < 300
+                result["scanner"] = {
+                    "up": up,
+                    "last_seen_ago_s": ago,
+                    "detail": f"last scan {ago}s ago" if ago is not None else "key present, no ts",
+                }
+            else:
+                result["scanner"] = {"up": False, "last_seen_ago_s": None, "detail": "no scan:latest key"}
+        except Exception as exc:
+            result["scanner"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
+
+        # learner — learner:status written every 60s
+        try:
+            raw = client.get("learner:status")
+            if raw:
+                d = json.loads(raw)
+                ts = float(d.get("ts", 0))
+                ago = round(now - ts, 1) if ts else None
+                up = ago is not None and ago < 300
+                result["learner"] = {
+                    "up": up,
+                    "last_seen_ago_s": ago,
+                    "detail": f"heartbeat {ago}s ago" if ago is not None else "key present, no ts",
+                }
+            else:
+                result["learner"] = {"up": False, "last_seen_ago_s": None, "detail": "no learner:status key"}
+        except Exception as exc:
+            result["learner"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
+
+        # scheduler — scheduler:heartbeat written every 30s
+        try:
+            raw = client.get("scheduler:heartbeat")
+            if raw:
+                d = json.loads(raw)
+                ts = float(d.get("ts", 0))
+                ago = round(now - ts, 1) if ts else None
+                up = ago is not None and ago < 120
+                result["scheduler"] = {
+                    "up": up,
+                    "last_seen_ago_s": ago,
+                    "detail": f"heartbeat {ago}s ago" if ago is not None else "key present, no ts",
+                }
+            else:
+                result["scheduler"] = {"up": False, "last_seen_ago_s": None, "detail": "no scheduler:heartbeat key"}
+        except Exception as exc:
+            result["scheduler"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
+
+    except Exception as exc:
+        for name in ("scanner", "learner", "scheduler"):
+            result[name] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
+
+    return result
+
+
 @app.get("/api/services")
 async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     """
@@ -1306,6 +1398,7 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
             "connected": rds_ok,
             "error":     rds_error,
         },
+        "containers": _container_health(vk.get("connected", False)),
     }
 
 
