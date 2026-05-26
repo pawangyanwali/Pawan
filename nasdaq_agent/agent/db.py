@@ -97,6 +97,7 @@ _DT_PARAM_CONCAT_RE = re.compile(
 )
 _DT_PARAM_RE = re.compile(r"datetime\('now'\s*,\s*\?\)", re.IGNORECASE)
 _DATE_FIXED_RE = re.compile(r"date\('now'\s*,\s*'([^']+)'\)", re.IGNORECASE)
+_DATE_PARAM_RE = re.compile(r"date\('now'\s*,\s*\?\)", re.IGNORECASE)
 _DATE_NOW_RE   = re.compile(r"date\('now'\)", re.IGNORECASE)
 _DATE_COL_RE   = re.compile(r"\bdate\((\w+)\)", re.IGNORECASE)
 _STRFTIME_WEEK_RE = re.compile(r"strftime\('%Y-W%W'\s*,\s*(\w+)\)", re.IGNORECASE)
@@ -159,6 +160,7 @@ def _to_pg(sql: str) -> str:
         lambda m: f"(CURRENT_DATE + INTERVAL '{m.group(1)}')::text",
         sql,
     )
+    sql = _DATE_PARAM_RE.sub("(CURRENT_DATE + ?::INTERVAL)::text", sql)
     sql = _DATE_NOW_RE.sub("CURRENT_DATE::text", sql)
     sql = _DATE_COL_RE.sub(lambda m: f"({m.group(1)}::timestamptz::date::text)", sql)
     sql = _STRFTIME_WEEK_RE.sub(
