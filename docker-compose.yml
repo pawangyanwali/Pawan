@@ -75,7 +75,7 @@ services:
       LOG_DIR:                     "/app/logs"
     command: ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]
     # HEALTHCHECK is defined in Dockerfile — hits /api/health
-    mem_limit: 1500m
+    mem_limit: 1000m
     cpus: "0.5"
     pids_limit: 256
     depends_on:
@@ -94,15 +94,15 @@ services:
       NASDAQ_SCHEDULER_ENABLED:    "0"
       LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.scanner_service"]
-    # Override HEALTHCHECK — scanner has no HTTP; considered healthy if running
+    # Override HEALTHCHECK — use app's TLS-aware Valkey client (not raw redis.Redis)
     healthcheck:
       test: ["CMD", "python3", "-c",
-             "import redis, os; r=redis.Redis(host=os.getenv('VALKEY_HOST','localhost')); r.ping()"]
+             "import sys; sys.path.insert(0,'/app'); from agent.valkey_client import _get_client; c=_get_client(); assert c and c.ping()"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 90s
-    mem_limit: 5000m
+    mem_limit: 4000m
     cpus: "1.5"
     pids_limit: 512
 
@@ -124,7 +124,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-    mem_limit: 2500m
+    mem_limit: 1500m
     cpus: "0.5"
     pids_limit: 256
 
@@ -142,9 +142,7 @@ services:
     command: ["python", "-m", "services.scheduler_service"]
     healthcheck:
       test: ["CMD", "python3", "-c",
-             "import redis, os, json, time; r=redis.Redis(host=os.getenv('VALKEY_HOST','localhost')); \
-              v=r.get('scheduler:heartbeat'); \
-              assert v and time.time()-json.loads(v)['ts']<120"]
+             "import sys,json,time; sys.path.insert(0,'/app'); from agent.valkey_client import _get_client; c=_get_client(); v=c.get('scheduler:heartbeat'); assert v and time.time()-json.loads(v)['ts']<120"]
       interval: 60s
       timeout: 10s
       retries: 3

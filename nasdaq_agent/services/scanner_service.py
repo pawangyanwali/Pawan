@@ -6,6 +6,7 @@ Responsibilities:
   1. Start Schwab WebSocket streamer and/or REST MD poller (market data).
   2. Run the scan loop (Scanner.start_background).
   3. After each cycle, publish scan results to Valkey (scan:latest + scan:notify).
+  4. Hot-reload Schwab tokens when web-api publishes schwab:tokens_refreshed.
 
 Interface contract:
   WRITES  Valkey scan:latest  — full JSON snapshot of signals/regime/session
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 # Bootstrap path before any project imports
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -102,6 +104,54 @@ def _start_market_data() -> None:
             _log.warning("Schwab MD poller not started: %s", exc)
 
 
+# ── Schwab token hot-reload ───────────────────────────────────────────────────
+
+def _token_reload_loop() -> None:
+    """
+    Subscribe to Valkey channel 'schwab:tokens_refreshed'.
+    When the web-api completes a Schwab OAuth flow it publishes to this channel,
+    triggering a streamer restart in the scanner container without any manual
+    docker restart.
+    """
+    try:
+        from agent.valkey_client import _cfg
+        import redis as _r
+    except ImportError:
+        _log.debug("Valkey/redis not available — Schwab token hot-reload disabled")
+        return
+
+    while not _runner.stopped:
+        host, port, ssl = _cfg()
+        try:
+            sub_client = _r.Redis(
+                host=host, port=port, ssl=ssl,
+                ssl_cert_reqs=None,
+                socket_connect_timeout=5,
+                socket_timeout=60,
+                decode_responses=True,
+            )
+            pubsub = sub_client.pubsub()
+            pubsub.subscribe("schwab:tokens_refreshed")
+            _log.info("Subscribed to schwab:tokens_refreshed for token hot-reload")
+            for msg in pubsub.listen():
+                if _runner.stopped:
+                    return
+                if msg.get("type") != "message":
+                    continue
+                _log.info("Schwab tokens refreshed via Valkey — restarting market data")
+                try:
+                    from agent.broker.schwab_streamer import stop_streamer
+                    stop_streamer()
+                    time.sleep(1)
+                except Exception:
+                    pass
+                if _MARKET_DATA_ENABLED:
+                    _start_market_data()
+        except Exception as exc:
+            _log.debug("token_reload_loop error: %s — retrying in 30s", exc)
+            time.sleep(30)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -122,6 +172,9 @@ def main() -> None:
         _start_market_data()
     else:
         _log.info("Market data disabled (NASDAQ_MARKET_DATA_ENABLED=0)")
+
+    # Hot-reload: restart market data when new Schwab tokens arrive via OAuth
+    threading.Thread(target=_token_reload_loop, daemon=True, name="token-reload").start()
 
     scanner.start_background()
     _log.info("Scan loop running — waiting for SIGTERM/SIGINT …")

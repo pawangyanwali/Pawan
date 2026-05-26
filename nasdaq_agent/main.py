@@ -1980,9 +1980,28 @@ async def learning_status():
         loop.run_in_executor(None, af_get_status),
         loop.run_in_executor(_pt_executor, get_observation_summary),
     )
+    engine_status = learning_engine.get_status()
+
+    # When the learner runs in a separate container it publishes its state to
+    # Valkey key learner:status every 60s.  Prefer that over the stale local
+    # in-memory state (which never updates in the web-api container).
+    if not _LEARNER_ENABLED:
+        try:
+            from agent.valkey_client import _get_client as _vk_client
+            _vk = _vk_client()
+            if _vk:
+                _raw = _vk.get("learner:status")
+                if _raw:
+                    _d = json.loads(_raw)
+                    if time.time() - _d.get("ts", 0) < 300:
+                        engine_status = _d.get("engine", engine_status)
+                        status        = _d.get("adaptive_filter", status)
+        except Exception:
+            pass
+
     result = {
         **status,
-        "engine":       learning_engine.get_status(),
+        "engine":       engine_status,
         "observations": obs,
     }
     if _P2_AVAILABLE:
@@ -2156,6 +2175,15 @@ async def schwab_at_web_callback(
             from config import NASDAQ_TICKERS as _nq_t
             start_streamer(list(_nq_t))
             _ensure_tick_broadcast_registered()
+        except Exception:
+            pass
+        # Notify the scanner container to hot-reload tokens via Valkey pub/sub
+        try:
+            from agent.valkey_client import _get_client as _vk_c
+            _vk = _vk_c()
+            if _vk:
+                _vk.publish("schwab:tokens_refreshed",
+                            json.dumps({"ts": time.time(), "app": "at"}))
         except Exception:
             pass
         html = ("<html><body style='font-family:sans-serif;padding:40px;background:#f0fff4'>"

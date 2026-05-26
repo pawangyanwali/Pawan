@@ -6,14 +6,14 @@ Responsibilities:
   1. Run the adaptive learning engine (win-rate tracking, threshold calibration).
   2. Run the weekend deep-learner when market is closed.
   3. Gate ALL activity behind market-hours checks — never train during market hours.
+  4. Publish adaptive-filter + engine state to Valkey every 60s so that web-api
+     can serve fresh /api/learning-status without a local learner.
 
 Interface contract:
   READS   PostgreSQL  — signal history, trade outcomes
   WRITES  PostgreSQL  — updated model weights, learning logs
   WRITES  local disk  — XGBoost / BiLSTM model files (agent/models/)
-
-  Does NOT touch Valkey.  Does NOT serve HTTP.
-  The web-api reads learning state directly from PostgreSQL / model files.
+  WRITES  Valkey      — learner:status (TTL 300s)
 
 Environment variables:
   LOG_LEVEL  DEBUG|INFO|WARNING  (default INFO)
@@ -21,6 +21,7 @@ Environment variables:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -76,6 +77,40 @@ def _run_weekend_learner() -> None:
         _log.warning("Weekend learner error: %s", exc)
 
 
+# ── Valkey status publisher ───────────────────────────────────────────────────
+
+def _publish_status_loop() -> None:
+    """
+    Publish adaptive-filter + engine state to Valkey every 60s so that the
+    web-api container (which runs no learner) can serve fresh data from
+    GET /api/learning-status without polling the DB.
+
+    Key: learner:status  TTL: 300s  (expires if learner dies)
+    """
+    try:
+        from agent.valkey_client import _get_client
+    except ImportError:
+        _log.debug("Valkey client not available — learner:status will not be published")
+        return
+
+    while not _runner.stopped:
+        try:
+            client = _get_client()
+            if client:
+                from agent.learning_engine import learning_engine
+                from agent.adaptive_filter import get_status as af_status
+                payload = json.dumps({
+                    "ts":             time.time(),
+                    "engine":         learning_engine.get_status(),
+                    "adaptive_filter": af_status(),
+                })
+                client.setex("learner:status", 300, payload)
+                _log.debug("learner:status published to Valkey")
+        except Exception as exc:
+            _log.debug("learner:status publish failed: %s", exc)
+        time.sleep(60)
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def _monitor_loop() -> None:
@@ -115,7 +150,8 @@ def main() -> None:
     _run_learning_engine()
     _run_weekend_learner()
 
-    threading.Thread(target=_monitor_loop, daemon=True, name="learner-monitor").start()
+    threading.Thread(target=_monitor_loop,        daemon=True, name="learner-monitor").start()
+    threading.Thread(target=_publish_status_loop, daemon=True, name="learner-status-pub").start()
 
     _log.info("Learner running — waiting for SIGTERM/SIGINT …")
 
