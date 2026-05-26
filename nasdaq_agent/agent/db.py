@@ -100,6 +100,44 @@ _DATE_FIXED_RE = re.compile(r"date\('now'\s*,\s*'([^']+)'\)", re.IGNORECASE)
 _DATE_NOW_RE   = re.compile(r"date\('now'\)", re.IGNORECASE)
 _DATE_COL_RE   = re.compile(r"\bdate\((\w+)\)", re.IGNORECASE)
 _STRFTIME_WEEK_RE = re.compile(r"strftime\('%Y-W%W'\s*,\s*(\w+)\)", re.IGNORECASE)
+_ROUND_START_RE = re.compile(r'\bROUND\s*\(', re.IGNORECASE)
+
+
+def _add_numeric_cast_to_round(sql: str) -> str:
+    """Wrap ROUND()'s first arg with ::NUMERIC so it works in PostgreSQL.
+
+    PostgreSQL has ROUND(numeric, int) but NOT ROUND(double precision, int).
+    Transforms ROUND(expr, N) → ROUND((expr)::NUMERIC, N) unless the cast is
+    already present.  Uses balanced-paren tracking so nested calls are handled
+    correctly.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(sql):
+        m = _ROUND_START_RE.search(sql, i)
+        if m is None:
+            out.append(sql[i:])
+            break
+        out.append(sql[i:m.end()])
+        j = m.end()
+        depth = 1
+        while j < len(sql) and depth > 0:
+            if sql[j] == '(':
+                depth += 1
+            elif sql[j] == ')':
+                depth -= 1
+            j += 1
+        content = sql[m.end():j - 1]
+        # Last ', N' is the precision argument; everything before is the expression.
+        m2 = re.search(r',\s*\d+\s*$', content)
+        if m2 and '::numeric' not in content[:m2.start()].lower():
+            expr = content[:m2.start()]
+            prec = content[m2.start():]
+            out.append(f'({expr})::NUMERIC{prec})')
+        else:
+            out.append(content + ')')
+        i = j
+    return ''.join(out)
 
 
 def _to_pg(sql: str) -> str:
@@ -126,6 +164,8 @@ def _to_pg(sql: str) -> str:
     sql = _STRFTIME_WEEK_RE.sub(
         lambda m: f"TO_CHAR({m.group(1)}::timestamptz, 'IYYY-IW')", sql
     )
+
+    sql = _add_numeric_cast_to_round(sql)
 
     sql = re.sub(
         r'\bADD\s+COLUMN\b(?!\s+IF\s+NOT\s+EXISTS)',
