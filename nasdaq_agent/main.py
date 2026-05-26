@@ -265,10 +265,37 @@ def _build_observation_rows() -> tuple[list[dict], str | None]:
         or session_key == "CLOSED"
     )
 
+    max_age_s = None if closed_window else 10.0
+
+    def _fresh_quotes(raw: dict[str, dict]) -> dict[str, dict]:
+        if not raw:
+            return {}
+        if max_age_s is None:
+            return {str(sym): dict(quote) for sym, quote in raw.items() if isinstance(quote, dict)}
+        now = time.time()
+        fresh: dict[str, dict] = {}
+        for sym, quote in raw.items():
+            if not isinstance(quote, dict):
+                continue
+            try:
+                updated_at = float(quote.get("updated_at") or 0.0)
+            except Exception:
+                updated_at = 0.0
+            if updated_at > 0 and now - updated_at <= max_age_s:
+                fresh[str(sym)] = dict(quote)
+        return fresh
+
+    quotes: dict[str, dict] = {}
     try:
-        quotes = get_live_quotes_snapshot(max_age_s=None if closed_window else 10.0)
+        from agent.valkey_client import get_all_prices
+        quotes.update(_fresh_quotes(get_all_prices()))
     except Exception:
-        return [], None
+        pass
+    try:
+        # In-process quote memory wins over Valkey if both have the ticker.
+        quotes.update(get_live_quotes_snapshot(max_age_s=max_age_s))
+    except Exception:
+        pass
     if not quotes:
         return [], None
 
@@ -522,11 +549,10 @@ _valkey_sub_registered: bool = False
 def _ensure_tick_broadcast_registered() -> None:
     """Register price→WebSocket callbacks exactly once."""
     global _schwab_tick_registered, _valkey_sub_registered
-    if _schwab_tick_registered:
-        return
-    register_bulk_price_callback(_on_schwab_bulk_prices)
-    register_tick_callback(_on_schwab_tick)
-    _schwab_tick_registered = True
+    if not _schwab_tick_registered:
+        register_bulk_price_callback(_on_schwab_bulk_prices)
+        register_tick_callback(_on_schwab_tick)
+        _schwab_tick_registered = True
 
     # Also subscribe to Valkey so the WS path stays live even if the direct
     # Schwab bulk callback is replaced by a Valkey-only pipeline in a future step.
@@ -893,12 +919,13 @@ async def lifespan(app: FastAPI):
                     logging.getLogger(__name__).info(
                         "Schwab Market Data connected — starting parallel quote poller."
                     )
-                    # Delay 90 s so the scanner's cold-cache OHLCV fetch can
-                    # complete before MDPoller starts consuming rate-limit budget.
-                    # On a warm restart the OHLCV cache is already hot and the
-                    # scanner finishes in < 10 s, so the delay is nearly free.
+                    # Keep this short so the dashboard resumes second-level
+                    # quote updates quickly after deploy/restart. Operators can
+                    # raise it with NASDAQ_MD_STARTUP_DELAY_S if Schwab rate
+                    # pressure is observed during a cold OHLCV warmup.
+                    _md_startup_delay = float(os.getenv("NASDAQ_MD_STARTUP_DELAY_S", "10"))
                     start_md_poller(list(_nq_tickers), interval=1.0,
-                                    parallel_batches=2, startup_delay_s=90)
+                                    parallel_batches=2, startup_delay_s=_md_startup_delay)
                     _ensure_tick_broadcast_registered()
                 else:
                     logging.getLogger(__name__).warning(
@@ -987,6 +1014,8 @@ async def get_signals(_user: AuthenticatedUser = Depends(require_viewer)):
         "count":      len(sigs),
         "signals":    sigs,
         "from_cache": from_cache,
+        "universe_total": _get_universe_total(),
+        "empty_reason": None if sigs else "no_scanner_signal_cache_or_quote_data",
         "scanning":   scanner.is_running and not sigs,
     }
 

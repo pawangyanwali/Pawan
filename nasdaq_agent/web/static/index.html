@@ -1852,10 +1852,63 @@ function _authHeaders(extra) {
   const at = sessionStorage.getItem('access_token');
   return Object.assign({ 'Authorization': at ? `Bearer ${at}` : '' }, extra || {});
 }
-function _authFetch(url, opts) {
+
+let _authRefreshPromise = null;
+
+function _jwtExpMs(token) {
+  try {
+    const payload = JSON.parse(atob((token || '').split('.')[1] || ''));
+    return payload.exp ? payload.exp * 1000 : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function _accessTokenNeedsRefresh(token) {
+  const expMs = _jwtExpMs(token);
+  return !token || (expMs > 0 && Date.now() > expMs - 30000);
+}
+
+async function _refreshAccessToken() {
+  const rt = localStorage.getItem('refresh_token');
+  if (!rt) return false;
+  if (!_authRefreshPromise) {
+    _authRefreshPromise = fetch('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: rt }),
+    })
+      .then(async res => {
+        if (!res.ok) throw new Error('refresh failed');
+        const data = await res.json();
+        if (!data.access_token) throw new Error('missing access token');
+        sessionStorage.setItem('access_token', data.access_token);
+        return true;
+      })
+      .catch(() => false)
+      .finally(() => { _authRefreshPromise = null; });
+  }
+  return _authRefreshPromise;
+}
+
+async function _ensureAccessToken() {
+  const at = sessionStorage.getItem('access_token');
+  if (!_accessTokenNeedsRefresh(at)) return at;
+  const ok = await _refreshAccessToken();
+  return ok ? sessionStorage.getItem('access_token') : '';
+}
+
+async function _authFetch(url, opts) {
+  await _ensureAccessToken();
   const o = Object.assign({}, opts || {});
   o.headers = _authHeaders(o.headers || {});
-  return fetch(url, o);
+  const res = await fetch(url, o);
+  if (res.status !== 401) return res;
+  const refreshed = await _refreshAccessToken();
+  if (!refreshed) return res;
+  const retry = Object.assign({}, opts || {});
+  retry.headers = _authHeaders(retry.headers || {});
+  return fetch(url, retry);
 }
 
 // ─── WebSocket — persistent, self-healing connection ─────────────────────────
@@ -1869,6 +1922,8 @@ function _authFetch(url, opts) {
 let ws;
 let _wsWatchdog  = null;
 let _wsDeadTimer = null;
+let _wsAuthRetrying = false;
+let _wsAuthRetryCount = 0;
 const _WS_RECONNECT_MS  = 1000;   // always reconnect after 1 second
 const _WS_WATCHDOG_MS   = 60000;  // reconnect if no server message for 60s
 const _WS_HEARTBEAT_MS  = 20000;  // send heartbeat to server every 20s
@@ -1888,11 +1943,15 @@ function _resetWatchdog() {
   }, _WS_WATCHDOG_MS);
 }
 
-function connectWS() {
+async function connectWS() {
   // Guard: don't stack connections if already open or connecting
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-  const _wsAt = sessionStorage.getItem('access_token') || '';
+  const _wsAt = await _ensureAccessToken();
+  if (!_wsAt) {
+    window.location.replace('/login');
+    return;
+  }
   // Token is sent as a first-message after connection (not in the URL) so it
   // stays out of server/proxy/CDN access logs.
   ws = new WebSocket(`${BACKEND_WS}/ws`);
@@ -1926,6 +1985,7 @@ function connectWS() {
     let m;
     try { m = JSON.parse(e.data); } catch(_) { return; }
     _wsLastMsgAt = Date.now();
+    _wsAuthRetryCount = 0;
 
     // Server keepalive ping — reply immediately so server knows we're alive
     if (m.type === 'ping') {
@@ -2129,6 +2189,9 @@ function connectWS() {
 
     if (m.type === 'update') {
       _wsLastMsgAt = Date.now();
+      if ((m.signals || []).some(s => s.is_observation || s.source === 'live_quote_observation')) {
+        _lastPriceAt = Date.now();
+      }
       // Merge tick-updated prices/change_pct into fresh scan signals so
       // real-time values don't flicker back to the scan's computed values.
       const prevByTicker = Object.fromEntries(allSignals.map(s => [s.ticker, s]));
@@ -2184,12 +2247,30 @@ function connectWS() {
   };
 
   ws.onclose = (e) => {
-    // Code 4001 = server rejected auth — clear session and force re-login
+    // Code 4001 = server rejected auth. Refresh once before forcing login.
     if (e.code === 4001) {
+      if (_wsAuthRetrying || _wsAuthRetryCount >= 1) {
+        sessionStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
+        window.location.replace('/login');
+        return;
+      }
+      _wsAuthRetrying = true;
+      _wsAuthRetryCount += 1;
       sessionStorage.removeItem('access_token');
-      window.location.replace('/login');
+      _refreshAccessToken().then(ok => {
+        if (!ok) {
+          localStorage.removeItem('refresh_token');
+          window.location.replace('/login');
+          return;
+        }
+        _wsAuthRetrying = false;
+        setTimeout(connectWS, _WS_RECONNECT_MS);
+      });
       return;
     }
+    _wsAuthRetrying = false;
+    _wsAuthRetryCount = 0;
     document.getElementById('dot').classList.remove('live');
     document.getElementById('ws-status').textContent = 'Reconnecting…';
     const chip = document.getElementById('ws-chip');
@@ -2332,13 +2413,31 @@ async function pollPipelineMetrics() {
   } catch {}
 }
 setInterval(pollPipelineMetrics, 15000);
+
+function _applySignalPayload(d) {
+  if (!Array.isArray(d?.signals)) return false;
+  allSignals = d.signals;
+  if (allSignals.some(s => s.is_observation || s.source === 'live_quote_observation')) {
+    _lastPriceAt = Date.now();
+  }
+  if (d.universe_total) window._universeTotal = d.universe_total;
+  if (d.count != null) window._scannedCount = d.count;
+  renderAll();
+  hideLoading();
+  return allSignals.length > 0;
+}
+
 async function pollFallback() {
   // REST fallback: only when WS is not connected AND hasn't delivered recent data.
   // The watchdog handles reconnection; this just ensures stale UI gets refreshed
   // while a reconnect attempt is in flight.
   const wsLive = ws && ws.readyState === WebSocket.OPEN;
   if (wsLive && Date.now() - _wsLastMsgAt < 60000) return;
-  try { const d = await (await _authFetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals = d.signals; renderAll(); hideLoading(); if (d.from_cache) { const sub = document.getElementById('loading-sub'); } } } catch {}
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/signals`);
+    if (!r.ok) throw new Error(`signals ${r.status}`);
+    _applySignalPayload(await r.json());
+  } catch {}
 }
 setInterval(pollFallback, 15000);
 function hideLoading() { const el = document.getElementById('loading'); el.classList.add('hidden'); setTimeout(() => el.style.display='none', 600); }
@@ -5971,7 +6070,7 @@ try {
   if (cached && cached.win_rate > 0) updateLearnPill(cached);
 } catch(e) {}
 connectWS();
-(async () => { try { const d = await (await _authFetch(`${BACKEND_HTTP}/api/signals`)).json(); if (d.signals?.length) { allSignals=d.signals; renderAll(); hideLoading(); } } catch {} })();
+(async () => { try { _applySignalPayload(await (await _authFetch(`${BACKEND_HTTP}/api/signals`)).json()); } catch {} })();
 
 // Load paper trading stats immediately on page load and refresh every 30s
 async function fetchPtStats() {

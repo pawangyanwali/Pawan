@@ -124,6 +124,72 @@ def test_observation_rows_fill_dashboard_when_signals_and_cache_empty(tmp_path, 
     assert from_cache is False
 
 
+def test_observation_rows_use_valkey_when_process_memory_empty(tmp_path, monkeypatch):
+    cache_file = tmp_path / "missing_signal_cache.json"
+    _reset_cache_state(monkeypatch, cache_file)
+    monkeypatch.setattr(main, "NASDAQ_TICKERS", ["AAPL"])
+    monkeypatch.setattr(
+        main,
+        "get_session_info",
+        lambda: {"session": "PRE_MARKET", "is_holiday": False, "is_weekend": False},
+    )
+    monkeypatch.setattr(
+        "agent.valkey_client.get_all_prices",
+        lambda: {"AAPL": {"last": 199.0, "mark": 200.0, "updated_at": time.time()}},
+    )
+
+    sigs, last_scan, from_cache = main._current_signal_snapshot()
+
+    assert len(sigs) == 1
+    assert sigs[0]["ticker"] == "AAPL"
+    assert sigs[0]["price"] == 200.0
+    assert sigs[0]["is_observation"] is True
+    assert last_scan is not None
+    assert from_cache is False
+
+
+def test_active_observation_rows_filter_stale_valkey_quotes(tmp_path, monkeypatch):
+    cache_file = tmp_path / "missing_signal_cache.json"
+    _reset_cache_state(monkeypatch, cache_file)
+    monkeypatch.setattr(main, "NASDAQ_TICKERS", ["AAPL"])
+    monkeypatch.setattr(
+        main,
+        "get_session_info",
+        lambda: {"session": "PRE_MARKET", "is_holiday": False, "is_weekend": False},
+    )
+    monkeypatch.setattr(
+        "agent.valkey_client.get_all_prices",
+        lambda: {"AAPL": {"last": 199.0, "updated_at": time.time() - 60}},
+    )
+
+    sigs, last_scan, from_cache = main._current_signal_snapshot()
+
+    assert sigs == []
+    assert last_scan is None
+    assert from_cache is False
+
+
+def test_closed_observation_rows_allow_stale_valkey_quotes(tmp_path, monkeypatch):
+    cache_file = tmp_path / "missing_signal_cache.json"
+    _reset_cache_state(monkeypatch, cache_file)
+    monkeypatch.setattr(main, "NASDAQ_TICKERS", ["AAPL"])
+    monkeypatch.setattr(
+        main,
+        "get_session_info",
+        lambda: {"session": "CLOSED", "is_holiday": False, "is_weekend": False},
+    )
+    monkeypatch.setattr(
+        "agent.valkey_client.get_all_prices",
+        lambda: {"AAPL": {"last": 199.0, "updated_at": time.time() - 3600}},
+    )
+
+    sigs, last_scan, _ = main._current_signal_snapshot()
+
+    assert len(sigs) == 1
+    assert sigs[0]["ticker"] == "AAPL"
+    assert last_scan is not None
+
+
 def test_active_observation_rows_require_fresh_quotes(tmp_path, monkeypatch):
     cache_file = tmp_path / "missing_signal_cache.json"
     _reset_cache_state(monkeypatch, cache_file)
