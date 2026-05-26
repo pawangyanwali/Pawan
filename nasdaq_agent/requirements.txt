@@ -17,7 +17,9 @@ python-dotenv>=1.0.0
 pytz>=2024.1
 cryptography>=41.0.0
 # Neural network components (LSTM regime detector)
-torch>=2.0.0
+# torch is installed in the Dockerfile as CPU-only to avoid the 2 GB CUDA build.
+# For local dev with GPU: pip install torch>=2.0.0
+# torch>=2.0.0
 # RL entry timer uses only stdlib + numpy (no extra dep needed)
 # PostgreSQL drivers
 psycopg2-binary>=2.9.9

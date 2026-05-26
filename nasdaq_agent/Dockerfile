@@ -15,8 +15,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Python deps before copying app code so Docker can cache this layer
 # independently of code changes.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip
+
+# Install PyTorch CPU-only before the main requirements to avoid pulling the
+# 2 GB CUDA build that pip selects by default on Linux.  The EC2 t3.large has
+# no GPU so CPU-only (~180 MB) is sufficient for the BiLSTM regime detector.
+RUN pip install --no-cache-dir \
+    "torch>=2.0.0" --index-url https://download.pytorch.org/whl/cpu
+
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Application code ──────────────────────────────────────────────────────────
 COPY . .
