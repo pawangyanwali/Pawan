@@ -11,9 +11,9 @@ worker_class = "uvicorn.workers.UvicornWorker"
 workers = 1
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
-# ML retraining NOW runs in a subprocess (agent/_ml_retrain_worker.py) so the
-# worker heartbeat is never blocked by GIL-holding training threads.
-# 1800 s is belt-and-suspenders for any other slow operation.
+# ML retraining runs in daemon threads (not subprocess) so in-memory models
+# stay current.  XGBoost releases the GIL during C-level training so the
+# event loop heartbeat is not blocked.  1800 s guards any other slow operation.
 timeout = 1800
 graceful_timeout = 120
 keepalive = 65

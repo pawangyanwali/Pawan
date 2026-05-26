@@ -1633,14 +1633,26 @@ class Scanner:
             logger.info(f"Scheduled ML retrain launching ({len(TRAINING_TICKERS)} Tier-1 tickers)…")
             self._last_retrain       = time.time()
             self._last_deep_finetune = time.time()   # full retrain counts as fine-tune too
-            # Run in a subprocess so CPU-intensive XGBoost/sklearn training never
-            # stalls the asyncio event loop or the gunicorn worker heartbeat.
-            import subprocess as _sp, sys as _sys
-            from pathlib import Path as _Path
-            _worker = str(_Path(__file__).parent / "_ml_retrain_worker.py")
-            _proc = _sp.Popen([_sys.executable, _worker],
-                              cwd=str(_Path(__file__).parent.parent))
-            logger.info(f"[ML-Retrain] Subprocess started (pid={_proc.pid})")
+            # Run in a daemon thread so XGBoost/sklearn training runs in the same
+            # process and directly updates the in-memory _model_registry.
+            # Subprocess approach (old) saved to disk but never reloaded models
+            # into the main process — predictions used stale models until restart.
+            def _scheduled_retrain():
+                try:
+                    from agent.ml_model import retrain_all as _retrain_all
+                    from agent.data_fetcher import fetch_batch_interval as _fetch
+                    from config import CACHE_TTL_1D as _TTL_1D
+                    logger.info(f"[ML-Retrain] Thread started ({len(TRAINING_TICKERS)} tickers)")
+                    daily_data = _fetch(TRAINING_TICKERS, "1day", 500, ttl=_TTL_1D)
+                    _retrain_all(TRAINING_TICKERS, daily_data=daily_data, skip_deep=True)
+                    logger.info("[ML-Retrain] Thread complete — in-memory models updated.")
+                except Exception as _rt_e:
+                    logger.warning(f"[ML-Retrain] Thread failed: {_rt_e}")
+
+            import threading as _rt_threading
+            _rt_threading.Thread(
+                target=_scheduled_retrain, daemon=True, name="ml-retrain-scheduled"
+            ).start()
 
         elif self._should_finetune_deep():
             # Hourly Deep BiLSTM fine-tune — uses cached 15-min data, no API calls.
