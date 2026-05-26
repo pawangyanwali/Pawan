@@ -93,6 +93,7 @@ class ScanPipeline:
             "cycles_completed": 0,
             "errors_last_cycle": 0,
             "tickers_per_second": 0.0,
+            "slow_tickers_last_cycle": [],
         }
         self._metrics_lock = threading.Lock()
 
@@ -136,17 +137,27 @@ class ScanPipeline:
         t0 = time.perf_counter()
         errors = 0
         results: list = []
+        slow_tickers: list[tuple[str, float]] = []
         n_total = len(tickers)
         n_done = 0
+        try:
+            slow_threshold_s = max(
+                0.0,
+                float(os.getenv("NASDAQ_SCAN_SLOW_TICKER_S", "5.0")),
+            )
+        except ValueError:
+            slow_threshold_s = 5.0
 
         def _run(ticker: str):
-            return analyse_ticker(
+            task_t0 = time.perf_counter()
+            sig = analyse_ticker(
                 ticker,
                 df_1m=data_1m.get(ticker),
                 df_5m=data_5m.get(ticker, _empty),
                 df_1h=data_1h.get(ticker, _empty),
                 df_1d=data_1d.get(ticker, _empty),
             )
+            return sig, time.perf_counter() - task_t0
 
         with ThreadPoolExecutor(max_workers=self.n_workers,
                                 thread_name_prefix="scan") as executor:
@@ -158,7 +169,9 @@ class ScanPipeline:
                 ticker = future_to_ticker[future]
                 n_done += 1
                 try:
-                    sig = future.result()
+                    sig, task_elapsed_s = future.result()
+                    if slow_threshold_s and task_elapsed_s >= slow_threshold_s:
+                        slow_tickers.append((ticker, task_elapsed_s))
                     if sig is not None:
                         results.append(sig)
                         if on_ticker_done is not None:
@@ -181,7 +194,16 @@ class ScanPipeline:
             errors=errors,
             n_tickers=len(tickers),
             elapsed_s=elapsed_s,
+            slow_tickers=slow_tickers,
         )
+
+        if slow_tickers:
+            top_slow = sorted(slow_tickers, key=lambda item: item[1], reverse=True)[:10]
+            logger.warning(
+                "ScanPipeline slow tickers >= %.1fs: %s",
+                slow_threshold_s,
+                ", ".join(f"{ticker}={seconds:.1f}s" for ticker, seconds in top_slow),
+            )
 
         logger.info(
             "ScanPipeline: %d/%d tickers OK, %d errors, %d ms "
@@ -208,6 +230,7 @@ class ScanPipeline:
         errors: int,
         n_tickers: int,
         elapsed_s: float,
+        slow_tickers: list[tuple[str, float]] | None = None,
     ) -> None:
         with self._metrics_lock:
             prev_cycles = self._metrics["cycles_completed"]
@@ -226,6 +249,14 @@ class ScanPipeline:
                 "tickers_per_second": round(
                     n_tickers / elapsed_s if elapsed_s > 0 else 0.0, 1
                 ),
+                "slow_tickers_last_cycle": [
+                    {"ticker": ticker, "elapsed_s": round(seconds, 3)}
+                    for ticker, seconds in sorted(
+                        slow_tickers or [],
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )[:10]
+                ],
             })
 
 

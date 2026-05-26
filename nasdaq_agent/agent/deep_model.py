@@ -245,36 +245,33 @@ def _get_cluster_model(cluster: str):
     """Load or return cached model for the given cluster."""
     global _cluster_models, _cluster_scalers, _cluster_trained
 
-    if _cluster_models[cluster] is not None:
-        return _cluster_models[cluster]
+    with _lock:
+        if _cluster_models[cluster] is not None:
+            return _cluster_models[cluster]
 
-    n_tickers = len(_CLUSTER_TICKERS.get(cluster, []))
-    model = _build_model(n_tickers)
-    if model is None:
-        return None
+        n_tickers = len(_CLUSTER_TICKERS.get(cluster, []))
+        model = _build_model(n_tickers)
+        if model is None:
+            return None
 
-    cfg = _CLUSTER_CONFIGS[cluster]
-    try:
-        import torch
-        model_path = cfg["path"]
-        if model_path.exists():
-            model.load_state_dict(
-                torch.load(model_path, map_location="cpu", weights_only=True)
-            )
-            model.eval()
-            with _lock:
-                _cluster_models[cluster]  = model
+        cfg = _CLUSTER_CONFIGS[cluster]
+        try:
+            import torch
+            model_path = cfg["path"]
+            if model_path.exists():
+                model.load_state_dict(
+                    torch.load(model_path, map_location="cpu", weights_only=True)
+                )
+                model.eval()
                 _cluster_scalers[cluster] = _load_scaler(cfg["scaler"])
                 _cluster_trained[cluster] = True
-            logger.info(f"[DeepModel] Cluster {cluster} loaded from disk.")
-    except Exception as e:
-        logger.debug(f"[DeepModel] Cluster {cluster} load failed (will retrain): {e}")
+                logger.info(f"[DeepModel] Cluster {cluster} loaded from disk.")
+        except Exception as e:
+            logger.debug(f"[DeepModel] Cluster {cluster} load failed (will retrain): {e}")
 
-    with _lock:
-        if _cluster_models[cluster] is None:
-            _cluster_models[cluster] = model
+        _cluster_models[cluster] = model
 
-    return _cluster_models[cluster]
+        return _cluster_models[cluster]
 
 
 # ── Feature preparation ───────────────────────────────────────────────────────

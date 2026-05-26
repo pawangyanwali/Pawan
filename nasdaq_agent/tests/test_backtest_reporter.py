@@ -86,3 +86,33 @@ def test_adjust_confidence_multiple_contexts():
     assert result > 50.0
     with br._cal_lock:
         br._calibration = {}
+
+
+def test_feedback_retrain_defers_deep_phase(monkeypatch):
+    import agent.adaptive_filter as adaptive_filter
+    import agent.backtest_reporter as br
+    import agent.live_backtest as live_backtest
+    import agent.ml_model as ml_model
+    import config
+
+    calls = []
+    monkeypatch.setattr(config, "TRAINING_TICKERS", ["AAPL", "MSFT"])
+    monkeypatch.setattr(br, "_log_attribution", lambda df: None)
+    monkeypatch.setattr(br, "_update_confidence_calibration", lambda df: None)
+    monkeypatch.setattr(adaptive_filter, "update_filter", lambda stats: None)
+    monkeypatch.setattr(
+        live_backtest,
+        "get_performance_stats",
+        lambda lookback_days=30: {"win_rate": 0.5},
+    )
+    monkeypatch.setattr(
+        ml_model,
+        "retrain_all",
+        lambda tickers, **kwargs: calls.append((list(tickers), kwargs)),
+    )
+
+    outcomes = pd.DataFrame({"outcome": [1, 0, 1, 0]})
+
+    br._run_feedback_retrain(outcomes, ["SHOULD_NOT_USE"])
+
+    assert calls == [(["AAPL", "MSFT"], {"skip_deep": True})]

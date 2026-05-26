@@ -1375,6 +1375,7 @@ class Scanner:
         self._last_retrain:       float             = 0.0
         self._last_deep_finetune: float             = 0.0   # hourly BiLSTM fine-tune
         self._first_scan_done:    threading.Event   = threading.Event()
+        self._second_scan_done:   threading.Event   = threading.Event()
         self._scan_count:         int               = 0
 
     def register_callback(self, fn: Callable) -> None:
@@ -1423,18 +1424,16 @@ class Scanner:
         Starting retrain during that window would compete for the API rate budget
         and potentially trigger 429s that slow the scan.
         """
-        logger.info("ML training: waiting for first two scan cycles to warm data cache…")
-        # Wait for the first scan event (set at the end of run_once)
+        logger.info("ML training: waiting for first two completed scan cycles to warm data cache…")
         self._first_scan_done.wait(timeout=600)
-        # Extra buffer: let the second cycle finish so 5min cache is also warm
-        time.sleep(90)
+        self._second_scan_done.wait(timeout=900)
 
         logger.info(f"ML training starting ({len(TRAINING_TICKERS)} Tier-1 tickers)…")
         daily_data = fetch_batch_interval(TRAINING_TICKERS, "1day", 500, ttl=CACHE_TTL_1D)
-        retrain_all(TRAINING_TICKERS, daily_data=daily_data)
+        retrain_all(TRAINING_TICKERS, daily_data=daily_data, skip_deep=True)
         self._last_retrain       = time.time()
-        self._last_deep_finetune = time.time()   # startup full train counts as fine-tune
-        logger.info("ML training complete.")
+        self._last_deep_finetune = time.time()   # deep phase is deferred to scheduled fine-tune
+        logger.info("ML training complete; Deep BiLSTM deferred to scheduled fine-tune.")
 
     # ── Scan loop ─────────────────────────────────────────────────────────────
 
@@ -1624,6 +1623,8 @@ class Scanner:
         self._scan_count += 1
         if self._scan_count == 1:
             self._first_scan_done.set()   # unblock _train_ml_background
+        if self._scan_count >= 2:
+            self._second_scan_done.set()
         logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(active_tickers)} active (universe: {len(NASDAQ_TICKERS)})")
 
         # ML feedback: retrain if enough new backtest outcomes have accumulated

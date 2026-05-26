@@ -168,9 +168,10 @@ def _run_feedback_retrain(outcomes_df: pd.DataFrame, tickers: list) -> None:
         stats = get_performance_stats(lookback_days=30)
         _af_update(stats)
 
-        # 3. Retrain ML models — always use Tier-1 training set, never the full
-        #    active-ticker list (which can be 477 on fallback and starves the scan).
-        retrain_all(TRAINING_TICKERS)
+        # 3. Retrain ML models using Tier-1 tickers only. Feedback retrains run
+        #    opportunistically while the web app is live, so defer the expensive
+        #    Deep BiLSTM phase to the scanner's scheduled deep fine-tune path.
+        retrain_all(TRAINING_TICKERS, skip_deep=True)
         logger.info("[BT Feedback] Feedback retrain complete.")
 
     except Exception as e:
