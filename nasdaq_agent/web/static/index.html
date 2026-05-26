@@ -2455,7 +2455,12 @@ function renderTable() {
     // ── Trade STATUS cell ──────────────────────────────────────────────────
     const trade = allOpenTrades[s.ticker];
     let statusCell = '';
-    if (s.is_suppressed) {
+    if (s.is_observation) {
+      statusCell = `<div style="padding:5px 7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;font-size:9px">
+        <div style="color:var(--blue);font-weight:700">LIVE QUOTE</div>
+        <div style="color:#94a3b8;margin-top:2px;font-size:8px">No trade signal</div>
+      </div>`;
+    } else if (s.is_suppressed) {
       statusCell = `<div style="padding:5px 7px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:9px">
         <div style="color:var(--red);font-weight:700">🚫 FILTERED</div>
         <div style="color:#94a3b8;margin-top:2px;font-size:8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.suppress_reason||''}">${s.suppress_reason||'Adaptive filter'}</div>

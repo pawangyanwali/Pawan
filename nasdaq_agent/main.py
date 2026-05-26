@@ -76,7 +76,7 @@ from agent.broker.schwab_auth import (
 from agent.broker.schwab_streamer import (
     start_streamer, start_md_poller, get_streamer_status,
     register_tick_callback, register_bulk_price_callback,
-    is_md_poller_running,
+    is_md_poller_running, get_live_quotes_snapshot,
 )
 from agent.broker.schwab_client import get_positions, get_account_summary, get_orders
 from agent.broker.order_bridge import maybe_place_tos_order, get_daily_status
@@ -246,6 +246,174 @@ def _loaded_signal_cache_age_seconds() -> float | None:
         return None
 
 
+def _build_observation_rows() -> tuple[list[dict], str | None]:
+    """
+    Build dashboard-only rows from live quote memory when no scanner signals exist.
+
+    These rows keep the dashboard populated with current market observations
+    during regular, pre-market, and after-hours quote flow. They are intentionally
+    neutral and are not fed back into trading, backtesting, or model training.
+    """
+    try:
+        session = get_session_info()
+    except Exception:
+        session = {}
+    session_key = session.get("session", "")
+    closed_window = (
+        session.get("is_weekend")
+        or session.get("is_holiday")
+        or session_key == "CLOSED"
+    )
+
+    try:
+        quotes = get_live_quotes_snapshot(max_age_s=None if closed_window else 10.0)
+    except Exception:
+        return [], None
+    if not quotes:
+        return [], None
+
+    try:
+        regime = get_regime()
+        regime_name = regime.regime
+        regime_label = regime.label
+        regime_color = regime.color
+    except Exception:
+        regime_name = "NEUTRAL"
+        regime_label = "Neutral"
+        regime_color = "#94a3b8"
+
+    rows: list[dict] = []
+    newest_ts = 0.0
+    for ticker in NASDAQ_TICKERS:
+        q = quotes.get(ticker)
+        if not q:
+            continue
+        last = float(q.get("last") or 0.0)
+        mark = float(q.get("mark") or 0.0)
+        price = mark if session_key in {"AFTER_HOURS", "PRE_MARKET", "CLOSED"} and mark > 0 else last or mark
+        if price <= 0:
+            continue
+        updated_at = float(q.get("updated_at") or 0.0)
+        newest_ts = max(newest_ts, updated_at)
+        prev_close = float(q.get("prev_close") or 0.0)
+        change_pct = float(q.get("net_pct_change") or 0.0)
+        if change_pct == 0.0 and prev_close > 0:
+            change_pct = (price - prev_close) / prev_close * 100
+        row = {
+            "ticker": ticker,
+            "name": ticker,
+            "price": round(price, 4),
+            "change_pct": round(change_pct, 3),
+            "open_price": float(q.get("open") or 0.0),
+            "technical": 0.0,
+            "volume": float(q.get("volume") or 0.0),
+            "ml_prob": 0.5,
+            "ml_daily_prob": 0.5,
+            "sentiment": 0.0,
+            "score": 0.0,
+            "signal": "NEUTRAL",
+            "rel_volume": 0.0,
+            "unusual_vol": False,
+            "prediction": "NEUTRAL",
+            "confidence": 0.0,
+            "trend": "SIDEWAYS",
+            "trend_probability": 0.5,
+            "ml_trained": False,
+            "target_price": round(price, 4),
+            "stop_loss": round(price, 4),
+            "rr_ratio": 0.0,
+            "patterns": [],
+            "reasons": ["Observation mode: live quote available, no trade signal generated."],
+            "ml_swing_prob": 0.5,
+            "ml_deep_prob": 0.5,
+            "ml_swing_trained": False,
+            "ml_deep_trained": False,
+            "supports": [],
+            "resistances": [],
+            "pivots": {},
+            "poc": 0.0,
+            "mtf_score": 0.0,
+            "mtf_alignment": "MIXED",
+            "mtf_bull_count": 0,
+            "mtf_bear_count": 0,
+            "mtf_timeframes": {},
+            "rsi_gated": False,
+            "reversal_score": 0.0,
+            "reversal_type": "NONE",
+            "divergence_type": "NONE",
+            "reversal_signals": [],
+            "retest_level": 0.0,
+            "entry_zone_low": 0.0,
+            "entry_zone_high": 0.0,
+            "exhaustion_flags": [],
+            "bounce_signals": [],
+            "session": session_key or "UNKNOWN",
+            "session_label": session.get("label", ""),
+            "session_color": session.get("color", "#94a3b8"),
+            "session_mult": float(session.get("mult", 1.0) or 1.0),
+            "session_advice": session.get("advice", ""),
+            "regime": regime_name,
+            "regime_label": regime_label,
+            "regime_color": regime_color,
+            "trading_tier": "REGULAR",
+            "rs_label": "IN_LINE",
+            "rs_ratio": 1.0,
+            "gap_type": "FLAT",
+            "gap_pct": 0.0,
+            "gap_filled": False,
+            "gap_fill_prob": 0.0,
+            "premarket_high": 0.0,
+            "premarket_low": 0.0,
+            "vwap_event": "FLAT",
+            "vwap_deviation": 0.0,
+            "sector_etf": "",
+            "sector_trend": "NEUTRAL",
+            "exit_recommendation": "HOLD",
+            "rsi_zone": "NEUTRAL",
+            "rsi_value": 50.0,
+            "entry_type": "OBSERVATION",
+            "rr_quality": "LOW",
+            "rr_qualifies": False,
+            "is_suppressed": False,
+            "suppress_reason": "",
+            "earnings_blocked": False,
+            "earnings_reason": "",
+            "earnings_date": "",
+            "earnings_days_away": 0,
+            "ah_change_pct": 0.0,
+            "ah_direction": "",
+            "ah_magnitude": "",
+            "ah_confirms_signal": False,
+            "ah_news_likely": False,
+            "trade_plan": {},
+            "candles": [],
+            "headlines": [],
+            "ticker_win_rate": 0.0,
+            "ticker_obs_count": 0,
+            "learning_rank": 0.0,
+            "is_observation": True,
+            "source": "live_quote_observation",
+            "scanned_at": datetime.fromtimestamp(updated_at or time.time(), timezone.utc).isoformat(),
+        }
+        rows.append(row)
+
+    if newest_ts:
+        return rows, datetime.fromtimestamp(newest_ts, timezone.utc).isoformat()
+    return rows, None
+
+
+def _merge_observation_rows(primary_rows: list[dict]) -> tuple[list[dict], str | None]:
+    """Append live-quote observation rows for tickers missing from primary_rows."""
+    observation_rows, observation_ts = _build_observation_rows()
+    if not observation_rows:
+        return primary_rows, observation_ts
+    seen = {str(row.get("ticker", "")) for row in primary_rows}
+    missing = [row for row in observation_rows if row.get("ticker") not in seen]
+    if not missing:
+        return primary_rows, observation_ts
+    return primary_rows + missing, observation_ts
+
+
 def _load_signal_cache() -> None:
     """Load the on-disk signal cache at startup when it is session-appropriate."""
     global _last_signals_dicts, _last_signals_ts
@@ -286,7 +454,11 @@ def _current_signal_snapshot() -> tuple[list[dict], str | None, bool]:
     if _last_signals_dicts:
         age = _loaded_signal_cache_age_seconds()
         if age is None or age <= _signal_cache_max_age_seconds():
-            return _last_signals_dicts, _last_signals_ts or scanner.last_scan, True
+            rows, observation_ts = _merge_observation_rows(_last_signals_dicts)
+            return rows, observation_ts or _last_signals_ts or scanner.last_scan, True
+    observation_rows, observation_ts = _build_observation_rows()
+    if observation_rows:
+        return observation_rows, observation_ts or scanner.last_scan, False
     return [], _last_signals_ts or scanner.last_scan, False
 
 # ── Schwab price → WebSocket broadcast ───────────────────────────────────────

@@ -803,6 +803,23 @@ def get_live_quote(ticker: str) -> dict:
         return dict(_live_quotes.get(ticker, {}))
 
 
+def get_live_quotes_snapshot(max_age_s: float | None = None) -> dict[str, dict]:
+    """
+    Return a thread-safe snapshot of current Level 1 quotes.
+
+    max_age_s filters out stale quotes by updated_at. Passing None returns every
+    quote currently held in memory, which is useful for closed-session dashboard
+    observation rows where last known price is still informative.
+    """
+    now = time.time()
+    with _lock:
+        return {
+            sym: dict(quote)
+            for sym, quote in _live_quotes.items()
+            if max_age_s is None or now - float(quote.get("updated_at") or 0.0) <= max_age_s
+        }
+
+
 def get_bid_ask_imbalance(ticker: str) -> float:
     """
     Bid/ask size imbalance: (bid_size − ask_size) / (bid_size + ask_size).

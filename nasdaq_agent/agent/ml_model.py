@@ -42,6 +42,33 @@ from agent.technical import compute_indicators
 
 logger = logging.getLogger(__name__)
 
+
+def _candidate_rejection_reason(
+    *,
+    new_acc: float,
+    old_acc: float,
+    min_acc: float,
+    max_regression: float,
+    econ_ok: bool,
+    econ_note: str,
+) -> str:
+    """Explain why a candidate model was not promoted without implying a crash."""
+    if new_acc < min_acc:
+        return f"accuracy gate failed: acc={new_acc:.3f} < floor={min_acc:.2f}"
+    if old_acc and new_acc < old_acc - max_regression:
+        return (
+            "incumbent regression gate failed: "
+            f"acc={new_acc:.3f}, incumbent={old_acc:.3f}, "
+            f"max_allowed_drop={max_regression:.2f}"
+        )
+    if not econ_ok:
+        return f"economic gate failed: {econ_note}"
+    return (
+        "promotion gate failed: "
+        f"acc={new_acc:.3f}, floor={min_acc:.2f}, incumbent={old_acc:.3f}, {econ_note}"
+    )
+
+
 import threading as _threading
 
 _retrain_lock  = _threading.Lock()
@@ -385,11 +412,12 @@ class StockMLModel:
                 f"(prev={old_acc:.3f}) | {econ_note} | trees={n_trees} | samples={len(X_train)}"
             )
         else:
-            reason = (
-                f"acc={new_acc:.3f} < floor={_MIN_ACC}" if not acc_ok
-                else f"econ rejected: {econ_note}"
+            reason = _candidate_rejection_reason(
+                new_acc=new_acc, old_acc=old_acc,
+                min_acc=_MIN_ACC, max_regression=_MAX_REGRESSION,
+                econ_ok=econ_ok, econ_note=econ_note,
             )
-            logger.warning(f"[{self.ticker}] ScalpML candidate rejected — {reason}")
+            logger.info(f"[{self.ticker}] ScalpML candidate rejected — {reason}")
         return promoted
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -777,8 +805,12 @@ class DailyMLModel:
                 f"(prev={old_acc:.3f}) | {econ_note} | trees={n_trees} | samples={len(X_train)}"
             )
         else:
-            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
-            logger.warning(f"[{self.ticker}] DailyML candidate rejected — {reason}")
+            reason = _candidate_rejection_reason(
+                new_acc=new_acc, old_acc=old_acc,
+                min_acc=_MIN_ACC, max_regression=_MAX_REGRESSION,
+                econ_ok=econ_ok, econ_note=econ_note,
+            )
+            logger.info(f"[{self.ticker}] DailyML candidate rejected — {reason}")
         return promoted
 
     # ── Inference ─────────────────────────────────────────────────────────────
@@ -994,8 +1026,12 @@ class ReversalMLModel:
                 f"reversals={y.sum()}/{len(y)} ({y.mean()*100:.1f}%)"
             )
         else:
-            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
-            logger.warning(f"[{self.ticker}] ReversalML candidate rejected — {reason}")
+            reason = _candidate_rejection_reason(
+                new_acc=new_acc, old_acc=old_acc,
+                min_acc=_MIN_ACC, max_regression=_MAX_REGRESSION,
+                econ_ok=econ_ok, econ_note=econ_note,
+            )
+            logger.info(f"[{self.ticker}] ReversalML candidate rejected — {reason}")
         return promoted
 
     def predict_proba(self, df: pd.DataFrame) -> float:
@@ -1155,8 +1191,12 @@ class SwingMLModel:
                 f"(prev={old_acc:.3f}) | {econ_note} | trees={n_trees} | samples={len(X_train)} (15min, 2h)"
             )
         else:
-            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
-            logger.warning(f"[{self.ticker}] SwingML candidate rejected — {reason}")
+            reason = _candidate_rejection_reason(
+                new_acc=new_acc, old_acc=old_acc,
+                min_acc=_MIN_ACC, max_regression=_MAX_REGRESSION,
+                econ_ok=econ_ok, econ_note=econ_note,
+            )
+            logger.info(f"[{self.ticker}] SwingML candidate rejected — {reason}")
         return promoted
 
     def predict_proba(self, df_15m: pd.DataFrame) -> float:
@@ -1334,8 +1374,12 @@ class EnsembleMLModel:
                 f"(prev={old_acc:.3f}) | {econ_note} | members={len(self.models)} | samples={len(X_train)}"
             )
         else:
-            reason = f"acc={new_acc:.3f} < floor" if not acc_ok else f"econ rejected: {econ_note}"
-            logger.warning(f"[{self.ticker}] Ensemble candidate rejected — {reason}")
+            reason = _candidate_rejection_reason(
+                new_acc=new_acc, old_acc=old_acc,
+                min_acc=_MIN_ACC, max_regression=_MAX_REGRESSION,
+                econ_ok=econ_ok, econ_note=econ_note,
+            )
+            logger.info(f"[{self.ticker}] Ensemble candidate rejected — {reason}")
         return promoted
 
     def predict(self, df: pd.DataFrame) -> tuple[float, float]:
