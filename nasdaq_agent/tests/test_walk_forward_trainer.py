@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Comprehensive tests for Phase 3 Part 1: WalkForwardTrainer.
 

@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Extended API endpoint tests using FastAPI TestClient.
 Tests the 57 untested endpoints beyond what test_api.py covers.

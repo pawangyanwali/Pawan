@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Comprehensive tests for Phase 1 (market session detection) and Phase 2
 (extended-hours training data + session-aware ML features).

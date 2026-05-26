@@ -10,10 +10,59 @@ on:
       - '.github/workflows/deploy.yml'
 
 jobs:
+  test:
+    name: Fast test suite (< 60s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: nasdaq_agent/requirements.txt
+
+      - name: Install test dependencies
+        working-directory: nasdaq_agent
+        run: |
+          pip install --quiet \
+            fastapi uvicorn gunicorn websockets \
+            pandas numpy scikit-learn joblib xgboost ta \
+            textblob aiohttp requests python-multipart \
+            python-dotenv pytz cryptography redis \
+            psycopg2-binary asyncpg \
+            PyJWT bcrypt email-validator pyotp qrcode alembic \
+            pytest pytest-asyncio pytest-timeout httpx
+          # CPU-only torch (saves ~1.8 GB vs CUDA build)
+          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run fast suite
+        working-directory: nasdaq_agent
+        env:
+          NASDAQ_SCANNER_ENABLED: "0"
+          NASDAQ_MARKET_DATA_ENABLED: "0"
+          NASDAQ_LEARNER_ENABLED: "0"
+          NASDAQ_SCHEDULER_ENABLED: "0"
+        run: |
+          pytest tests/test_fast_suite.py \
+                 tests/test_market_hours.py \
+                 tests/test_vwap.py \
+                 tests/test_risk_controls.py \
+                 tests/test_paper_trading.py \
+                 tests/test_live_backtest.py \
+                 tests/test_signal_cache.py \
+                 tests/test_backtest.py \
+                 tests/test_exit_signals.py \
+                 tests/test_opening_range.py \
+                 tests/test_macro_calendar.py \
+                 --timeout=8 -x -q 2>&1 | tail -30
+
   deploy:
     name: SSH deploy & reload
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: test
 
     steps:
       - name: Deploy to server

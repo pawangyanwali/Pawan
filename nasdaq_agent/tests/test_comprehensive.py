@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Comprehensive system test — covers every API endpoint, ML/model layer,
 signal logic, backtest accuracy, P&L math, and data integrity.

@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Data Integrity Tests — validates that all data produced and consumed by the
 system satisfies its mathematical and logical invariants.

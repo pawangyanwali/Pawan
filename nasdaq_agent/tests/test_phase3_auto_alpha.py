@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Tests for Phase 3 Part 3 — auto-tuning EWMA alpha in ParameterAdapter.
 

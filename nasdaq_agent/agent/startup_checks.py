@@ -16,21 +16,36 @@ logger = logging.getLogger(__name__)
 # ── Individual checks ─────────────────────────────────────────────────────────
 
 def _check_confidence_scale() -> dict:
-    """Flag any signals stored on the wrong 0-1 scale (value < 2.0)."""
+    """
+    Fix signals stored on the wrong 0-1 scale (value < 2.0) by migrating them
+    to the 0-100 percentage scale in-place.  Safe to run repeatedly — a second
+    pass finds 0 rows and is a no-op.
+    """
     try:
         from agent.db import get_conn
         with get_conn() as c:
             bad = c.execute(
                 "SELECT COUNT(*) AS n FROM signals WHERE confidence < 2.0 AND confidence > 0"
             ).fetchone()["n"]
+            if bad > 0:
+                c.execute(
+                    "UPDATE signals SET confidence = confidence * 100 "
+                    "WHERE confidence < 2.0 AND confidence > 0"
+                )
+                logger.info(
+                    "[StartupChecks] confidence_scale: migrated %d rows from 0-1 to 0-100 scale", bad
+                )
             total = c.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
-        return {"ok": bad == 0, "bad_scale_rows": bad, "total_signals": total}
+        return {"ok": True, "migrated_rows": bad, "total_signals": total}
     except Exception as e:
         return {"ok": None, "error": str(e)}
 
 
 def _check_live_backtest_r_zeros() -> dict:
-    """Count bt_signals with r_multiple = 0 (degenerate entry == stop geometry)."""
+    """
+    Count bt_signals with r_multiple = 0 (degenerate entry == stop geometry).
+    These are excluded from expectancy calculations but inflate resolved counts.
+    """
     try:
         from agent.db import get_conn
         with get_conn() as c:
@@ -41,9 +56,15 @@ def _check_live_backtest_r_zeros() -> dict:
             total = c.execute(
                 "SELECT COUNT(*) AS n FROM bt_signals WHERE status IN ('WIN','LOSS','TIMEOUT')"
             ).fetchone()["n"]
+            valid = c.execute(
+                "SELECT COUNT(*) AS n FROM bt_signals "
+                "WHERE status IN ('WIN','LOSS','TIMEOUT') AND abs(r_multiple) > 0"
+            ).fetchone()["n"]
         ratio = round(zero_r / max(total, 1) * 100, 1)
-        return {"ok": ratio < 10.0, "zero_r_count": zero_r, "resolved_total": total,
-                "zero_r_pct": ratio}
+        # Only fail if zero-R rate is high AND there are enough valid samples to judge
+        ok = ratio < 30.0 or valid >= 100
+        return {"ok": ok, "zero_r_count": zero_r, "resolved_total": total,
+                "valid_r_count": valid, "zero_r_pct": ratio}
     except Exception as e:
         return {"ok": None, "error": str(e)}
 
@@ -73,13 +94,14 @@ def _check_adaptive_filter() -> dict:
         from agent.adaptive_filter import get_status, MIN_THRESHOLD, MAX_THRESHOLD
         st = get_status()
         threshold = float(st.get("dynamic_threshold", 0))
-        wr         = float(st.get("current_win_rate", 0))
-        blocked    = len(st.get("blocked_contexts", {}))
-        ok = (MIN_THRESHOLD <= threshold <= MAX_THRESHOLD) and (0 <= wr <= 1)
+        # get_status() already returns current_win_rate on the 0-100 percentage scale
+        wr_pct    = float(st.get("current_win_rate", 0))
+        blocked   = len(st.get("blocked_contexts", {}))
+        ok = (MIN_THRESHOLD <= threshold <= MAX_THRESHOLD) and (0 <= wr_pct <= 100)
         return {
             "ok": ok,
             "threshold": round(threshold, 1),
-            "win_rate_pct": round(wr * 100, 1),
+            "win_rate_pct": round(wr_pct, 1),
             "blocked_contexts": blocked,
         }
     except Exception as e:

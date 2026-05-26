@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Supplementary tests covering smaller untested modules:
   - agent/relative_strength.py

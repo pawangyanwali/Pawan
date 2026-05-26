@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Tests for REST API endpoints via FastAPI TestClient.
 Uses a mock scanner so no real Twelve Data API calls are made.

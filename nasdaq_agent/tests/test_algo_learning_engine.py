@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Comprehensive tests for Phase 1 Adaptive Trading Learning Engine.
 Covers all 10 components in agent/algo_learning_engine.py.

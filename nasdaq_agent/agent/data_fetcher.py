@@ -96,7 +96,7 @@ def _sqlite_get(ticker: str, interval: str, ttl: float) -> pd.DataFrame | None:
         if hasattr(newest, "tzinfo") and newest.tzinfo is not None:
             newest = newest.tz_convert("UTC").tz_localize(None)
         mult = _SQLITE_TTL_BY_INTERVAL.get(interval, _SQLITE_TTL_MULT)
-        if (pd.Timestamp.utcnow().tz_localize(None) - newest).total_seconds() > ttl * mult:
+        if (pd.Timestamp.now("UTC").tz_localize(None) - newest).total_seconds() > ttl * mult:
             return None
         return df.rename(columns={
             "open": "Open", "high": "High",

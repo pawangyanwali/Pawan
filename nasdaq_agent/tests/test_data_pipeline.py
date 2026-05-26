@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 test_data_pipeline.py
 ─────────────────────

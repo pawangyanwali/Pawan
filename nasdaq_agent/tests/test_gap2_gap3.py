@@ -1,3 +1,6 @@
+import pytest
+pytestmark = pytest.mark.slow
+
 """
 Tests for Gap 2 (routing wire in scanner.py) and Gap 3 (Phase 2 API endpoints in main.py).
 
