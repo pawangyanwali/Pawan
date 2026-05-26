@@ -15,8 +15,6 @@
 #   market hours  (scanner + web-api + scheduler)  ≈ 6 GB RAM
 #   off-hours     (learner + web-api + scheduler)   ≈ 3.5 GB RAM
 
-version: "3.9"
-
 # Shared settings — referenced via YAML anchors in each service
 x-common: &common
   build:
