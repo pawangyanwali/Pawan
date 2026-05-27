@@ -502,6 +502,16 @@ def analyse_ticker(
         if df_1m is None or df_1m.empty or len(df_1m) < 5:
             return None
 
+        # ── Drop trailing incomplete bars (close=0 or NaN) ───────────────────
+        # Schwab REST may return a placeholder "current bar" with close=0 when
+        # called outside trading hours (CLOSED/AH sessions).  Remove it before
+        # computing indicators so prediction.py doesn't receive price=0 and fall
+        # back to _empty_prediction() (which has confidence=0.0).
+        _df_clean = df_1m[df_1m["Close"].fillna(0) > 0]
+        if _df_clean.empty or len(_df_clean) < 5:
+            return None
+        df_1m = _df_clean
+
         df_ind = compute_indicators(df_1m.copy())
         last   = df_ind.iloc[-1]
 

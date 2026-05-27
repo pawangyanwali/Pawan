@@ -329,11 +329,13 @@ def fetch_batch_realtime(
                 cache_miss.append(ticker)
 
         if cache_miss:
-            # Try SQLite — skip for extended-hours to avoid mixing AH/PM bars
-            # with regular-session bars that share the same "1min" SQLite key.
+            # Try SQLite.  During extended/closed hours we still allow SQLite reads
+            # with a longer TTL (4h) — the data is historical so mixing AH bars is
+            # acceptable; the live price overlay will correct the last Close anyway.
+            _sqlite_ttl = 300 if not extended_hours else 14400   # 5 min regular, 4 h extended
             still_miss = []
             for ticker in cache_miss:
-                df = _sqlite_get(ticker, "1min", 300) if not extended_hours else None
+                df = _sqlite_get(ticker, "1min", _sqlite_ttl)
                 if df is not None:
                     result[ticker] = df
                     _cache_set(ticker, interval_key, df)
@@ -368,12 +370,27 @@ def fetch_batch_realtime(
                 logger.info(f"[Schwab] 1min: {len(fetched)}/{len(still_miss)} fetched from API")
 
     # ── Live price overlay ────────────────────────────────────────────────────
+    # Priority 1: in-process _live_quotes (streamer running in this container)
+    # Priority 2: Valkey md:prices hash (market-data container in split mode)
+    # Without this fallback, scanner container (NASDAQ_MARKET_DATA_ENABLED=0)
+    # would serve stale REST Close values and miss the live price update that
+    # corrects any trailing zero/incomplete bar from Schwab's API.
     try:
         from agent.broker.schwab_streamer import get_live_quote
+        # Bulk-read Valkey prices once per batch call — O(1) HGETALL ≈ 0.5 ms
+        _vk_prices: dict = {}
+        try:
+            from agent.valkey_client import get_all_prices as _vk_all_prices
+            _vk_prices = _vk_all_prices()
+        except Exception:
+            pass
         for ticker, df in result.items():
             if df.empty:
                 continue
             q = get_live_quote(ticker)
+            if not q:
+                # Fallback: read from market-data container's Valkey price hash
+                q = _vk_prices.get(ticker, {})
             if not q:
                 continue
             last = float(q.get("last") or 0)
