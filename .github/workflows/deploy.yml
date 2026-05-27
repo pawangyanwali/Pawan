@@ -142,6 +142,22 @@ except Exception:
               done
 
               # ── Wait for scanner ───────────────────────────────────────────────
+              # ── Wait for market-data ──────────────────────────────────────────
+              echo "=== Waiting for market-data to become healthy (max 90s) ==="
+              for i in $(seq 1 9); do
+                sleep 10
+                status=$(_svc_health market-data)
+                if [ "$status" = "healthy" ]; then
+                  echo "  market-data healthy after $((i*10))s"
+                  break
+                fi
+                echo "  Attempt $i/9: health=$status"
+                if [ $i -eq 9 ]; then
+                  echo "WARNING: market-data not yet healthy after 90s — check logs"
+                  sudo -u "$APP_USER" docker compose logs --tail=30 market-data
+                fi
+              done
+
               # Scanner healthcheck: python3 Valkey ping — passes once Valkey is
               # reachable. start_period=90s so we allow up to 2 min total.
               echo "=== Waiting for scanner to become healthy (max 2 min) ==="
