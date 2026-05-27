@@ -46,21 +46,19 @@ x-common: &common
     - nasdaq-net
   logging: *logging
   volumes:
-    # Persist model files and runtime data across restarts
-    - nasdaq-data:/app/data
+    # Persist model files, token files, and runtime data on the host.
+    # Bind-mount means the host directory IS the container path — no docker cp needed.
+    # Ensure the directory exists before first run: mkdir -p /opt/nasdaq-agent/nasdaq_agent/data
+    - /opt/nasdaq-agent/nasdaq_agent/data:/app/data
     # Bind-mount host log directory so all service logs appear in one place
     # on the host at /opt/nasdaq-agent/logs
     - /opt/nasdaq-agent/logs:/app/logs
-    # Schwab auth tokens must survive restarts
-    - nasdaq-tokens:/app/tokens
 
 networks:
   nasdaq-net:
     driver: bridge
 
-volumes:
-  nasdaq-data:    # model files, SQLite state, backtest cache
-  nasdaq-tokens:  # Schwab OAuth token files
+volumes: {}  # all data bind-mounted to host; no named volumes needed
 
 services:
 
