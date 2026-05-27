@@ -2869,7 +2869,7 @@ async def _ws_keepalive(ws: WebSocket) -> None:
 async def websocket_endpoint(ws: WebSocket):
     # Accept the connection, then authenticate via either:
     #   Fast path  — valid "token" query-parameter (zero-latency, already in URL)
-    #   Slow path  — {"type":"auth","token":"..."} first message within 10 seconds
+    #   Slow path  — {"type":"auth","token":"..."} first message within 3 seconds
     # Both paths call the same decode_token / is_blacklisted checks.
     await ws.accept()
 
@@ -2883,15 +2883,25 @@ async def websocket_endpoint(ws: WebSocket):
 
     _authed = False
 
-    # Fast path: token in query param (client already attached it to the URL)
+    # Fast path: token in query param (client already attached it to the URL).
+    # If the token is present but INVALID → close immediately (4001) rather than
+    # falling into the slow path and holding the connection open for 3 seconds.
+    # A bad query-token is never going to become valid via a first message.
     _qtoken = ws.query_params.get("token", "")
     if _qtoken:
-        _authed = _verify_token(_qtoken)
+        if _verify_token(_qtoken):
+            _authed = True
+        else:
+            # Bad token supplied explicitly — reject without delay
+            await _safe_ws_close(ws, code=4001)
+            return
 
-    # Slow path: wait for first-message auth (covers clients that omit the query param)
+    # Slow path: wait for first-message auth (covers clients that omit the query param).
+    # Timeout reduced to 3s — 10s held a half-open connection too long and caused
+    # the test suite to hit its 8s per-test timeout.
     if not _authed:
         try:
-            raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+            raw = await asyncio.wait_for(ws.receive_text(), timeout=3.0)
             msg = json.loads(raw)
             if msg.get("type") == "auth":
                 _authed = _verify_token(msg.get("token", ""))
