@@ -961,6 +961,7 @@ async def lifespan(app: FastAPI):
     from agent.multi_tf_backtest import init_db as _mtf_init_db
     from historical.store import init_tables as _hist_init_tables
     from agent.service_state import init_db as _ss_init_db
+    from agent.context_store import init_db as _ctx_init_db
     _auth_init_tables()
     seed_admin()
     _ah_init_db()
@@ -968,6 +969,7 @@ async def lifespan(app: FastAPI):
     _mtf_init_db()
     _hist_init_tables()
     _ss_init_db()   # durable service-state table (scan:latest, heartbeats, etc.)
+    _ctx_init_db()  # context intel tables (context_events, ticker_context_features, earnings_calendar)
 
     # Warm the market-hours cache before the first scan so get_market_session()
     # doesn't block on its first call mid-scan.  This runs in the background
@@ -2003,6 +2005,23 @@ async def macro_calendar_endpoint():
         "current": check_macro_event(),
         "upcoming": get_upcoming_events(days=14),
     }
+
+
+@app.get("/api/context/{ticker}")
+async def context_snapshot_endpoint(ticker: str):
+    """
+    Return the latest context intelligence snapshot for a ticker.
+
+    Payload includes rolling sentiment windows (5m/30m/2h/1d), news shock flag,
+    context risk score, recent headlines, earnings phase / blackout status,
+    and a stale_age_s field indicating how old the data is.
+
+    Source:  Valkey ctx:latest:{ticker} → PostgreSQL fallback → safe defaults.
+    Populated by the context-intel service every 30 seconds.
+    """
+    from agent.context_snapshot import get_context_snapshot
+    snapshot = get_context_snapshot(ticker.upper())
+    return snapshot
 
 
 @app.get("/api/watchlist")

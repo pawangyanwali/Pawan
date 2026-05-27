@@ -652,7 +652,25 @@ def analyse_ticker(
             swing_trained = _swing_trained,
             deep_trained  = _deep_trained,
         )
-        sent, headlines = score_sentiment(ticker)
+        # ── Context snapshot (Valkey-first, < 10 ms) ─────────────────────────
+        # Single read replaces two stub calls (score_sentiment + earnings_blackout).
+        # Falls back: Valkey → PostgreSQL → safe defaults.
+        # When FINNHUB_API_KEY is absent or context-intel is not running, all
+        # fields default to 0.0 / "" / 999 — identical to the pre-Phase-1 stubs.
+        from agent.context_snapshot import get_context_snapshot as _get_ctx
+        _ctx      = _get_ctx(ticker)
+        sent      = float(_ctx.get("sentiment_30m", 0.0))
+        headlines = list(_ctx.get("recent_headlines", []))
+
+        # Build earnings blackout dict from context snapshot (matches expected keys)
+        _ep = _ctx.get("earnings_phase", "")
+        eb  = {
+            "blocked":   _ep == "blackout" or _ep == "cooldown",
+            "reason":    _ctx.get("earnings_reason",    ""),
+            "next_date": _ctx.get("earnings_next_date", ""),
+            "days_away": int(_ctx.get("earnings_days_away", 999)),
+        }
+
         rvol            = rvol_time_of_day(df_ind, df_1d)
         uvol            = detect_unusual_volume(df_ind)
 
@@ -665,9 +683,6 @@ def analyse_ticker(
         sess_info = get_session_info()
         sess_mult = confidence_multiplier()
         # Schwab market hours cross-check skipped when SCHWAB_ENABLED=false
-
-        # Earnings blackout
-        eb = earnings_blackout(ticker)
 
         # Gap analysis
         gap = analyse_gap(df_1m, df_1d)

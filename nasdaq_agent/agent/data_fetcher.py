@@ -484,7 +484,16 @@ def get_credit_usage() -> dict:
 
 
 def fetch_news(ticker: str) -> list:
-    return []
+    """
+    Return recent news for ticker from the context_store DB.
+    Falls back to [] when context-intel has not populated any events yet
+    (same behaviour as the original stub).
+    """
+    try:
+        from agent.context_store import get_recent_news_for_ticker
+        return get_recent_news_for_ticker(ticker, max_items=10)
+    except Exception:
+        return []
 
 
 def fetch_ticker_info(ticker: str) -> dict:

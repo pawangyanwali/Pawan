@@ -25,9 +25,19 @@ _cache: dict[str, tuple[Optional[datetime], float]] = {}  # ticker → (next_dat
 
 
 def _fetch_next_earnings(ticker: str) -> Optional[datetime]:
-    """Schwab Market Data does not provide an earnings calendar endpoint.
-    Returns None — earnings blocking is effectively disabled."""
-    return None
+    """
+    Look up the next earnings date from the context_store DB (populated by the
+    context-intel service from Finnhub).
+
+    Falls back to None when the DB is unavailable or the context-intel service
+    has not run yet — earnings blocking remains disabled in that case, which
+    is the same behaviour as before Phase 1.
+    """
+    try:
+        from agent.context_store import get_next_earnings_from_db
+        return get_next_earnings_from_db(ticker)
+    except Exception:
+        return None
 
 
 def get_next_earnings(ticker: str) -> Optional[datetime]:

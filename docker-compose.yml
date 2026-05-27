@@ -165,6 +165,37 @@ services:
     cpus: "0.5"
     pids_limit: 256
 
+  # ── Context Intelligence ────────────────────────────────────────────────────
+  # Polls Finnhub (news + earnings) and publishes rolling context features to
+  # Valkey (ctx:latest:{ticker}, TTL 600 s) and PostgreSQL.
+  # Scanner reads from Valkey; this container has zero impact on scan latency.
+  # Provider outage (Finnhub down / missing FINNHUB_API_KEY) is non-fatal;
+  # the scanner continues with last-known features or safe defaults.
+  context-intel:
+    <<: *common
+    environment:
+      NASDAQ_SCANNER_ENABLED:       "0"
+      NASDAQ_MARKET_DATA_ENABLED:   "0"
+      NASDAQ_LEARNER_ENABLED:       "0"
+      NASDAQ_SCHEDULER_ENABLED:     "0"
+      NASDAQ_CONTEXT_INTEL_ENABLED: "1"
+      LOG_DIR:                      "/app/logs"
+    command: ["python", "-m", "services.context_intel_service"]
+    depends_on:
+      - market-data
+    healthcheck:
+      # Process alive + DB reachable + Valkey reachable + feature-compute heartbeat.
+      # Provider (Finnhub) reachability is NOT checked — a Finnhub outage must
+      # not restart this container; report it via /api/services/status instead.
+      test: ["CMD", "python3", "/app/services/context_healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    mem_limit: 512m
+    cpus: "0.3"
+    pids_limit: 128
+
   # ── Scheduler ───────────────────────────────────────────────────────────────
   # Lightweight process: EOD force-close watchdog + Valkey heartbeat.
   # Must stay up continuously — restarts instantly if it crashes.
