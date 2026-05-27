@@ -4119,7 +4119,7 @@ function _ptRenderLearning(ls, summary) {
   if (hist.length >= 2) {
     html += `<div class="pt-learn-card">
       <div style="font-size:12px;font-weight:700;margin-bottom:8px">Confidence Gate History</div>
-      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">Gate tightens when win rate is below 62%, relaxes when above 92%</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">Gate tightens when win rate is below ${target}%, relaxes when above target</div>
       <div style="display:flex;align-items:flex-end;gap:4px;height:50px">${hist.slice(-10).map(h => {
         const pct = Math.round(((h.threshold-50)/35)*100);
         const col = h.win_rate*100 >= target ? '#16a34a' : '#f59e0b';

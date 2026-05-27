@@ -43,8 +43,10 @@ def test_dashboard_target_win_rate_not_hardcoded():
         ">= 62",         # comparison operators
         ">62",
         ">=62",
+        "62%",           # hard-coded percent copy
         "'62% WR'",      # hard-coded label string
         '"62% WR"',
+        "below 62",
         "≥62%",          # unicode ≥ in copy
         "win rate ≥62",
         "win rate >= 62",
