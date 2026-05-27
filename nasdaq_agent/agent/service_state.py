@@ -15,6 +15,12 @@ Keys that stay Valkey-only (high-frequency streaming / pub-sub only):
   md:1m:{ticker}       — append-only 1-min candle LISTs, 2 h TTL
   scan:notify          — lightweight pub/sub wake-up trigger
   schwab:tokens_refreshed — pub/sub OAuth trigger
+
+DB interface note:
+  agent.db.get_conn() returns _PgConnection — a custom wrapper that exposes
+  the sqlite3.Connection API: conn.execute(sql, params) → cursor-like object
+  with .fetchone()/.fetchall() returning RealDictRow dicts.  Do NOT call
+  conn.cursor() — it does not exist on _PgConnection.
 """
 from __future__ import annotations
 
@@ -30,7 +36,7 @@ logger = logging.getLogger(__name__)
 # that may start before web-api runs init_db() explicitly.  We self-initialize
 # once (per process) so callers never need to call init_db() themselves.
 _init_lock  = threading.Lock()
-_db_ready   = False   # becomes True after the first successful init_db()
+_db_ready   = False   # becomes True only after a confirmed successful init_db()
 
 
 def _ensure_init() -> None:
@@ -66,13 +72,16 @@ def init_db() -> bool:
     The return value is used by _ensure_init() to decide whether to retry DDL
     creation on the next set_state() call — a False here means the next write
     will attempt init again rather than silently skipping table setup.
+
+    Uses _PgConnection.execute() — do NOT use conn.cursor() which does not
+    exist on the _PgConnection wrapper (agent/db.py).
     """
     try:
         from agent.db import get_conn
         with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(_DDL)
-            conn.commit()
+            # _PgConnection.execute() translates ? → %s and runs on psycopg2.
+            # The DDL contains no parameters so params list is empty.
+            conn.execute(_DDL)
         logger.info("[service_state] table ready")
         return True
     except Exception as exc:
@@ -100,6 +109,8 @@ def set_state(key: str, value: dict[str, Any], ttl_s: Optional[int] = None) -> b
         expires_fragment = (
             f"NOW() + INTERVAL '{int(ttl_s)} seconds'" if ttl_s else "NULL"
         )
+        # %s placeholders — _PgConnection passes them through to psycopg2 as-is
+        # (no ? → %s conversion needed since we write %s directly).
         sql = f"""
             INSERT INTO service_state (key, value, updated_at, expires_at)
             VALUES (%s, %s::jsonb, NOW(), {expires_fragment})
@@ -109,9 +120,7 @@ def set_state(key: str, value: dict[str, Any], ttl_s: Optional[int] = None) -> b
                     expires_at = EXCLUDED.expires_at
         """
         with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (key, json.dumps(value, default=str)))
-            conn.commit()
+            conn.execute(sql, (key, json.dumps(value, default=str)))
         return True
     except Exception as exc:
         logger.debug("[service_state] set_state(%s) error: %s", key, exc)
@@ -124,6 +133,9 @@ def get_state(key: str, ignore_expiry: bool = False) -> Optional[dict[str, Any]]
 
     ignore_expiry=True: return even if past expires_at.  Useful for cold-start
     fallback — stale heartbeat data is better than nothing on dashboard load.
+
+    RealDictCursor returns rows as dict-like objects; access by column name,
+    not by index.  psycopg2 automatically deserialises JSONB into Python dicts.
     """
     try:
         from agent.db import get_conn
@@ -133,12 +145,13 @@ def get_state(key: str, ignore_expiry: bool = False) -> Optional[dict[str, Any]]
         )
         sql = f"SELECT value FROM service_state WHERE key = %s {expiry_clause}"
         with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (key,))
-                row = cur.fetchone()
+            cur = conn.execute(sql, (key,))
+            row = cur.fetchone()
         if row is None:
             return None
-        val = row[0]
+        # RealDictRow: access by name.  JSONB is auto-parsed to dict by psycopg2;
+        # fall back to json.loads() for string payloads (e.g. legacy rows).
+        val = row["value"]
         return val if isinstance(val, dict) else json.loads(val)
     except Exception as exc:
         logger.debug("[service_state] get_state(%s) error: %s", key, exc)
@@ -154,14 +167,13 @@ def get_age_s(key: str) -> Optional[float]:
     try:
         from agent.db import get_conn
         with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT EXTRACT(EPOCH FROM (NOW() - updated_at)) "
-                    "FROM service_state WHERE key = %s",
-                    (key,),
-                )
-                row = cur.fetchone()
-        return float(row[0]) if row else None
+            cur = conn.execute(
+                "SELECT EXTRACT(EPOCH FROM (NOW() - updated_at)) AS age_s "
+                "FROM service_state WHERE key = %s",
+                (key,),
+            )
+            row = cur.fetchone()
+        return float(row["age_s"]) if row else None
     except Exception as exc:
         logger.debug("[service_state] get_age_s(%s) error: %s", key, exc)
         return None

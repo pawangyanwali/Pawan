@@ -103,13 +103,18 @@ class TestSignalSnapshotModule:
 
     def test_write_returns_false_when_no_client(self):
         from agent.signal_snapshot import write_latest
+        # write_latest returns False only when BOTH PostgreSQL and Valkey fail.
+        # Patching only Valkey is insufficient now that PG is the primary write path.
         with patch("agent.valkey_client._get_client", return_value=None):
-            assert write_latest([], {}, {}, 0) is False
+            with patch("agent.service_state.set_state", return_value=False):
+                assert write_latest([], {}, {}, 0) is False
 
     def test_read_returns_none_when_no_client(self):
         from agent.signal_snapshot import read_latest
+        # read_latest returns None only when BOTH PostgreSQL and Valkey have no data.
         with patch("agent.valkey_client._get_client", return_value=None):
-            assert read_latest() is None
+            with patch("agent.service_state.get_state", return_value=None):
+                assert read_latest() is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
