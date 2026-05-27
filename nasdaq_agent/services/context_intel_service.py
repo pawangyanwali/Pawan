@@ -102,12 +102,15 @@ def _run_earnings_poll() -> None:
     from_dt = (now - timedelta(days=7)).strftime("%Y-%m-%d")
     to_dt   = (now + timedelta(days=30)).strftime("%Y-%m-%d")
 
-    _log.debug("[earnings_poller] Fetching calendar %s → %s", from_dt, to_dt)
+    _log.info("[earnings_poller] Fetching calendar %s → %s", from_dt, to_dt)
     raw = fetch_earnings_calendar(from_dt, to_dt)
 
     if not raw:
-        _log.debug("[earnings_poller] No earnings data returned")
+        _log.info("[earnings_poller] Finnhub returned 0 earnings records for %s→%s "
+                  "(free-tier limit or no confirmed dates in window)", from_dt, to_dt)
         return
+
+    _log.info("[earnings_poller] Finnhub returned %d raw entries", len(raw))
 
     entries: list[dict] = []
     null_date_count = 0
