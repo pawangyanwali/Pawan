@@ -32,6 +32,8 @@ Algorithm catalogue (this file):
     20 — Regime Aligned Short     (REGIME_ALIGNED_SHORT)
     21 — Sector Breakout Follow   (SECTOR_BREAKOUT_BULL / BEAR)
     22 — Cross-Sectional RS Rank  (CS_RS_RANK_BULL / BEAR)
+  Phase 4 — extreme gap fade:
+    31 — AH Extreme Gap Fade     (AH_GAP_FADE_BEAR / AH_GAP_FADE_BULL)
 """
 from __future__ import annotations
 
@@ -361,6 +363,169 @@ def eval_gap_fade(sig) -> Optional[AlgoResult]:
             )
     except Exception as exc:
         logger.debug("eval_gap_fade error: %s", exc)
+    return None
+
+
+# ── Algo 31: AH Extreme Gap Fade ─────────────────────────────────────────────
+
+def eval_ah_gap_fade(sig) -> Optional[AlgoResult]:
+    """
+    AH Extreme Gap Fade — Algo 31 (AH_GAP_FADE_BEAR / AH_GAP_FADE_BULL).
+
+    Targets stocks that gapped ≥10 % overnight on catalysts (earnings, news)
+    and are EXTREMELY overbought/oversold at the regular-session open.
+    Large-gap moves of this magnitude statistically retrace 30–50 % of the
+    gap within the first 30 minutes as early buyers take profit into the open.
+
+    Bear trigger (short the extreme gap-up):
+      • gap_pct   ≥  _gap_gate   (default 10 %)     — extreme AH move
+      • rsi_value ≥  _rsi_gate   (default 75)        — overbought at open
+      • price     ≥  today_open × 0.97               — still near open, not already faded
+      • rel_volume ≥ _rvol_gate  (default 2.0×)      — high participation
+      • orb5_breakout ≠ "BULL"                       — no confirmed momentum continuation
+
+    Bull trigger (long the extreme gap-down — symmetric):
+      • gap_pct   ≤  −_gap_gate
+      • rsi_value ≤  _rsi_gate_bull  (default 30)    — oversold at open
+      • similar symmetry
+
+    Entry  = current price (market entry at open).
+    Stop   = session HOD or pre-market high + 0.5 % buffer (bear).
+             session LOD or pre-market low  − 0.5 % buffer (bull).
+    Target = _fill_pct × gap_dollars from entry (default 40 % gap fill).
+             Conservative partial-fill target — leaves room for the trade to work
+             without requiring a full gap close.
+    """
+    try:
+        gap_pct       = float(getattr(sig, "gap_pct",        0.0))
+        gap_type      = getattr(sig, "gap_type",       "FLAT")
+        rsi_value     = float(getattr(sig, "rsi_value",      50.0))
+        rsi_zone      = getattr(sig, "rsi_zone",       "NEUTRAL")
+        rvol          = float(getattr(sig, "rel_volume",     1.0))
+        price         = float(sig.price)
+        today_open    = float(getattr(sig, "today_open",     price))
+        prev_close    = float(getattr(sig, "prev_day_close", 0.0))
+        sess_high     = float(getattr(sig, "session_high",   0.0))
+        sess_low      = float(getattr(sig, "session_low",    0.0))
+        pm_high       = float(getattr(sig, "premarket_high", 0.0))
+        pm_low        = float(getattr(sig, "premarket_low",  0.0))
+        vwap_event    = getattr(sig, "vwap_event",     "")
+        orb5_breakout = getattr(sig, "orb5_breakout",  "")
+        session       = getattr(sig, "session",        "")
+
+        # Only fire during regular session — need today_open as the gap anchor
+        if session not in ("REGULAR", ""):
+            return None
+        if today_open <= 0 or prev_close <= 0:
+            return None
+
+        # ── Tunable parameters (adapted by AlgoLearningEngine) ───────────────
+        _gap_gate      = _param("AH_GAP_FADE", "gap_gate",      10.0)  # min gap %
+        _rvol_gate     = _param("AH_GAP_FADE", "rvol_gate",      2.0)  # min RVOL
+        _fill_pct      = _param("AH_GAP_FADE", "fill_pct",       0.40) # target fill fraction
+        _rsi_gate_bear = _param("AH_GAP_FADE", "rsi_gate",      75.0)  # OB threshold
+        _rsi_gate_bull = _param("AH_GAP_FADE", "rsi_gate_bull", 30.0)  # OS threshold
+
+        # ── Bear side: short the extreme gap-up ──────────────────────────────
+        if (gap_type == "GAP_UP"
+                and gap_pct       >= _gap_gate
+                and rsi_value     >= _rsi_gate_bear
+                and price         >= today_open * 0.97  # still elevated — not 3 % below open yet
+                and rvol          >= _rvol_gate
+                and orb5_breakout != "BULL"):           # no confirmed momentum continuation
+
+            entry = price
+            # Stop: above session HOD or pre-market high, +0.5 % buffer
+            raw_stop = max(
+                sess_high if sess_high > price else price,
+                pm_high   if pm_high   > price else price,
+                today_open,
+            )
+            stop = raw_stop * 1.005
+            if stop <= entry:
+                stop = entry * 1.015  # fallback: 1.5 % above entry
+
+            # Target: _fill_pct of the original gap fill
+            gap_dollar = today_open - prev_close          # gap size in dollars
+            target     = entry - (_fill_pct * gap_dollar)
+            if target >= entry or gap_dollar <= 0:
+                return None  # gap too small or already filled past entry
+
+            rr = _rr(entry, stop, target)
+            if rr < 1.0:
+                return None  # skip if risk/reward is unfavourable
+
+            vwap_boost = (8.0 if vwap_event in ("EXTENDED_UP", "AT_2SD_UP") else
+                          4.0 if vwap_event in ("AT_1SD_UP",   "ABOVE")      else 0.0)
+            conf = min(85.0, (
+                55.0
+                + min(20.0, (gap_pct   - _gap_gate)      * 1.5)  # bigger gap → higher conf
+                + min(8.0,  (rsi_value - _rsi_gate_bear) * 0.4)  # more OB → higher conf
+                + min(6.0,  (rvol      - _rvol_gate)     * 2.0)  # volume confirms
+                + vwap_boost
+            ))
+            reason = (
+                f"AH Gap Fade short: gap {gap_pct:+.1f}%, RSI {rsi_value:.0f} "
+                f"({rsi_zone}), RVOL {rvol:.1f}x, target {_fill_pct*100:.0f}% fill"
+                f" → ${target:.2f}"
+            )
+            return AlgoResult(
+                algo="AH_GAP_FADE_BEAR", direction="SELL",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=round(rr, 2), reason=reason,
+            )
+
+        # ── Bull side: long the extreme gap-down ─────────────────────────────
+        if (gap_type == "GAP_DOWN"
+                and gap_pct       <= -_gap_gate
+                and rsi_value     <= _rsi_gate_bull
+                and price         <= today_open * 1.03  # still near open
+                and rvol          >= _rvol_gate
+                and orb5_breakout != "BEAR"):           # no confirmed breakdown
+
+            entry = price
+            raw_stop = min(
+                sess_low if 0 < sess_low < price else price,
+                pm_low   if 0 < pm_low   < price else price,
+                today_open,
+            )
+            stop = raw_stop * 0.995
+            if stop >= entry:
+                stop = entry * 0.985  # fallback: 1.5 % below entry
+
+            gap_dollar = prev_close - today_open          # positive for gap-down
+            target     = entry + (_fill_pct * gap_dollar)
+            if target <= entry or gap_dollar <= 0:
+                return None
+
+            rr = _rr(entry, stop, target)
+            if rr < 1.0:
+                return None
+
+            vwap_boost = (8.0 if vwap_event in ("EXTENDED_DOWN", "AT_2SD_DOWN") else
+                          4.0 if vwap_event in ("AT_1SD_DOWN",   "BELOW")        else 0.0)
+            conf = min(85.0, (
+                55.0
+                + min(20.0, (abs(gap_pct)   - _gap_gate)      * 1.5)
+                + min(8.0,  (_rsi_gate_bull - rsi_value)       * 0.4)
+                + min(6.0,  (rvol           - _rvol_gate)      * 2.0)
+                + vwap_boost
+            ))
+            reason = (
+                f"AH Gap Fade long: gap {gap_pct:+.1f}%, RSI {rsi_value:.0f} "
+                f"({rsi_zone}), RVOL {rvol:.1f}x, target {_fill_pct*100:.0f}% fill"
+                f" → ${target:.2f}"
+            )
+            return AlgoResult(
+                algo="AH_GAP_FADE_BULL", direction="BUY",
+                confidence=round(conf, 1),
+                entry=round(entry, 4), stop=round(stop, 4), target=round(target, 4),
+                rr=round(rr, 2), reason=reason,
+            )
+
+    except Exception as exc:
+        logger.debug("eval_ah_gap_fade error: %s", exc)
     return None
 
 
@@ -1761,6 +1926,8 @@ _ALGO_REGISTRY = [
     eval_regime_aligned_short,
     eval_sector_breakout_follow,
     eval_cross_sectional_rs,
+    # Phase 4 — extreme gap fade
+    eval_ah_gap_fade,
 ]
 
 

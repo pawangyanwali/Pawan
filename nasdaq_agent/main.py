@@ -2069,13 +2069,14 @@ async def learning_params_status():
     # Representative algo per family — used to look up current tuned params
     _FAMILY_REPRESENTATIVES = {
         "ORB":         "ORB5_BULL",
-        "GAP_TREND":   "GAP_AND_GO_BULL",
-        "GAP_FADE":    "GAP_FADE_BULL",
-        "BREAKOUT":    "PDH_BREAKOUT_BULL",
-        "FLAG":        "BULL_FLAG",
-        "VWAP_SCALP":  "VWAP_TOUCH_SCALP_BULL",
-        "LEVEL_SCALP": "LEVEL_REJECTION_SCALP_BULL",
-        "RS_REGIME":   "SPY_BETA_CATCHUP_BULL",
+        "GAP_TREND":    "GAP_AND_GO_BULL",
+        "GAP_FADE":     "GAP_FADE_BULL",
+        "AH_GAP_FADE":  "AH_GAP_FADE_BEAR",
+        "BREAKOUT":     "PDH_BREAKOUT_BULL",
+        "FLAG":         "BULL_FLAG",
+        "VWAP_SCALP":   "VWAP_TOUCH_SCALP_BULL",
+        "LEVEL_SCALP":  "LEVEL_REJECTION_SCALP_BULL",
+        "RS_REGIME":    "SPY_BETA_CATCHUP_BULL",
     }
     defaults = {
         "rvol_gate": 1.5,

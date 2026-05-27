@@ -1381,3 +1381,209 @@ class TestEvaluateAll:
             if item["direction"] == "SELL":
                 assert item["stop"] > item["entry"] > item["target"], \
                     f"{item['algo']}: SELL invariant violated stop={item['stop']} entry={item['entry']} target={item['target']}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestAhGapFade
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestAhGapFade:
+    """Unit tests for eval_ah_gap_fade — the AH Extreme Gap Fade algo."""
+
+    from agent.trading_algos import eval_ah_gap_fade
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _bear_sig(self, gap_pct=15.0, rsi_value=82.0, rvol=3.0,
+                  price=None, today_open=None, prev_close=100.0,
+                  sess_high=None, pm_high=None,
+                  orb5_breakout="", vwap_event="ABOVE",
+                  session="REGULAR", **extra):
+        """Return a signal set up to trigger AH_GAP_FADE_BEAR."""
+        open_price = today_open if today_open is not None else prev_close * (1 + gap_pct / 100)
+        cur_price  = price if price is not None else open_price
+        return _sig(
+            price=cur_price,
+            gap_pct=gap_pct,
+            gap_type="GAP_UP",
+            rsi_value=rsi_value,
+            rsi_zone="EXTREME_OB",
+            rel_volume=rvol,
+            today_open=open_price,
+            prev_day_close=prev_close,
+            session_high=sess_high if sess_high is not None else cur_price * 1.01,
+            premarket_high=pm_high if pm_high is not None else cur_price * 1.005,
+            orb5_breakout=orb5_breakout,
+            vwap_event=vwap_event,
+            session=session,
+            **extra,
+        )
+
+    def _bull_sig(self, gap_pct=-15.0, rsi_value=22.0, rvol=3.0,
+                  price=None, today_open=None, prev_close=100.0,
+                  sess_low=None, pm_low=None,
+                  orb5_breakout="", vwap_event="BELOW",
+                  session="REGULAR", **extra):
+        """Return a signal set up to trigger AH_GAP_FADE_BULL."""
+        open_price = today_open if today_open is not None else prev_close * (1 + gap_pct / 100)
+        cur_price  = price if price is not None else open_price
+        return _sig(
+            price=cur_price,
+            gap_pct=gap_pct,
+            gap_type="GAP_DOWN",
+            rsi_value=rsi_value,
+            rsi_zone="EXTREME_OS",
+            rel_volume=rvol,
+            today_open=open_price,
+            prev_day_close=prev_close,
+            session_low=sess_low if sess_low is not None else cur_price * 0.99,
+            premarket_low=pm_low if pm_low is not None else cur_price * 0.995,
+            orb5_breakout=orb5_breakout,
+            vwap_event=vwap_event,
+            session=session,
+            **extra,
+        )
+
+    # ── bear-side tests ───────────────────────────────────────────────────────
+
+    def test_bear_triggers_on_extreme_gap_up(self):
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig()
+        res = eval_ah_gap_fade(sig)
+        assert res is not None, "Expected AH_GAP_FADE_BEAR signal"
+        _assert_valid_result(res, "SELL")
+        assert res.algo == "AH_GAP_FADE_BEAR"
+
+    def test_bear_sell_invariant(self):
+        """SELL geometry: stop > entry > target."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig()
+        res = eval_ah_gap_fade(sig)
+        assert res is not None
+        assert res.stop > res.entry > res.target, (
+            f"SELL geometry violated: stop={res.stop} entry={res.entry} target={res.target}"
+        )
+
+    def test_bear_confidence_in_range(self):
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig(gap_pct=20.0, rsi_value=85.0, rvol=4.0)
+        res = eval_ah_gap_fade(sig)
+        assert res is not None
+        assert 0 < res.confidence <= 85, f"confidence out of range: {res.confidence}"
+
+    def test_bear_larger_gap_higher_confidence(self):
+        """A 25% gap should produce higher confidence than a 10% gap."""
+        from agent.trading_algos import eval_ah_gap_fade
+        small = eval_ah_gap_fade(self._bear_sig(gap_pct=10.1))
+        large = eval_ah_gap_fade(self._bear_sig(gap_pct=25.0))
+        assert small is not None and large is not None
+        assert large.confidence >= small.confidence
+
+    def test_bear_no_fire_below_gap_threshold(self):
+        """gap_pct < 10% must not trigger the algo."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig(gap_pct=5.0)
+        assert eval_ah_gap_fade(sig) is None
+
+    def test_bear_no_fire_when_rsi_not_overbought(self):
+        """RSI below 75 must not trigger."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig(rsi_value=60.0)
+        assert eval_ah_gap_fade(sig) is None
+
+    def test_bear_no_fire_when_orb5_bull(self):
+        """Strong ORB5 bull breakout means continuation — skip fade."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig(orb5_breakout="BULL")
+        assert eval_ah_gap_fade(sig) is None
+
+    def test_bear_no_fire_when_already_faded_below_open(self):
+        """If price has dropped 5 % below open, algo should not fire (already faded)."""
+        from agent.trading_algos import eval_ah_gap_fade
+        prev_close = 100.0
+        today_open = 115.0  # 15% gap
+        price = today_open * 0.93  # 7 % below open — beyond the 3% trigger threshold
+        sig = self._bear_sig(prev_close=prev_close, today_open=today_open, price=price)
+        assert eval_ah_gap_fade(sig) is None
+
+    def test_bear_no_fire_in_after_hours_session(self):
+        """Algo only fires in REGULAR session."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig(session="AFTER_HOURS")
+        assert eval_ah_gap_fade(sig) is None
+
+    def test_bear_vwap_extended_boost_raises_confidence(self):
+        """EXTENDED_UP vwap_event should produce higher confidence than neutral."""
+        from agent.trading_algos import eval_ah_gap_fade
+        neutral_vwap = eval_ah_gap_fade(self._bear_sig(vwap_event="NEUTRAL"))
+        extended_vwap = eval_ah_gap_fade(self._bear_sig(vwap_event="EXTENDED_UP"))
+        if neutral_vwap and extended_vwap:
+            assert extended_vwap.confidence >= neutral_vwap.confidence
+
+    def test_bear_target_is_partial_fill(self):
+        """Target should be above prev_close (40% fill, not 100% fill)."""
+        from agent.trading_algos import eval_ah_gap_fade
+        prev_close = 100.0
+        gap_pct = 20.0
+        sig = self._bear_sig(prev_close=prev_close, gap_pct=gap_pct)
+        res = eval_ah_gap_fade(sig)
+        assert res is not None
+        # Target should be above prev_close (partial, not full, fill)
+        assert res.target > prev_close, (
+            f"Target {res.target} should be above prev_close {prev_close} for partial fill"
+        )
+
+    def test_bear_rr_at_least_one(self):
+        """R:R must be ≥ 1.0 for the algo to fire."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bear_sig()
+        res = eval_ah_gap_fade(sig)
+        if res is not None:
+            assert res.rr >= 1.0, f"R:R too low: {res.rr}"
+
+    # ── bull-side tests ───────────────────────────────────────────────────────
+
+    def test_bull_triggers_on_extreme_gap_down(self):
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bull_sig()
+        res = eval_ah_gap_fade(sig)
+        assert res is not None, "Expected AH_GAP_FADE_BULL signal"
+        _assert_valid_result(res, "BUY")
+        assert res.algo == "AH_GAP_FADE_BULL"
+
+    def test_bull_buy_invariant(self):
+        """BUY geometry: stop < entry < target."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bull_sig()
+        res = eval_ah_gap_fade(sig)
+        assert res is not None
+        assert res.stop < res.entry < res.target
+
+    def test_bull_no_fire_when_orb5_bear(self):
+        """Strong ORB5 bear breakdown means continuation — skip long fade."""
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bull_sig(orb5_breakout="BEAR")
+        assert eval_ah_gap_fade(sig) is None
+
+    def test_bull_no_fire_below_gap_threshold(self):
+        from agent.trading_algos import eval_ah_gap_fade
+        sig = self._bull_sig(gap_pct=-4.0)
+        assert eval_ah_gap_fade(sig) is None
+
+    # ── evaluate_all integration ──────────────────────────────────────────────
+
+    def test_ah_gap_fade_bear_in_evaluate_all(self):
+        """AH_GAP_FADE_BEAR must appear in evaluate_all output for a qualifying signal."""
+        sig = self._bear_sig()
+        result = evaluate_all(sig)
+        algos = [r["algo"] for r in result]
+        assert "AH_GAP_FADE_BEAR" in algos, \
+            f"AH_GAP_FADE_BEAR not in evaluate_all output; fired algos: {algos}"
+
+    def test_ah_gap_fade_bull_in_evaluate_all(self):
+        """AH_GAP_FADE_BULL must appear in evaluate_all output for a qualifying signal."""
+        sig = self._bull_sig()
+        result = evaluate_all(sig)
+        algos = [r["algo"] for r in result]
+        assert "AH_GAP_FADE_BULL" in algos, \
+            f"AH_GAP_FADE_BULL not in evaluate_all output; fired algos: {algos}"
