@@ -2643,7 +2643,11 @@ function renderTable() {
         <div style="color:${watchCol};margin-top:2px">${rrNote}</div>
       </div>`;
     } else {
-      const ctxNote = s.ctx_stale ? 'No context data' : (s.earnings_phase === 'caution' ? '📅 Earnings soon' : 'Monitoring');
+      const ctxNote = s.ctx_stale ? 'No context data'
+        : s.earnings_phase === 'blackout'  ? '🚫 Earnings blackout'
+        : s.earnings_phase === 'cooldown'  ? '⏳ Post-earnings cooldown'
+        : s.earnings_phase === 'caution'   ? '📅 Earnings soon'
+        : 'Monitoring';
       statusCell = `<div style="padding:5px 7px;background:rgba(71,85,105,.07);border:1px solid rgba(71,85,105,.2);border-radius:6px;font-size:9px">
         <div style="color:#64748b;font-weight:700">👁 WATCHING</div>
         <div style="color:#475569;margin-top:2px">${ctxNote}</div>
