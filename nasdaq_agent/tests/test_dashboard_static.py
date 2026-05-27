@@ -32,3 +32,24 @@ def test_dashboard_rest_fallback_applies_signal_payload():
     assert "function _applySignalPayload(d)" in src
     assert "allSignals = d.signals;" in src
     assert "_applySignalPayload(await r.json());" in src
+
+
+def test_dashboard_target_win_rate_not_hardcoded():
+    """Fail if any win-rate threshold or label is still hard-coded to 62."""
+    src = _html()
+
+    # These patterns indicate the UI is ignoring the adaptive target from the backend.
+    bad_patterns = [
+        ">= 62",         # comparison operators
+        ">62",
+        ">=62",
+        "'62% WR'",      # hard-coded label string
+        '"62% WR"',
+        "≥62%",          # unicode ≥ in copy
+        "win rate ≥62",
+        "win rate >= 62",
+    ]
+    found = [p for p in bad_patterns if p in src]
+    assert not found, (
+        f"Hard-coded 62 win-rate value(s) found in index.html — use target_win_rate from backend: {found}"
+    )

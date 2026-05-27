@@ -1727,7 +1727,7 @@ TRADING_MAX_POSITION_PCT=10
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
       <div>
         <div style="font-size:16px;font-weight:700;color:var(--text)">🧠 Self-Learning Filter Status</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px">Adaptive system suppressing losing patterns until win rate ≥ <span id="learn-target-subtitle">62</span>%</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">Adaptive system suppressing losing patterns until win rate ≥ <span id="learn-target-subtitle">55</span>%</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <button onclick="loadLearningStatus()" style="background:var(--accent);border:none;color:white;border-radius:5px;padding:5px 12px;cursor:pointer;font-family:inherit;font-size:11px">Refresh</button>
@@ -1739,7 +1739,7 @@ TRADING_MAX_POSITION_PCT=10
     <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <span style="font-size:12px;font-weight:700;color:var(--text)">Win Rate Progress</span>
-        <span style="font-size:11px;color:var(--muted)">Target: <strong id="learn-target-label" style="color:var(--green-s)">62%</strong></span>
+        <span style="font-size:11px;color:var(--muted)">Target: <strong id="learn-target-label" style="color:var(--green-s)">55%</strong></span>
       </div>
       <div class="learn-progress-bar">
         <div class="learn-progress-fill" id="learn-wr-fill" style="width:0%;background:var(--muted)"></div>
@@ -3918,6 +3918,7 @@ async function openPaperTrading() {
     ]);
     _ptData = d; _ptLearn = ls;
     const s = d.summary;
+    const target = ls.target_win_rate || 55;
 
     // ── Summary stats ──
     const td   = s.total_dollar_pnl || 0;   // today P&L (primary)
@@ -3931,10 +3932,10 @@ async function openPaperTrading() {
       [periodLabel+' Closed',      s.closed,                             'var(--text)'],
       [periodLabel+' Wins',        s.wins,                               'var(--green)'],
       [periodLabel+' Losses',      s.losses,                             'var(--red)'],
-      [periodLabel+' Win Rate',    s.win_rate+'%',                       s.win_rate>=62?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
+      [periodLabel+' Win Rate',    s.win_rate+'%',                       s.win_rate>=target?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
       ['Avg P&L',                  (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
       ['Today P&L',                (td>=0?'+$':'-$')+Math.abs(td).toFixed(2)+atLabel, td>=0?'var(--green-s)':'var(--red-s)'],
-      ['Target',                   '62% WR',                             'var(--muted)'],
+      ['Target',                   target+'% WR',                        'var(--muted)'],
     ].map(([l,v,c])=>`<div class="paper-stat">
       <div style="font-size:9px;color:var(--muted);margin-bottom:2px">${l}</div>
       <div style="font-size:15px;font-weight:700;color:${c}">${v}</div>
@@ -4135,7 +4136,7 @@ function _ptRenderLearning(ls, summary) {
       ${summary.wins + summary.losses < 50 ? `<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#f59e0b">⚡</span><span style="font-size:11px">Only ${summary.wins+summary.losses} resolved trades so far — need 50+ for reliable pattern detection. Keep running.</span></div>` : ''}
       ${wr < target ? `<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#f59e0b">📈</span><span style="font-size:11px">Win rate ${wr.toFixed(1)}% is below ${target}% target — system is raising confidence gate to filter weaker signals.</span></div>` : `<div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#16a34a">✅</span><span style="font-size:11px">Win rate ${wr.toFixed(1)}% is above ${target}% target. System is operating well.</span></div>`}
       <div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#0ea5e9">🎯</span><span style="font-size:11px">Best setups historically: POWER_HOUR session, BEAR_TREND regime, EXTENDED_DOWN VWAP. System automatically favors these.</span></div>
-      <div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#8b5cf6">🧠</span><span style="font-size:11px">Ready for live trading when: 200+ resolved trades AND win rate ≥62% sustained for 5+ days.</span></div>
+      <div style="display:flex;gap:8px;align-items:flex-start"><span style="color:#8b5cf6">🧠</span><span style="font-size:11px">Ready for live trading when: 200+ resolved trades AND win rate ≥${target}% sustained for 5+ days.</span></div>
     </div>
   </div>`;
 
@@ -4331,7 +4332,7 @@ async function ptLoadAccountTab() {
       <!-- Trade stats -->
       <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
         <div style="font-size:9px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Trade Stats</div>
-        <div style="font-size:22px;font-weight:700;color:${wr>=62?'var(--green)':wr>=50?'var(--yellow)':'var(--red)'}">${wr.toFixed(1)}% WR</div>
+        <div style="font-size:22px;font-weight:700;color:${wr>=(JSON.parse(localStorage.getItem('lastLearnState')||'{}').target_win_rate||55)?'var(--green)':wr>=50?'var(--yellow)':'var(--red)'}">${wr.toFixed(1)}% WR</div>
         <div style="font-size:10px;color:var(--muted);margin-top:4px">W: <span style="color:var(--green)">${wins}</span> · L: <span style="color:var(--red)">${losses}</span> · Total: ${total}</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px">Open: ${a.open_trades ?? 0} / ${a.max_open_trades ?? '—'}</div>
       </div>
@@ -5317,7 +5318,7 @@ function renderLearningStatus(d) {
   const eng = d.engine || {};
   const obs = d.observations || {};
   const obsWR = obs.observation_wr ?? 0;
-  const obsCol = obsWR >= 62 ? 'var(--green)' : obsWR >= 45 ? 'var(--yellow)' : 'var(--red)';
+  const obsCol = obsWR >= target ? 'var(--green)' : obsWR >= 45 ? 'var(--yellow)' : 'var(--red)';
   const filterObsWR = d.observation_win_rate ?? 0;
   const filterObsCol = filterObsWR >= 55 ? 'var(--green)' : filterObsWR >= 35 ? 'var(--yellow)' : 'var(--red)';
   const kpis = [
@@ -5327,7 +5328,7 @@ function renderLearningStatus(d) {
       title: 'Short-term (90s) direction accuracy — displayed separately, does not drive the confidence gate' },
     { label:'Market Obs. WR',      value: obs.observation_wr != null ? obsWR.toFixed(1)+'%' : '—', color: obsCol },
     { label:'Signals Observed',    value: obs.total_signals ?? '—',                     color:'var(--muted)' },
-    { label:'Obs. Resolved',       value: obs.resolved ?? '—',                          color: obsWR >= 62 ? 'var(--green)' : 'var(--muted)' },
+    { label:'Obs. Resolved',       value: obs.resolved ?? '—',                          color: obsWR >= target ? 'var(--green)' : 'var(--muted)' },
     { label:'Target',              value: target + '%',                                 color:'var(--green-s)' },
     { label:'Signals Suppressed',  value: suppressed,                                   color:'var(--yellow)' },
     { label:'Blocked Contexts',    value: Object.keys(d.blocked_contexts||{}).length,   color:'var(--red)' },
@@ -6053,6 +6054,7 @@ function updatePtPills(s, openTradesMap) {
   const losses    = s.losses            ?? (closed - wins);
   const wr        = s.win_rate          ?? (closed > 0 ? Math.round(wins / closed * 100) : null);
   const pnlDollar = s.total_dollar_pnl  ?? null;
+  const target    = (JSON.parse(localStorage.getItem('lastLearnState') || '{}').target_win_rate) || 55;
   const pnlPct    = s.total_pnl         ?? null;
   // open count: prefer live open_trades map, fall back to summary field
   const openCount = openTradesMap ? Object.keys(openTradesMap).length : (s.open ?? 0);
@@ -6071,7 +6073,7 @@ function updatePtPills(s, openTradesMap) {
   if (elLoss)   elLoss.textContent   = losses;
   if (elWrBadge && wr !== null) {
     elWrBadge.textContent = wr.toFixed(1) + '% WR';
-    elWrBadge.style.color = wr >= 62 ? 'var(--green)' : wr >= 50 ? 'var(--yellow)' : 'var(--red)';
+    elWrBadge.style.color = wr >= target ? 'var(--green)' : wr >= 50 ? 'var(--yellow)' : 'var(--red)';
   }
   if (elPnlVal && pnlDollar !== null) {
     const pos = pnlDollar >= 0;
