@@ -90,18 +90,35 @@ def _eod_watchdog_loop() -> None:
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
 
 def _heartbeat_loop() -> None:
-    """Write a timestamp to Valkey every SCHEDULER_HEARTBEAT_S seconds."""
+    """
+    Write a liveness timestamp every SCHEDULER_HEARTBEAT_S seconds.
+
+    Write order (both best-effort — a failure must never crash the scheduler):
+      1. PostgreSQL service_state  — durable, expires_at = NOW() + 90s
+      2. Valkey SETEX              — fast-path cache, TTL = 90s (backward compat)
+    """
     import json
 
+    _TTL = _HEARTBEAT_INTERVAL * 3   # 90s — matches docker-compose healthcheck
+
     while not _runner.stopped:
+        payload = {"ts": time.time(), "service": "scheduler"}
+
+        # ── 1. PostgreSQL (source of truth) ───────────────────────────────────
+        try:
+            from agent.service_state import set_state
+            set_state(_HEARTBEAT_KEY, payload, ttl_s=_TTL)
+        except Exception as exc:
+            _log.debug("Heartbeat PostgreSQL write failed: %s", exc)
+
+        # ── 2. Valkey (fast-path cache) ───────────────────────────────────────
         try:
             from agent.valkey_client import _get_client
             client = _get_client()
             if client:
-                payload = json.dumps({"ts": time.time(), "service": "scheduler"})
-                client.setex(_HEARTBEAT_KEY, _HEARTBEAT_INTERVAL * 3, payload)
+                client.setex(_HEARTBEAT_KEY, _TTL, json.dumps(payload))
         except Exception as exc:
-            _log.debug("Heartbeat write failed: %s", exc)
+            _log.debug("Heartbeat Valkey write failed: %s", exc)
 
         _runner._stop.wait(_HEARTBEAT_INTERVAL)
 

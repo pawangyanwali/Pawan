@@ -81,41 +81,58 @@ def _run_weekend_learner() -> None:
 
 def _publish_status_loop() -> None:
     """
-    Publish adaptive-filter + engine state to Valkey every 60s so that the
-    web-api container (which runs no learner) can serve fresh data from
-    GET /api/learning-status without polling the DB.
+    Publish adaptive-filter + learning-engine state every 60s.
 
-    Key: learner:status  TTL: 300s  (expires if learner dies)
+    Write order (both best-effort — a failure must never crash the learner):
+      1. PostgreSQL service_state  — durable, expires_at = NOW() + 300s
+      2. Valkey SETEX              — fast-path cache, TTL = 300s (backward compat)
+
+    Key: learner:status  TTL: 300s  (marks stale if learner dies)
     """
     try:
         from agent.valkey_client import _get_client
     except ImportError:
-        _log.debug("Valkey client not available — learner:status will not be published")
-        return
+        _get_client = lambda: None   # noqa: E731 — Valkey unavailable, PG-only path
+
+    _TTL = 300  # seconds — matches docker-compose healthcheck expectation
 
     while not _runner.stopped:
         try:
-            client = _get_client()
-            if client:
-                from agent.learning_engine import learning_engine, get_learning_log
-                from agent.adaptive_filter import get_status as af_status
+            from agent.learning_engine import learning_engine, get_learning_log
+            from agent.adaptive_filter import get_status as af_status
 
-                phase2_status: dict = {}
-                try:
-                    from agent.algo_learning_p2 import get_phase2_engine
-                    phase2_status = get_phase2_engine().get_status()
-                except Exception:
-                    pass
+            phase2_status: dict = {}
+            try:
+                from agent.algo_learning_p2 import get_phase2_engine
+                phase2_status = get_phase2_engine().get_status()
+            except Exception:
+                pass
 
-                payload = json.dumps({
-                    "ts":             time.time(),
-                    "engine":         learning_engine.get_status(),
-                    "adaptive_filter": af_status(),
-                    "log":            get_learning_log(limit=50),
-                    "phase2":         phase2_status,
-                })
-                client.setex("learner:status", 300, payload)
-                _log.debug("learner:status published to Valkey")
+            payload = {
+                "ts":              time.time(),
+                "engine":          learning_engine.get_status(),
+                "adaptive_filter": af_status(),
+                "log":             get_learning_log(limit=50),
+                "phase2":          phase2_status,
+            }
+
+            # ── 1. PostgreSQL (source of truth) ───────────────────────────────
+            try:
+                from agent.service_state import set_state
+                set_state("learner:status", payload, ttl_s=_TTL)
+                _log.debug("learner:status published to PostgreSQL")
+            except Exception as exc:
+                _log.debug("learner:status PG write failed: %s", exc)
+
+            # ── 2. Valkey (fast-path cache) ───────────────────────────────────
+            try:
+                client = _get_client()
+                if client:
+                    client.setex("learner:status", _TTL, json.dumps(payload))
+                    _log.debug("learner:status published to Valkey")
+            except Exception as exc:
+                _log.debug("learner:status Valkey write failed: %s", exc)
+
         except Exception as exc:
             _log.debug("learner:status publish failed: %s", exc)
         time.sleep(60)

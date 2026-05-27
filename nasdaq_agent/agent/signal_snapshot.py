@@ -1,12 +1,20 @@
 """
-Durable scan-result state via Valkey.
+Durable scan-result state.
 
-Pattern (mirrors valkey_client.py for prices):
-  KEY   scan:latest   — full JSON snapshot; survives web-api restarts
-  PUBSUB scan:notify  — lightweight notification so subscribers wake up fast
+Write path  (scanner → PostgreSQL + Valkey):
+  1. UPSERT into service_state table (key='scan:latest') — durable, survives
+     Valkey restarts, readable by any DB client.
+  2. PUBLISH scan:notify to Valkey — lightweight wake-up for web-api subscribers.
+  3. SET scan:latest in Valkey — kept as a fast-path cache for containers that
+     read it before PostgreSQL is warmed (backward compat, no TTL).
 
-Scanner writes after every cycle.
-web-api reads on startup and subscribes for live updates.
+Read path  (web-api → PostgreSQL first, Valkey fallback):
+  read_latest() tries PostgreSQL first.  If the DB is unavailable it falls back
+  to the Valkey key so the dashboard is never blank due to a transient DB hiccup.
+
+Subscribe path  (web-api → Valkey pub/sub, unchanged):
+  subscribe_scan_results() listens on scan:notify; on each notification it calls
+  read_latest() which now prefers PostgreSQL.
 """
 from __future__ import annotations
 
@@ -17,11 +25,12 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-_KEY     = "scan:latest"
+_PG_KEY  = "scan:latest"
+_VK_KEY  = "scan:latest"
 _CHANNEL = "scan:notify"
 
 
-# ── Write (scanner → Valkey) ──────────────────────────────────────────────────
+# ── Write (scanner → PostgreSQL + Valkey) ────────────────────────────────────
 
 def write_latest(
     signals:       list[dict[str, Any]],
@@ -30,62 +39,89 @@ def write_latest(
     scanned_count: int,
 ) -> bool:
     """
-    Persist the latest scan result and publish a wake-up notification.
-    Returns True on success, False if Valkey is unavailable (non-fatal).
+    Persist the latest scan result to PostgreSQL (durable) and publish a
+    wake-up notification via Valkey pub/sub (real-time).
+
+    Returns True when at least one write path succeeded.
     """
+    snapshot = {
+        "ts":            time.time(),
+        "signals":       signals,
+        "regime":        regime,
+        "session":       session,
+        "scanned_count": scanned_count,
+    }
+
+    pg_ok = False
+    vk_ok = False
+
+    # ── 1. PostgreSQL UPSERT (source of truth) ────────────────────────────────
+    try:
+        from agent.service_state import set_state
+        pg_ok = set_state(_PG_KEY, snapshot, ttl_s=None)
+    except Exception as exc:
+        logger.debug("[signal_snapshot] PostgreSQL write error: %s", exc)
+
+    # ── 2. Valkey — fast cache + pub/sub trigger ──────────────────────────────
     try:
         from agent.valkey_client import _get_client
         client = _get_client()
-        if client is None:
-            return False
-
-        snapshot = json.dumps({
-            "ts":            time.time(),
-            "signals":       signals,
-            "regime":        regime,
-            "session":       session,
-            "scanned_count": scanned_count,
-        }, separators=(",", ":"), default=str)
-
-        pipe = client.pipeline(transaction=False)
-        pipe.set(_KEY, snapshot)
-        pipe.publish(_CHANNEL, "1")   # payload is just a trigger; reader fetches the key
-        pipe.execute()
-        return True
-
+        if client:
+            raw = json.dumps(snapshot, separators=(",", ":"), default=str)
+            pipe = client.pipeline(transaction=False)
+            pipe.set(_VK_KEY, raw)           # fast-path cache (no TTL)
+            pipe.publish(_CHANNEL, "1")      # wake-up trigger for subscribers
+            pipe.execute()
+            vk_ok = True
     except Exception as exc:
-        logger.debug("[signal_snapshot] write_latest error: %s", exc)
+        logger.debug("[signal_snapshot] Valkey write error: %s", exc)
+
+    if not pg_ok and not vk_ok:
+        logger.warning("[signal_snapshot] write_latest: both PG and Valkey failed")
         return False
+    return True
 
 
-# ── Read (web-api → Valkey) ───────────────────────────────────────────────────
+# ── Read (web-api → PostgreSQL first, Valkey fallback) ───────────────────────
 
 def read_latest() -> Optional[dict[str, Any]]:
     """
     Return the latest scan snapshot dict, or None if not yet available.
-    Called by web-api on startup so the dashboard is immediately populated
-    without waiting for the next scanner cycle.
+
+    Preference order:
+      1. PostgreSQL service_state (durable, survives Valkey restart)
+      2. Valkey scan:latest (fast-path if DB is temporarily unavailable)
     """
+    # ── Priority 1: PostgreSQL ────────────────────────────────────────────────
+    try:
+        from agent.service_state import get_state
+        snap = get_state(_PG_KEY, ignore_expiry=True)   # scan:latest has no TTL
+        if snap and snap.get("signals") is not None:
+            return snap
+    except Exception as exc:
+        logger.debug("[signal_snapshot] PostgreSQL read error: %s", exc)
+
+    # ── Priority 2: Valkey (fallback) ─────────────────────────────────────────
     try:
         from agent.valkey_client import _get_client
         client = _get_client()
-        if client is None:
-            return None
-        raw = client.get(_KEY)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        if client:
+            raw = client.get(_VK_KEY)
+            if raw:
+                return json.loads(raw)
     except Exception as exc:
-        logger.debug("[signal_snapshot] read_latest error: %s", exc)
-        return None
+        logger.debug("[signal_snapshot] Valkey read error: %s", exc)
+
+    return None
 
 
-# ── Subscribe (web-api background task) ──────────────────────────────────────
+# ── Subscribe (web-api background task — Valkey pub/sub, unchanged) ──────────
 
 def subscribe_scan_results(callback: Callable[[dict[str, Any]], None]) -> None:
     """
-    Block-subscribe to scan notifications.  On each notification, reads
-    scan:latest from Valkey and calls callback(snapshot_dict).
+    Block-subscribe to scan notifications via Valkey pub/sub.  On each
+    notification, reads the latest snapshot (preferring PostgreSQL) and calls
+    callback(snapshot_dict).
 
     Runs in a daemon thread — call via threading.Thread(target=..., daemon=True).
     Falls back silently if Valkey is unavailable.
@@ -96,14 +132,13 @@ def subscribe_scan_results(callback: Callable[[dict[str, Any]], None]) -> None:
     def _run() -> None:
         while True:
             try:
-                from agent.valkey_client import _get_client
+                from agent.valkey_client import _get_client, _cfg
                 import redis as _redis_lib
-                host_port_ssl = _get_client()
-                if host_port_ssl is None:
+
+                if _get_client() is None:
                     _time.sleep(5)
                     continue
 
-                from agent.valkey_client import _cfg
                 host, port, ssl = _cfg()
                 sub = _redis_lib.Redis(
                     host=host, port=port, ssl=ssl,

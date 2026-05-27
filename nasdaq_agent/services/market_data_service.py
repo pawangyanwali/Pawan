@@ -83,26 +83,39 @@ def _start(tickers: list[str]) -> None:
 
 def _publish_streamer_status_loop() -> None:
     """
-    Publish Schwab streamer + MD poller status to Valkey key scanner:streamer
-    every 15s so the web-api Infrastructure panel shows accurate state.
-    This loop now lives in market_data_service (where the streamer runs).
+    Publish Schwab streamer + MD poller status every 15s.
+
+    Write order (both best-effort):
+      1. PostgreSQL service_state  — durable, expires_at = NOW() + 60s
+      2. Valkey SETEX              — fast-path cache, TTL = 60s (backward compat)
     """
     import json as _json
 
-    try:
-        from agent.valkey_client import _get_client
-    except ImportError:
-        return
+    _TTL = 60  # seconds — matches docker-compose healthcheck expectation
 
     while not _runner.stopped:
         try:
-            client = _get_client()
-            if client:
-                from agent.broker.schwab_streamer import get_streamer_status
-                payload = _json.dumps({"ts": time.time(), **get_streamer_status()})
-                client.setex("scanner:streamer", 60, payload)
+            from agent.broker.schwab_streamer import get_streamer_status
+            payload = {"ts": time.time(), **get_streamer_status()}
+
+            # ── 1. PostgreSQL (source of truth) ───────────────────────────────
+            try:
+                from agent.service_state import set_state
+                set_state("scanner:streamer", payload, ttl_s=_TTL)
+            except Exception as exc:
+                _log.debug("scanner:streamer PG write failed: %s", exc)
+
+            # ── 2. Valkey (fast-path cache) ───────────────────────────────────
+            try:
+                from agent.valkey_client import _get_client
+                client = _get_client()
+                if client:
+                    client.setex("scanner:streamer", _TTL, _json.dumps(payload))
+            except Exception as exc:
+                _log.debug("scanner:streamer Valkey write failed: %s", exc)
+
         except Exception as exc:
-            _log.debug("scanner:streamer publish failed: %s", exc)
+            _log.debug("scanner:streamer status collection failed: %s", exc)
         time.sleep(15)
 
 

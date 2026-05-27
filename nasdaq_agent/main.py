@@ -535,7 +535,8 @@ def _current_signal_snapshot() -> tuple[list[dict], str | None, bool]:
     if _SCANNER_ENABLED and scanner.signals:
         return [s.to_dict() for s in scanner.signals], scanner.last_scan, False
 
-    # Priority 2: Valkey snapshot (written by scanner container after every cycle)
+    # Priority 2: PostgreSQL service_state / Valkey snapshot
+    # read_latest() now prefers PostgreSQL (durable) and falls back to Valkey.
     try:
         from agent.signal_snapshot import read_latest as _snap_read
         snap = _snap_read()
@@ -959,12 +960,14 @@ async def lifespan(app: FastAPI):
     from agent.historical_cache import init_db as _hc_init_db
     from agent.multi_tf_backtest import init_db as _mtf_init_db
     from historical.store import init_tables as _hist_init_tables
+    from agent.service_state import init_db as _ss_init_db
     _auth_init_tables()
     seed_admin()
     _ah_init_db()
     _hc_init_db()
     _mtf_init_db()
     _hist_init_tables()
+    _ss_init_db()   # durable service-state table (scan:latest, heartbeats, etc.)
 
     # Warm the market-hours cache before the first scan so get_market_session()
     # doesn't block on its first call mid-scan.  This runs in the background
@@ -1254,13 +1257,17 @@ async def health():
 
 def _container_health(valkey_connected: bool) -> dict:
     """
-    Derive container liveness from Valkey heartbeat keys.
+    Derive container liveness from service state (PostgreSQL first, Valkey fallback).
 
     Each container writes a key with a short TTL so expiry = container down:
       web-api    — always "up" (this process is answering the request)
       scanner    — scan:latest key; written after every scan cycle (can take up to ~400s)
       learner    — learner:status key; written every 60s (TTL 300s)
       scheduler  — scheduler:heartbeat key; written every 30s (TTL 90s)
+
+    Read priority:
+      1. PostgreSQL service_state (durable, survives Valkey restarts)
+      2. Valkey (fast-path fallback for backward compat)
 
     Returns a dict keyed by container name with:
       up (bool), last_seen_ago_s (float|None), detail (str)
@@ -1273,76 +1280,79 @@ def _container_health(valkey_connected: bool) -> dict:
         "web-api": {"up": True, "last_seen_ago_s": 0.0, "detail": "serving this response"},
     }
 
-    if not valkey_connected:
-        for name in ("scanner", "learner", "scheduler"):
-            result[name] = {"up": None, "last_seen_ago_s": None, "detail": "Valkey unreachable"}
-        return result
+    def _pg_get(key: str, ignore_expiry: bool = False) -> dict | None:
+        """Best-effort PostgreSQL state read; returns None on any error."""
+        try:
+            from agent.service_state import get_state as _ss_get
+            return _ss_get(key, ignore_expiry=ignore_expiry)
+        except Exception:
+            return None
 
+    def _vk_get(key: str) -> dict | None:
+        """Best-effort Valkey state read; returns None on any error."""
+        if not valkey_connected:
+            return None
+        try:
+            from agent.valkey_client import _get_client as _vk_c
+            _vc = _vk_c()
+            if _vc:
+                raw = _vc.get(key)
+                if raw:
+                    return json.loads(raw)
+        except Exception:
+            pass
+        return None
+
+    # ── scanner — scan:latest ─────────────────────────────────────────────────
     try:
-        from agent.valkey_client import _get_client
-        client = _get_client()
-        if client is None:
-            for name in ("scanner", "learner", "scheduler"):
-                result[name] = {"up": None, "last_seen_ago_s": None, "detail": "no Valkey client"}
-            return result
-
-        # scanner — scan:latest written after each cycle; JSON with optional "ts" field
-        try:
-            raw = client.get("scan:latest")
-            if raw:
-                d = json.loads(raw)
-                scan_ts = float(d.get("ts", 0))
-                ago = round(now - scan_ts, 1) if scan_ts else None
-                up = ago is not None and ago < _SCANNER_STALE_S
-                result["scanner"] = {
-                    "up": up,
-                    "last_seen_ago_s": ago,
-                    "detail": f"last scan {ago}s ago" if ago is not None else "key present, no ts",
-                }
-            else:
-                result["scanner"] = {"up": False, "last_seen_ago_s": None, "detail": "no scan:latest key"}
-        except Exception as exc:
-            result["scanner"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
-
-        # learner — learner:status written every 60s
-        try:
-            raw = client.get("learner:status")
-            if raw:
-                d = json.loads(raw)
-                ts = float(d.get("ts", 0))
-                ago = round(now - ts, 1) if ts else None
-                up = ago is not None and ago < 300
-                result["learner"] = {
-                    "up": up,
-                    "last_seen_ago_s": ago,
-                    "detail": f"heartbeat {ago}s ago" if ago is not None else "key present, no ts",
-                }
-            else:
-                result["learner"] = {"up": False, "last_seen_ago_s": None, "detail": "no learner:status key"}
-        except Exception as exc:
-            result["learner"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
-
-        # scheduler — scheduler:heartbeat written every 30s
-        try:
-            raw = client.get("scheduler:heartbeat")
-            if raw:
-                d = json.loads(raw)
-                ts = float(d.get("ts", 0))
-                ago = round(now - ts, 1) if ts else None
-                up = ago is not None and ago < 120
-                result["scheduler"] = {
-                    "up": up,
-                    "last_seen_ago_s": ago,
-                    "detail": f"heartbeat {ago}s ago" if ago is not None else "key present, no ts",
-                }
-            else:
-                result["scheduler"] = {"up": False, "last_seen_ago_s": None, "detail": "no scheduler:heartbeat key"}
-        except Exception as exc:
-            result["scheduler"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
-
+        d = _pg_get("scan:latest", ignore_expiry=True) or _vk_get("scan:latest")
+        if d:
+            scan_ts = float(d.get("ts", 0))
+            ago = round(now - scan_ts, 1) if scan_ts else None
+            up  = ago is not None and ago < _SCANNER_STALE_S
+            result["scanner"] = {
+                "up": up,
+                "last_seen_ago_s": ago,
+                "detail": f"last scan {ago}s ago" if ago is not None else "key present, no ts",
+            }
+        else:
+            result["scanner"] = {"up": False, "last_seen_ago_s": None, "detail": "no scan:latest state"}
     except Exception as exc:
-        for name in ("scanner", "learner", "scheduler"):
-            result[name] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
+        result["scanner"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
+
+    # ── learner — learner:status ──────────────────────────────────────────────
+    try:
+        d = _pg_get("learner:status") or _vk_get("learner:status")
+        if d:
+            ts  = float(d.get("ts", 0))
+            ago = round(now - ts, 1) if ts else None
+            up  = ago is not None and ago < 300
+            result["learner"] = {
+                "up": up,
+                "last_seen_ago_s": ago,
+                "detail": f"heartbeat {ago}s ago" if ago is not None else "key present, no ts",
+            }
+        else:
+            result["learner"] = {"up": False, "last_seen_ago_s": None, "detail": "no learner:status state"}
+    except Exception as exc:
+        result["learner"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
+
+    # ── scheduler — scheduler:heartbeat ──────────────────────────────────────
+    try:
+        d = _pg_get("scheduler:heartbeat") or _vk_get("scheduler:heartbeat")
+        if d:
+            ts  = float(d.get("ts", 0))
+            ago = round(now - ts, 1) if ts else None
+            up  = ago is not None and ago < 120
+            result["scheduler"] = {
+                "up": up,
+                "last_seen_ago_s": ago,
+                "detail": f"heartbeat {ago}s ago" if ago is not None else "key present, no ts",
+            }
+        else:
+            result["scheduler"] = {"up": False, "last_seen_ago_s": None, "detail": "no scheduler:heartbeat state"}
+    except Exception as exc:
+        result["scheduler"] = {"up": None, "last_seen_ago_s": None, "detail": str(exc)}
 
     return result
 
@@ -1358,21 +1368,31 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
 
     vk = vk_health()
 
-    # When scanner runs in its own container, read streamer/poller status from
-    # Valkey (written by scanner_service every 15s) instead of the local noop state.
+    # When market-data runs in its own container, read streamer/poller status
+    # from service_state (PostgreSQL first, Valkey fallback).
     streamer = get_streamer_status()
-    if not _MARKET_DATA_ENABLED and vk.get("connected"):
+    if not _MARKET_DATA_ENABLED:
+        # ── Priority 1: PostgreSQL service_state ─────────────────────────────
         try:
-            from agent.valkey_client import _get_client as _vk_c
-            _vc = _vk_c()
-            if _vc:
-                _raw = _vc.get("scanner:streamer")
-                if _raw:
-                    _sd = json.loads(_raw)
-                    if time.time() - _sd.get("ts", 0) < 60:
-                        streamer = _sd
+            from agent.service_state import get_state as _ss_get
+            _sd = _ss_get("scanner:streamer")   # None if expired (> 60s old)
+            if _sd:
+                streamer = _sd
         except Exception:
             pass
+        # ── Priority 2: Valkey fallback ──────────────────────────────────────
+        if streamer is get_streamer_status() and vk.get("connected"):
+            try:
+                from agent.valkey_client import _get_client as _vk_c
+                _vc = _vk_c()
+                if _vc:
+                    _raw = _vc.get("scanner:streamer")
+                    if _raw:
+                        _sd = json.loads(_raw)
+                        if time.time() - _sd.get("ts", 0) < 60:
+                            streamer = _sd
+            except Exception:
+                pass
 
     # RDS check — lightweight: just try to get a connection from the pool
     rds_ok = False
@@ -1397,19 +1417,29 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     sigs, last_scan, from_cache = _current_signal_snapshot()
 
     # When scanner runs in its own container, derive running state from the
-    # Valkey scan:latest key age rather than the local scanner.is_running (always False).
+    # scan:latest age (PostgreSQL first, Valkey fallback).
     scanner_running = scanner.is_running
     if not _SCANNER_ENABLED and not scanner_running:
+        # ── Priority 1: PostgreSQL ────────────────────────────────────────────
         try:
-            from agent.valkey_client import _get_client as _vk_sc
-            _vc = _vk_sc()
-            if _vc:
-                _raw = _vc.get("scan:latest")
-                if _raw:
-                    _ts = json.loads(_raw).get("ts", 0)
-                    scanner_running = bool(_ts and (time.time() - float(_ts)) < 660)
+            from agent.service_state import get_age_s as _ss_age
+            _age = _ss_age("scan:latest")
+            if _age is not None:
+                scanner_running = _age < 660   # running if written within 11 min
         except Exception:
             pass
+        # ── Priority 2: Valkey fallback ───────────────────────────────────────
+        if not scanner_running:
+            try:
+                from agent.valkey_client import _get_client as _vk_sc
+                _vc = _vk_sc()
+                if _vc:
+                    _raw = _vc.get("scan:latest")
+                    if _raw:
+                        _ts = json.loads(_raw).get("ts", 0)
+                        scanner_running = bool(_ts and (time.time() - float(_ts)) < 660)
+            except Exception:
+                pass
 
     return {
         "scanner": {
@@ -2117,21 +2147,33 @@ async def learning_status():
     engine_status = learning_engine.get_status()
 
     # When the learner runs in a separate container it publishes its state to
-    # Valkey key learner:status every 60s.  Prefer that over the stale local
-    # in-memory state (which never updates in the web-api container).
+    # learner:status every 60s.  Prefer PostgreSQL (source of truth) over the
+    # stale local in-memory state (which never updates in the web-api container).
     if not _LEARNER_ENABLED:
+        _learner_d: dict | None = None
+        # ── Priority 1: PostgreSQL service_state ─────────────────────────────
         try:
-            from agent.valkey_client import _get_client as _vk_client
-            _vk = _vk_client()
-            if _vk:
-                _raw = _vk.get("learner:status")
-                if _raw:
-                    _d = json.loads(_raw)
-                    if time.time() - _d.get("ts", 0) < 300:
-                        engine_status = _d.get("engine", engine_status)
-                        status        = _d.get("adaptive_filter", status)
+            from agent.service_state import get_state as _ss_get
+            _learner_d = _ss_get("learner:status")   # None if expired (> 300s)
+            if _learner_d:
+                engine_status = _learner_d.get("engine", engine_status)
+                status        = _learner_d.get("adaptive_filter", status)
         except Exception:
             pass
+        # ── Priority 2: Valkey fallback ───────────────────────────────────────
+        if not _learner_d:
+            try:
+                from agent.valkey_client import _get_client as _vk_client
+                _vk = _vk_client()
+                if _vk:
+                    _raw = _vk.get("learner:status")
+                    if _raw:
+                        _d = json.loads(_raw)
+                        if time.time() - _d.get("ts", 0) < 300:
+                            engine_status = _d.get("engine", engine_status)
+                            status        = _d.get("adaptive_filter", status)
+            except Exception:
+                pass
 
     result = {
         **status,
@@ -2153,20 +2195,34 @@ async def learning_phase2_status():
     """Phase 2 status: concept drift, staged deployment, walk-forward validation, transfer tier."""
     if not _P2_AVAILABLE:
         if not _LEARNER_ENABLED:
+            _learner_d2: dict | None = None
+            # ── Priority 1: PostgreSQL service_state ─────────────────────────
             try:
-                from agent.valkey_client import _get_client as _vk_client
-                _vk = _vk_client()
-                if _vk:
-                    _raw = _vk.get("learner:status")
-                    if _raw:
-                        _d = json.loads(_raw)
-                        age = time.time() - _d.get("ts", 0)
-                        p2  = _d.get("phase2", {})
-                        if p2:
-                            # Surface staleness so the UI can show a warning badge
-                            return {"available": True, "_stale": age > 120, **p2}
+                from agent.service_state import get_state as _ss_get
+                _learner_d2 = _ss_get("learner:status")   # None if expired
+                if _learner_d2:
+                    age = time.time() - _learner_d2.get("ts", 0)
+                    p2  = _learner_d2.get("phase2", {})
+                    if p2:
+                        # Surface staleness so the UI can show a warning badge
+                        return {"available": True, "_stale": age > 120, **p2}
             except Exception:
                 pass
+            # ── Priority 2: Valkey fallback ───────────────────────────────────
+            if not _learner_d2:
+                try:
+                    from agent.valkey_client import _get_client as _vk_client
+                    _vk = _vk_client()
+                    if _vk:
+                        _raw = _vk.get("learner:status")
+                        if _raw:
+                            _d = json.loads(_raw)
+                            age = time.time() - _d.get("ts", 0)
+                            p2  = _d.get("phase2", {})
+                            if p2:
+                                return {"available": True, "_stale": age > 120, **p2}
+                except Exception:
+                    pass
         return {"available": False}
     try:
         status = _get_p2_engine().get_status()
@@ -2205,21 +2261,35 @@ async def learning_log_endpoint(limit: int = 100):
     log_entries   = get_learning_log(limit=limit)
     engine_status = learning_engine.get_status()
 
-    _stale = True  # assume stale until proven fresh from Valkey
+    _stale = True  # assume stale until proven fresh
     if not _LEARNER_ENABLED:
+        _learner_dl: dict | None = None
+        # ── Priority 1: PostgreSQL service_state ─────────────────────────────
         try:
-            from agent.valkey_client import _get_client as _vk_client
-            _vk = _vk_client()
-            if _vk:
-                _raw = _vk.get("learner:status")
-                if _raw:
-                    _d  = json.loads(_raw)
-                    age = time.time() - _d.get("ts", 0)
-                    log_entries   = _d.get("log", log_entries)[:limit]
-                    engine_status = _d.get("engine", engine_status)
-                    _stale = age > 120   # fresh if learner published within 2 min
+            from agent.service_state import get_state as _ss_get
+            _learner_dl = _ss_get("learner:status")   # None if expired (> 300s)
+            if _learner_dl:
+                age           = time.time() - _learner_dl.get("ts", 0)
+                log_entries   = _learner_dl.get("log", log_entries)[:limit]
+                engine_status = _learner_dl.get("engine", engine_status)
+                _stale        = age > 120   # fresh if learner published within 2 min
         except Exception:
             pass
+        # ── Priority 2: Valkey fallback ───────────────────────────────────────
+        if not _learner_dl:
+            try:
+                from agent.valkey_client import _get_client as _vk_client
+                _vk = _vk_client()
+                if _vk:
+                    _raw = _vk.get("learner:status")
+                    if _raw:
+                        _d            = json.loads(_raw)
+                        age           = time.time() - _d.get("ts", 0)
+                        log_entries   = _d.get("log", log_entries)[:limit]
+                        engine_status = _d.get("engine", engine_status)
+                        _stale        = age > 120
+            except Exception:
+                pass
 
     return {"log": log_entries, "engine": engine_status, "_stale": _stale}
 
