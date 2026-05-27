@@ -34,17 +34,16 @@ _db_ready   = False   # becomes True after the first successful init_db()
 
 
 def _ensure_init() -> None:
-    """Call init_db() once per process, lazily, on the first set_state call."""
+    """Lazy-initialize once per process. Only marks ready after confirmed success.
+    Retries on every set_state() call until init_db() succeeds so a transient
+    DB unavailability on cold start does not permanently block table creation.
+    """
     global _db_ready
     if _db_ready:
         return
     with _init_lock:
         if not _db_ready:
-            try:
-                init_db()
-                _db_ready = True
-            except Exception:
-                pass   # logged inside init_db(); caller will handle the DB error
+            _db_ready = init_db()   # True only on real success; False = retry next call
 
 
 _DDL = """
@@ -60,8 +59,14 @@ CREATE INDEX IF NOT EXISTS idx_service_state_expires
 """
 
 
-def init_db() -> None:
-    """Create the service_state table (idempotent — safe to call on every startup)."""
+def init_db() -> bool:
+    """Create the service_state table (idempotent — safe to call on every startup).
+
+    Returns True when the table is confirmed to exist, False on any DB error.
+    The return value is used by _ensure_init() to decide whether to retry DDL
+    creation on the next set_state() call — a False here means the next write
+    will attempt init again rather than silently skipping table setup.
+    """
     try:
         from agent.db import get_conn
         with get_conn() as conn:
@@ -69,8 +74,10 @@ def init_db() -> None:
                 cur.execute(_DDL)
             conn.commit()
         logger.info("[service_state] table ready")
+        return True
     except Exception as exc:
         logger.warning("[service_state] init_db error: %s", exc)
+        return False
 
 
 def set_state(key: str, value: dict[str, Any], ttl_s: Optional[int] = None) -> bool:

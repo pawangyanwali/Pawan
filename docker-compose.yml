@@ -102,8 +102,11 @@ services:
       LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.market_data_service"]
     healthcheck:
-      test: ["CMD", "python3", "-c",
-             "import sys; sys.path.insert(0,'/app'); from agent.valkey_client import _get_client; c=_get_client(); assert c and c.ping()"]
+      # Three-tier check:
+      #   1. Valkey ping (always)
+      #   2. scanner:streamer age < 90 s (status-publisher loop alive)
+      #   3. md:prices freshness < 90 s (active sessions only — quotes flowing)
+      test: ["CMD", "python3", "/app/services/md_healthcheck.py"]
       interval: 30s
       timeout: 10s
       retries: 3
