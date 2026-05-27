@@ -285,20 +285,26 @@ def fetch_batch_realtime(
             from agent.valkey_client import _get_client as _vk_get
             _vk = _vk_get()
             if _vk:
-                still_rest = []
+                # ── Batch all lrange calls in a single pipeline round-trip ────────
+                # N individual lrange calls would cost N × RTT (≥ 1ms each).
+                # One pipeline call costs 1 × RTT regardless of N.
+                pipe = _vk.pipeline(transaction=False)
                 for ticker in rest_needed:
-                    key  = f"md:1m:{ticker}"
-                    rows = _vk.lrange(key, 0, -1)
+                    pipe.lrange(f"md:1m:{ticker}", 0, -1)
+                all_rows_list = pipe.execute()   # list[list[bytes]] — one per ticker
+
+                col_map = {
+                    "open": "Open", "high": "High", "low": "Low",
+                    "close": "Close", "volume": "Volume",
+                    "Open": "Open", "High": "High", "Low": "Low",
+                    "Close": "Close", "Volume": "Volume",
+                }
+                still_rest = []
+                for ticker, rows in zip(rest_needed, all_rows_list):
                     if rows and len(rows) >= 20:
                         candles = [_json.loads(r) for r in rows]
                         _df = pd.DataFrame(candles)
                         # Normalise column names to match REST-fetched dataframes
-                        col_map = {
-                            "open": "Open", "high": "High", "low": "Low",
-                            "close": "Close", "volume": "Volume",
-                            "Open": "Open", "High": "High", "Low": "Low",
-                            "Close": "Close", "Volume": "Volume",
-                        }
                         _df.rename(columns={c: col_map[c] for c in _df.columns if c in col_map}, inplace=True)
                         # Build a DatetimeIndex from timestamp/time_ms field if present.
                         # WS streamer writes "time_ms" (from _CHART_FIELDS field "7");

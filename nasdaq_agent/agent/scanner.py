@@ -489,6 +489,37 @@ def _compute_levels(df_1m: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
     return result
 
 
+# ── ML prediction cache ───────────────────────────────────────────────────────
+# Keyed by (ticker, last_bar_timestamp_nanoseconds).  If the most recent 1-min
+# bar hasn't changed since the previous scan cycle, all six ML model outputs
+# are identical — feature inputs are the same.  Skipping model inference saves
+# ~1.5-2 s per ticker (the single largest time sink in analyse_ticker).
+#
+# Cache lifetime: 5 min.  A new bar closing invalidates automatically because
+# the nanosecond timestamp changes.
+#
+# Thread safety: Python dict reads/writes are GIL-protected.  Multiple threads
+# may write the same key simultaneously but always write identical values
+# (same inputs → same outputs), so last-write-wins is correct.
+_ML_PRED_CACHE: dict[str, tuple] = {}
+_ML_PRED_CACHE_TTL_S: float = 300.0   # 5 min — covers 2× the longest scan interval
+
+
+def _ml_pred_cache_get(ticker: str, bar_ts_ns: int) -> tuple | None:
+    """Return cached (scalp, daily, reversal, ensemble, agree, swing, deep) or None."""
+    entry = _ML_PRED_CACHE.get(ticker)
+    if entry is None:
+        return None
+    cached_ns, *vals, cached_at = entry
+    if cached_ns != bar_ts_ns or time.time() - cached_at > _ML_PRED_CACHE_TTL_S:
+        return None
+    return tuple(vals)
+
+
+def _ml_pred_cache_put(ticker: str, bar_ts_ns: int, *vals) -> None:
+    _ML_PRED_CACHE[ticker] = (bar_ts_ns, *vals, time.time())
+
+
 # ── Single ticker analysis ────────────────────────────────────────────────────
 
 def analyse_ticker(
@@ -557,10 +588,6 @@ def analyse_ticker(
         # feature distributions match training (RSI-14 on 5m = 70 min of price
         # action; on 1m it only covers 14 min, completely different signal).
         _df_ml = df_5m if (df_5m is not None and len(df_5m) >= 20) else df_ind
-        ml_scalp                   = predict(ticker, _df_ml)
-        ml_daily_p                 = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
-        ml_reversal_p              = predict_reversal(ticker, _df_ml)
-        ml_ensemble_p, ml_agree    = predict_ensemble(ticker, _df_ml)
 
         # 15-min bars — resampled from 5-min (no extra API call).
         # Used by both SwingML (XGBoost on 9 months of 15-min data) and
@@ -574,8 +601,25 @@ def analyse_ticker(
             pass
         _has_15m = _df_15m is not None and len(_df_15m) >= 20
 
-        ml_swing_p = predict_swing(ticker, _df_15m) if _has_15m else 0.5
-        ml_deep_p  = predict_deep(ticker, _df_15m)  if _has_15m else 0.5
+        # ── ML prediction cache ───────────────────────────────────────────────
+        # Skip 6 model calls (~1.5-2 s) when the last 1-min bar hasn't changed.
+        # The bar timestamp (nanoseconds) is the uniqueness key: a new bar close
+        # changes it automatically, invalidating the cache without TTL tricks.
+        _bar_ts_ns = int(df_ind.index[-1].value)
+        _ml_hit = _ml_pred_cache_get(ticker, _bar_ts_ns)
+        if _ml_hit is not None:
+            (ml_scalp, ml_daily_p, ml_reversal_p,
+             ml_ensemble_p, ml_agree, ml_swing_p, ml_deep_p) = _ml_hit
+        else:
+            ml_scalp        = predict(ticker, _df_ml)
+            ml_daily_p      = predict_daily(ticker, df_1d) if not df_1d.empty else 0.5
+            ml_reversal_p   = predict_reversal(ticker, _df_ml)
+            ml_ensemble_p, ml_agree = predict_ensemble(ticker, _df_ml)
+            ml_swing_p      = predict_swing(ticker, _df_15m) if _has_15m else 0.5
+            ml_deep_p       = predict_deep(ticker, _df_15m)  if _has_15m else 0.5
+            _ml_pred_cache_put(ticker, _bar_ts_ns, ml_scalp, ml_daily_p,
+                               ml_reversal_p, ml_ensemble_p, ml_agree,
+                               ml_swing_p, ml_deep_p)
 
         # MetaEnsemble: calibrated fusion of all ML sources.
         # When trained (≥30 outcomes), uses a meta-XGBoost to combine signals
