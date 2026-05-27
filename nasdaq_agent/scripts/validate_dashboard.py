@@ -82,13 +82,13 @@ try:
         r = c.execute("""
             SELECT
                 COUNT(*)                                           AS total,
-                SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END)  AS wins,
+                SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END)   AS wins,
                 ROUND(
-                    SUM(CASE WHEN outcome = 'WIN' THEN 1.0 ELSE 0 END)
+                    SUM(CASE WHEN status = 'WIN' THEN 1.0 ELSE 0 END)
                     / NULLIF(COUNT(*), 0) * 100, 1
                 )                                                  AS win_rate_pct
             FROM bt_signals
-            WHERE resolved = true
+            WHERE status IN ('WIN', 'LOSS', 'TIMEOUT')
         """).fetchone()
         print(dict(r))
 except Exception as e:
