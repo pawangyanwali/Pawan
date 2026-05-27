@@ -94,9 +94,13 @@ def _run_earnings_poll() -> None:
         _log.debug("[earnings_poller] FINNHUB_API_KEY not set — skipping")
         return
 
-    now      = datetime.now(timezone.utc)
-    from_dt  = now.strftime("%Y-%m-%d")
-    to_dt    = (now + timedelta(days=90)).strftime("%Y-%m-%d")
+    now = datetime.now(timezone.utc)
+    # Poll -7 days to +30 days:
+    #   -7d catches recent earnings for post-earnings cooldown detection
+    #   +30d is the realistic window where companies confirm exact dates
+    #   (90d produced ~1500 entries but most had null dates = unconfirmed)
+    from_dt = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    to_dt   = (now + timedelta(days=30)).strftime("%Y-%m-%d")
 
     _log.debug("[earnings_poller] Fetching calendar %s → %s", from_dt, to_dt)
     raw = fetch_earnings_calendar(from_dt, to_dt)
@@ -106,20 +110,23 @@ def _run_earnings_poll() -> None:
         return
 
     entries: list[dict] = []
+    null_date_count = 0
     for item in raw:
         symbol = (item.get("symbol") or "").upper().strip()
-        date_s = item.get("date", "")           # "YYYY-MM-DD"
-        hour   = item.get("hour", "")           # "bmo" | "amc" | "dmh"
-        if not symbol or not date_s:
+        date_s = item.get("date") or ""          # explicit None → "" handling
+        hour   = item.get("hour", "")
+        if not symbol:
             continue
+        if not date_s:
+            null_date_count += 1
+            continue   # unconfirmed earnings date — skip
         try:
-            # Parse date string; use 09:00 UTC for bmo, 22:00 UTC for amc
             d = datetime.strptime(date_s, "%Y-%m-%d")
             if hour == "amc":
                 d = d.replace(hour=22, tzinfo=timezone.utc)
             else:
-                # bmo, dmh, or unknown → pre-market open UTC
-                d = d.replace(hour=13, tzinfo=timezone.utc)  # 09:00 ET = 13:00 UTC (EST)
+                # bmo / dmh / unknown → 09:30 ET = 13:30 UTC (approximate)
+                d = d.replace(hour=13, minute=30, tzinfo=timezone.utc)
         except Exception:
             continue
 
@@ -131,9 +138,13 @@ def _run_earnings_poll() -> None:
             "rev_estimate": item.get("revenueEstimate"),
         })
 
+    if null_date_count:
+        _log.info("[earnings_poller] Skipped %d entries with unconfirmed dates",
+                  null_date_count)
+
     upserted = upsert_earnings(entries)
-    _log.info("[earnings_poller] Upserted %d earnings entries (%d returned)",
-              upserted, len(raw))
+    _log.info("[earnings_poller] Upserted %d / %d confirmed earnings entries",
+              upserted, len(entries))
 
 
 # ── News poller — every 3 minutes ────────────────────────────────────────────
