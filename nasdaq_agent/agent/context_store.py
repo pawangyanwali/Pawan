@@ -573,7 +573,7 @@ def upsert_earnings(entries: list[dict]) -> int:
                     )
                     count += 1
                 except Exception as row_err:
-                    logger.debug("[context_store] upsert_earnings row error: %s", row_err)
+                    logger.warning("[context_store] upsert_earnings row error: %s", row_err)
     except Exception as exc:
         logger.warning("[context_store] upsert_earnings error: %s", exc)
     return count

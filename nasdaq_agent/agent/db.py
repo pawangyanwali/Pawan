@@ -280,14 +280,24 @@ class _PgConnection:
 
         lastrowid = None
         if stripped.startswith("INSERT"):
+            # lastval() fails on tables with no SERIAL/sequence (e.g. composite PKs).
+            # A bare `except: pass` leaves the transaction in an aborted state,
+            # causing every subsequent execute() in the same with-block to fail.
+            # Use a savepoint so a failure rolls back cleanly.
+            lv_sp = self._conn.cursor()
+            lv_sp.execute("SAVEPOINT _lastval_sp")
             try:
                 id_cur = self._conn.cursor()
                 id_cur.execute("SELECT lastval()")
                 row = id_cur.fetchone()
                 lastrowid = row[0] if row else None
                 id_cur.close()
+                lv_sp.execute("RELEASE SAVEPOINT _lastval_sp")
             except Exception:
-                pass
+                try:
+                    lv_sp.execute("ROLLBACK TO SAVEPOINT _lastval_sp")
+                except Exception:
+                    pass
 
         return _PgCursor(cur, lastrowid)
 
