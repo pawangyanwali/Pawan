@@ -17,6 +17,8 @@ echo "[2/5] Ensuring data directory exists on host ..."
 mkdir -p "$APP_DIR/nasdaq_agent/data/models"
 mkdir -p "$APP_DIR/nasdaq_agent/data/cache"
 mkdir -p "$APP_DIR/logs"
+# Containers run as UID 1000 (nasdaq) — ensure they can write to the data dir.
+chown -R 1000:1000 "$APP_DIR/nasdaq_agent/data" 2>/dev/null || true
 
 echo "[3/5] Building image ..."
 docker compose -f "$APP_DIR/docker-compose.yml" build
