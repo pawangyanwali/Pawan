@@ -290,7 +290,8 @@ class TestPaperTrading:
     def test_get_summary_empty(self, tmp_db_paths):
         from agent.paper_trading import get_summary
         s = get_summary()
-        assert "total_trades" in s or "trades_today" in s
+        # get_summary() returns capital + trade-count keys (open/closed/wins/losses)
+        assert "open" in s or "closed" in s
 
     def test_open_and_close_trade(self, tmp_db_paths):
         from agent.paper_trading import maybe_open_trade
@@ -358,8 +359,13 @@ class TestVwap:
         df = self._make_df(closes, vwap_val=100.0)
         result = compute_vwap_signal(df)
         assert isinstance(result, dict)
-        assert result["event"] in ("ABOVE", "RECLAIM", "EXTENDED_UP", "NEUTRAL", "REJECTION",
-                                   "BELOW", "EXTENDED_DOWN", "AT_VWAP")
+        # Full set of valid VWAP events from agent/vwap.py
+        assert result["event"] in (
+            "RECLAIM", "REJECTION",
+            "AT_2SD_UP", "AT_2SD_DOWN",
+            "AT_1SD_UP", "AT_1SD_DOWN",
+            "ABOVE", "BELOW", "FLAT",
+        )
 
     def test_below_vwap(self):
         from agent.vwap import compute_vwap_signal

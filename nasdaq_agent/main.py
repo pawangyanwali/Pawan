@@ -2160,10 +2160,11 @@ async def learning_phase2_status():
                     _raw = _vk.get("learner:status")
                     if _raw:
                         _d = json.loads(_raw)
-                        if time.time() - _d.get("ts", 0) < 300:
-                            p2 = _d.get("phase2", {})
-                            if p2:
-                                return {"available": True, **p2}
+                        age = time.time() - _d.get("ts", 0)
+                        p2  = _d.get("phase2", {})
+                        if p2:
+                            # Surface staleness so the UI can show a warning badge
+                            return {"available": True, "_stale": age > 120, **p2}
             except Exception:
                 pass
         return {"available": False}
@@ -2204,6 +2205,7 @@ async def learning_log_endpoint(limit: int = 100):
     log_entries   = get_learning_log(limit=limit)
     engine_status = learning_engine.get_status()
 
+    _stale = True  # assume stale until proven fresh from Valkey
     if not _LEARNER_ENABLED:
         try:
             from agent.valkey_client import _get_client as _vk_client
@@ -2211,14 +2213,15 @@ async def learning_log_endpoint(limit: int = 100):
             if _vk:
                 _raw = _vk.get("learner:status")
                 if _raw:
-                    _d = json.loads(_raw)
-                    if time.time() - _d.get("ts", 0) < 300:
-                        log_entries   = _d.get("log", log_entries)[:limit]
-                        engine_status = _d.get("engine", engine_status)
+                    _d  = json.loads(_raw)
+                    age = time.time() - _d.get("ts", 0)
+                    log_entries   = _d.get("log", log_entries)[:limit]
+                    engine_status = _d.get("engine", engine_status)
+                    _stale = age > 120   # fresh if learner published within 2 min
         except Exception:
             pass
 
-    return {"log": log_entries, "engine": engine_status}
+    return {"log": log_entries, "engine": engine_status, "_stale": _stale}
 
 
 @app.get("/api/after-hours")

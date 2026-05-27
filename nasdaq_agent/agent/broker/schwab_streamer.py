@@ -281,6 +281,36 @@ def _process_chart_equity(content: list) -> None:
             except Exception:
                 pass
 
+    # Publish candles to Valkey so the scanner container can read them
+    # even when market-data runs in a separate container.
+    # Key: md:1m:{ticker}  Type: Redis LIST  Max length: 200 bars  TTL: 7200s
+    if new_bars:
+        _publish_candles_to_valkey(new_bars)
+
+
+def _publish_candles_to_valkey(bars: list[tuple[str, dict]]) -> None:
+    """
+    Push new 1-min candles to Valkey LIST keys (md:1m:{ticker}).
+    Each list holds the last 200 bars in chronological order (oldest first).
+    TTL = 7200s so stale data auto-expires if the streamer goes down.
+    Called from _process_chart_equity — errors are suppressed (non-fatal).
+    """
+    try:
+        import json as _json
+        from agent.valkey_client import _get_client as _vk_get
+        client = _vk_get()
+        if not client:
+            return
+        pipe = client.pipeline(transaction=False)
+        for sym, candle in bars:
+            key = f"md:1m:{sym}"
+            pipe.rpush(key, _json.dumps(candle))
+            pipe.ltrim(key, -200, -1)   # keep last 200 bars
+            pipe.expire(key, 7200)      # 2-hour TTL
+        pipe.execute()
+    except Exception:
+        pass  # non-fatal — scanner falls back to in-process cache or REST
+
 
 def _process_screener(service: str, content: list) -> None:
     global _screener_up, _screener_down, _screener_vol

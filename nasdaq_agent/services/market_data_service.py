@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-market_data_service — Schwab price publisher (standalone, no scanner).
+market_data_service — Schwab price publisher (standalone container).
 
 Responsibilities:
   1. Maintain the Schwab WebSocket streamer connection.
-  2. Run the REST MD poller as a fallback / supplement.
+  2. Run the REST MD poller as fallback / supplement.
   3. Publish every price update to Valkey (md:prices hash + pub/sub).
+  4. Publish 1-min candles to Valkey (md:1m:{ticker} lists) on each bar close
+     so the scanner container can read them via data_fetcher Tier A½.
+  5. Publish streamer/poller status to Valkey (scanner:streamer, 15s cadence)
+     so the web-api Infrastructure panel shows accurate state.
 
 Interface contract:
-  WRITES  Valkey md:prices  — hash of all live quotes (durable)
-  WRITES  Valkey md:prices  — pub/sub fan-out to subscribers (real-time)
-
-  Does NOT run the scan loop.  Intended for a future split where the scanner
-  reads live prices from Valkey instead of from the in-process _live_quotes
-  cache.  Until data_fetcher is updated, use scanner_service (which bundles
-  market data) and disable this service to avoid duplicate Schwab connections.
+  WRITES  Valkey md:prices          — spot quotes hash + pub/sub (~300 ms)
+  WRITES  Valkey md:1m:{ticker}     — Redis LIST of last 200 1-min candles
+  WRITES  Valkey scanner:streamer   — JSON status blob (TTL 60s, every 15s)
 
 Environment variables:
   NASDAQ_MD_STARTUP_DELAY_S   float  poller warm-up delay in seconds (default 10)
@@ -79,6 +79,35 @@ def _start(tickers: list[str]) -> None:
         _log.warning("No Schwab data source active — no prices will be published")
 
 
+# ── Streamer status publisher ─────────────────────────────────────────────────
+
+def _publish_streamer_status_loop() -> None:
+    """
+    Publish Schwab streamer + MD poller status to Valkey key scanner:streamer
+    every 15s so the web-api Infrastructure panel shows accurate state.
+    This loop now lives in market_data_service (where the streamer runs).
+    """
+    import json as _json
+
+    try:
+        from agent.valkey_client import _get_client
+    except ImportError:
+        return
+
+    while not _runner.stopped:
+        try:
+            client = _get_client()
+            if client:
+                from agent.broker.schwab_streamer import get_streamer_status
+                payload = _json.dumps({"ts": time.time(), **get_streamer_status()})
+                client.setex("scanner:streamer", 60, payload)
+        except Exception as exc:
+            _log.debug("scanner:streamer publish failed: %s", exc)
+        time.sleep(15)
+
+
+# ── Health / stats logger ─────────────────────────────────────────────────────
+
 def _health_loop() -> None:
     """Log Valkey publish stats every 60 s so we can diagnose stale data."""
     while not _runner.stopped:
@@ -105,7 +134,8 @@ def main() -> None:
     _log.info("=== market_data_service starting ===")
     _start(list(NASDAQ_TICKERS))
 
-    threading.Thread(target=_health_loop, daemon=True, name="md-health").start()
+    threading.Thread(target=_health_loop,                  daemon=True, name="md-health").start()
+    threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="md-streamer-status").start()
 
     _log.info("Market data running — waiting for SIGTERM/SIGINT …")
     _runner.register_signals()

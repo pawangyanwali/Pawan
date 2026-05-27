@@ -1,19 +1,23 @@
 # NASDAQ Agent — Docker Compose (Phase 1, single EC2 t3.large)
 #
 # Architecture:
-#   web-api    → serves HTTP + WebSocket; reads from Valkey only; no ML
-#   scanner    → scan loop + Schwab market data; writes to Valkey + PostgreSQL
-#   learner    → off-hours ML training; writes models + DB; market-hours gated
-#   scheduler  → EOD position close, Valkey heartbeat; no network dependencies
+#   web-api      → serves HTTP + WebSocket; reads from Valkey only; no ML
+#   market-data  → Schwab WebSocket streamer + REST poller; publishes md:prices
+#                  and md:1m:{ticker} candle lists to Valkey
+#   scanner      → scan loop only; reads candles from Valkey (no local streamer)
+#   learner      → off-hours ML training; writes models + DB; market-hours gated
+#   scheduler    → EOD position close, Valkey heartbeat; no network dependencies
 #
 # Communication:
-#   scanner → web-api  : Valkey  scan:latest / scan:notify
-#   scanner → web-api  : Valkey  md:prices (real-time price fan-out)
-#   scanner / learner  : PostgreSQL (shared signal history, trade records)
+#   market-data → scanner   : Valkey  md:1m:{ticker} (1-min candles, LIST)
+#   market-data → web-api   : Valkey  md:prices (real-time price fan-out)
+#   market-data → web-api   : Valkey  scanner:streamer (streamer status, 15s)
+#   scanner     → web-api   : Valkey  scan:latest / scan:notify
+#   scanner / learner       : PostgreSQL (shared signal history, trade records)
 #
 # t3.large resource budget: 2 vCPU / 8 GB RAM
-#   market hours  (scanner + web-api + scheduler)  ≈ 6 GB RAM
-#   off-hours     (learner + web-api + scheduler)   ≈ 3.5 GB RAM
+#   market hours  (market-data + scanner + web-api + scheduler)  ≈ 6.3 GB RAM
+#   off-hours     (learner + web-api + scheduler)                 ≈ 3.5 GB RAM
 #
 # Logging:
 #   All containers write to /app/logs (bind-mounted → /opt/nasdaq-agent/logs).
@@ -79,22 +83,50 @@ services:
     cpus: "0.5"
     pids_limit: 256
     depends_on:
-      - scanner   # ensures scan results exist in Valkey before web-api starts
+      - scanner      # ensures scan results exist in Valkey before web-api starts
+      - market-data  # ensures md:prices is populated before web-api serves price data
 
-  # ── Scanner + Market Data ───────────────────────────────────────────────────
-  # Runs the full scan loop and Schwab streamer/poller.
-  # Publishes scan results to Valkey (scan:latest) after every cycle.
-  # Publishes price updates to Valkey (md:prices) every ~300 ms via streamer.
-  scanner:
+  # ── Market Data ─────────────────────────────────────────────────────────────
+  # Dedicated Schwab WebSocket streamer + REST MD poller.
+  # Publishes:  md:prices  (Redis HASH + pub/sub, ~300 ms cadence)
+  #             md:1m:{ticker}  (Redis LIST, one entry per closed 1-min candle)
+  #             scanner:streamer  (status key, 15s cadence)
+  # The scanner reads candles from md:1m:{ticker} via data_fetcher Tier A½.
+  market-data:
     <<: *common
     environment:
-      NASDAQ_SCANNER_ENABLED:      "1"
+      NASDAQ_SCANNER_ENABLED:      "0"
       NASDAQ_MARKET_DATA_ENABLED:  "1"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
       LOG_DIR:                     "/app/logs"
+    command: ["python", "-m", "services.market_data_service"]
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import sys; sys.path.insert(0,'/app'); from agent.valkey_client import _get_client; c=_get_client(); assert c and c.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    mem_limit: 800m
+    cpus: "0.5"
+    pids_limit: 128
+
+  # ── Scanner ──────────────────────────────────────────────────────────────────
+  # Runs the scan loop only — no Schwab streamer (NASDAQ_MARKET_DATA_ENABLED=0).
+  # Reads 1-min candles from Valkey (md:1m:{ticker}) published by market-data.
+  # Publishes scan results to Valkey (scan:latest) after every cycle.
+  scanner:
+    <<: *common
+    environment:
+      NASDAQ_SCANNER_ENABLED:      "1"
+      NASDAQ_MARKET_DATA_ENABLED:  "0"
+      NASDAQ_LEARNER_ENABLED:      "0"
+      NASDAQ_SCHEDULER_ENABLED:    "0"
+      LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.scanner_service"]
-    # Override HEALTHCHECK — use app's TLS-aware Valkey client (not raw redis.Redis)
+    depends_on:
+      - market-data           # ensure market-data is up before scanner starts
     healthcheck:
       test: ["CMD", "python3", "-c",
              "import sys; sys.path.insert(0,'/app'); from agent.valkey_client import _get_client; c=_get_client(); assert c and c.ping()"]
@@ -102,8 +134,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 90s
-    mem_limit: 4000m
-    cpus: "1.5"
+    mem_limit: 3500m
+    cpus: "1.3"
     pids_limit: 512
 
   # ── Learner ─────────────────────────────────────────────────────────────────

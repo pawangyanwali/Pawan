@@ -1808,6 +1808,7 @@ TRADING_MAX_POSITION_PCT=10
         <span id="lp-drift-badge" style="display:none;padding:2px 7px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid var(--red)">0 drift</span>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
+        <span id="lp-stale-badge" style="display:none;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid var(--red)">STALE</span>
         <span id="lp-updated" style="font-size:9px;color:var(--muted)"></span>
         <span id="lp-toggle-icon" style="color:var(--muted);font-size:12px">▲</span>
       </div>
@@ -6415,15 +6416,19 @@ function _lpFmtVal(val, param) {
 }
 
 async function refreshLearningPanel() {
-  // 1. Fetch params
+  const staleBadge = document.getElementById('lp-stale-badge');
+  let anyError = false;
+
+  // ── 1. Params table ────────────────────────────────────────────────────────
   try {
-    const pd = await _authFetch(`${BACKEND_HTTP}/api/learning/params`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
+    const pd = await _authFetch(`${BACKEND_HTTP}/api/learning/params`,
+                                {signal: AbortSignal.timeout(20000)}).then(r => r.json());
     const tbody = document.getElementById('lp-params-tbody');
     if (tbody) {
       if (!pd.available) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:10px">Learning engine not available</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:10px">Learning engine not available in this container</td></tr>';
       } else {
-        const families = ['ORB','GAP_TREND','GAP_FADE','BREAKOUT','FLAG','VWAP_SCALP','LEVEL_SCALP','RS_REGIME'];
+        const families = ['ORB','GAP_TREND','GAP_FADE','AH_GAP_FADE','BREAKOUT','FLAG','VWAP_SCALP','LEVEL_SCALP','RS_REGIME'];
         tbody.innerHTML = families.map(f => {
           const p = (pd.families || {})[f] || {};
           return `<tr style="border-bottom:1px solid var(--border)">
@@ -6437,74 +6442,97 @@ async function refreshLearningPanel() {
       }
     }
   } catch(e) {
-    // API unavailable — show defaults so panel is still usable
+    anyError = true;
     const tbody = document.getElementById('lp-params-tbody');
     if (tbody) {
-      const families = ['ORB','GAP_TREND','GAP_FADE','BREAKOUT','FLAG','VWAP_SCALP','LEVEL_SCALP','RS_REGIME'];
+      const families = ['ORB','GAP_TREND','GAP_FADE','AH_GAP_FADE','BREAKOUT','FLAG','VWAP_SCALP','LEVEL_SCALP','RS_REGIME'];
       const def = {rvol_gate:1.5, conf_gate:55.0, entry_window_bars:3, target_mult:1.5};
       tbody.innerHTML = families.map(f => `<tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:3px 6px;font-weight:600;color:var(--text);white-space:nowrap">${f}</td>
+        <td style="padding:3px 6px;font-weight:600;color:var(--muted);white-space:nowrap">${f}</td>
         <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.rvol_gate.toFixed(2)}</td>
         <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.conf_gate.toFixed(1)}</td>
         <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.entry_window_bars.toFixed(0)}</td>
         <td style="padding:3px 6px;text-align:right;color:var(--muted)">${def.target_mult.toFixed(2)}</td>
-      </tr>`).join('') + '<tr><td colspan="5" style="text-align:center;color:var(--muted);font-size:10px;padding:4px">Showing defaults — engine unreachable</td></tr>';
+      </tr>`).join('')
+      + '<tr><td colspan="5" style="text-align:center;color:var(--red);font-size:10px;padding:4px">⚠ Showing defaults — learner unreachable</td></tr>';
     }
   }
 
-  // 2. Fetch phase2 — deployment mode + drift alerts
+  // ── 2. Phase2 — deployment mode + drift alerts ─────────────────────────────
   try {
-    const p2 = await _authFetch(`${BACKEND_HTTP}/api/learning/phase2`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
-    const mode = (p2.deployment || {}).current_mode || (p2.available === false ? 'N/A' : 'SHADOW');
+    const p2 = await _authFetch(`${BACKEND_HTTP}/api/learning/phase2`,
+                                {signal: AbortSignal.timeout(20000)}).then(r => r.json());
+    const isStale = p2._stale === true;
+    const mode = (p2.deployment || {}).current_mode
+               || (p2.available === false ? 'N/A' : 'SHADOW');
     const drifts = ((p2.drift || {}).material_drifts || []).length;
 
-    // Deployment badge colors
     const modeColors = {
-      SHADOW: {bg: 'rgba(100,116,139,.2)', color: 'var(--muted)', border: 'var(--border)'},
-      PAPER_ONLY: {bg: 'rgba(245,158,11,.15)', color: 'var(--yellow)', border: 'var(--yellow)'},
-      PARTIAL_LIVE: {bg: 'rgba(249,115,22,.15)', color: '#fb923c', border: '#fb923c'},
-      FULL_LIVE: {bg: 'rgba(34,197,94,.15)', color: 'var(--green)', border: 'var(--green)'},
+      SHADOW:       {bg: 'rgba(100,116,139,.2)',   color: 'var(--muted)',   border: 'var(--border)'},
+      PAPER_ONLY:   {bg: 'rgba(245,158,11,.15)',   color: 'var(--yellow)', border: 'var(--yellow)'},
+      PARTIAL_LIVE: {bg: 'rgba(249,115,22,.15)',   color: '#fb923c',       border: '#fb923c'},
+      FULL_LIVE:    {bg: 'rgba(34,197,94,.15)',    color: 'var(--green)',  border: 'var(--green)'},
+      'N/A':        {bg: 'rgba(100,116,139,.15)',  color: 'var(--muted)',  border: 'var(--border)'},
     };
     const mc = modeColors[mode] || modeColors.SHADOW;
 
     const smallBadge = document.getElementById('lp-deploy-badge');
-    const fullBadge = document.getElementById('lp-deploy-full');
+    const fullBadge  = document.getElementById('lp-deploy-full');
     if (smallBadge) {
-      smallBadge.textContent = mode;
-      smallBadge.style.background = mc.bg;
-      smallBadge.style.color = mc.color;
-      smallBadge.style.borderColor = mc.border;
+      smallBadge.textContent    = isStale ? `${mode} (stale)` : mode;
+      smallBadge.style.background  = isStale ? 'rgba(239,68,68,.15)' : mc.bg;
+      smallBadge.style.color       = isStale ? 'var(--red)'          : mc.color;
+      smallBadge.style.borderColor = isStale ? 'var(--red)'          : mc.border;
     }
-    if (fullBadge) {
-      fullBadge.textContent = mode;
-      fullBadge.style.color = mc.color;
-    }
+    if (fullBadge) { fullBadge.textContent = mode; fullBadge.style.color = mc.color; }
+
+    if (isStale) anyError = true;
 
     const driftBadge = document.getElementById('lp-drift-badge');
-    const driftNum = document.getElementById('lp-drift-num');
-    if (driftBadge) driftBadge.style.display = drifts > 0 ? 'inline-block' : 'none';
-    if (driftBadge) driftBadge.textContent = `${drifts} drift${drifts !== 1 ? 's' : ''}`;
-    if (driftNum) { driftNum.textContent = drifts; driftNum.style.color = drifts > 0 ? 'var(--red)' : 'var(--text)'; }
-  } catch(e) {}
+    const driftNum   = document.getElementById('lp-drift-num');
+    if (driftBadge) { driftBadge.style.display = drifts > 0 ? 'inline-block' : 'none'; driftBadge.textContent = `${drifts} drift${drifts !== 1 ? 's' : ''}`; }
+    if (driftNum)   { driftNum.textContent = drifts; driftNum.style.color = drifts > 0 ? 'var(--red)' : 'var(--text)'; }
+  } catch(e) {
+    anyError = true;
+    // Mark deploy badge as ERROR so operator knows data is absent, not just shadow
+    const smallBadge = document.getElementById('lp-deploy-badge');
+    if (smallBadge) {
+      smallBadge.textContent    = 'ERROR';
+      smallBadge.style.background  = 'rgba(239,68,68,.15)';
+      smallBadge.style.color       = 'var(--red)';
+      smallBadge.style.borderColor = 'var(--red)';
+    }
+  }
 
-  // 3. Fetch learning log — filter for param changes
+  // ── 3. Learning log — param changes ───────────────────────────────────────
   try {
-    const ld = await _authFetch(`${BACKEND_HTTP}/api/learning-log?limit=50`, {signal: AbortSignal.timeout(20000)}).then(r => r.json());
+    const ld = await _authFetch(`${BACKEND_HTTP}/api/learning-log?limit=50`,
+                                {signal: AbortSignal.timeout(20000)}).then(r => r.json());
+    const isStale = ld._stale === true;
     const entries = (ld.log || []).filter(e => e.message && /param/i.test(e.message)).slice(-5).reverse();
     const logEl = document.getElementById('lp-param-log');
     if (logEl) {
       if (!entries.length) {
-        logEl.innerHTML = '<span style="color:var(--muted)">No param changes logged yet.</span>';
+        logEl.innerHTML = `<span style="color:${isStale ? 'var(--red)' : 'var(--muted)'}">` +
+          (isStale ? '⚠ Log data stale — learner container may be down' : 'No param changes logged yet.') +
+          '</span>';
       } else {
-        logEl.innerHTML = entries.map(e => {
-          const ts = e.ts ? new Date(e.ts).toLocaleTimeString() : '';
+        const staleNote = isStale ? '<div style="color:var(--red);font-size:9px;margin-bottom:3px">⚠ Stale data from Valkey cache</div>' : '';
+        logEl.innerHTML = staleNote + entries.map(e => {
+          const ts = e.ts ? new Date(e.ts * 1000).toLocaleTimeString() : '';
           return `<div style="margin-bottom:2px"><span style="color:#475569;margin-right:6px">${ts}</span><span style="color:var(--yellow)">${e.message}</span></div>`;
         }).join('');
       }
     }
-  } catch(e) {}
+    if (isStale) anyError = true;
+  } catch(e) {
+    anyError = true;
+    const logEl = document.getElementById('lp-param-log');
+    if (logEl) logEl.innerHTML = '<span style="color:var(--red)">⚠ Learning log unreachable</span>';
+  }
 
-  // Update timestamp
+  // ── Stale badge + timestamp ────────────────────────────────────────────────
+  if (staleBadge) staleBadge.style.display = anyError ? 'inline-block' : 'none';
   const upd = document.getElementById('lp-updated');
   if (upd) upd.textContent = new Date().toLocaleTimeString();
 }

@@ -273,6 +273,49 @@ def fetch_batch_realtime(
 
     streaming_count = len(result)
 
+    # ── Tier A½: Valkey candle store (cross-container market-data service) ────
+    # When the in-process streamer is not running (NASDAQ_MARKET_DATA_ENABLED=0)
+    # the market-data container publishes 1-min candles to md:1m:{ticker} lists.
+    # This tier reads those candles so the scanner can work without a local
+    # Schwab WebSocket connection.
+    if rest_needed:
+        valkey_hit = []
+        try:
+            import json as _json
+            from agent.valkey_client import _get_client as _vk_get
+            _vk = _vk_get()
+            if _vk:
+                still_rest = []
+                for ticker in rest_needed:
+                    key  = f"md:1m:{ticker}"
+                    rows = _vk.lrange(key, 0, -1)
+                    if rows and len(rows) >= 20:
+                        candles = [_json.loads(r) for r in rows]
+                        _df = pd.DataFrame(candles)
+                        # Normalise column names to match REST-fetched dataframes
+                        col_map = {
+                            "open": "Open", "high": "High", "low": "Low",
+                            "close": "Close", "volume": "Volume",
+                            "Open": "Open", "High": "High", "Low": "Low",
+                            "Close": "Close", "Volume": "Volume",
+                        }
+                        _df.rename(columns={c: col_map[c] for c in _df.columns if c in col_map}, inplace=True)
+                        # Build a DatetimeIndex from timestamp field if present
+                        if "timestamp" in _df.columns:
+                            _df.index = pd.to_datetime(_df["timestamp"], unit="ms", utc=True).dt.tz_convert("America/New_York")
+                            _df.drop(columns=["timestamp"], inplace=True, errors="ignore")
+                        if not _df.empty and "Close" in _df.columns:
+                            result[ticker] = _df
+                            _cache_set(ticker, "1min", _df)
+                            valkey_hit.append(ticker)
+                            continue
+                    still_rest.append(ticker)
+                rest_needed = still_rest
+                if valkey_hit:
+                    logger.debug(f"[DataFetcher] Valkey candles: {len(valkey_hit)} tickers")
+        except Exception as _vk_exc:
+            logger.debug(f"[DataFetcher] Valkey candle read failed: {_vk_exc}")
+
     # ── Tier B: async REST fallback ───────────────────────────────────────────
     if rest_needed:
         interval_key = f"1min:ext" if extended_hours else "1min"
