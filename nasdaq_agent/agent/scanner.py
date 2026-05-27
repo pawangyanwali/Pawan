@@ -240,6 +240,7 @@ class StockSignal:
     earnings_reason:   str   = ""
     earnings_date:     str   = ""
     earnings_days_away: int  = 0
+    earnings_phase:    str   = ""   # "" | "blackout" | "caution" | "cooldown"
 
     # ── Gap analysis ──────────────────────────────────────────────────────────
     gap_type:         str   = "FLAT"
@@ -338,8 +339,12 @@ class StockSignal:
     # ── Chart candles (last 80 × 1-min bars) ─────────────────────────────────
     candles:    list = field(default_factory=list)
 
-    # ── News ──────────────────────────────────────────────────────────────────
-    headlines:  list = field(default_factory=list)
+    # ── News / context intelligence ───────────────────────────────────────────
+    headlines:         list  = field(default_factory=list)
+    news_shock:        bool  = False    # True when news_count_30m ≥ 3 × baseline
+    sentiment_velocity: float = 0.0    # sentiment_5m − sentiment_30m (momentum)
+    news_count_30m:    int   = 0        # news articles in last 30 min
+    ctx_stale:         bool  = False    # True when context data > 120 s old
     scanned_at: str  = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # ── Adaptive filter ───────────────────────────────────────────────────────
@@ -1176,11 +1181,16 @@ def analyse_ticker(
             regime            = regime.regime,
             regime_label      = regime.label,
             regime_color      = regime.color,
-            # Earnings
+            # Earnings + context intelligence
             earnings_blocked   = bool(eb["blocked"]),
             earnings_reason    = eb["reason"],
             earnings_date      = eb["next_date"],
             earnings_days_away = int(eb["days_away"]),
+            earnings_phase     = _ep,
+            news_shock         = bool(_ctx.get("news_shock", False)),
+            sentiment_velocity = round(float(_ctx.get("sentiment_velocity", 0.0)), 4),
+            news_count_30m     = int(_ctx.get("news_count_30m", 0)),
+            ctx_stale          = float(_ctx.get("stale_age_s", 0.0)) > 120,
             # Gap analysis
             gap_type          = gap["gap_type"],
             gap_pct           = float(gap["gap_pct"]),

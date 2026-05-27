@@ -2747,6 +2747,7 @@ function renderTable() {
             ? `<span style="display:block;margin-top:2px;font-size:8px;font-weight:700;color:#ef4444;background:rgba(239,68,68,.12);padding:1px 5px;border-radius:3px;border:1px solid rgba(239,68,68,.3)" title="Price below 30-min Opening Range">⚡ ORB BEAR</span>`
             : ''}
         ${supInlineTag}
+        ${s.news_shock ? `<span style="display:block;margin-top:2px;font-size:8px;font-weight:700;color:#f59e0b;background:rgba(245,158,11,.12);padding:1px 5px;border-radius:3px;border:1px solid rgba(245,158,11,.3)" title="News shock: ${s.news_count_30m||0} articles in last 30m">📰 NEWS SHOCK</span>` : ''}
       </td>
       <td>${statusCell}</td>
       <td>${levelsCell}</td>
@@ -2798,7 +2799,19 @@ function renderTable() {
                         <span style="font-size:8px;color:var(--muted);display:block;margin-top:1px">AH est.</span>`; })()
             : `<span style="font-size:10px;color:var(--muted)">—</span>`
         }
-        ${s.earnings_blocked ? `<span class="earnings-badge" title="${s.earnings_reason}">⚠ ERN ${s.earnings_days_away}d</span>` : ''}
+        ${s.earnings_phase === 'blackout' || s.earnings_phase === 'cooldown'
+          ? `<span class="earnings-badge" title="${s.earnings_reason}">⚠ ERN ${s.earnings_days_away}d</span>`
+          : s.earnings_phase === 'caution'
+            ? `<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;border:1px solid #f59e0b" title="${s.earnings_reason}">📅 ERN ${s.earnings_days_away}d</span>`
+            : ''}
+        ${(() => {
+          const snt = typeof s.sentiment_30m === 'number' ? s.sentiment_30m : (s.sentiment || 0);
+          const vel = s.sentiment_velocity || 0;
+          if (Math.abs(snt) < 0.05) return '';
+          const c = snt > 0.1 ? 'var(--green)' : snt < -0.1 ? 'var(--red)' : '#94a3b8';
+          const arrow = vel > 0.05 ? '↑' : vel < -0.05 ? '↓' : '';
+          return `<span style="font-size:8px;color:${c};font-weight:600;display:block;margin-top:2px" title="30m sentiment ${arrow}: ${(snt*100).toFixed(0)}%">${arrow}snt ${snt>0?'+':''}${(snt*100).toFixed(0)}%</span>`;
+        })()}
       </td>
       <td>
         ${s.vwap_event && s.vwap_event!=='FLAT'

@@ -119,6 +119,50 @@ def _publish_streamer_status_loop() -> None:
         time.sleep(15)
 
 
+# ── Token hot-reload ──────────────────────────────────────────────────────────
+
+def _token_reload_loop() -> None:
+    """
+    Subscribe to the schwab:tokens_refreshed Valkey pub/sub channel.
+
+    When the auth endpoint or background refresh writes new Schwab tokens
+    it publishes to this channel.  This loop detects the event and calls
+    _start() so the streamer / MD poller reconnect with the new tokens
+    immediately — without a container restart.
+
+    Reconnection is non-destructive: _start() calls start_streamer /
+    start_md_poller which each guard against double-starting internally.
+    """
+    while not _runner.stopped:
+        try:
+            from agent.valkey_client import _get_client
+            client = _get_client()
+            if client is None:
+                time.sleep(30)
+                continue
+
+            pubsub = client.pubsub()
+            pubsub.subscribe("schwab:tokens_refreshed")
+            _log.info("[token_reload] Subscribed to schwab:tokens_refreshed")
+
+            for message in pubsub.listen():
+                if _runner.stopped:
+                    break
+                if message and message.get("type") == "message":
+                    _log.info(
+                        "[token_reload] Token refresh detected — restarting data sources"
+                    )
+                    try:
+                        from config import NASDAQ_TICKERS
+                        _start(list(NASDAQ_TICKERS))
+                    except Exception as exc:
+                        _log.warning("[token_reload] Restart after token refresh failed: %s", exc)
+
+        except Exception as exc:
+            _log.debug("[token_reload] pub/sub error: %s — retrying in 30 s", exc)
+            time.sleep(30)
+
+
 # ── Health / stats logger ─────────────────────────────────────────────────────
 
 def _health_loop() -> None:
@@ -149,6 +193,7 @@ def main() -> None:
 
     threading.Thread(target=_health_loop,                  daemon=True, name="md-health").start()
     threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="md-streamer-status").start()
+    threading.Thread(target=_token_reload_loop,            daemon=True, name="md-token-reload").start()
 
     _log.info("Market data running — waiting for SIGTERM/SIGINT …")
     _runner.register_signals()

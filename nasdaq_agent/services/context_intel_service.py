@@ -205,11 +205,11 @@ def _run_news_poll() -> None:
 
     # ── 2. Company news: rotating Tier-1 group (10 API calls per cycle) ──────
     with _rotation_lock:
+        import math as _math
+        _n_groups     = _math.ceil(len(_TIER1_FOR_ROTATION) / _ROTATION_GROUP_SIZE)
         group_start   = _rotation_index * _ROTATION_GROUP_SIZE
         group_tickers = _TIER1_FOR_ROTATION[group_start: group_start + _ROTATION_GROUP_SIZE]
-        _rotation_index = (_rotation_index + 1) % (
-            len(_TIER1_FOR_ROTATION) // _ROTATION_GROUP_SIZE
-        )
+        _rotation_index = (_rotation_index + 1) % _n_groups
 
     from datetime import datetime, timezone, timedelta
     now      = datetime.now(timezone.utc)

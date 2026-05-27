@@ -152,6 +152,36 @@ def _read_valkey(ticker: str) -> Optional[dict]:
         return None
 
 
+def _computed_at_to_unix(features: dict) -> float:
+    """
+    Convert computed_at from ticker_context_features to a unix timestamp.
+
+    psycopg2 returns a datetime object; some SQLite drivers return a string.
+    Returns 0.0 if the field is missing or unparseable — the caller's
+    stale_age_s will then be very large, correctly flagging the row as stale.
+    """
+    val = features.get("computed_at")
+    if val is None:
+        return 0.0
+    if hasattr(val, "timestamp"):               # datetime (psycopg2 / sqlite3 row)
+        try:
+            return val.timestamp()
+        except Exception:
+            return 0.0
+    # String fallback: "2026-05-27T14:23:45+00:00" or "2026-05-27 14:23:45+00:00"
+    try:
+        from datetime import datetime, timezone
+        s = str(val).strip().replace(" ", "T")
+        if s.endswith("+00"):
+            s += ":00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 def _read_pg(ticker: str) -> Optional[dict]:
     """Assemble a context payload from PostgreSQL tables."""
     try:
@@ -161,6 +191,10 @@ def _read_pg(ticker: str) -> Optional[dict]:
         features = get_features(ticker)
         if features is None:
             return None
+
+        # Use the actual time the features were computed — not time.time().
+        # time.time() would make stale PG rows appear fresh to the scanner.
+        asof_ts = _computed_at_to_unix(features)
 
         # Earnings fields
         earnings_phase     = ""
@@ -208,7 +242,7 @@ def _read_pg(ticker: str) -> Optional[dict]:
             "earnings_reason":    earnings_reason,
             "earnings_next_date": earnings_next_date,
             "earnings_days_away": earnings_days_away,
-            "asof_ts":            time.time(),
+            "asof_ts":            asof_ts,
         }
     except Exception as exc:
         logger.debug("[context_snapshot] PG fallback(%s) error: %s", ticker, exc)

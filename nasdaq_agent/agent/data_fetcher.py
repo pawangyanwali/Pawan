@@ -299,6 +299,21 @@ def fetch_batch_realtime(
                     "Open": "Open", "High": "High", "Low": "Low",
                     "Close": "Close", "Volume": "Volume",
                 }
+                # Stale gate for Tier A½: during regular session (9:30–16:00 ET)
+                # reject candles whose newest bar is > 5 min old — this means
+                # the market-data container stopped publishing and the REST tier
+                # should be used instead.
+                try:
+                    _now_et_vk  = pd.Timestamp.now(tz="America/New_York")
+                    _in_sess_vk = (
+                        _now_et_vk.replace(hour=9,  minute=30, second=0, microsecond=0) <=
+                        _now_et_vk <=
+                        _now_et_vk.replace(hour=16, minute=0,  second=0, microsecond=0)
+                    )
+                except Exception:
+                    _now_et_vk  = None
+                    _in_sess_vk = False
+
                 still_rest = []
                 for ticker, rows in zip(rest_needed, all_rows_list):
                     if rows and len(rows) >= 20:
@@ -318,6 +333,20 @@ def fetch_batch_realtime(
                             _df.index = pd.to_datetime(_df[_ts_col], unit="ms", utc=True).dt.tz_convert("America/New_York")
                             _df.drop(columns=[_ts_col], inplace=True, errors="ignore")
                         if not _df.empty and "Close" in _df.columns:
+                            # Freshness gate: during regular session only accept
+                            # Valkey candles whose newest bar is ≤ 5 min old.
+                            if _in_sess_vk and _now_et_vk is not None:
+                                try:
+                                    _age_vk = (_now_et_vk - _df.index[-1]).total_seconds()
+                                    if _age_vk > 300:
+                                        logger.debug(
+                                            "[DataFetcher] %s Valkey candles stale "
+                                            "(%.0fs) — falling back to REST", ticker, _age_vk
+                                        )
+                                        still_rest.append(ticker)
+                                        continue
+                                except Exception:
+                                    pass  # index not datetime — accept the data
                             result[ticker] = _df
                             _cache_set(ticker, "1min", _df)
                             valkey_hit.append(ticker)
