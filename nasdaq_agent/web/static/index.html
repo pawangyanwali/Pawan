@@ -2642,6 +2642,12 @@ function renderTable() {
         <div style="color:var(--green);font-weight:700">✅ SIGNAL LIVE</div>
         <div style="color:${watchCol};margin-top:2px">${rrNote}</div>
       </div>`;
+    } else {
+      const ctxNote = s.ctx_stale ? 'No context data' : (s.earnings_phase === 'caution' ? '📅 Earnings soon' : 'Monitoring');
+      statusCell = `<div style="padding:5px 7px;background:rgba(71,85,105,.07);border:1px solid rgba(71,85,105,.2);border-radius:6px;font-size:9px">
+        <div style="color:#64748b;font-weight:700">👁 WATCHING</div>
+        <div style="color:#475569;margin-top:2px">${ctxNote}</div>
+      </div>`;
     }
 
     // ── Trade LEVELS cell — Entry / TP / SL ───────────────────────────────
@@ -4017,7 +4023,7 @@ async function openPaperTrading() {
 
 function _ptRenderLearning(ls, summary) {
   const wr = ls.current_win_rate || 0;
-  const target = ls.target_win_rate || 62;
+  const target = ls.target_win_rate || 55;
   const threshold = ls.dynamic_threshold || 60;
   const blocked = ls.blocked_contexts || {};
   const boosted = ls.boosted_contexts || {};
@@ -5275,7 +5281,7 @@ async function loadLearningStatus() {
 
 function renderLearningStatus(d) {
   const wr      = d.current_win_rate ?? d.win_rate ?? 0;  // API uses current_win_rate; localStorage/WS uses win_rate
-  const target  = d.target_win_rate  ?? 62;
+  const target  = d.target_win_rate  ?? 55;
   const thresh  = d.dynamic_threshold ?? 60;
   const total   = d.total_resolved ?? 0;
   const isLearning = d.is_learning ?? false;
@@ -6097,7 +6103,7 @@ function updateLearnPill(l) {
   if (!l) return;
   // API returns current_win_rate; WS broadcast wraps it as win_rate — accept both
   const wr     = l.win_rate ?? l.current_win_rate ?? 0;
-  const target = l.target_win_rate ?? 62;
+  const target = l.target_win_rate ?? 55;
   const gate   = l.dynamic_threshold ?? 60;
   const sup    = l.suppressed_count ?? 0;
   const pct    = Math.min(100, (wr / target) * 100);
@@ -6125,9 +6131,12 @@ function updateBtHeaderBtn(bt) {
   if (!bt || bt.total == null || bt.total === 0) return;
   const btn = document.getElementById('bt-header-btn');
   if (!btn) return;
-  const wr = bt.win_rate != null ? `${(bt.win_rate*100).toFixed(0)}%` : '';
+  const wr  = bt.win_rate != null ? `${(bt.win_rate*100).toFixed(0)}%` : '';
   const col = bt.win_rate >= 0.55 ? 'var(--green)' : bt.win_rate >= 0.45 ? 'var(--yellow)' : 'var(--red)';
-  btn.innerHTML = `📈 Backtest <span style="color:${col};font-weight:700">${wr}</span>`;
+  const exp = bt.expectancy != null ? bt.expectancy.toFixed(2) : null;
+  const expCol = exp != null ? (exp >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--muted)';
+  const expStr = exp != null ? ` <span style="font-size:9px;color:${expCol}">E:${exp}R</span>` : '';
+  btn.innerHTML = `📈 Backtest <span style="color:${col};font-weight:700">${wr}</span>${expStr}`;
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────

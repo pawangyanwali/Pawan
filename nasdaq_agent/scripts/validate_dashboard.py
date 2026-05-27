@@ -105,4 +105,19 @@ try:
 except Exception as e:
     print(f"  ERROR: {e}")
 
+# ── Earnings calendar ────────────────────────────────────────
+section("Earnings calendar (PostgreSQL)")
+with get_conn() as c:
+    r = c.execute("SELECT COUNT(*) total FROM earnings_calendar").fetchone()
+    print(f"  total rows: {r['total']}")
+    rows = c.execute(
+        "SELECT ticker, report_ts, hour FROM earnings_calendar "
+        "WHERE report_ts >= NOW() ORDER BY report_ts ASC LIMIT 10"
+    ).fetchall()
+    if rows:
+        for row in rows:
+            print(" ", dict(row))
+    else:
+        print("  No upcoming earnings rows found")
+
 print(f"\n{SEP}\nDone.\n{SEP}\n")

@@ -592,8 +592,8 @@ def get_next_earnings_from_db(ticker: str) -> Optional[datetime]:
                 """
                 SELECT report_ts FROM earnings_calendar
                 WHERE ticker = ?
-                  AND report_ts >= NOW() AT TIME ZONE 'UTC'
-                  AND report_ts <= NOW() AT TIME ZONE 'UTC' + INTERVAL '90 days'
+                  AND report_ts >= NOW()
+                  AND report_ts <= NOW() + INTERVAL '90 days'
                 ORDER BY report_ts ASC
                 LIMIT 1
                 """,
