@@ -18,6 +18,8 @@ def test_learning_params_endpoint_does_not_queue_executor_jobs():
 def test_learning_phase2_endpoint_uses_in_process_status_read():
     src = _main_source()
     start = src.index("async def learning_phase2_status")
-    body = src[start:start + 700]
+    # The function now contains a PG-first/Valkey-fallback block before the
+    # in-process status read; allow up to 2000 chars to cover the full body.
+    body = src[start:start + 2000]
     assert "status = _get_p2_engine().get_status()" in body
     assert "run_in_executor" not in body

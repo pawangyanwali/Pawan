@@ -1372,16 +1372,18 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     # from service_state (PostgreSQL first, Valkey fallback).
     streamer = get_streamer_status()
     if not _MARKET_DATA_ENABLED:
+        _streamer_resolved = False   # sentinel: True once we get data from MD container
         # ── Priority 1: PostgreSQL service_state ─────────────────────────────
         try:
             from agent.service_state import get_state as _ss_get
             _sd = _ss_get("scanner:streamer")   # None if expired (> 60s old)
             if _sd:
                 streamer = _sd
+                _streamer_resolved = True
         except Exception:
             pass
         # ── Priority 2: Valkey fallback ──────────────────────────────────────
-        if streamer is get_streamer_status() and vk.get("connected"):
+        if not _streamer_resolved and vk.get("connected"):
             try:
                 from agent.valkey_client import _get_client as _vk_c
                 _vc = _vk_c()

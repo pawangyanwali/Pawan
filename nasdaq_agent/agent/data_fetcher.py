@@ -300,10 +300,17 @@ def fetch_batch_realtime(
                             "Close": "Close", "Volume": "Volume",
                         }
                         _df.rename(columns={c: col_map[c] for c in _df.columns if c in col_map}, inplace=True)
-                        # Build a DatetimeIndex from timestamp field if present
-                        if "timestamp" in _df.columns:
-                            _df.index = pd.to_datetime(_df["timestamp"], unit="ms", utc=True).dt.tz_convert("America/New_York")
-                            _df.drop(columns=["timestamp"], inplace=True, errors="ignore")
+                        # Build a DatetimeIndex from timestamp/time_ms field if present.
+                        # WS streamer writes "time_ms" (from _CHART_FIELDS field "7");
+                        # REST-sourced rows and some legacy rows use "timestamp".
+                        _ts_col = (
+                            "time_ms"   if "time_ms"   in _df.columns else
+                            "timestamp" if "timestamp" in _df.columns else
+                            None
+                        )
+                        if _ts_col:
+                            _df.index = pd.to_datetime(_df[_ts_col], unit="ms", utc=True).dt.tz_convert("America/New_York")
+                            _df.drop(columns=[_ts_col], inplace=True, errors="ignore")
                         if not _df.empty and "Close" in _df.columns:
                             result[ticker] = _df
                             _cache_set(ticker, "1min", _df)

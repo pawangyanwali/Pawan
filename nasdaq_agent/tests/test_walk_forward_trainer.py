@@ -341,12 +341,10 @@ class TestParameterRecommendations:
         """
         Win rate < 0.35 with n >= 20 should attempt to raise conf_gate.
         """
+        from agent.algo_learning_engine import _ALL_FAMILIES
         records = _make_records(n=30, win_rate=0.20, avg_pnl_r=0.5)
         mock_engine = _MockEngine()
-        mock_engine._registry._vals = {(f, "conf_gate"): 55.0
-                                        for f in ["ORB", "GAP_TREND", "GAP_FADE",
-                                                   "BREAKOUT", "FLAG", "VWAP_SCALP",
-                                                   "LEVEL_SCALP", "RS_REGIME"]}
+        mock_engine._registry._vals = {(f, "conf_gate"): 55.0 for f in _ALL_FAMILIES}
 
         result, calls = self._run_with_records(records, cycle_num=1, tmp_path=tmp_path,
                                                mock_engine=mock_engine)
@@ -360,12 +358,10 @@ class TestParameterRecommendations:
         """
         Win rate > 0.60 with n >= 20 should attempt to lower rvol_gate.
         """
+        from agent.algo_learning_engine import _ALL_FAMILIES
         records = _make_records(n=30, win_rate=0.80, avg_pnl_r=0.5)
         mock_engine = _MockEngine()
-        mock_engine._registry._vals = {(f, "rvol_gate"): 1.5
-                                        for f in ["ORB", "GAP_TREND", "GAP_FADE",
-                                                   "BREAKOUT", "FLAG", "VWAP_SCALP",
-                                                   "LEVEL_SCALP", "RS_REGIME"]}
+        mock_engine._registry._vals = {(f, "rvol_gate"): 1.5 for f in _ALL_FAMILIES}
 
         result, calls = self._run_with_records(records, cycle_num=1, tmp_path=tmp_path,
                                                mock_engine=mock_engine)
@@ -379,12 +375,10 @@ class TestParameterRecommendations:
         """
         avg_pnl_r < -0.5 with n >= 15 should attempt to lower target_mult.
         """
+        from agent.algo_learning_engine import _ALL_FAMILIES
         records = _make_records(n=25, win_rate=0.45, avg_pnl_r=-0.8)
         mock_engine = _MockEngine()
-        mock_engine._registry._vals = {(f, "target_mult"): 1.5
-                                        for f in ["ORB", "GAP_TREND", "GAP_FADE",
-                                                   "BREAKOUT", "FLAG", "VWAP_SCALP",
-                                                   "LEVEL_SCALP", "RS_REGIME"]}
+        mock_engine._registry._vals = {(f, "target_mult"): 1.5 for f in _ALL_FAMILIES}
 
         result, calls = self._run_with_records(records, cycle_num=1, tmp_path=tmp_path,
                                                mock_engine=mock_engine)
@@ -398,12 +392,10 @@ class TestParameterRecommendations:
         """
         avg_pnl_r > 1.2 with n >= 15 should attempt to raise target_mult.
         """
+        from agent.algo_learning_engine import _ALL_FAMILIES
         records = _make_records(n=25, win_rate=0.45, avg_pnl_r=1.8)
         mock_engine = _MockEngine()
-        mock_engine._registry._vals = {(f, "target_mult"): 1.5
-                                        for f in ["ORB", "GAP_TREND", "GAP_FADE",
-                                                   "BREAKOUT", "FLAG", "VWAP_SCALP",
-                                                   "LEVEL_SCALP", "RS_REGIME"]}
+        mock_engine._registry._vals = {(f, "target_mult"): 1.5 for f in _ALL_FAMILIES}
 
         result, calls = self._run_with_records(records, cycle_num=1, tmp_path=tmp_path,
                                                mock_engine=mock_engine)

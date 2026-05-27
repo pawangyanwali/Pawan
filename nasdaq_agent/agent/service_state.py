@@ -20,9 +20,32 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# ── Lazy auto-init ────────────────────────────────────────────────────────────
+# set_state() is called from market-data, learner, and scheduler containers
+# that may start before web-api runs init_db() explicitly.  We self-initialize
+# once (per process) so callers never need to call init_db() themselves.
+_init_lock  = threading.Lock()
+_db_ready   = False   # becomes True after the first successful init_db()
+
+
+def _ensure_init() -> None:
+    """Call init_db() once per process, lazily, on the first set_state call."""
+    global _db_ready
+    if _db_ready:
+        return
+    with _init_lock:
+        if not _db_ready:
+            try:
+                init_db()
+                _db_ready = True
+            except Exception:
+                pass   # logged inside init_db(); caller will handle the DB error
+
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS service_state (
@@ -59,7 +82,12 @@ def set_state(key: str, value: dict[str, Any], ttl_s: Optional[int] = None) -> b
     ttl_s: if provided, sets expires_at = NOW() + ttl_s seconds.
            get_state() treats rows with expires_at in the past as missing
            (mimics Valkey SETEX semantics).  Pass None for no expiry.
+
+    Self-initializes the service_state table on the first call so that
+    market-data, learner, and scheduler containers do not need to call
+    init_db() explicitly.
     """
+    _ensure_init()
     try:
         from agent.db import get_conn
         expires_fragment = (

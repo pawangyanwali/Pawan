@@ -217,6 +217,8 @@ def _process_levelone_equities(content: list) -> None:
             updated.append((sym, dict(quote)))   # snapshot for callbacks (outside lock)
 
             # Accumulate compact quote for the 500ms Valkey flush
+            # updated_at is required so the dashboard freshness filter (main.py)
+            # can distinguish live quotes from stale Valkey cache entries.
             _pending_ws_prices[sym] = {
                 "last":       float(quote.get("last") or 0),
                 "mark":       float(quote.get("mark") or 0),
@@ -226,6 +228,7 @@ def _process_levelone_equities(content: list) -> None:
                 "high":       float(quote.get("high") or 0),
                 "low":        float(quote.get("low")  or 0),
                 "pct_change": float(quote.get("net_pct_change") or 0),
+                "updated_at": quote["updated_at"],   # set above; required for freshness filter
             }
 
     # Fire tick callbacks outside the lock — 250ms throttle per ticker
@@ -604,6 +607,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     "high":       quote["high"],
                     "low":        quote["low"],
                     "pct_change": quote["net_pct_change"],
+                    "updated_at": quote["updated_at"],   # required for dashboard freshness filter
                 }
 
         if not bulk:
