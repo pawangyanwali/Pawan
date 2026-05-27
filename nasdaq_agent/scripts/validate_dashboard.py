@@ -29,8 +29,7 @@ with get_conn() as c:
             ROUND(COALESCE(SUM(pnl_dollar), 0)::numeric, 2)        AS today_pnl
         FROM paper_trades
         WHERE status = 'CLOSED'
-          AND closed_at AT TIME ZONE 'UTC' >= CURRENT_DATE
-          AND closed_at AT TIME ZONE 'UTC' <  CURRENT_DATE + INTERVAL '1 day'
+          AND closed_at::timestamptz::date = CURRENT_DATE
     """).fetchone()
     print(dict(r))
 
@@ -39,7 +38,7 @@ section("Trade dates — last 5 calendar days")
 with get_conn() as c:
     rows = c.execute("""
         SELECT
-            (closed_at AT TIME ZONE 'UTC')::date            AS d,
+            closed_at::timestamptz::date                     AS d,
             COUNT(*)                                         AS total,
             SUM(CASE WHEN pnl_dollar > 0 THEN 1 ELSE 0 END) AS wins,
             ROUND(COALESCE(SUM(pnl_dollar),0)::numeric, 2)  AS pnl
