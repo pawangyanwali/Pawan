@@ -176,6 +176,9 @@ def main() -> None:
     import threading
     from agent.scanner import scanner
     from agent.market_hours import refresh_market_hours_cache
+    from agent.service_heartbeat import start_service_heartbeat
+
+    start_service_heartbeat("scanner", _runner)
 
     # Warm market-hours cache without blocking startup
     threading.Thread(

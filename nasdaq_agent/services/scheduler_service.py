@@ -127,8 +127,10 @@ def _heartbeat_loop() -> None:
 
 def main() -> None:
     import threading
+    from agent.service_heartbeat import start_service_heartbeat
 
     _log.info("=== scheduler_service starting ===")
+    start_service_heartbeat("scheduler", _runner)
 
     threading.Thread(
         target=_eod_watchdog_loop, daemon=True, name="eod-watchdog"

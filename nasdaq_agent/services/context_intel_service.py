@@ -397,10 +397,13 @@ def main() -> None:
     _log.info("=== context_intel_service starting ===")
 
     from agent.context_store import init_db
+    from agent.service_heartbeat import start_service_heartbeat
 
     # Ensure DB tables exist (idempotent)
     if not init_db():
         _log.warning("DB not available at startup — will retry on first write")
+
+    start_service_heartbeat("context-intel", _runner)
 
     threads = [
         threading.Thread(target=_earnings_poller_loop,  daemon=True, name="ctx-earnings"),
