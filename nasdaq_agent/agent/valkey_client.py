@@ -186,6 +186,100 @@ def get_all_prices() -> dict[str, dict]:
         return {}
 
 
+def price_bus_health(max_age_s: float = 2.0) -> dict:
+    """
+    Summarize quote freshness across the whole md:prices hash.
+
+    This is intentionally stricter than a process liveness check: Valkey can be
+    reachable while prices are stale.  The dashboard and health checks use this
+    to distinguish real live Schwab WS quotes from REST fallback or cached scan
+    prices.
+    """
+    prices = get_all_prices()
+    now = time.time()
+    total = len(prices)
+    if total == 0:
+        return {
+            "total": 0,
+            "fresh": 0,
+            "trusted_fresh": 0,
+            "live": 0,
+            "fallback": 0,
+            "snapshot": 0,
+            "stale": 0,
+            "fresh_pct": 0.0,
+            "trusted_fresh_pct": 0.0,
+            "live_pct": 0.0,
+            "fallback_pct": 0.0,
+            "snapshot_pct": 0.0,
+            "oldest_age_s": None,
+            "newest_age_s": None,
+            "status": "NO_DATA",
+        }
+
+    fresh = trusted_fresh = live = fallback = snapshot = stale = 0
+    ages: list[float] = []
+    for quote in prices.values():
+        try:
+            ts = float(quote.get("updated_at") or 0.0)
+        except Exception:
+            ts = 0.0
+        age = max(0.0, now - ts) if ts > 0 else float("inf")
+        if age != float("inf"):
+            ages.append(age)
+        source_status = str(quote.get("source_status") or "").upper()
+        is_fresh = age <= max_age_s
+        if is_fresh:
+            fresh += 1
+            if source_status == "LIVE":
+                live += 1
+                trusted_fresh += 1
+            elif source_status in ("REST_FALLBACK", "FALLBACK"):
+                fallback += 1
+                trusted_fresh += 1
+            elif source_status in ("SCAN_SNAPSHOT", "STALE_CACHE"):
+                snapshot += 1
+        else:
+            stale += 1
+
+    fresh_pct = fresh / total if total else 0.0
+    trusted_fresh_pct = trusted_fresh / total if total else 0.0
+    live_pct = live / total if total else 0.0
+    fallback_pct = fallback / total if total else 0.0
+    snapshot_pct = snapshot / total if total else 0.0
+    if live_pct >= 0.95:
+        status = "LIVE"
+    elif live > 0:
+        status = "PARTIAL_LIVE"
+    elif fallback_pct >= 0.95:
+        status = "REST_FALLBACK"
+    elif fallback > 0:
+        status = "PARTIAL_FALLBACK"
+    elif snapshot > 0:
+        status = "SCAN_SNAPSHOT"
+    else:
+        status = "STALE"
+
+    return {
+        "total": total,
+        "fresh": fresh,
+        "trusted_fresh": trusted_fresh,
+        "live": live,
+        "fallback": fallback,
+        "snapshot": snapshot,
+        "stale": stale,
+        "fresh_pct": round(fresh_pct * 100, 1),
+        "trusted_fresh_pct": round(trusted_fresh_pct * 100, 1),
+        "live_pct": round(live_pct * 100, 1),
+        "fallback_pct": round(fallback_pct * 100, 1),
+        "snapshot_pct": round(snapshot_pct * 100, 1),
+        "oldest_age_s": round(max(ages), 1) if ages else None,
+        "newest_age_s": round(min(ages), 1) if ages else None,
+        "status": status,
+        "max_age_s": max_age_s,
+    }
+
+
 # ── Pub/Sub subscriber (WebSocket bridge) ─────────────────────────────────────
 
 _sub_thread: Optional[threading.Thread] = None

@@ -1863,6 +1863,9 @@ TRADING_MAX_POSITION_PCT=10
 let allSignals = [], filter = 'ALL', sortKey = 'learning_rank', searchQ = '', clusterFilter = 'ALL', tierFilter = 'ALL';
 let _wsLastMsgAt = 0;  // epoch ms of last server WebSocket message
 let _lastPriceAt = 0;  // epoch ms of last live price update (prices or tick message)
+let _lastPriceStatus = 'NO_DATA';
+let _lastPriceSource = '';
+let _lastPriceCoverage = { total:0, live:0, fallback:0, snapshot:0 };
 const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let allBreadth = null;
@@ -1955,6 +1958,34 @@ let _wsAuthRetryCount = 0;
 const _WS_RECONNECT_MS  = 1000;   // always reconnect after 1 second
 const _WS_WATCHDOG_MS   = 45000;  // reconnect if no server message for 45s
 const _WS_HEARTBEAT_MS  = 20000;  // send heartbeat to server every 20s
+
+function _updatePriceBusState(prices, fallbackStatus='UNKNOWN') {
+  const vals = Object.values(prices || {});
+  if (!vals.length) return;
+  let live = 0, fallback = 0, snapshot = 0, fresh = 0;
+  let newest = 0, source = '';
+  const nowSec = Date.now() / 1000;
+  for (const q of vals) {
+    const st = String(q.source_status || (q.is_live ? 'LIVE' : fallbackStatus)).toUpperCase();
+    const ts = Number(q.updated_at || nowSec);
+    if (ts > newest) newest = ts;
+    if (!source && q.source) source = q.source;
+    if ((nowSec - ts) <= 2.0) fresh++;
+    if (st === 'LIVE') live++;
+    else if (st === 'REST_FALLBACK' || st === 'FALLBACK') fallback++;
+    else if (st === 'SCAN_SNAPSHOT' || st === 'STALE_CACHE') snapshot++;
+  }
+  _lastPriceAt = newest ? newest * 1000 : Date.now();
+  _lastPriceSource = source || fallbackStatus;
+  _lastPriceCoverage = { total: vals.length, live, fallback, snapshot, fresh };
+  const livePct = vals.length ? live / vals.length : 0;
+  const freshPct = vals.length ? fresh / vals.length : 0;
+  if (livePct >= 0.95) _lastPriceStatus = 'LIVE';
+  else if (live > 0) _lastPriceStatus = 'PARTIAL_LIVE';
+  else if (fallback > 0 && freshPct >= 0.8) _lastPriceStatus = 'REST_FALLBACK';
+  else if (snapshot > 0) _lastPriceStatus = 'SCAN_SNAPSHOT';
+  else _lastPriceStatus = fallbackStatus;
+}
 
 function _wsSend(obj) {
   try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
@@ -2086,7 +2117,7 @@ async function connectWS() {
     if (m.type === 'prices') {
       const prices = m.p;
       if (!prices) return;
-      _lastPriceAt = Date.now();
+      _updatePriceBusState(prices, 'UNKNOWN');
 
       // In extended sessions (AH / pre-market) the Schwab `lastPrice` is the last
       // executed AH trade, which can be stale for minutes in thin markets.
@@ -2181,7 +2212,7 @@ async function connectWS() {
     if (m.type === 'tick') {
       const { ticker, last, net_pct_change, bid, ask, volume, high, low } = m;
       if (!ticker || last == null) return;
-      _lastPriceAt = Date.now();
+      _updatePriceBusState({ [ticker]: { updated_at: Date.now() / 1000, source:'SCHWAB_WS', source_status:'LIVE', is_live:true } }, 'LIVE');
 
       const sig = allSignals.find(s => s.ticker === ticker);
       if (sig) {
@@ -2240,7 +2271,8 @@ async function connectWS() {
     if (m.type === 'update') {
       _wsLastMsgAt = Date.now();
       if ((m.signals || []).some(s => s.is_observation || s.source === 'live_quote_observation')) {
-        _lastPriceAt = Date.now();
+        _lastPriceStatus = 'SCAN_SNAPSHOT';
+        _lastPriceSource = 'scanner';
       }
       // Merge tick-updated prices/change_pct into fresh scan signals so
       // real-time values don't flicker back to the scan's computed values.
@@ -2373,29 +2405,50 @@ setInterval(_pollSchwabHeaderStatus, 30000);
 // Heartbeat: send pong to server every 20s to keep proxy/NAT alive
 setInterval(() => _wsSend({ type: 'pong' }), _WS_HEARTBEAT_MS);
 
-// Price freshness indicator — updates every second, shows data age
+// Price freshness indicator: updates every second and shows source truth.
 setInterval(() => {
   const el = document.getElementById('data-freshness');
   if (!el) return;
+  const session = _sessionInfo?.session || '';
   if (!_lastPriceAt) {
-    el.textContent = '● PRICES';
+    el.textContent = session === 'CLOSED' ? 'MARKET CLOSED' : 'NO DATA';
     el.style.color = 'var(--muted)';
     el.style.borderColor = 'var(--border)';
+    el.title = session === 'CLOSED' ? 'Market is closed' : 'No price updates received yet';
     return;
   }
   const age = Math.floor((Date.now() - _lastPriceAt) / 1000);
-  if (age < 2) {
-    el.textContent = '● LIVE';
+  const coverage = _lastPriceCoverage.total ? ` ${_lastPriceCoverage.live}/${_lastPriceCoverage.total}` : '';
+  if (_lastPriceStatus === 'LIVE' && age < 2) {
+    el.textContent = `LIVE${coverage}`;
     el.style.color = 'var(--green, #26a65b)';
     el.style.borderColor = 'var(--green, #26a65b)';
-  } else if (age < 5) {
-    el.textContent = `● ${age}s ago`;
+    el.title = 'Schwab WebSocket live quotes are fresh across the dashboard';
+  } else if (_lastPriceStatus === 'PARTIAL_LIVE' && age < 5) {
+    el.textContent = `PARTIAL LIVE ${age}s`;
     el.style.color = '#f5a623';
     el.style.borderColor = '#f5a623';
+    el.title = 'Some Schwab WebSocket quotes are live; other tickers are on fallback or stale data';
+  } else if (_lastPriceStatus === 'REST_FALLBACK' && age < 10) {
+    el.textContent = `REST FALLBACK ${age}s`;
+    el.style.color = '#f5a623';
+    el.style.borderColor = '#f5a623';
+    el.title = 'Fresh Schwab REST fallback quotes are being used; this is not streaming live data';
+  } else if (_lastPriceStatus === 'SCAN_SNAPSHOT') {
+    el.textContent = `SCAN SNAPSHOT ${age}s`;
+    el.style.color = '#f5a623';
+    el.style.borderColor = '#f5a623';
+    el.title = 'Prices came from the scanner snapshot, not the live market-data stream';
+  } else if (session === 'CLOSED') {
+    el.textContent = 'MARKET CLOSED';
+    el.style.color = 'var(--muted)';
+    el.style.borderColor = 'var(--border)';
+    el.title = 'Market is closed; dashboard may show latest known prices';
   } else {
-    el.textContent = `● STALE ${age}s`;
+    el.textContent = `STALE ${age}s`;
     el.style.color = 'var(--red, #e74c3c)';
     el.style.borderColor = 'var(--red, #e74c3c)';
+    el.title = `Price source stale (${_lastPriceSource || 'unknown'})`;
     // Stale prices are not the same as a dead WebSocket: closed market hours,
     // token gaps, or provider outages can all pause prices while server pings
     // still prove the socket is healthy. Reconnect only if the socket itself
@@ -2477,7 +2530,8 @@ function _applySignalPayload(d) {
   if (!Array.isArray(d?.signals)) return false;
   allSignals = d.signals;
   if (allSignals.some(s => s.is_observation || s.source === 'live_quote_observation')) {
-    _lastPriceAt = Date.now();
+    _lastPriceStatus = 'SCAN_SNAPSHOT';
+    _lastPriceSource = 'signals';
   }
   if (d.universe_total) window._universeTotal = d.universe_total;
   if (d.count != null) window._scannedCount = d.count;

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -78,6 +79,7 @@ _mdpoller_error:     Optional[str] = None
 _last_ws_data_at: float = 0.0
 
 MAX_CANDLE_HISTORY = 300   # 5 hours of 1-min bars
+_WS_STANDDOWN_FRESH_PCT = float(os.getenv("NASDAQ_WS_STANDDOWN_FRESH_PCT", "0.95"))
 
 # ── Real-time tick callback registry ─────────────────────────────────────────
 # Registered functions are called on every LEVELONE_EQUITIES update.
@@ -214,6 +216,9 @@ def _process_levelone_equities(content: list) -> None:
             else:
                 _halted.discard(sym)
 
+            quote["source"] = "SCHWAB_WS"
+            quote["source_status"] = "LIVE"
+            quote["is_live"] = True
             updated.append((sym, dict(quote)))   # snapshot for callbacks (outside lock)
 
             # Accumulate compact quote for the 500ms Valkey flush
@@ -229,6 +234,9 @@ def _process_levelone_equities(content: list) -> None:
                 "low":        float(quote.get("low")  or 0),
                 "pct_change": float(quote.get("net_pct_change") or 0),
                 "updated_at": quote["updated_at"],   # set above; required for freshness filter
+                "source": "SCHWAB_WS",
+                "source_status": "LIVE",
+                "is_live": True,
             }
 
     # Fire tick callbacks outside the lock — 250ms throttle per ticker
@@ -578,6 +586,13 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
         with _lock:
             for sym, q in quotes.items():
                 quote = _live_quotes.setdefault(sym, {})
+                if (
+                    quote.get("source_status") == "LIVE"
+                    and time.time() - float(quote.get("updated_at") or 0.0) <= 2.0
+                ):
+                    # Keep true WS ticks visible as LIVE instead of overwriting
+                    # them with REST fallback for the same ticker.
+                    continue
                 quote["last"]       = float(q.get("last") or 0)
                 quote["mark"]       = float(q.get("mark") or 0)
                 quote["bid"]        = float(q.get("bid")  or 0)
@@ -592,6 +607,9 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     raw_chg = (quote["last"] - quote["prev_close"]) / quote["prev_close"] * 100
                 quote["net_pct_change"] = round(raw_chg, 3)
                 quote["updated_at"]    = time.time()
+                quote["source"]        = "SCHWAB_REST"
+                quote["source_status"] = "REST_FALLBACK"
+                quote["is_live"]       = False
                 if quote["last"] <= 0:
                     _halted.add(sym)
                 else:
@@ -608,6 +626,9 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     "low":        quote["low"],
                     "pct_change": quote["net_pct_change"],
                     "updated_at": quote["updated_at"],   # required for dashboard freshness filter
+                    "source": "SCHWAB_REST",
+                    "source_status": "REST_FALLBACK",
+                    "is_live": False,
                 }
 
         if not bulk:
@@ -705,10 +726,10 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
                 auth_misses = 0   # reset on success
 
-                # Stand down when the WS streamer is actively delivering data.
-                # This eliminates REST/WS rate-limit competition: MDPoller only
-                # fires when the WS stream has been silent for > 2 seconds.
-                if is_ws_data_live(max_age_s=2.0):
+                # Stand down only when the WS streamer is covering almost the
+                # whole universe.  A single active WS ticker must not make the
+                # REST fallback stop while the rest of the dashboard goes stale.
+                if ws_fresh_coverage(max_age_s=2.0) >= _WS_STANDDOWN_FRESH_PCT:
                     consecutive_miss = 0
                     time.sleep(interval)
                     continue
@@ -992,6 +1013,24 @@ def is_ws_data_live(max_age_s: float = 2.0) -> bool:
     )
 
 
+def ws_fresh_coverage(max_age_s: float = 2.0) -> float:
+    """Return fraction of subscribed tickers with fresh Schwab WS quotes."""
+    with _lock:
+        tickers = list(_subscribed_tickers)
+        quotes = {ticker: dict(_live_quotes.get(ticker, {})) for ticker in tickers}
+    if not tickers:
+        return 0.0
+    now = time.time()
+    fresh = 0
+    for ticker in tickers:
+        quote = quotes.get(ticker) or {}
+        if quote.get("source_status") != "LIVE":
+            continue
+        if now - float(quote.get("updated_at") or 0.0) <= max_age_s:
+            fresh += 1
+    return fresh / len(tickers)
+
+
 def get_streamer_status() -> dict:
     """
     Return a health snapshot for both the WS streamer and the REST MDPoller.
@@ -1023,6 +1062,7 @@ def get_streamer_status() -> dict:
             "running":   bool(_streamer_thread and _streamer_thread.is_alive()),
             "connected": _ws_connected and bool(_streamer_thread and _streamer_thread.is_alive()),
             "live_quotes":    live_count if (_streamer_thread and _streamer_thread.is_alive()) else 0,
+            "fresh_coverage_pct": round(ws_fresh_coverage(max_age_s=2.0) * 100, 1),
             "live_candles":   candle_count,
             "halted_tickers": halted_count,
             "nq_bias":   get_nq_futures_bias(),
