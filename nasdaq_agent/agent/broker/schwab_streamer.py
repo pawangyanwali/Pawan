@@ -244,7 +244,8 @@ def _process_levelone_equities(content: list) -> None:
                 "is_live": True,
             }
             if (
-                float(quote.get("open") or 0) <= 0
+                _mdpoller_last_ok > 0
+                and float(quote.get("open") or 0) <= 0
                 and float(quote.get("last") or quote.get("mark") or 0) > 0
             ):
                 need_open_backfill.append(sym)
