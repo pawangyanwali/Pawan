@@ -232,6 +232,26 @@ jobs:
               echo "=== Service status (Docker) ==="
               _dc ps
 
+              # ── Full diagnostics for any unhealthy container ───────────────────
+              # Dumps last 60 log lines per unhealthy service so failures are fully
+              # visible in the Actions log without needing to SSH in.
+              UNHEALTHY=0
+              for svc in web-api scanner market-data learner scheduler context-intel watchdog; do
+                status=$(_svc_health "$svc")
+                if [ "$status" != "healthy" ]; then
+                  UNHEALTHY=1
+                  echo ""
+                  echo "##############################################"
+                  echo "# UNHEALTHY: $svc (status=$status)"
+                  echo "##############################################"
+                  _dc logs --tail 60 "$svc" 2>/dev/null || true
+                fi
+              done
+              if [ "$UNHEALTHY" = "1" ]; then
+                echo ""
+                echo "WARNING: one or more services are unhealthy — see logs above"
+              fi
+
               echo "=== Deployed via Docker Compose successfully ==="
 
             else
