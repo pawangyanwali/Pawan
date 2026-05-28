@@ -1881,7 +1881,7 @@ let _wsLastMsgAt = 0;  // epoch ms of last server WebSocket message
 let _lastPriceAt = 0;  // epoch ms of last live price update (prices or tick message)
 let _lastPriceStatus = 'NO_DATA';
 let _lastPriceSource = '';
-let _lastPriceCoverage = { total:0, live:0, fallback:0, snapshot:0 };
+let _lastPriceCoverage = { total:0, live:0, fallback:0, snapshot:0, stale:0, fresh:0 };
 let _priceBusCache = {}; // ticker -> latest observed quote/source for stable header status
 const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
@@ -1997,21 +1997,27 @@ function _updatePriceBusState(prices, fallbackStatus='UNKNOWN') {
 
   const vals = Object.values(_priceBusCache);
   if (!vals.length) return;
-  let live = 0, fallback = 0, snapshot = 0, fresh = 0;
+  let live = 0, fallback = 0, snapshot = 0, stale = 0, fresh = 0;
   let newest = 0, source = '';
   for (const q of vals) {
     const st = String(q.source_status || (q.is_live ? 'LIVE' : fallbackStatus)).toUpperCase();
     const ts = Number(q.updated_at || nowSec);
+    const isFresh = (nowSec - ts) <= 5.0;
     if (ts > newest) newest = ts;
     if (!source && q.source) source = q.source;
-    if ((nowSec - ts) <= 2.0) fresh++;
-    if (st === 'LIVE') live++;
-    else if (st === 'REST_FALLBACK' || st === 'FALLBACK') fallback++;
-    else if (st === 'SCAN_SNAPSHOT' || st === 'STALE_CACHE') snapshot++;
+    if (isFresh) {
+      fresh++;
+      if (st === 'LIVE') live++;
+      else if (st === 'REST_FALLBACK' || st === 'FALLBACK') fallback++;
+      else if (st === 'SCAN_SNAPSHOT' || st === 'STALE_CACHE') snapshot++;
+      else stale++;
+    } else {
+      stale++;
+    }
   }
   _lastPriceAt = newest ? newest * 1000 : Date.now();
   _lastPriceSource = source || fallbackStatus;
-  _lastPriceCoverage = { total: vals.length, live, fallback, snapshot, fresh };
+  _lastPriceCoverage = { total: vals.length, live, fallback, snapshot, stale, fresh };
   const livePct = vals.length ? live / vals.length : 0;
   const freshPct = vals.length ? fresh / vals.length : 0;
   if (livePct >= 0.95) _lastPriceStatus = 'LIVE';
@@ -2452,22 +2458,28 @@ setInterval(() => {
     return;
   }
   const age = Math.floor((Date.now() - _lastPriceAt) / 1000);
-  const coverage = _lastPriceCoverage.total ? ` ${_lastPriceCoverage.live}/${_lastPriceCoverage.total}` : '';
+  const cov = _lastPriceCoverage || {};
+  const sourceBreakdown = cov.total
+    ? `${cov.live || 0} WS / ${cov.fallback || 0} REST / ${cov.stale || 0} stale`
+    : '';
+  const detailedBreakdown = cov.total
+    ? `${sourceBreakdown} · ${cov.fresh || 0}/${cov.total || 0} fresh · ${cov.snapshot || 0} snapshot`
+    : '';
   if (_lastPriceStatus === 'LIVE' && age < 2) {
-    el.textContent = `LIVE${coverage}`;
+    el.textContent = cov.total ? `LIVE ${cov.live}/${cov.total}` : 'LIVE';
     el.style.color = 'var(--green, #26a65b)';
     el.style.borderColor = 'var(--green, #26a65b)';
-    el.title = 'Schwab WebSocket live quotes are fresh across the dashboard';
+    el.title = `Schwab WebSocket live quotes are fresh across the dashboard${detailedBreakdown ? ': ' + detailedBreakdown : ''}`;
   } else if (_lastPriceStatus === 'PARTIAL_LIVE' && age < 5) {
-    el.textContent = `PARTIAL LIVE ${age}s`;
+    el.textContent = sourceBreakdown ? `HYBRID LIVE ${sourceBreakdown}` : `HYBRID LIVE ${age}s`;
     el.style.color = '#f5a623';
     el.style.borderColor = '#f5a623';
-    el.title = 'Some Schwab WebSocket quotes are live; other tickers are on fallback or stale data';
+    el.title = `Mixed data sources: Schwab WebSocket + REST fallback + stale/no-print symbols${detailedBreakdown ? ' · ' + detailedBreakdown : ''}`;
   } else if (_lastPriceStatus === 'REST_FALLBACK' && age < 10) {
-    el.textContent = `REST FALLBACK ${age}s`;
+    el.textContent = cov.total ? `REST FALLBACK ${cov.fallback}/${cov.total}` : `REST FALLBACK ${age}s`;
     el.style.color = '#f5a623';
     el.style.borderColor = '#f5a623';
-    el.title = 'Fresh Schwab REST fallback quotes are being used; this is not streaming live data';
+    el.title = `Fresh Schwab REST fallback quotes are being used; this is not streaming live data${detailedBreakdown ? ' · ' + detailedBreakdown : ''}`;
   } else if (_lastPriceStatus === 'SCAN_SNAPSHOT') {
     el.textContent = `SCAN SNAPSHOT ${age}s`;
     el.style.color = '#f5a623';

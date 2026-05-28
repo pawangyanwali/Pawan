@@ -87,7 +87,9 @@ def test_dashboard_displays_price_source_truth_instead_of_reconnecting_on_snapsh
     assert "let _priceBusCache = {}" in src
     assert "Evaluate the whole dashboard cache" in src
     assert "REST FALLBACK" in src
-    assert "PARTIAL LIVE" in src
+    assert "HYBRID LIVE" in src
+    assert "WS /" in src
+    assert "REST /" in src
     assert "SCAN SNAPSHOT" in src
     assert "MARKET CLOSED" in src
     assert "wsSilent" in src
