@@ -1,0 +1,382 @@
+# ── NASDAQ Scalping Agent — Docker Compose ────────────────────────────────────
+#
+# Infrastructure topology
+# ───────────────────────
+#   EC2  t3a.xlarge  (4 vCPU · 16 GB RAM · 100 GB EBS)
+#   RDS  PostgreSQL  — durable state, external AWS managed service
+#   ElastiCache      — hot-path cache + pub/sub, external AWS managed service
+#
+# All containers share one Docker bridge network (nasdaq-net).
+# RDS and ElastiCache are reached over the VPC private subnet — no containers
+# needed for them.  Never add postgres/redis/valkey services here.
+#
+# EBS bind-mounts (created by deploy/setup-host.sh before first compose up):
+#   /opt/nasdaq-agent/models   — XGBoost + BiLSTM weights (scanner reads, learner writes)
+#   /opt/nasdaq-agent/tokens   — Schwab OAuth tokens      (market-data + web-api)
+#   /opt/nasdaq-agent/cache    — OHLCV bar cache          (scanner + context-intel)
+#   /opt/nasdaq-agent/logs     — rotating log files       (all containers)
+#
+# Usage
+# ─────
+#   docker compose up -d               # start all containers
+#   docker compose logs -f scanner     # tail one service
+#   docker compose restart market-data # restart without touching others
+#   docker compose pull && docker compose up -d --remove-orphans
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── YAML anchors (DRY — merged into each service's environment block) ─────────
+
+x-db-env: &db-env
+  PGHOST:     ${PGHOST:?PGHOST must be set in .env}
+  PGPORT:     ${PGPORT:-5432}
+  PGDATABASE: ${PGDATABASE:-nasdaq_agent}
+  PGUSER:     ${PGUSER:?PGUSER must be set in .env}
+  PGPASSWORD: ${PGPASSWORD:?PGPASSWORD must be set in .env}
+  PGSSLMODE:  ${PGSSLMODE:-require}
+
+x-valkey-env: &valkey-env
+  VALKEY_HOST: ${VALKEY_HOST:?VALKEY_HOST must be set in .env}
+  VALKEY_PORT: ${VALKEY_PORT:-6379}
+  VALKEY_SSL:  ${VALKEY_SSL:-true}
+
+x-schwab-env: &schwab-env
+  SCHWAB_CLIENT_ID:      ${SCHWAB_CLIENT_ID:-}
+  SCHWAB_CLIENT_SECRET:  ${SCHWAB_CLIENT_SECRET:-}
+  SCHWAB_MD_CLIENT_ID:   ${SCHWAB_MD_CLIENT_ID:-}
+  SCHWAB_MD_CLIENT_SECRET: ${SCHWAB_MD_CLIENT_SECRET:-}
+  SCHWAB_ACCOUNT_NUMBER: ${SCHWAB_ACCOUNT_NUMBER:-}
+  # Tokens stored on EBS so they survive container restarts.
+  # Without this, every container restart requires full Schwab OAuth re-auth.
+  SCHWAB_TOKEN_DIR:        /app/data/tokens
+  SCHWAB_TOKEN_BACKUP_DIR: /app/data/tokens/backup
+
+x-log-env: &log-env
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_DIR:   /app/logs
+
+x-trading-env: &trading-env
+  IS_PAPER_TRADING:       ${IS_PAPER_TRADING:-true}
+  TRADING_ACCOUNT_SIZE:   ${TRADING_ACCOUNT_SIZE:-50000}
+  TRADING_RISK_PCT:       ${TRADING_RISK_PCT:-1.5}
+  PAPER_BUDGET:           ${PAPER_BUDGET:-50000}
+  PAPER_MAX_OPEN_TRADES:  ${PAPER_MAX_OPEN_TRADES:-10}
+  MAX_CONCURRENT_TRADES:  ${MAX_CONCURRENT_TRADES:-3}
+  DAILY_LOSS_HALT_PCT:    ${DAILY_LOSS_HALT_PCT:-2.5}
+
+# ── Shared service defaults ───────────────────────────────────────────────────
+
+x-common: &common
+  image: nasdaq-agent:${IMAGE_TAG:-latest}
+  restart: unless-stopped
+  networks:
+    - nasdaq-net
+  # Docker captures stdout; rotating files land on the EBS logs volume.
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+# ── Services ──────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── web-api ─────────────────────────────────────────────────────────────────
+  # FastAPI + Gunicorn (1 UvicornWorker).  Serves REST API and WebSocket.
+  # All four service-mode flags are OFF — this container only serves HTTP.
+  # It reads signals from Valkey/PG; the scanner publishes them.
+  # Subscribes to scan:notify pub/sub → pushes to WebSocket clients.
+  web-api:
+    <<: *common
+    container_name: nasdaq-web-api
+    command: ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]
+    ports:
+      - "${WEB_API_PORT:-8000}:8000"
+    volumes:
+      - models:/app/data/models   # deep-model status reads
+      - tokens:/app/data/tokens   # broker endpoints (positions, orders)
+      - cache:/app/data/cache
+      - logs:/app/logs
+    environment:
+      <<: [*db-env, *valkey-env, *schwab-env, *log-env, *trading-env]
+      # All background services run in their own containers.
+      NASDAQ_SCANNER_ENABLED:     "0"
+      NASDAQ_LEARNER_ENABLED:     "0"
+      NASDAQ_MARKET_DATA_ENABLED: "0"
+      NASDAQ_SCHEDULER_ENABLED:   "0"
+      # Auth
+      JWT_SECRET:          ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-30}
+      JWT_REFRESH_TTL_DAYS:   ${JWT_REFRESH_TTL_DAYS:-7}
+      APP_ENV:             ${APP_ENV:-production}
+      # CORS — set to your EC2 public IP or domain in .env
+      CORS_ORIGINS:        ${CORS_ORIGINS:-http://localhost:8000}
+      SCHWAB_AUTO_TRADE:   ${SCHWAB_AUTO_TRADE:-false}
+      SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL:-}
+      SCHWAB_PAPER_TRADING: ${SCHWAB_PAPER_TRADING:-true}
+      FINNHUB_API_KEY:     ${FINNHUB_API_KEY:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          memory: 384M
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  # ── scanner ──────────────────────────────────────────────────────────────────
+  # ML inference engine.  8 parallel workers score every ticker each cycle.
+  # Reads live prices from ElastiCache md:prices (published by market-data).
+  # Publishes completed scan results to ElastiCache scan:notify → web-api WebSocket.
+  # Writes signal history, paper trades, and live backtest records to RDS.
+  # NASDAQ_MARKET_DATA_ENABLED=0 — market-data is its own container.
+  scanner:
+    <<: *common
+    container_name: nasdaq-scanner
+    command: ["python", "-m", "services.scanner_service"]
+    volumes:
+      - models:/app/data/models   # XGBoost + BiLSTM model weights (read)
+      - cache:/app/data/cache     # OHLCV bar cache
+      - logs:/app/logs
+    environment:
+      <<: [*db-env, *valkey-env, *log-env, *trading-env]
+      # Market data runs in its own container; scanner reads prices from Valkey.
+      NASDAQ_MARKET_DATA_ENABLED: "0"
+      PIPELINE_WORKERS: ${PIPELINE_WORKERS:-8}
+      FINNHUB_API_KEY:  ${FINNHUB_API_KEY:-}
+    deploy:
+      resources:
+        limits:
+          # Scanner is the dominant CPU workload during market hours.
+          # 8 ML workers burst to ~2 CPUs during inference; idle between cycles.
+          cpus: "2.5"
+          memory: 3G
+        reservations:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.scanner_healthcheck"]
+      interval: 30s
+      timeout: 15s
+      # First scan cycle can take up to 90s (DB init + first price fetch).
+      start_period: 120s
+      retries: 3
+
+  # ── market-data ──────────────────────────────────────────────────────────────
+  # Schwab WebSocket streamer + REST MD poller.
+  # Publishes every price tick to ElastiCache md:prices (<100ms latency).
+  # Publishes 1-min candles to ElastiCache md:1m:{ticker}.
+  # Isolated so a Schwab disconnect / token refresh does NOT restart the scanner.
+  # Hot-reload: subscribes to schwab:tokens_refreshed pub/sub — reconnects
+  # automatically when web-api completes a new OAuth flow.
+  market-data:
+    <<: *common
+    container_name: nasdaq-market-data
+    command: ["python", "-m", "services.market_data_service"]
+    volumes:
+      - tokens:/app/data/tokens   # Schwab OAuth token files
+      - logs:/app/logs
+    environment:
+      <<: [*valkey-env, *schwab-env, *log-env]
+      # PG used only for service_state heartbeat writes — still need credentials.
+      <<: *db-env
+      NASDAQ_MD_STARTUP_DELAY_S: ${NASDAQ_MD_STARTUP_DELAY_S:-10}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.md_healthcheck"]
+      interval: 30s
+      timeout: 15s
+      # Poller startup delay + first candle fetch
+      start_period: 90s
+      retries: 3
+
+  # ── learner ──────────────────────────────────────────────────────────────────
+  # Adaptive filter calibration + algo parameter tuning (continuous).
+  # BiLSTM deep retraining (off-hours only — gated by market hours check).
+  # Reads trade outcomes from RDS; writes updated model weights to EBS models/.
+  # Publishes learner:status to ElastiCache (TTL 300s) so web-api can serve
+  # /api/learning-status without a local learner process.
+  learner:
+    <<: *common
+    container_name: nasdaq-learner
+    command: ["python", "-m", "services.learner_service"]
+    volumes:
+      - models:/app/data/models   # BiLSTM weights (read + write)
+      - cache:/app/data/cache
+      - logs:/app/logs
+    environment:
+      <<: [*db-env, *valkey-env, *log-env]
+      LEARNER_DEEP_ENABLED:         ${LEARNER_DEEP_ENABLED:-1}
+      LEARNER_DEEP_INTERVAL_S:      ${LEARNER_DEEP_INTERVAL_S:-3600}
+      # 5-minute startup delay so scanner settles before first deep cycle.
+      LEARNER_DEEP_STARTUP_DELAY_S: ${LEARNER_DEEP_STARTUP_DELAY_S:-300}
+      LEARNER_DEEP_TICKER_LIMIT:    ${LEARNER_DEEP_TICKER_LIMIT:-100}
+    deploy:
+      resources:
+        limits:
+          # BiLSTM training runs off-hours; limit prevents starving scanner
+          # during rare cases where market hours check is delayed at startup.
+          cpus: "1.5"
+          memory: 3500M
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.learner_healthcheck"]
+      interval: 60s
+      timeout: 15s
+      start_period: 120s
+      retries: 3
+
+  # ── scheduler ────────────────────────────────────────────────────────────────
+  # Time-driven tasks: EOD position close at 3:45 PM ET on weekdays.
+  # Publishes scheduler:heartbeat to PG + Valkey every 30s.
+  # Completely independent — no Schwab, no scanner coupling.
+  scheduler:
+    <<: *common
+    container_name: nasdaq-scheduler
+    command: ["python", "-m", "services.scheduler_service"]
+    volumes:
+      - logs:/app/logs
+    environment:
+      <<: [*db-env, *valkey-env, *log-env]
+      SCHEDULER_HEARTBEAT_S: ${SCHEDULER_HEARTBEAT_S:-30}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.scheduler_healthcheck"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # ── context-intel ─────────────────────────────────────────────────────────────
+  # Background intelligence poller — four independent loops:
+  #   earnings_poller  every 6h  — Finnhub earnings calendar → RDS
+  #   news_poller      every 3m  — market + company news     → RDS
+  #   feature_compute  every 30s — rolling context features  → RDS + Valkey
+  #   iv_poller        every 5m  — IV stub (Phase 2)         → heartbeat only
+  # Provider (Finnhub) outage is non-fatal — existing DB data remains valid.
+  context-intel:
+    <<: *common
+    container_name: nasdaq-context-intel
+    command: ["python", "-m", "services.context_intel_service"]
+    volumes:
+      - cache:/app/data/cache
+      - logs:/app/logs
+    environment:
+      <<: [*db-env, *valkey-env, *log-env]
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.context_healthcheck"]
+      interval: 60s
+      timeout: 15s
+      start_period: 120s
+      retries: 3
+
+  # ── watchdog ──────────────────────────────────────────────────────────────────
+  # Monitors all application containers via Docker Engine Unix socket.
+  # Restarts a container when: state != running OR health == unhealthy for
+  # WATCHDOG_UNHEALTHY_STRIKES consecutive checks.
+  # Docker's own restart:unless-stopped handles transient crashes.
+  # Watchdog handles hung containers that stay "running" but fail healthchecks.
+  # Requires /var/run/docker.sock — only makes sense on single-host EC2.
+  watchdog:
+    <<: *common
+    container_name: nasdaq-watchdog
+    command: ["python", "-m", "services.watchdog_service"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # Docker Engine access
+      - logs:/app/logs
+    environment:
+      <<: [*db-env, *valkey-env, *log-env]
+      WATCHDOG_DOCKER_SOCKET:    /var/run/docker.sock
+      WATCHDOG_INTERVAL_S:       ${WATCHDOG_INTERVAL_S:-30}
+      WATCHDOG_UNHEALTHY_STRIKES: ${WATCHDOG_UNHEALTHY_STRIKES:-2}
+      WATCHDOG_RESTART_TIMEOUT_S: ${WATCHDOG_RESTART_TIMEOUT_S:-10}
+      # Comma-separated compose service names to watch.
+      WATCHDOG_SERVICES: "web-api,scanner,market-data,learner,scheduler,context-intel"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 128M
+        reservations:
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.watchdog_healthcheck"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+# ── Named volumes (EBS bind-mounts) ──────────────────────────────────────────
+#
+# All four directories must be created on the host before 'docker compose up'.
+# See deploy/setup-host.sh.
+#
+# models/ and tokens/ are shared across multiple containers — Docker handles
+# concurrent reads safely; write coordination is by design (learner writes
+# models, market-data writes tokens).
+
+volumes:
+  models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/nasdaq-agent/models
+
+  tokens:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/nasdaq-agent/tokens
+
+  cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/nasdaq-agent/cache
+
+  logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/nasdaq-agent/logs
+
+# ── Internal network ──────────────────────────────────────────────────────────
+#
+# All containers resolve each other by service name (e.g. "web-api") on this
+# bridge network.  RDS and ElastiCache are reached via VPC routing — no
+# special network config needed for them.
+
+networks:
+  nasdaq-net:
+    name: nasdaq-net
+    driver: bridge
