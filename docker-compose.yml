@@ -133,6 +133,7 @@ services:
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
       NASDAQ_SCANNER_TRAINING_ENABLED: "0"
+      ADAPTIVE_FILTER_ENFORCEMENT_MODE: "observe"
       SCHWAB_TOKEN_DIR:            "/app/tokens"
       LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.scanner_service"]
@@ -161,14 +162,20 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "0"
       NASDAQ_LEARNER_ENABLED:      "1"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      LEARNING_RETRAIN_ACTIVE_SESSIONS: "1"
+      LEARNING_RETRAIN_INCLUDE_DEEP: "1"
+      LEARNER_DEEP_ENABLED:        "1"
+      LEARNER_DEEP_INTERVAL_S:     "3600"
+      LEARNER_DEEP_TICKER_LIMIT:   "100"
+      ADAPTIVE_FILTER_ENFORCEMENT_MODE: "observe"
       LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.learner_service"]
     healthcheck:
-      test: ["CMD", "python3", "-c", "print('ok')"]
+      test: ["CMD", "python3", "/app/services/learner_healthcheck.py"]
       interval: 60s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 180s
     mem_limit: 1500m
     cpus: "0.5"
     pids_limit: 256

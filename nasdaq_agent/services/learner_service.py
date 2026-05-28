@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -38,9 +39,25 @@ from services._base import configure_logging, ServiceRunner
 _log    = configure_logging("learner")
 _runner = ServiceRunner("learner")
 
-# Hard gate: never train within MARKET_HOURS_BUFFER_S of market open/close.
-# The learning engine has its own internal gate; this is a belt-and-suspenders check.
 _POLL_INTERVAL_S = int(os.getenv("LEARNER_POLL_INTERVAL_S", "30"))
+_DEEP_ENABLED = os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes")
+_DEEP_INTERVAL_S = max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600")))
+_DEEP_STARTUP_DELAY_S = max(0, int(os.getenv("LEARNER_DEEP_STARTUP_DELAY_S", "300")))
+_DEEP_TICKER_LIMIT = max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100")))
+_DEEP_STATE: dict = {
+    "enabled": _DEEP_ENABLED,
+    "running": False,
+    "cycle": 0,
+    "interval_s": _DEEP_INTERVAL_S,
+    "ticker_limit": _DEEP_TICKER_LIMIT,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_success_at": None,
+    "last_duration_s": None,
+    "last_tickers": 0,
+    "last_error": None,
+}
+_DEEP_LOCK = threading.Lock()
 
 
 # ── Market-hours guard ────────────────────────────────────────────────────────
@@ -56,6 +73,14 @@ def _is_market_hours() -> bool:
 
 
 # ── Learning engine lifecycle ─────────────────────────────────────────────────
+
+def _current_session() -> str:
+    try:
+        from agent.market_hours import get_market_session
+        return str(get_market_session())
+    except Exception:
+        return "UNKNOWN"
+
 
 def _run_learning_engine() -> None:
     """Start the adaptive learning engine and keep it alive."""
@@ -78,6 +103,83 @@ def _run_weekend_learner() -> None:
 
 
 # ── Valkey status publisher ───────────────────────────────────────────────────
+
+def _deep_state_snapshot() -> dict:
+    with _DEEP_LOCK:
+        return dict(_DEEP_STATE)
+
+
+def _set_deep_state(**updates) -> None:
+    with _DEEP_LOCK:
+        _DEEP_STATE.update(updates)
+
+
+def _continuous_deep_loop() -> None:
+    """
+    Keep Deep BiLSTM learning alive in the learner container.
+
+    The scanner never runs this work. Docker CPU and memory limits keep this
+    background learner from starving the market-data and scanner containers.
+    """
+    if not _DEEP_ENABLED:
+        _log.info("Continuous deep learner disabled by LEARNER_DEEP_ENABLED=0")
+        return
+
+    if _DEEP_STARTUP_DELAY_S:
+        _log.info("Continuous deep learner waiting %ss before first cycle", _DEEP_STARTUP_DELAY_S)
+        if _runner._stop.wait(_DEEP_STARTUP_DELAY_S):
+            return
+
+    while not _runner.stopped:
+        _run_deep_cycle()
+        _runner._stop.wait(_DEEP_INTERVAL_S)
+
+
+def _run_deep_cycle() -> None:
+    start = time.time()
+    _set_deep_state(
+        running=True,
+        cycle=int(_deep_state_snapshot().get("cycle", 0)) + 1,
+        last_started_at=start,
+        last_finished_at=None,
+        last_error=None,
+    )
+    try:
+        from agent.data_fetcher import fetch_batch_interval
+        from agent.deep_model import retrain_deep_all
+        from config import TRAINING_TICKERS
+
+        tickers = list(TRAINING_TICKERS)[:_DEEP_TICKER_LIMIT]
+        _log.info("Continuous deep cycle starting (%d tickers)", len(tickers))
+        hist_15m = fetch_batch_interval(
+            tickers,
+            "15min",
+            5000,
+            ttl=86400,
+            background=True,
+            extended_hours=True,
+        )
+        ok = retrain_deep_all(hist_15m)
+        finished = time.time()
+        _set_deep_state(
+            running=False,
+            last_finished_at=finished,
+            last_duration_s=round(finished - start, 1),
+            last_success_at=finished if ok else _deep_state_snapshot().get("last_success_at"),
+            last_tickers=len(hist_15m),
+            last_error=None if ok else "deep retrain returned false",
+        )
+        _log.info("Continuous deep cycle finished ok=%s tickers=%d", ok, len(hist_15m))
+    except Exception as exc:
+        finished = time.time()
+        _set_deep_state(
+            running=False,
+            last_finished_at=finished,
+            last_duration_s=round(finished - start, 1),
+            last_error=str(exc),
+        )
+        _log.warning("Continuous deep cycle failed: %s", exc, exc_info=True)
+
 
 def _publish_status_loop() -> None:
     """
@@ -114,6 +216,12 @@ def _publish_status_loop() -> None:
                 "adaptive_filter": af_status(),
                 "log":             get_learning_log(limit=50),
                 "phase2":          phase2_status,
+                "deep":            _deep_state_snapshot(),
+                "service": {
+                    "mode": "continuous",
+                    "poll_interval_s": _POLL_INTERVAL_S,
+                    "session": _current_session(),
+                },
             }
 
             # ── 1. PostgreSQL (source of truth) ───────────────────────────────
@@ -167,18 +275,14 @@ def main() -> None:
     import threading
 
     _log.info("=== learner_service starting ===")
-
-    if _is_market_hours():
-        _log.warning(
-            "Market appears to be open — learner will start but internal gates "
-            "will block training until market closes."
-        )
+    _log.info("Continuous learning active; training work stays inside learner container limits.")
 
     _run_learning_engine()
     _run_weekend_learner()
 
     threading.Thread(target=_monitor_loop,        daemon=True, name="learner-monitor").start()
     threading.Thread(target=_publish_status_loop, daemon=True, name="learner-status-pub").start()
+    threading.Thread(target=_continuous_deep_loop, daemon=True, name="continuous-deep").start()
 
     _log.info("Learner running — waiting for SIGTERM/SIGINT …")
 

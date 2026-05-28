@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -39,6 +40,8 @@ _STARTUP_RETRAIN_GRACE = 360     # no ML retrain for 6 min — lets scanner warm
 LEARN_INTERVAL_SECS   = 90      # how often to run a learning cycle (1.5 min)
 RETRAIN_MIN_NEW       = 15      # new outcomes needed to trigger ML retrain
 RETRAIN_COOLDOWN_SECS = 600     # don't retrain more often than every 10 min
+RETRAIN_ACTIVE_SESSIONS = os.getenv("LEARNING_RETRAIN_ACTIVE_SESSIONS", "1").lower() in ("1", "true", "yes")
+RETRAIN_INCLUDE_DEEP = os.getenv("LEARNING_RETRAIN_INCLUDE_DEEP", "1").lower() in ("1", "true", "yes")
 
 # ── Persistent log file (JSONL — one entry per line, append-only) ─────────────
 _LOG_PATH   = Path(__file__).parent.parent / "data" / "learning_log.jsonl"
@@ -222,6 +225,11 @@ class LearningEngine:
             "last_win_rate":  round(self._last_win_rate, 1),
             "last_threshold": round(self._last_threshold, 1),
             "interval_secs":  LEARN_INTERVAL_SECS,
+            "last_retrain_at": self._last_retrain_t or None,
+            "retrain_cooldown_secs": RETRAIN_COOLDOWN_SECS,
+            "retrain_min_new": RETRAIN_MIN_NEW,
+            "active_session_retrain_enabled": RETRAIN_ACTIVE_SESSIONS,
+            "deep_retrain_enabled": RETRAIN_INCLUDE_DEEP,
         }
 
     # ── Main loop ─────────────────────────────────────────────────────────────
@@ -461,14 +469,22 @@ class LearningEngine:
             from agent.market_hours import get_market_session
             _session = get_market_session()
         except Exception as exc:
-            _log(f"ML feedback retrain deferred — session check failed: {exc}", level="INFO")
-            return
+            _session = "UNKNOWN"
+            _log(f"ML feedback retrain session check failed: {exc}; continuing in learner container", level="WARNING")
+        _actual_session = _session
+        if RETRAIN_ACTIVE_SESSIONS and _session != "CLOSED":
+            _log(
+                f"ML feedback retrain continuing during session={_session} inside learner container",
+                level="INFO",
+            )
+            _session = "CLOSED"
+
         if _session != "CLOSED":
             _log(f"ML feedback retrain deferred — session={_session}; waiting for CLOSED window", level="INFO")
             return
 
         _log(f"ML feedback retrain triggered — "
-             f"{stats['overall']['total']} total outcomes", significant=True)
+             f"{stats['overall']['total']} total outcomes, session={_actual_session}", significant=True)
 
         def _do_retrain():
             try:
@@ -484,7 +500,7 @@ class LearningEngine:
                     _log_attribution(outcomes_df)
                     _update_confidence_calibration(outcomes_df)
 
-                retrain_all(TRAINING_TICKERS, skip_deep=False)
+                retrain_all(TRAINING_TICKERS, skip_deep=not RETRAIN_INCLUDE_DEEP)
                 _log("ML retrain complete", significant=True)
             except Exception as e:
                 _log(f"ML retrain failed: {e}", level="ERROR", significant=True)

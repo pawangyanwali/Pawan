@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 
@@ -57,6 +58,7 @@ MAX_STUCK_CYCLES  = 4      # consecutive max-threshold trade updates before anti
 
 # Sources that produce reliable TP/SL-resolved trade data
 _TRADE_SOURCES = {"backtest", "paper", "weekend_walk_forward"}
+_ENFORCEMENT_MODE = os.getenv("ADAPTIVE_FILTER_ENFORCEMENT_MODE", "observe").lower()
 
 _FILTER_PATH = Path(__file__).parent.parent / "data" / "adaptive_filter.json"
 _lock = threading.Lock()
@@ -430,6 +432,7 @@ def should_suppress(
         blocked   = dict(_state["blocked_contexts"])
         threshold = float(_state["dynamic_threshold"])
 
+    reason = ""
     for dim, val in [
         ("vwap_event", vwap_event), ("session", session), ("regime", regime),
         ("rsi_zone", rsi_zone), ("entry_type", entry_type),
@@ -439,12 +442,19 @@ def should_suppress(
             continue
         key = f"{dim}:{val}"
         if key in blocked:
-            return True, f"Suppressed: {blocked[key]['reason']}"
+            reason = f"Adaptive advisory: {blocked[key]['reason']}"
+            break
 
-    if confidence < threshold:
-        return True, f"Confidence {confidence:.1f}% below learned threshold {threshold:.1f}%"
+    if not reason and confidence < threshold:
+        reason = f"Confidence {confidence:.1f}% below learned threshold {threshold:.1f}%"
 
-    return False, ""
+    if not reason:
+        return False, ""
+
+    if _ENFORCEMENT_MODE in ("off", "observe", "advisory", "shadow"):
+        return False, reason
+
+    return True, reason
 
 
 def get_confidence_boost(
@@ -487,6 +497,7 @@ def get_status() -> dict:
             "threshold_history":    _state["threshold_history"],
             "is_learning":          _state["total_resolved"] >= MIN_SAMPLE,
             "stuck_cycles":         _state.get("_stuck_cycles", 0),
+            "enforcement_mode":      _ENFORCEMENT_MODE,
         }
 
 

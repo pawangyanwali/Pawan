@@ -624,6 +624,9 @@ def retrain_deep_all(ticker_dfs_15m: dict[str, pd.DataFrame]) -> bool:
     global _trained, _is_training_now, _training_history
 
     with _lock:
+        if _is_training_now:
+            logger.info("[DeepModel] Training skipped - another deep retrain is already running")
+            return False
         _is_training_now = True
     try:
         try:
