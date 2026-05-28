@@ -78,19 +78,26 @@ def earnings_blackout(ticker: str) -> dict:
         result["next_date"] = next_dt.strftime("%b %d, %Y")
         result["days_away"] = delta
 
-        if 0 <= delta <= _PRE_EARNINGS_DAYS:
+        try:
+            from agent.config_manager import config as _cfg
+            pre_days  = int(_cfg.get("scanner.pre_earnings_blackout_days",  _PRE_EARNINGS_DAYS))
+            post_days = int(_cfg.get("scanner.post_earnings_cooldown_days", _POST_EARNINGS_DAYS))
+        except Exception:
+            pre_days, post_days = _PRE_EARNINGS_DAYS, _POST_EARNINGS_DAYS
+
+        if 0 <= delta <= pre_days:
             result["blocked"] = True
             result["reason"]  = (
                 f"Earnings in {delta}d ({next_dt.strftime('%b %d')}) — "
                 "blackout: gap risk too high."
             )
-        elif -_POST_EARNINGS_DAYS <= delta < 0:
+        elif -post_days <= delta < 0:
             result["blocked"] = True
             result["reason"]  = (
                 f"Post-earnings cooldown ({abs(delta)}d after) — "
                 "gap-fill trap risk."
             )
-        elif delta <= _PRE_EARNINGS_DAYS + 4:
+        elif delta <= pre_days + 4:
             result["reason"] = (
                 f"Earnings in {delta}d ({next_dt.strftime('%b %d')}) — "
                 "reduce size."

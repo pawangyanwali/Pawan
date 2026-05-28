@@ -4575,11 +4575,21 @@ async function ptLoadBudgetTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const a = await (await _authFetch(`${BACKEND_HTTP}/api/account-state`, {signal: AbortSignal.timeout(12000)})).json();
-    const budget   = a.starting_balance ?? 100000;
-    const maxTrade = a.max_trade_pct    ?? 5;
-    const maxAlloc = a.max_allocated_pct ?? 40;
-    const maxOpen  = a.max_open_trades  ?? 10;
+    const [paperResp, scannerResp] = await Promise.all([
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`, {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=scanner.`, {signal: AbortSignal.timeout(12000)}),
+    ]);
+    const paperData   = await paperResp.json();
+    const scannerData = await scannerResp.json();
+    const pc = paperData.config   || {};
+    const sc = scannerData.config || {};
+    const budget     = pc["paper.budget"]            ?? 50000;
+    const maxTrade   = pc["paper.max_trade_pct"]     ?? 5;
+    const maxAlloc   = pc["paper.max_allocated_pct"] ?? 40;
+    const maxOpen    = pc["paper.max_open_trades"]   ?? 10;
+    const minConf    = pc["paper.min_confidence"]    ?? 25;
+    const preEarnings  = sc["scanner.pre_earnings_blackout_days"]  ?? 3;
+    const postEarnings = sc["scanner.post_earnings_cooldown_days"] ?? 1;
 
     el.innerHTML = `
     <div style="max-width:520px">
@@ -4606,7 +4616,7 @@ async function ptLoadBudgetTab() {
           </label>
           <input id="pt-cfg-trade-pct" type="number" min="0.5" max="25" step="0.5" value="${maxTrade}"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
-          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max capital committed to a single trade. At $${budget.toFixed(0)}: <span id="pt-cfg-trade-dollar">${(budget * maxTrade / 100).toFixed(0)}</span> per trade.</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max capital committed to a single trade. At $${Number(budget).toFixed(0)}: <span id="pt-cfg-trade-dollar">${(Number(budget) * Number(maxTrade) / 100).toFixed(0)}</span> per trade.</div>
         </div>
 
         <div>
@@ -4627,6 +4637,15 @@ async function ptLoadBudgetTab() {
           <div style="font-size:9px;color:var(--muted);margin-top:3px">Hard cap on concurrent open positions. New trades are blocked when this is reached.</div>
         </div>
 
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
+            MIN CONFIDENCE (%)
+          </label>
+          <input id="pt-cfg-min-conf" type="number" min="1" max="100" step="1" value="${minConf}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Minimum signal confidence required to open a paper trade (data collection floor).</div>
+        </div>
+
       </div>
 
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
@@ -4644,6 +4663,43 @@ async function ptLoadBudgetTab() {
           2. Allocated capital + new cost_basis ≤ budget × max_allocated%<br>
           3. New position size ≤ budget × max_trade%<br>
           If any gate fails, the trade is skipped for that cycle.
+        </div>
+      </div>
+
+      <div style="margin-top:24px">
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Signal Config</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+          Earnings blackout windows — suppress trading signals near earnings announcements.
+          Changes take effect immediately without a restart.
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px">
+
+          <div>
+            <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
+              PRE-EARNINGS BLACKOUT (days)
+            </label>
+            <input id="pt-cfg-pre-earnings" type="number" min="0" max="14" step="1" value="${preEarnings}"
+              style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+            <div style="font-size:9px;color:var(--muted);margin-top:3px">Block signals this many days before earnings (gap risk protection).</div>
+          </div>
+
+          <div>
+            <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
+              POST-EARNINGS COOLDOWN (days)
+            </label>
+            <input id="pt-cfg-post-earnings" type="number" min="0" max="7" step="1" value="${postEarnings}"
+              style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+            <div style="font-size:9px;color:var(--muted);margin-top:3px">Block signals this many days after earnings (gap-fill trap protection).</div>
+          </div>
+
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+          <button onclick="ptSaveSignalConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
+            Save Signal Config
+          </button>
+          <span id="pt-cfg-signal-status" style="font-size:11px;color:var(--muted)"></span>
         </div>
       </div>
     </div>`;
@@ -4670,15 +4726,55 @@ async function ptSaveBudgetConfig(btn) {
   const tradePct = parseFloat(document.getElementById('pt-cfg-trade-pct')?.value)  || null;
   const allocPct = parseFloat(document.getElementById('pt-cfg-alloc-pct')?.value)  || null;
   const maxOpen  = parseInt(  document.getElementById('pt-cfg-max-open')?.value, 10) || null;
+  const minConf  = parseFloat(document.getElementById('pt-cfg-min-conf')?.value)   || null;
   const status   = document.getElementById('pt-cfg-status');
-  if (!budget || !tradePct || !allocPct || !maxOpen) {
+  if (!budget || !tradePct || !allocPct || !maxOpen || !minConf) {
     if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
     return;
   }
   btn.disabled = true;
-  const params = new URLSearchParams({ total_budget: budget, max_trade_pct: tradePct, max_allocated_pct: allocPct, max_open_trades: maxOpen });
   try {
-    const r = await _authFetch(`${BACKEND_HTTP}/api/account-config?${params}`, {method:'POST', signal: AbortSignal.timeout(8000)});
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        "paper.budget": budget,
+        "paper.max_trade_pct": tradePct,
+        "paper.max_allocated_pct": allocPct,
+        "paper.max_open_trades": maxOpen,
+        "paper.min_confidence": minConf,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function ptSaveSignalConfig(btn) {
+  const preEarnings  = parseInt(document.getElementById('pt-cfg-pre-earnings')?.value,  10);
+  const postEarnings = parseInt(document.getElementById('pt-cfg-post-earnings')?.value, 10);
+  const status = document.getElementById('pt-cfg-signal-status');
+  if (isNaN(preEarnings) || isNaN(postEarnings)) {
+    if (status) { status.textContent = 'Both fields required.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        "scanner.pre_earnings_blackout_days": preEarnings,
+        "scanner.post_earnings_cooldown_days": postEarnings,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
     const d = await r.json();
     if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
     if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }

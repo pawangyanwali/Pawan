@@ -1002,6 +1002,10 @@ async def lifespan(app: FastAPI):
     _hist_init_tables()
     _ss_init_db()   # durable service-state table (scan:latest, heartbeats, etc.)
     _ctx_init_db()  # context intel tables (context_events, ticker_context_features, earnings_calendar)
+    from agent.config_manager import config as _config_mgr
+    _config_mgr.load()
+    _config_mgr.seed_defaults()
+    _config_mgr.start_listener()
 
     # Warm the market-hours cache before the first scan so get_market_session()
     # doesn't block on its first call mid-scan.  This runs in the background
@@ -1822,6 +1826,40 @@ async def api_update_account_config(
             lambda: update_account_config(total_budget, max_trade_pct, max_allocated_pct, max_open_trades)
         )
         return {"success": True, "config": cfg}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/config")
+async def api_get_config(
+    prefix: str | None = None,
+    _current: AuthenticatedUser = Depends(require_trader),
+):
+    """Return all runtime config keys (optionally filtered by prefix)."""
+    from agent.config_manager import config as _cfg
+    all_cfg = _cfg.all()
+    if prefix:
+        all_cfg = {k: v for k, v in all_cfg.items() if k.startswith(prefix)}
+    return {"config": all_cfg}
+
+
+@app.post("/api/config")
+async def api_set_config(
+    request: Request,
+    _current: AuthenticatedUser = Depends(require_trader),
+):
+    """Update one or more runtime config keys. Body: {"key": value, ...}"""
+    try:
+        updates = await request.json()
+        if not isinstance(updates, dict) or not updates:
+            return {"success": False, "error": "Body must be a non-empty JSON object"}
+        from agent.config_manager import config as _cfg
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: _cfg.set_many(updates, updated_by=_current.username)
+        )
+        return {"success": True, "updated": list(updates.keys())}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

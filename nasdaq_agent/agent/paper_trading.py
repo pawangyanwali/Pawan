@@ -1509,20 +1509,17 @@ def get_account_state(open_prices: dict | None = None) -> dict:
                 "entry_price*shares as cb "
                 "FROM paper_trades WHERE status='OPEN'"
             ).fetchall()
-        cfg_row = c.execute(
-            "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades "
-            "FROM account_config WHERE id=1"
-        ).fetchone()
         today_row = c.execute("""
             SELECT ROUND(SUM(COALESCE(pnl_dollar,0)),2) as today_pnl
             FROM paper_trades
             WHERE status='CLOSED' AND date(closed_at) = date('now')
         """).fetchone()
 
-    budget        = float(cfg_row["total_budget"]) if cfg_row else 50000.0
-    max_trade_pct = float(cfg_row["max_trade_pct"]) if cfg_row else 5.0
-    max_alloc_pct = float(cfg_row["max_allocated_pct"]) if cfg_row else 40.0
-    max_open      = int(cfg_row["max_open_trades"]) if cfg_row else 10
+    from agent.config_manager import config as _cfg
+    budget        = float(_cfg.get("paper.budget",            50000.0))
+    max_trade_pct = float(_cfg.get("paper.max_trade_pct",     5.0))
+    max_alloc_pct = float(_cfg.get("paper.max_allocated_pct", 40.0))
+    max_open      = int(_cfg.get("paper.max_open_trades",     10))
 
     dollars      = [float(r["pnl_dollar"]) for r in closed]
     realized_pnl = round(sum(dollars), 2) if dollars else 0.0
@@ -1634,43 +1631,23 @@ def update_account_config(
     max_open_trades:   int   | None = None,
 ) -> dict:
     """Update account configuration. Returns new config."""
-    from datetime import datetime, timezone
-    with _lock:
-        with _conn() as c:
-            row = c.execute("SELECT * FROM account_config WHERE id=1").fetchone()
-            cur = dict(row) if row else {}
-            new_budget    = total_budget      if total_budget      is not None else cur.get("total_budget", 50000)
-            new_trade_pct = max_trade_pct     if max_trade_pct     is not None else cur.get("max_trade_pct", 5.0)
-            new_alloc_pct = max_allocated_pct if max_allocated_pct is not None else cur.get("max_allocated_pct", 40.0)
-            new_max_open  = max_open_trades   if max_open_trades   is not None else cur.get("max_open_trades", 10)
-            ts = datetime.now(timezone.utc).isoformat()
-            vals = (new_budget, new_trade_pct, new_alloc_pct, new_max_open, ts)
-            from agent.db import using_postgres
-            if using_postgres():
-                c.execute("""
-                    INSERT INTO account_config
-                        (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
-                    VALUES (1, ?, ?, ?, ?, ?)
-                    ON CONFLICT (id) DO UPDATE SET
-                        total_budget      = EXCLUDED.total_budget,
-                        max_trade_pct     = EXCLUDED.max_trade_pct,
-                        max_allocated_pct = EXCLUDED.max_allocated_pct,
-                        max_open_trades   = EXCLUDED.max_open_trades,
-                        updated_at        = EXCLUDED.updated_at
-                """, vals)
-            else:
-                c.execute("""
-                    INSERT OR REPLACE INTO account_config
-                        (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
-                    VALUES (1, ?, ?, ?, ?, ?)
-                """, vals)
-            c.commit()
-    return {
-        "total_budget":      new_budget,
-        "max_trade_pct":     new_trade_pct,
-        "max_allocated_pct": new_alloc_pct,
-        "max_open_trades":   new_max_open,
-    }
+    from agent.config_manager import config as _cfg
+    cur_budget    = _cfg.get("paper.budget",            50000.0)
+    cur_trade_pct = _cfg.get("paper.max_trade_pct",     5.0)
+    cur_alloc_pct = _cfg.get("paper.max_allocated_pct", 40.0)
+    cur_max_open  = _cfg.get("paper.max_open_trades",   10)
+    new_budget    = float(total_budget)      if total_budget      is not None else float(cur_budget)
+    new_trade_pct = float(max_trade_pct)     if max_trade_pct     is not None else float(cur_trade_pct)
+    new_alloc_pct = float(max_allocated_pct) if max_allocated_pct is not None else float(cur_alloc_pct)
+    new_max_open  = int(max_open_trades)     if max_open_trades   is not None else int(cur_max_open)
+    _cfg.set_many({
+        "paper.budget": new_budget,
+        "paper.max_trade_pct": new_trade_pct,
+        "paper.max_allocated_pct": new_alloc_pct,
+        "paper.max_open_trades": new_max_open,
+    }, updated_by="dashboard")
+    return {"total_budget": new_budget, "max_trade_pct": new_trade_pct,
+            "max_allocated_pct": new_alloc_pct, "max_open_trades": new_max_open}
 
 
 def get_equity_curve(days: int = 30) -> list[dict]:
