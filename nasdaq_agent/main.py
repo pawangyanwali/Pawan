@@ -825,6 +825,10 @@ def _on_signals(signals: list[StockSignal]) -> None:
                 "last":       s.price,
                 "open":       getattr(s, "open_price", 0) or 0,
                 "pct_change": getattr(s, "change_pct",  0) or 0,
+                "updated_at":  time.time(),
+                "source": "SCANNER_SNAPSHOT",
+                "source_status": "SCAN_SNAPSHOT",
+                "is_live": False,
             }
             for s in signals
             if s.price > 0
@@ -919,6 +923,10 @@ def _on_valkey_scan(snap: dict) -> None:
                     "last":       s.get("price", 0),
                     "open":       s.get("open_price", 0) or 0,
                     "pct_change": s.get("change_pct", 0) or 0,
+                    "updated_at":  time.time(),
+                    "source": "SCANNER_SNAPSHOT",
+                    "source_status": "SCAN_SNAPSHOT",
+                    "is_live": False,
                 }
                 for s in sigs_dicts
                 if (s.get("price") or 0) > 0
@@ -1497,6 +1505,52 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
             "error":     rds_error,
         },
         "containers": _container_health(vk.get("connected", False)),
+    }
+
+
+@app.get("/api/runtime-health")
+async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
+    """
+    Operator-facing runtime SLA snapshot.
+
+    /api/services answers "are processes connected?".  This endpoint answers
+    "is the trading dashboard safe to trust right now?" with quote-source and
+    freshness percentages across the whole Valkey price bus.
+    """
+    from agent.valkey_client import health_status as vk_health, price_bus_health
+
+    vk = vk_health()
+    try:
+        session = get_market_session()
+    except Exception:
+        session = "CLOSED"
+
+    price_2s = price_bus_health(max_age_s=2.0)
+    price_5s = price_bus_health(max_age_s=5.0)
+    sigs, last_scan, from_cache = _current_signal_snapshot()
+    scan_age_s = None
+    try:
+        from agent.service_state import get_age_s as _ss_age
+        scan_age_s = _ss_age("scan:latest")
+    except Exception:
+        pass
+
+    return {
+        "session": session,
+        "prices": {
+            "sla_2s": price_2s,
+            "health_5s": price_5s,
+            "active_session": session != "CLOSED",
+            "trusted_live": session != "CLOSED" and price_2s.get("status") == "LIVE",
+        },
+        "scanner": {
+            "signals": len(sigs),
+            "last_scan": last_scan,
+            "scan_age_s": scan_age_s,
+            "from_cache": from_cache,
+        },
+        "containers": _container_health(vk.get("connected", False)),
+        "valkey": vk,
     }
 
 

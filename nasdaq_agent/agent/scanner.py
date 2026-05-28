@@ -8,6 +8,7 @@ per minute for history, well within the 90 req/min Schwab rate limit.
 """
 
 import logging
+import os
 import time
 import threading
 from dataclasses import dataclass, field, asdict
@@ -95,6 +96,16 @@ except ImportError:
     _ALE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+def _scanner_training_enabled() -> bool:
+    """
+    Heavy model training must not compete with the scanner in production.
+
+    The dedicated learner containers own retraining.  This flag exists only for
+    local/legacy monolith runs that intentionally want scanner-side training.
+    """
+    return os.getenv("NASDAQ_SCANNER_TRAINING_ENABLED", "0").lower() in ("1", "true", "yes")
 
 # Per-signal consecutive-fire counter for entry_window_bars staleness detection.
 # Keyed by "TICKER:ALGO_NAME". Incremented each cycle the signal fires; deleted
@@ -1806,10 +1817,12 @@ class Scanner:
             self._second_scan_done.set()
         logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(active_tickers)} active (universe: {len(NASDAQ_TICKERS)})")
 
-        # ML feedback: retrain if enough new backtest outcomes have accumulated
-        maybe_trigger_feedback_retrain(active_tickers)
+        # ML feedback/retraining is owned by learner services in production.
+        # Keeping this out of the scanner protects price freshness and scan SLA.
+        if _scanner_training_enabled():
+            maybe_trigger_feedback_retrain(active_tickers)
 
-        if self._should_retrain():
+        if _scanner_training_enabled() and self._should_retrain():
             logger.info(f"Scheduled ML retrain launching ({len(TRAINING_TICKERS)} Tier-1 tickers)…")
             self._last_retrain       = time.time()
             self._last_deep_finetune = time.time()   # full retrain counts as fine-tune too
@@ -1834,7 +1847,7 @@ class Scanner:
                 target=_scheduled_retrain, daemon=True, name="ml-retrain-scheduled"
             ).start()
 
-        elif self._should_finetune_deep():
+        elif _scanner_training_enabled() and self._should_finetune_deep():
             # Hourly Deep BiLSTM fine-tune — uses cached 15-min data, no API calls.
             # Runs in a daemon thread so it doesn't block the next scan cycle.
             def _finetune():
@@ -2103,9 +2116,11 @@ class Scanner:
         bt_init_db()
         ah_init_db()
 
-        # Thread 1: ML training (waits for first scan to warm cache)
-        ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
-        ml_thread.start()
+        if _scanner_training_enabled():
+            ml_thread = threading.Thread(target=self._train_ml_background, daemon=True)
+            ml_thread.start()
+        else:
+            logger.info("Scanner-side ML training disabled; learner services own retraining.")
 
         # Thread 2: Scan loop — polling with streaming-first data (Tier 1+2)
         # fetch_batch_realtime() already uses streaming candles when the

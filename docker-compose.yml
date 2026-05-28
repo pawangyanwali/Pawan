@@ -103,6 +103,9 @@ services:
       NASDAQ_SCHEDULER_ENABLED:    "0"
       SCHWAB_TOKEN_DIR:            "/app/tokens"
       LOG_DIR:                     "/app/logs"
+      NASDAQ_WS_STANDDOWN_FRESH_PCT: "0.95"
+      MD_HEALTH_MAX_PRICE_AGE_S:   "5"
+      MD_HEALTH_MIN_FRESH_PCT:     "90"
     command: ["python", "-m", "services.market_data_service"]
     healthcheck:
       # Three-tier check:
@@ -129,6 +132,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "0"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      NASDAQ_SCANNER_TRAINING_ENABLED: "0"
       SCHWAB_TOKEN_DIR:            "/app/tokens"
       LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.scanner_service"]
@@ -221,4 +225,28 @@ services:
       start_period: 30s
     mem_limit: 256m
     cpus: "0.1"
+    pids_limit: 64
+
+  # Lightweight self-healing loop. Docker restart policies restart crashed
+  # processes; this restarts containers that become unhealthy or remain stopped.
+  watchdog:
+    <<: *common
+    environment:
+      NASDAQ_SCANNER_ENABLED:      "0"
+      NASDAQ_MARKET_DATA_ENABLED:  "0"
+      NASDAQ_LEARNER_ENABLED:      "0"
+      NASDAQ_SCHEDULER_ENABLED:    "0"
+      LOG_DIR:                     "/app/logs"
+      WATCHDOG_INTERVAL_S:         "30"
+      WATCHDOG_UNHEALTHY_STRIKES:  "2"
+      WATCHDOG_SERVICES:           "web-api,market-data,scanner,learner,scheduler,context-intel"
+    command: ["python", "-m", "services.watchdog_service"]
+    volumes:
+      - /opt/nasdaq-agent/nasdaq_agent/data:/app/data
+      - /opt/nasdaq-agent/tokens:/app/tokens
+      - /opt/nasdaq-agent/logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: always
+    mem_limit: 128m
+    cpus: "0.05"
     pids_limit: 64
