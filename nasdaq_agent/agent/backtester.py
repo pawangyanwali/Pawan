@@ -34,7 +34,6 @@ from agent.db import get_conn
 logger = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-_DB_PATH      = Path(__file__).parent.parent / "data" / "live_backtest.db"
 _PERSIST_PATH = Path(__file__).parent.parent / "data" / "backtest_report.json"
 
 # ── Walk-forward parameters ────────────────────────────────────────────────────

@@ -80,7 +80,6 @@ MAX_STUCK_CYCLES  = 4      # consecutive max-threshold trade updates before anti
 _TRADE_SOURCES = {"backtest", "paper", "weekend_walk_forward"}
 _ENFORCEMENT_MODE = os.getenv("ADAPTIVE_FILTER_ENFORCEMENT_MODE", "observe").lower()
 
-_FILTER_PATH = Path(__file__).parent.parent / "data" / "adaptive_filter.json"
 _lock = threading.Lock()
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -149,29 +148,6 @@ def _save_to_db(snapshot: dict) -> None:
 
 def _load():
     global _state
-    try:
-        if _FILTER_PATH.exists():
-            with open(_FILTER_PATH) as f:
-                saved = json.load(f)
-            with _lock:
-                _state.update(saved)
-                if _state["dynamic_threshold"] > MAX_THRESHOLD:
-                    _state["dynamic_threshold"] = DEFAULT_THRESHOLD
-                    logger.info(
-                        f"[AdaptiveFilter] Reset persisted threshold to DEFAULT "
-                        f"{DEFAULT_THRESHOLD}% (was above MAX {MAX_THRESHOLD}%)"
-                    )
-            logger.info(
-                f"[AdaptiveFilter] Loaded — threshold={_state['dynamic_threshold']:.1f}%  "
-                f"blocked={len(_state['blocked_contexts'])}  "
-                f"trade_WR={_state['current_win_rate']*100:.1f}%  "
-                f"obs_WR={_state.get('observation_win_rate', 0)*100:.1f}%"
-            )
-            return
-    except Exception as e:
-        logger.warning(f"[AdaptiveFilter] Could not load local state: {e}")
-
-    # Local file missing (fresh deployment) — try PostgreSQL backup
     saved = _load_from_db()
     if saved:
         with _lock:
@@ -187,12 +163,8 @@ def _load():
 
 def _save():
     try:
-        _FILTER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with _lock:
             snapshot = dict(_state)
-        with open(_FILTER_PATH, "w") as f:
-            json.dump(snapshot, f, indent=2)
-        # Mirror to PostgreSQL so state survives fresh deployments
         _save_to_db(snapshot)
     except Exception as e:
         logger.warning(f"[AdaptiveFilter] Could not save state: {e}")

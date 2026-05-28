@@ -38,6 +38,37 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = Path(__file__).parent.parent / "data"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Shared PostgreSQL key-value helpers ────────────────────────────────────────
+
+def _kv_load(key: str):
+    """Load a JSON blob from system_kv by key. Returns None on miss or error."""
+    try:
+        from agent.db import get_conn
+        with get_conn() as c:
+            row = c.execute(
+                "SELECT value FROM system_kv WHERE key = %s", (key,)
+            ).fetchone()
+        if row:
+            return json.loads(row["value"])
+    except Exception as exc:
+        logger.debug("[ALE] _kv_load(%s) error: %s", key, exc)
+    return None
+
+
+def _kv_save(key: str, data) -> None:
+    """Upsert a JSON blob into system_kv."""
+    try:
+        from agent.db import get_conn
+        with get_conn() as c:
+            c.execute("""
+                INSERT INTO system_kv (key, value, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value, updated_at = NOW()
+            """, (key, json.dumps(data)))
+    except Exception as exc:
+        logger.debug("[ALE] _kv_save(%s) error: %s", key, exc)
+
 # ── 1. ParameterControlRegistry ───────────────────────────────────────────────
 
 # Algo → family mapping
@@ -104,55 +135,65 @@ _PARAM_SPEC: dict[str, dict] = {
 }
 
 
+_ALGO_PARAMS_DDL = """
+CREATE TABLE IF NOT EXISTS algo_params (
+    family              TEXT NOT NULL,
+    param               TEXT NOT NULL,
+    current_val         DOUBLE PRECISION NOT NULL,
+    previous_val        DOUBLE PRECISION NOT NULL,
+    rollback_val        DOUBLE PRECISION NOT NULL,
+    last_updated_cycle  INTEGER NOT NULL DEFAULT 0,
+    last_reason         TEXT NOT NULL DEFAULT '',
+    updated_at          TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (family, param)
+)
+"""
+
 _TUNE_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS param_tune_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    family     TEXT NOT NULL,
-    param      TEXT NOT NULL,
-    old_val    REAL NOT NULL,
-    new_val    REAL NOT NULL,
-    reason     TEXT NOT NULL,
-    source     TEXT NOT NULL DEFAULT 'auto',
-    tuned_at   TEXT NOT NULL
+    id       SERIAL PRIMARY KEY,
+    family   TEXT NOT NULL,
+    param    TEXT NOT NULL,
+    old_val  DOUBLE PRECISION NOT NULL,
+    new_val  DOUBLE PRECISION NOT NULL,
+    reason   TEXT NOT NULL,
+    source   TEXT NOT NULL DEFAULT 'auto',
+    tuned_at TIMESTAMPTZ DEFAULT NOW()
 )
 """
 
 
 class ParameterControlRegistry:
     """
-    Persists current tuned parameters per algo-family to data/algo_params.json.
+    Persists current tuned parameters per algo-family to PostgreSQL algo_params table.
     Enforces bounds, cooldown periods, and directional-only updates.
     All parameter changes are also written to param_tune_log for audit history.
     """
-
-    _PATH = _DATA_DIR / "algo_params.json"
 
     def __init__(self):
         self._lock = threading.Lock()
         # Structure: {family: {param: {current, previous, rollback, last_updated_cycle, last_reason}}}
         self._state: dict[str, dict] = {}
         self._load_defaults()
-        self._ensure_tune_log_table()
+        self._ensure_tables()
 
-    def _ensure_tune_log_table(self) -> None:
+    def _ensure_tables(self) -> None:
         try:
             from agent.db import get_conn
-            _db = Path(__file__).parent.parent / "data" / "live_backtest.db"
-            with get_conn(_db) as c:
+            with get_conn() as c:
+                c.execute(_ALGO_PARAMS_DDL)
                 c.execute(_TUNE_LOG_DDL)
         except Exception as exc:
-            logger.debug("[ParamRegistry] _ensure_tune_log_table: %s", exc)
+            logger.debug("[ParamRegistry] _ensure_tables: %s", exc)
 
     def _log_tune(self, family: str, param: str, old_val: float, new_val: float,
                   reason: str, source: str = "auto") -> None:
         try:
             from agent.db import get_conn
-            _db = Path(__file__).parent.parent / "data" / "live_backtest.db"
-            with get_conn(_db) as c:
+            with get_conn() as c:
                 c.execute(
-                    "INSERT INTO param_tune_log (family, param, old_val, new_val, reason, source, tuned_at) VALUES (?,?,?,?,?,?,?)",
-                    (family, param, round(old_val, 6), round(new_val, 6), reason, source,
-                     datetime.now(timezone.utc).isoformat()),
+                    "INSERT INTO param_tune_log (family, param, old_val, new_val, reason, source, tuned_at) VALUES (%s,%s,%s,%s,%s,%s,NOW())",
+                    (family, param, round(old_val, 6), round(new_val, 6), reason, source),
                 )
         except Exception as exc:
             logger.debug("[ParamRegistry] _log_tune error: %s", exc)
@@ -171,25 +212,52 @@ class ParameterControlRegistry:
 
     def load(self) -> None:
         try:
-            if self._PATH.exists():
-                raw = json.loads(self._PATH.read_text())
-                with self._lock:
-                    for family, params in raw.items():
-                        if family in self._state:
-                            for param, vals in params.items():
-                                if param in self._state[family]:
-                                    self._state[family][param].update(vals)
+            from agent.db import get_conn
+            with get_conn() as c:
+                rows = c.execute("SELECT * FROM algo_params").fetchall()
+            with self._lock:
+                for row in rows:
+                    family, param = row["family"], row["param"]
+                    if family in self._state and param in self._state[family]:
+                        self._state[family][param].update({
+                            "current":            float(row["current_val"]),
+                            "previous":           float(row["previous_val"]),
+                            "rollback":           float(row["rollback_val"]),
+                            "last_updated_cycle": int(row["last_updated_cycle"]),
+                            "last_reason":        row["last_reason"] or "",
+                        })
+            logger.info("[ParamRegistry] Loaded %d param rows from algo_params", len(rows))
         except Exception as exc:
-            logger.warning(f"[ParamRegistry] load error: {exc}")
+            logger.warning("[ParamRegistry] load error: %s", exc)
 
     def save(self) -> None:
         try:
             with self._lock:
-                data = {f: {p: dict(v) for p, v in params.items()}
-                        for f, params in self._state.items()}
-            self._PATH.write_text(json.dumps(data, indent=2))
+                rows = [
+                    (fam, par,
+                     float(v["current"]), float(v["previous"]), float(v["rollback"]),
+                     int(v["last_updated_cycle"]), v.get("last_reason", ""))
+                    for fam, params in self._state.items()
+                    for par, v in params.items()
+                ]
+            from agent.db import get_conn
+            with get_conn() as c:
+                for row in rows:
+                    c.execute("""
+                        INSERT INTO algo_params
+                            (family, param, current_val, previous_val, rollback_val,
+                             last_updated_cycle, last_reason, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+                        ON CONFLICT (family, param) DO UPDATE SET
+                            current_val        = EXCLUDED.current_val,
+                            previous_val       = EXCLUDED.previous_val,
+                            rollback_val       = EXCLUDED.rollback_val,
+                            last_updated_cycle = EXCLUDED.last_updated_cycle,
+                            last_reason        = EXCLUDED.last_reason,
+                            updated_at         = NOW()
+                    """, row)
         except Exception as exc:
-            logger.warning(f"[ParamRegistry] save error: {exc}")
+            logger.warning("[ParamRegistry] save error: %s", exc)
 
     def get(self, family: str, param: str) -> float:
         try:
@@ -296,19 +364,18 @@ class ParameterControlRegistry:
         return result
 
     def get_tune_history(self, family: str | None = None, limit: int = 100) -> list[dict]:
-        """Return recent param tuning history from the DB log."""
+        """Return recent param tuning history from param_tune_log."""
         try:
             from agent.db import get_conn
-            _db = Path(__file__).parent.parent / "data" / "live_backtest.db"
-            with get_conn(_db) as c:
+            with get_conn() as c:
                 if family:
                     rows = c.execute(
-                        "SELECT * FROM param_tune_log WHERE family=? ORDER BY id DESC LIMIT ?",
+                        "SELECT * FROM param_tune_log WHERE family=%s ORDER BY id DESC LIMIT %s",
                         (family, limit),
                     ).fetchall()
                 else:
                     rows = c.execute(
-                        "SELECT * FROM param_tune_log ORDER BY id DESC LIMIT ?",
+                        "SELECT * FROM param_tune_log ORDER BY id DESC LIMIT %s",
                         (limit,),
                     ).fetchall()
             return [dict(r) for r in rows]
@@ -404,10 +471,10 @@ _LOSS_CAUSES = [
 class LossAnalyzer:
     """
     Identifies root causes of losses and tracks per-algo EWMA pattern rates.
-    Persisted to data/loss_patterns.json.
+    Persisted to PostgreSQL system_kv.
     """
 
-    _PATH = _DATA_DIR / "loss_patterns.json"
+    _KV_KEY = "ale_loss_analyzer"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -416,20 +483,20 @@ class LossAnalyzer:
 
     def load(self) -> None:
         try:
-            if self._PATH.exists():
-                raw = json.loads(self._PATH.read_text())
+            raw = _kv_load(self._KV_KEY)
+            if raw is not None:
                 with self._lock:
                     self._patterns = raw
         except Exception as exc:
-            logger.warning(f"[LossAnalyzer] load error: {exc}")
+            logger.warning("[LossAnalyzer] load error: %s", exc)
 
     def save(self) -> None:
         try:
             with self._lock:
                 data = dict(self._patterns)
-            self._PATH.write_text(json.dumps(data, indent=2))
+            _kv_save(self._KV_KEY, data)
         except Exception as exc:
-            logger.warning(f"[LossAnalyzer] save error: {exc}")
+            logger.warning("[LossAnalyzer] save error: %s", exc)
 
     def analyze(self, signal_row: dict, price_path_rows: list[dict]) -> dict:
         """
@@ -525,10 +592,10 @@ class LossAnalyzer:
 class WinReinforcer:
     """
     Tracks wins per algo+context and computes weight multipliers.
-    Persisted to data/win_patterns.json.
+    Persisted to PostgreSQL system_kv.
     """
 
-    _PATH   = _DATA_DIR / "win_patterns.json"
+    _KV_KEY   = "ale_win_reinforcer"
     _MIN_WINS = 15
 
     def __init__(self):
@@ -538,20 +605,21 @@ class WinReinforcer:
 
     def load(self) -> None:
         try:
-            if self._PATH.exists():
+            raw = _kv_load(self._KV_KEY)
+            if raw is not None:
                 with self._lock:
-                    self._wins = json.loads(self._PATH.read_text())
+                    self._wins = raw
         except Exception as exc:
-            logger.warning(f"[WinReinforcer] load error: {exc}")
+            logger.warning("[WinReinforcer] load error: %s", exc)
 
     def save(self) -> None:
         try:
             with self._lock:
                 data = {a: {k: dict(v) for k, v in ctx.items()}
                         for a, ctx in self._wins.items()}
-            self._PATH.write_text(json.dumps(data, indent=2))
+            _kv_save(self._KV_KEY, data)
         except Exception as exc:
-            logger.warning(f"[WinReinforcer] save error: {exc}")
+            logger.warning("[WinReinforcer] save error: %s", exc)
 
     def record_win(self, algo_name: str, context_key: str, ewma_alpha: float = 0.15) -> None:
         with self._lock:
@@ -580,10 +648,10 @@ class WinReinforcer:
 
 class AlgoSelector:
     """
-    UCB-based algo weighting. Persisted to data/algo_selector.json.
+    UCB-based algo weighting. Persisted to PostgreSQL system_kv.
     """
 
-    _PATH = _DATA_DIR / "algo_selector.json"
+    _KV_KEY = "ale_algo_selector"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -592,20 +660,21 @@ class AlgoSelector:
 
     def load(self) -> None:
         try:
-            if self._PATH.exists():
+            raw = _kv_load(self._KV_KEY)
+            if raw is not None:
                 with self._lock:
-                    self._state = json.loads(self._PATH.read_text())
+                    self._state = raw
         except Exception as exc:
-            logger.warning(f"[AlgoSelector] load error: {exc}")
+            logger.warning("[AlgoSelector] load error: %s", exc)
 
     def save(self) -> None:
         try:
             with self._lock:
                 data = {k: {a: dict(v) for a, v in algos.items()}
                         for k, algos in self._state.items()}
-            self._PATH.write_text(json.dumps(data, indent=2))
+            _kv_save(self._KV_KEY, data)
         except Exception as exc:
-            logger.warning(f"[AlgoSelector] save error: {exc}")
+            logger.warning("[AlgoSelector] save error: %s", exc)
 
     def record_outcome(self, algo_name: str, context_key: str, won: bool,
                        ewma_alpha: float = 0.20) -> None:
@@ -821,9 +890,7 @@ class CounterfactualSimulator:
         """
         try:
             from agent.db import get_conn
-            from pathlib import Path
-            _db = Path(__file__).parent.parent / "data" / "live_backtest.db"
-            with get_conn(_db) as c:
+            with get_conn() as c:
                 rows = c.execute("""
                     SELECT status FROM bt_signals
                     WHERE is_counterfactual=1
@@ -863,10 +930,10 @@ class CounterfactualSimulator:
 class ModelVersionRegistry:
     """
     Champion/challenger pattern for model versioning.
-    Persisted to data/model_registry.json.
+    Persisted to PostgreSQL system_kv.
     """
 
-    _PATH = _DATA_DIR / "model_registry.json"
+    _KV_KEY = "ale_model_registry"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -878,19 +945,20 @@ class ModelVersionRegistry:
 
     def load(self) -> None:
         try:
-            if self._PATH.exists():
+            raw = _kv_load(self._KV_KEY)
+            if raw is not None:
                 with self._lock:
-                    self._data = json.loads(self._PATH.read_text())
+                    self._data = raw
         except Exception as exc:
-            logger.warning(f"[ModelRegistry] load error: {exc}")
+            logger.warning("[ModelRegistry] load error: %s", exc)
 
     def save(self) -> None:
         try:
             with self._lock:
                 data = dict(self._data)
-            self._PATH.write_text(json.dumps(data, indent=2))
+            _kv_save(self._KV_KEY, data)
         except Exception as exc:
-            logger.warning(f"[ModelRegistry] save error: {exc}")
+            logger.warning("[ModelRegistry] save error: %s", exc)
 
     def register_version(self, version_id: str, metrics_dict: dict) -> None:
         """Create a new challenger entry."""

@@ -22,7 +22,6 @@ from agent.db import get_conn
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parent.parent / "data" / "paper_trades.db"
 _lock    = threading.Lock()
 
 _PAPER_MIN_CONF          = 25.0  # floor confidence for paper trade data collection
@@ -36,10 +35,10 @@ def _max_concurrent() -> int:
 
 
 def _conn():
-    return get_conn(_DB_PATH)
+    return get_conn()
 
 def _conn_ro():
-    return get_conn(_DB_PATH, read_only=True)
+    return get_conn(read_only=True)
 
 
 # ── Trade-event callbacks ─────────────────────────────────────────────────────

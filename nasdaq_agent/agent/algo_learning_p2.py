@@ -65,8 +65,7 @@ def _query_p2_outcomes(days: int = 60) -> pd.DataFrame:
     """
     try:
         from agent.db import get_conn
-        _db = _DATA_DIR / "live_backtest.db"
-        with get_conn(_db) as c:
+        with get_conn() as c:
             rows = c.execute("""
                 SELECT ticker, direction, confidence, session, regime,
                        vwap_event, rsi_zone, rsi_value, entry_type,

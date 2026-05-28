@@ -40,7 +40,6 @@ from agent.db import get_conn
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH  = Path(__file__).parent.parent / "data" / "live_backtest.db"
 _lock     = threading.Lock()
 MAX_BARS  = 40     # TIMEOUT after N bars if not resolved (40 scan-cycles ≈ 40 min at 60s intervals)
 
@@ -54,7 +53,7 @@ MIN_MOVE_TO_RECORD = 0.0   # record all signals (no minimum)
 # ── Database setup ─────────────────────────────────────────────────────────────
 
 def _conn():
-    return get_conn(_DB_PATH)
+    return get_conn()
 
 
 def init_db() -> None:

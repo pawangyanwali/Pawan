@@ -33,7 +33,6 @@ from agent.db import get_conn
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parent.parent / "data" / "signal_history.db"
 _lock    = threading.Lock()
 
 SHORT_WIN_PCT = 0.35   # price move % needed for a short-term win at next scan
@@ -41,11 +40,11 @@ SLIPPAGE_PCT  = 0.05   # realistic bid-ask + fill slippage per side
 
 
 def _conn():
-    return get_conn(_DB_PATH)
+    return get_conn()
 
 
 def _conn_ro():
-    return get_conn(_DB_PATH, read_only=True)
+    return get_conn(read_only=True)
 
 
 def init_db() -> None:
