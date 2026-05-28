@@ -171,9 +171,7 @@ services:
       - tokens:/app/data/tokens   # Schwab OAuth token files
       - logs:/app/logs
     environment:
-      <<: [*valkey-env, *schwab-env, *log-env]
-      # PG used only for service_state heartbeat writes — still need credentials.
-      <<: *db-env
+      <<: [*db-env, *valkey-env, *schwab-env, *log-env]
       NASDAQ_MD_STARTUP_DELAY_S: ${NASDAQ_MD_STARTUP_DELAY_S:-10}
     deploy:
       resources:
