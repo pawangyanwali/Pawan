@@ -612,6 +612,10 @@ def analyse_ticker(
         # changes it automatically, invalidating the cache without TTL tricks.
         _bar_ts_ns = int(df_ind.index[-1].value)
         _ml_hit = _ml_pred_cache_get(ticker, _bar_ts_ns)
+        try:
+            _session_name_for_ml = str(get_session_info().get("session", "")).upper()
+        except Exception:
+            _session_name_for_ml = ""
         if _ml_hit is not None:
             (ml_scalp, ml_daily_p, ml_reversal_p,
              ml_ensemble_p, ml_agree, ml_swing_p, ml_deep_p) = _ml_hit
@@ -621,7 +625,11 @@ def analyse_ticker(
             ml_reversal_p   = predict_reversal(ticker, _df_ml)
             ml_ensemble_p, ml_agree = predict_ensemble(ticker, _df_ml)
             ml_swing_p      = predict_swing(ticker, _df_15m) if _has_15m else 0.5
-            ml_deep_p       = predict_deep(ticker, _df_15m)  if _has_15m else 0.5
+            ml_deep_p       = (
+                predict_deep(ticker, _df_15m)
+                if _has_15m and _session_name_for_ml != "CLOSED"
+                else 0.5
+            )
             _ml_pred_cache_put(ticker, _bar_ts_ns, ml_scalp, ml_daily_p,
                                ml_reversal_p, ml_ensemble_p, ml_agree,
                                ml_swing_p, ml_deep_p)

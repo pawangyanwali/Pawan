@@ -37,6 +37,14 @@ def test_scanner_closed_session_uses_5min_cache_as_proxy_when_1min_unavailable()
     assert "Closed-session scan using 5min cached bars as a 1min proxy" in src
 
 
+def test_scanner_skips_deep_inference_while_market_closed():
+    src = _src("agent/scanner.py")
+
+    assert '_session_name_for_ml = str(get_session_info().get("session", "")).upper()' in src
+    assert 'if _has_15m and _session_name_for_ml != "CLOSED"' in src
+    assert "else 0.5" in src
+
+
 def test_data_fetcher_closed_session_stale_cache_fallback_is_scoped():
     src = _src("agent/data_fetcher.py")
 
