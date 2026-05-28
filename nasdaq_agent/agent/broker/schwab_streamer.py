@@ -30,8 +30,9 @@ import os
 import threading
 import time
 from collections import deque
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -65,6 +66,8 @@ _subscribed_tickers: list[str] = []
 
 # Prices accumulated from WS stream — flushed to Valkey every 500 ms
 _pending_ws_prices: dict[str, dict] = {}
+_open_backfill_lock = threading.Lock()
+_open_backfill_started: set[str] = set()
 
 # ── MDPoller lifecycle (separate from WS streamer) ────────────────────────────
 _mdpoller_thread:    Optional[threading.Thread] = None
@@ -322,6 +325,111 @@ def _publish_candles_to_valkey(bars: list[tuple[str, dict]]) -> None:
         pipe.execute()
     except Exception:
         pass  # non-fatal — scanner falls back to in-process cache or REST
+
+
+def _extract_today_open_from_df(df) -> float:
+    """Return today's regular-session open from a Schwab 1-min history frame."""
+    try:
+        if df is None or df.empty or "Open" not in df.columns:
+            return 0.0
+        tz = ZoneInfo("America/New_York")
+        idx = df.index
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize("UTC")
+        idx = idx.tz_convert(tz)
+        local_df = df.copy()
+        local_df.index = idx
+        today = datetime.now(tz).date()
+        today_df = local_df[local_df.index.date == today]
+        if today_df.empty:
+            return 0.0
+        return float(today_df.iloc[0]["Open"] or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _schedule_open_backfill(tickers: list[str]) -> None:
+    """
+    Backfill missing opens from 1-min price history once per ticker per process.
+
+    Schwab /quotes sometimes omits openPrice for thin/no-print symbols even when
+    LEVELONE streams bid/ask/last. This background path fills the dashboard open
+    column without blocking the 1-second quote poller.
+    """
+    todo = sorted({t for t in tickers if t})
+    if not todo:
+        return
+    with _open_backfill_lock:
+        todo = [t for t in todo if t not in _open_backfill_started]
+        _open_backfill_started.update(todo)
+    if not todo:
+        return
+    threading.Thread(
+        target=_backfill_open_prices,
+        args=(todo,),
+        daemon=True,
+        name=f"open-backfill-{len(todo)}",
+    ).start()
+
+
+def _backfill_open_prices(tickers: list[str]) -> None:
+    try:
+        from agent.broker.schwab_market_data import fetch_price_history_batch_async
+
+        logger.info("[MDPoller] Backfilling missing opens for %d tickers", len(tickers))
+        frames = fetch_price_history_batch_async(
+            tickers,
+            interval="1min",
+            outputsize=390,
+            extended_hours=False,
+            background=True,
+        )
+        bulk: dict[str, dict] = {}
+        with _lock:
+            for sym, df in frames.items():
+                open_price = _extract_today_open_from_df(df)
+                if open_price <= 0:
+                    continue
+                quote = _live_quotes.setdefault(sym, {})
+                quote["open"] = open_price
+                last = float(quote.get("last") or quote.get("mark") or 0)
+                if last <= 0:
+                    continue
+                status = str(quote.get("source_status") or "REST_FALLBACK")
+                source = str(quote.get("source") or "SCHWAB_REST")
+                is_live = bool(quote.get("is_live") or status == "LIVE")
+                bulk[sym] = {
+                    "last":       last,
+                    "mark":       float(quote.get("mark") or last),
+                    "open":       open_price,
+                    "bid":        float(quote.get("bid") or 0),
+                    "ask":        float(quote.get("ask") or 0),
+                    "volume":     float(quote.get("volume") or 0),
+                    "high":       float(quote.get("high") or 0),
+                    "low":        float(quote.get("low") or 0),
+                    "pct_change": float(quote.get("net_pct_change") or 0),
+                    "updated_at": float(quote.get("updated_at") or time.time()),
+                    "source": source,
+                    "source_status": status,
+                    "is_live": is_live,
+                }
+
+        if not bulk:
+            logger.info("[MDPoller] Missing-open backfill found no regular-session opens")
+            return
+        try:
+            from agent.valkey_client import publish_prices as _vk_publish
+            _vk_publish(bulk)
+        except Exception:
+            pass
+        for fn in _bulk_price_callbacks:
+            try:
+                fn(bulk)
+            except Exception:
+                pass
+        logger.info("[MDPoller] Backfilled missing opens for %d tickers", len(bulk))
+    except Exception as exc:
+        logger.debug("[MDPoller] Missing-open backfill failed: %s", exc)
 
 
 def _process_screener(service: str, content: list) -> None:
@@ -584,6 +692,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             return False
         bulk: dict[str, dict] = {}
         upd:  list[tuple[str, dict]] = []
+        need_open_backfill: list[str] = []
         with _lock:
             for sym, q in quotes.items():
                 quote = _live_quotes.setdefault(sym, {})
@@ -614,6 +723,8 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                             "source_status": "LIVE",
                             "is_live": True,
                         }
+                    elif float(quote.get("open") or 0) <= 0 and float(quote.get("last") or quote.get("mark") or 0) > 0:
+                        need_open_backfill.append(sym)
                     continue
                 quote["last"]       = float(q.get("last") or 0)
                 quote["mark"]       = float(q.get("mark") or 0)
@@ -636,6 +747,8 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     _halted.add(sym)
                 else:
                     _halted.discard(sym)
+                if quote["open"] <= 0 and (quote["last"] > 0 or quote["mark"] > 0):
+                    need_open_backfill.append(sym)
                 upd.append((sym, dict(quote)))
                 bulk[sym] = {
                     "last":       quote["last"],
@@ -652,6 +765,8 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     "source_status": "REST_FALLBACK",
                     "is_live": False,
                 }
+
+        _schedule_open_backfill(need_open_backfill)
 
         if not bulk:
             return False

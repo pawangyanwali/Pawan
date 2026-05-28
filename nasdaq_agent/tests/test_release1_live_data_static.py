@@ -77,10 +77,29 @@ def test_streamer_seeds_open_from_rest_without_downgrading_live_ws():
 
     assert '"open":       float(quote.get("open") or 0)' in src
     assert "rest_open = float(q.get(\"open\") or 0)" in src
+    assert "need_open_backfill: list[str] = []" in src
+    assert "_schedule_open_backfill(need_open_backfill)" in src
+    assert "fetch_price_history_batch_async(" in src
+    assert 'interval="1min"' in src
+    assert "background=True" in src
     assert 'quote.get("source_status") == "LIVE"' in src
     assert '"source_status": "LIVE"' in src
     assert "_STICKY_PRICE_FIELDS = (\"open\",)" in valkey
     assert "client.hmget(_HASH, keys)" in valkey
+
+
+def test_streamer_extracts_today_open_from_regular_session_history():
+    import pandas as pd
+    from agent.broker.schwab_streamer import _extract_today_open_from_df
+
+    today = pd.Timestamp.now(tz="America/New_York").normalize()
+    idx = pd.DatetimeIndex([
+        today + pd.Timedelta(hours=9, minutes=30),
+        today + pd.Timedelta(hours=9, minutes=31),
+    ]).tz_convert("UTC")
+    df = pd.DataFrame({"Open": [42.25, 43.0]}, index=idx)
+
+    assert _extract_today_open_from_df(df) == 42.25
 
 
 def test_scanner_side_training_is_disabled_by_default_in_production():
