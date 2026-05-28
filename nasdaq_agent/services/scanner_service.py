@@ -53,9 +53,25 @@ def _on_signals(signals: list) -> None:
     try:
         from agent.market_regime import get_regime
         from agent.market_hours import get_session_info
-        from agent.signal_snapshot import write_latest
+        from agent.signal_snapshot import read_latest, write_latest
 
         sigs_dicts = [s.to_dict() for s in signals]
+        if not sigs_dicts:
+            previous = read_latest() or {}
+            previous_signals = previous.get("signals") or []
+            if previous_signals:
+                _log.warning(
+                    "Scan produced 0 signals; preserving previous dashboard snapshot "
+                    "(%d signals) instead of publishing empty results.",
+                    len(previous_signals),
+                )
+                return
+            _log.warning(
+                "Scan produced 0 signals and no previous dashboard snapshot exists; "
+                "skipping empty publish."
+            )
+            return
+
         write_latest(
             signals       = sigs_dicts,
             regime        = get_regime().to_dict(),

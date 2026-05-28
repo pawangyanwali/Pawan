@@ -1695,6 +1695,25 @@ class Scanner:
             on_ticker_done=lambda sig, n, t: self._notify_ticker(sig, n, _n_total),
         )
 
+        if not results:
+            self.last_scan = datetime.now(timezone.utc).isoformat()
+            self._scan_count += 1
+            if self.signals:
+                logger.warning(
+                    "Scan produced 0/%d active tickers; preserving previous "
+                    "%d in-memory signals instead of clearing the dashboard.",
+                    len(active_tickers),
+                    len(self.signals),
+                )
+                self._notify(self.signals)
+                return list(self.signals)
+            logger.warning(
+                "Scan produced 0/%d active tickers and no previous in-memory "
+                "signals are available; leaving the dashboard snapshot unchanged.",
+                len(active_tickers),
+            )
+            return []
+
         # Attach per-ticker learning scores and compute learning_rank.
         # Fetched once per scan cycle (single DB query for all tickers).
         try:

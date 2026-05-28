@@ -118,6 +118,40 @@ def _sqlite_set(ticker: str, interval: str, df: pd.DataFrame) -> None:
 
 # ── Core batch fetcher ────────────────────────────────────────────────────────
 
+_CLOSED_SESSION_STALE_TTL = 86_400
+
+
+def _is_closed_session() -> bool:
+    try:
+        from agent.market_hours import get_session_info
+        return str(get_session_info().get("session", "")).upper() == "CLOSED"
+    except Exception:
+        return False
+
+
+def _restore_closed_session_cache(
+    tickers: list[str],
+    interval: str,
+    interval_key: str,
+    result: dict[str, pd.DataFrame],
+) -> int:
+    """Use last-known PostgreSQL bars while markets are closed and REST is down."""
+    if not tickers or not _is_closed_session():
+        return 0
+
+    restored = 0
+    for ticker in tickers:
+        if ticker in result:
+            continue
+        df = _sqlite_get(ticker, interval, _CLOSED_SESSION_STALE_TTL)
+        if df is None:
+            continue
+        result[ticker] = df
+        _cache_set(ticker, interval_key, df)
+        restored += 1
+    return restored
+
+
 def fetch_batch_interval(
     tickers:        list,
     interval:       str,
@@ -204,7 +238,26 @@ def fetch_batch_interval(
                 _sqlite_set(ticker, interval, df)
 
     ok = len([t for t in to_fetch if t in result])
-    logger.info(f"[Schwab] {interval_key}: {ok}/{len(to_fetch)} fetched from API")
+    api_ok = ok
+    restored = 0
+    if ok < len(to_fetch):
+        restored = _restore_closed_session_cache(to_fetch, interval, interval_key, result)
+        if restored:
+            logger.warning(
+                "[Schwab] %s: restored %d/%d tickers from PostgreSQL stale cache "
+                "during closed session after REST returned partial/empty data",
+                interval_key,
+                restored,
+                len(to_fetch),
+            )
+            ok += restored
+    if restored:
+        logger.info(
+            f"[Schwab] {interval_key}: {api_ok}/{len(to_fetch)} fetched from API "
+            f"(+{restored} stale-cache fallback)"
+        )
+    else:
+        logger.info(f"[Schwab] {interval_key}: {api_ok}/{len(to_fetch)} fetched from API")
     return result
 
 
@@ -409,7 +462,26 @@ def fetch_batch_realtime(
                     _cache_set(ticker, interval_key, df)
                     if not extended_hours:
                         _sqlite_set(ticker, "1min", df)
-                logger.info(f"[Schwab] 1min: {len(fetched)}/{len(still_miss)} fetched from API")
+                restored = 0
+                if len(fetched) < len(still_miss):
+                    restored = _restore_closed_session_cache(
+                        still_miss, "1min", interval_key, result
+                    )
+                    if restored:
+                        logger.warning(
+                            "[Schwab] 1min: restored %d/%d tickers from "
+                            "PostgreSQL stale cache during closed session "
+                            "after REST returned partial/empty data",
+                            restored,
+                            len(still_miss),
+                        )
+                if restored:
+                    logger.info(
+                        f"[Schwab] 1min: {len(fetched)}/{len(still_miss)} fetched from API "
+                        f"(+{restored} stale-cache fallback)"
+                    )
+                else:
+                    logger.info(f"[Schwab] 1min: {len(fetched)}/{len(still_miss)} fetched from API")
 
     # ── Live price overlay ────────────────────────────────────────────────────
     # Priority 1: in-process _live_quotes (streamer running in this container)
