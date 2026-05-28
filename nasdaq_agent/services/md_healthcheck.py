@@ -38,10 +38,10 @@ def _min_fresh_pct_for_session(session: str) -> float:
     session_key = (session or "CLOSED").upper()
     exact_name = f"MD_HEALTH_MIN_FRESH_PCT_{session_key}"
     if exact_name in os.environ:
-        return _float_env(exact_name, 90.0)
+        return _float_env(exact_name, 80.0)
     if session_key in {"PRE_MARKET", "AFTER_HOURS"}:
         return _float_env("MD_HEALTH_MIN_FRESH_PCT_EXTENDED", 60.0)
-    return _float_env("MD_HEALTH_MIN_FRESH_PCT", 90.0)
+    return _float_env("MD_HEALTH_MIN_FRESH_PCT", 80.0)
 
 
 def main() -> int:

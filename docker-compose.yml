@@ -105,14 +105,14 @@ services:
       LOG_DIR:                     "/app/logs"
       NASDAQ_WS_STANDDOWN_FRESH_PCT: "0.95"
       MD_HEALTH_MAX_PRICE_AGE_S:   "5"
-      MD_HEALTH_MIN_FRESH_PCT:     "90"
+      MD_HEALTH_MIN_FRESH_PCT:     "80"
       MD_HEALTH_MIN_FRESH_PCT_EXTENDED: "60"
     command: ["python", "-m", "services.market_data_service"]
     healthcheck:
       # Three-tier check:
       #   1. Valkey ping (always)
       #   2. scanner:streamer age < 90 s (status-publisher loop alive)
-      #   3. md:prices freshness < 90 s (active sessions only — quotes flowing)
+      #   3. md:prices trusted freshness above restart threshold (active sessions)
       test: ["CMD", "python3", "/app/services/md_healthcheck.py"]
       interval: 30s
       timeout: 10s

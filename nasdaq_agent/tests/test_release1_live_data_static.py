@@ -101,7 +101,8 @@ def test_market_data_healthcheck_uses_price_bus_coverage_thresholds():
     assert "trusted_fresh_pct" in src
     assert "MD_HEALTH_MIN_FRESH_PCT" in src
     assert "MD_HEALTH_MAX_PRICE_AGE_S" in src
-    assert 'MD_HEALTH_MIN_FRESH_PCT:     "90"' in compose
+    assert 'MD_HEALTH_MIN_FRESH_PCT:     "80"' in compose
+    assert 'MD_HEALTH_MIN_FRESH_PCT_EXTENDED: "60"' in compose
 
 
 def test_watchdog_service_restarts_stopped_or_unhealthy_containers():

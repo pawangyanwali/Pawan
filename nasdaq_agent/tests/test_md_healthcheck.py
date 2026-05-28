@@ -5,8 +5,8 @@ def test_regular_session_keeps_strict_default_threshold(monkeypatch):
     monkeypatch.delenv("MD_HEALTH_MIN_FRESH_PCT", raising=False)
     monkeypatch.delenv("MD_HEALTH_MIN_FRESH_PCT_EXTENDED", raising=False)
 
-    assert md_healthcheck._min_fresh_pct_for_session("REGULAR") == 90.0
-    assert md_healthcheck._min_fresh_pct_for_session("STANDARD") == 90.0
+    assert md_healthcheck._min_fresh_pct_for_session("REGULAR") == 80.0
+    assert md_healthcheck._min_fresh_pct_for_session("STANDARD") == 80.0
 
 
 def test_extended_sessions_use_extended_threshold(monkeypatch):
