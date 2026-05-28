@@ -69,6 +69,26 @@ def _kv_save(key: str, data) -> None:
     except Exception as exc:
         logger.debug("[ALE] _kv_save(%s) error: %s", key, exc)
 
+
+def _kv_auto_migrate(json_filename: str, kv_key: str):
+    """
+    One-time self-healing migration: if system_kv has no entry for kv_key,
+    look for the legacy JSON file and load it into system_kv.
+    Called only when _kv_load() returns None (i.e. PostgreSQL has no state yet).
+    Returns the migrated data, or None if file not found.
+    """
+    json_path = _DATA_DIR / json_filename
+    if not json_path.exists():
+        return None
+    try:
+        data = json.loads(json_path.read_text())
+        _kv_save(kv_key, data)
+        logger.info("[ALE] Auto-migrated %s → system_kv[%s]", json_filename, kv_key)
+        return data
+    except Exception as exc:
+        logger.warning("[ALE] Auto-migration %s failed: %s", json_filename, exc)
+        return None
+
 # ── 1. ParameterControlRegistry ───────────────────────────────────────────────
 
 # Algo → family mapping
@@ -215,20 +235,48 @@ class ParameterControlRegistry:
             from agent.db import get_conn
             with get_conn() as c:
                 rows = c.execute("SELECT * FROM algo_params").fetchall()
-            with self._lock:
-                for row in rows:
-                    family, param = row["family"], row["param"]
-                    if family in self._state and param in self._state[family]:
-                        self._state[family][param].update({
-                            "current":            float(row["current_val"]),
-                            "previous":           float(row["previous_val"]),
-                            "rollback":           float(row["rollback_val"]),
-                            "last_updated_cycle": int(row["last_updated_cycle"]),
-                            "last_reason":        row["last_reason"] or "",
-                        })
-            logger.info("[ParamRegistry] Loaded %d param rows from algo_params", len(rows))
+            if rows:
+                with self._lock:
+                    for row in rows:
+                        family, param = row["family"], row["param"]
+                        if family in self._state and param in self._state[family]:
+                            self._state[family][param].update({
+                                "current":            float(row["current_val"]),
+                                "previous":           float(row["previous_val"]),
+                                "rollback":           float(row["rollback_val"]),
+                                "last_updated_cycle": int(row["last_updated_cycle"]),
+                                "last_reason":        row["last_reason"] or "",
+                            })
+                logger.info("[ParamRegistry] Loaded %d param rows from algo_params", len(rows))
+                return
+            # PostgreSQL table is empty — auto-migrate from JSON file if present
+            self._auto_migrate_from_json()
         except Exception as exc:
             logger.warning("[ParamRegistry] load error: %s", exc)
+
+    def _auto_migrate_from_json(self) -> None:
+        """One-time silent migration: read legacy algo_params.json → PostgreSQL."""
+        json_path = _DATA_DIR / "algo_params.json"
+        if not json_path.exists():
+            return
+        try:
+            raw = json.loads(json_path.read_text())
+            with self._lock:
+                for family, params in raw.items():
+                    if family in self._state:
+                        for param, vals in params.items():
+                            if param in self._state[family]:
+                                self._state[family][param].update({
+                                    "current":            float(vals.get("current",  vals.get("current_val",  self._state[family][param]["current"]))),
+                                    "previous":           float(vals.get("previous", vals.get("previous_val", self._state[family][param]["previous"]))),
+                                    "rollback":           float(vals.get("rollback", vals.get("rollback_val", self._state[family][param]["rollback"]))),
+                                    "last_updated_cycle": int(vals.get("last_updated_cycle", 0)),
+                                    "last_reason":        str(vals.get("last_reason", "")),
+                                })
+            self.save()
+            logger.info("[ParamRegistry] Auto-migrated algo_params.json → PostgreSQL")
+        except Exception as exc:
+            logger.warning("[ParamRegistry] JSON auto-migration failed: %s", exc)
 
     def save(self) -> None:
         try:
@@ -474,7 +522,8 @@ class LossAnalyzer:
     Persisted to PostgreSQL system_kv.
     """
 
-    _KV_KEY = "ale_loss_analyzer"
+    _KV_KEY    = "ale_loss_analyzer"
+    _JSON_FILE = "loss_patterns.json"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -483,7 +532,7 @@ class LossAnalyzer:
 
     def load(self) -> None:
         try:
-            raw = _kv_load(self._KV_KEY)
+            raw = _kv_load(self._KV_KEY) or _kv_auto_migrate(self._JSON_FILE, self._KV_KEY)
             if raw is not None:
                 with self._lock:
                     self._patterns = raw
@@ -595,8 +644,9 @@ class WinReinforcer:
     Persisted to PostgreSQL system_kv.
     """
 
-    _KV_KEY   = "ale_win_reinforcer"
-    _MIN_WINS = 15
+    _KV_KEY    = "ale_win_reinforcer"
+    _JSON_FILE = "win_patterns.json"
+    _MIN_WINS  = 15
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -605,7 +655,7 @@ class WinReinforcer:
 
     def load(self) -> None:
         try:
-            raw = _kv_load(self._KV_KEY)
+            raw = _kv_load(self._KV_KEY) or _kv_auto_migrate(self._JSON_FILE, self._KV_KEY)
             if raw is not None:
                 with self._lock:
                     self._wins = raw
@@ -651,7 +701,8 @@ class AlgoSelector:
     UCB-based algo weighting. Persisted to PostgreSQL system_kv.
     """
 
-    _KV_KEY = "ale_algo_selector"
+    _KV_KEY    = "ale_algo_selector"
+    _JSON_FILE = "algo_selector.json"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -660,7 +711,7 @@ class AlgoSelector:
 
     def load(self) -> None:
         try:
-            raw = _kv_load(self._KV_KEY)
+            raw = _kv_load(self._KV_KEY) or _kv_auto_migrate(self._JSON_FILE, self._KV_KEY)
             if raw is not None:
                 with self._lock:
                     self._state = raw
@@ -933,7 +984,8 @@ class ModelVersionRegistry:
     Persisted to PostgreSQL system_kv.
     """
 
-    _KV_KEY = "ale_model_registry"
+    _KV_KEY    = "ale_model_registry"
+    _JSON_FILE = "model_registry.json"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -945,7 +997,7 @@ class ModelVersionRegistry:
 
     def load(self) -> None:
         try:
-            raw = _kv_load(self._KV_KEY)
+            raw = _kv_load(self._KV_KEY) or _kv_auto_migrate(self._JSON_FILE, self._KV_KEY)
             if raw is not None:
                 with self._lock:
                     self._data = raw

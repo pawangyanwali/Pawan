@@ -149,6 +149,21 @@ def _save_to_db(snapshot: dict) -> None:
 def _load():
     global _state
     saved = _load_from_db()
+
+    # Self-healing: if PostgreSQL has no state yet, auto-migrate from legacy JSON file
+    if not saved:
+        _json_path = Path(__file__).parent.parent / "data" / "adaptive_filter.json"
+        if _json_path.exists():
+            try:
+                import json as _json
+                saved = _json.loads(_json_path.read_text())
+                if saved:
+                    _save_to_db(saved)
+                    logger.info("[AdaptiveFilter] Auto-migrated adaptive_filter.json → PostgreSQL")
+            except Exception as _e:
+                logger.debug("[AdaptiveFilter] JSON auto-migration failed: %s", _e)
+                saved = None
+
     if saved:
         with _lock:
             _state.update(saved)
