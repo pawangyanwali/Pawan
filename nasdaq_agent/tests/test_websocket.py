@@ -141,6 +141,34 @@ class TestConnectionManager:
         assert ws.send_text.await_count == 3
 
     @pytest.mark.asyncio
+    async def test_concurrent_sends_to_same_client_are_serialized(self):
+        cm = ConnectionManager()
+        ws = _make_ws()
+        in_flight = 0
+        max_in_flight = 0
+        messages = []
+
+        async def _send(msg):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.01)
+            messages.append(msg)
+            in_flight -= 1
+
+        ws.send_text = _send
+        await cm.connect(ws)
+
+        ok1, ok2 = await asyncio.gather(
+            cm.send_text(ws, '{"type":"a"}', timeout=1.0),
+            cm.send_text(ws, '{"type":"b"}', timeout=1.0),
+        )
+
+        assert ok1 and ok2
+        assert max_in_flight == 1
+        assert sorted(messages) == ['{"type":"a"}', '{"type":"b"}']
+
+    @pytest.mark.asyncio
     async def test_active_count_tracks_connects_and_disconnects(self):
         cm  = ConnectionManager()
         wss = [_make_ws() for _ in range(4)]

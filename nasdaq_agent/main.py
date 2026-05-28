@@ -195,13 +195,38 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     def __init__(self):
         self.active: Set[WebSocket] = set()
+        self._send_locks: dict[WebSocket, asyncio.Lock] = {}
 
     async def connect(self, ws: WebSocket) -> None:
         # ws is already accepted in websocket_endpoint before auth runs
         self.active.add(ws)
+        self._send_locks.setdefault(ws, asyncio.Lock())
 
     def disconnect(self, ws: WebSocket) -> None:
         self.active.discard(ws)
+        self._send_locks.pop(ws, None)
+
+    async def send_text(self, ws: WebSocket, message: str, *, timeout: float = 2.0) -> bool:
+        """
+        Send one frame to a client, serialized per WebSocket.
+
+        Uvicorn's WebSocket transport is not safe for concurrent writes. The
+        dashboard has several producers (prices, scan updates, keepalive), so
+        every outbound frame for a given client must pass through this lock.
+        """
+        lock = self._send_locks.get(ws)
+        if lock is None:
+            return False
+        try:
+            async with lock:
+                if ws not in self.active:
+                    return False
+                await asyncio.wait_for(ws.send_text(message), timeout=timeout)
+                return True
+        except asyncio.TimeoutError:
+            raise
+        except Exception:
+            return False
 
     async def broadcast(self, message: str) -> None:
         # Snapshot first — prevents RuntimeError if a disconnect() fires during await.
@@ -213,8 +238,7 @@ class ConnectionManager:
             try:
                 # 2s timeout: dead clients cleaned up quickly so they don't delay
                 # subsequent broadcasts (keepalive pings, price messages).
-                await asyncio.wait_for(ws.send_text(message), timeout=2.0)
-                return None
+                return None if await self.send_text(ws, message, timeout=2.0) else ws
             except Exception:
                 return ws
 
@@ -225,7 +249,7 @@ class ConnectionManager:
         dead = await asyncio.gather(*[_send(ws) for ws in snapshot])
         for ws in dead:
             if ws is not None:
-                self.active.discard(ws)
+                self.disconnect(ws)
 
 
 manager = ConnectionManager()
@@ -2870,10 +2894,12 @@ async def _ws_keepalive(ws: WebSocket) -> None:
     while True:
         try:
             await asyncio.sleep(_PING_INTERVAL)
-            await asyncio.wait_for(
-                ws.send_json({"type": "ping"}),
+            ok = await asyncio.wait_for(
+                manager.send_text(ws, _dumps({"type": "ping"}), timeout=float(_PING_TIMEOUT)),
                 timeout=float(_PING_TIMEOUT),
             )
+            if not ok:
+                break
         except asyncio.TimeoutError:
             # Event loop was briefly saturated (e.g. scanner broadcast storm).
             # Sleep a SHORT interval so the next ping attempt arrives well within
@@ -2943,7 +2969,7 @@ async def websocket_endpoint(ws: WebSocket):
 
         if live_sigs:
             # Full update so the tab is immediately usable
-            await ws.send_text(_dumps({
+            await manager.send_text(ws, _dumps({
                 "type":          "update",
                 "signals":       live_sigs,
                 "regime":        regime.to_dict(),
@@ -2954,7 +2980,7 @@ async def websocket_endpoint(ws: WebSocket):
         else:
             # No data yet (cold start) — send a status frame so the loading
             # screen can show regime/session info rather than spinning blindly.
-            await ws.send_text(_dumps({
+            await manager.send_text(ws, _dumps({
                 "type":       "scan_status",
                 "scanning":   True,
                 "regime":     regime.to_dict(),
