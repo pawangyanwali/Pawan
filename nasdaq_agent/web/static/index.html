@@ -1881,6 +1881,7 @@ let _lastPriceAt = 0;  // epoch ms of last live price update (prices or tick mes
 let _lastPriceStatus = 'NO_DATA';
 let _lastPriceSource = '';
 let _lastPriceCoverage = { total:0, live:0, fallback:0, snapshot:0 };
+let _priceBusCache = {}; // ticker -> latest observed quote/source for stable header status
 const CLUSTER_MAP = {}; // populated from /api/clusters on load
 let allOpenTrades = {};   // ticker → paper trade row, updated from WS
 let allBreadth = null;
@@ -1975,11 +1976,28 @@ const _WS_WATCHDOG_MS   = 45000;  // reconnect if no server message for 45s
 const _WS_HEARTBEAT_MS  = 20000;  // send heartbeat to server every 20s
 
 function _updatePriceBusState(prices, fallbackStatus='UNKNOWN') {
-  const vals = Object.values(prices || {});
+  const incoming = prices || {};
+  const nowSec = Date.now() / 1000;
+  for (const [ticker, q] of Object.entries(incoming)) {
+    if (!ticker || !q) continue;
+    _priceBusCache[ticker] = Object.assign({}, _priceBusCache[ticker] || {}, q, {
+      _seen_at: nowSec,
+    });
+  }
+
+  // Evaluate the whole dashboard cache, not just the most recent producer
+  // batch. REST poller batches and WS batches arrive independently; using only
+  // the last batch makes the chip flip REST/LIVE even while the price bus is
+  // genuinely mixed and healthy.
+  for (const [ticker, q] of Object.entries(_priceBusCache)) {
+    const ts = Number(q.updated_at || q._seen_at || 0);
+    if (!ts || (nowSec - ts) > 600) delete _priceBusCache[ticker];
+  }
+
+  const vals = Object.values(_priceBusCache);
   if (!vals.length) return;
   let live = 0, fallback = 0, snapshot = 0, fresh = 0;
   let newest = 0, source = '';
-  const nowSec = Date.now() / 1000;
   for (const q of vals) {
     const st = String(q.source_status || (q.is_live ? 'LIVE' : fallbackStatus)).toUpperCase();
     const ts = Number(q.updated_at || nowSec);

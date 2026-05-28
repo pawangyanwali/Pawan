@@ -84,6 +84,8 @@ def test_dashboard_displays_price_source_truth_instead_of_reconnecting_on_snapsh
     src = _src("web/static/index.html")
 
     assert "function _updatePriceBusState(prices, fallbackStatus='UNKNOWN')" in src
+    assert "let _priceBusCache = {}" in src
+    assert "Evaluate the whole dashboard cache" in src
     assert "REST FALLBACK" in src
     assert "PARTIAL LIVE" in src
     assert "SCAN SNAPSHOT" in src
