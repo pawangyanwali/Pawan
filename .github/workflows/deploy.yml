@@ -6,7 +6,6 @@ on:
       - claude/nasdaq-stock-prediction-agent-kDe60
     paths:
       - 'nasdaq_agent/**'
-      - 'docker-compose.yml'
       - '.github/workflows/deploy.yml'
 
 jobs:
@@ -78,6 +77,17 @@ jobs:
             APP_DIR="/opt/nasdaq-agent"
             APP_USER="nasdaq"
 
+            # ── Fix ownership before any git or docker operation ───────────────
+            # Earlier sudo operations (mkdir, chown) can leave files owned by root
+            # inside APP_DIR.  Git 2.35.2+ refuses to run in repos with mixed
+            # ownership ('dubious ownership' error).  Docker also needs its config
+            # directory (~/.docker/config.json) to be owned by the running user.
+            sudo chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+
+            # Register the directory as safe for the nasdaq user so git never
+            # refuses to operate here regardless of how ownership evolves.
+            sudo -u "$APP_USER" git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+
             echo "=== Pulling latest code ==="
             sudo -u "$APP_USER" git -C "$APP_DIR" fetch origin
             sudo -u "$APP_USER" git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
@@ -92,50 +102,70 @@ jobs:
 
               # Ensure .env exists (operator must place this on the server; never committed)
               if [ ! -f "$APP_DIR/.env" ]; then
-                echo "ERROR: $APP_DIR/.env not found — create it from .env.example before deploying with Docker"
+                echo "ERROR: $APP_DIR/.env not found — create it from nasdaq_agent/.env.example"
                 exit 1
               fi
 
-              # Ensure log directory exists and is writable by container UID 1000
-              # (the 'nasdaq' user inside Docker is always created with UID 1000)
-              sudo mkdir -p "$APP_DIR/logs"
-              sudo chown -R 1000:1000 "$APP_DIR/logs"
+              # Ensure EBS bind-mount directories exist and are owned by container UID 1000.
+              # Run as root (sudo) because they may not exist yet on first deploy.
+              sudo mkdir -p "$APP_DIR/models" "$APP_DIR/tokens" "$APP_DIR/tokens/backup" \
+                            "$APP_DIR/cache"  "$APP_DIR/logs"
+              sudo chown -R 1000:1000 "$APP_DIR/models" "$APP_DIR/tokens" \
+                                      "$APP_DIR/cache"  "$APP_DIR/logs"
+              # Restore nasdaq ownership so docker and git keep working.
+              sudo chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
 
-              # Build the new image (uses layer cache; only rebuilds changed layers)
-              sudo -u "$APP_USER" docker compose build --pull
-
-              # Rolling update: bring up new containers; remove old ones when healthy
-              sudo -u "$APP_USER" docker compose up -d --remove-orphans
+              # Shorthand: docker compose with explicit compose file path.
+              # docker-compose.yml lives under nasdaq_agent/, not the repo root.
+              _dc() { sudo -u "$APP_USER" docker compose \
+                        -f "$APP_DIR/nasdaq_agent/docker-compose.yml" \
+                        --project-directory "$APP_DIR" "$@"; }
 
               # ── Helper: docker compose ps JSON → Health field ─────────────────
               # Compose v2 may return a JSON array OR a single object depending on
               # the version. This one-liner handles both forms safely.
               _svc_health() {
                 local svc="$1"
-                sudo -u "$APP_USER" docker compose ps --format json "$svc" 2>/dev/null \
-                  | python3 -c "import sys,json; d=json.load(sys.stdin); o=d[0] if isinstance(d,list) else d; print(o.get('Health',o.get('State','?')))" \
-                  2>/dev/null || echo "unknown"
+                _dc ps --format json "$svc" 2>/dev/null \
+                  | python3 -c "
+import sys, json
+raw = sys.stdin.read().strip()
+if not raw: print('unknown'); raise SystemExit(0)
+d = json.loads(raw)
+if isinstance(d, list): d = d[0] if d else {}
+print(d.get('Health', d.get('health', d.get('State', 'unknown'))))
+" 2>/dev/null || echo "unknown"
               }
 
-              # ── Wait for web-api ───────────────────────────────────────────────
+              # Build the new image (uses layer cache; only rebuilds changed layers)
+              _dc build --pull
+
+              # Rolling update: bring up new containers; remove old ones when healthy
+              _dc up -d --remove-orphans
+
+              # ── Wait for web-api (fatal if not healthy) ────────────────────────
               echo "=== Waiting for web-api to become healthy (max 3 min) ==="
+              WEB_API_HEALTHY=0
               for i in $(seq 1 18); do
                 sleep 10
                 status=$(_svc_health web-api)
                 if [ "$status" = "healthy" ]; then
                   echo "  web-api healthy after $((i*10))s"
+                  WEB_API_HEALTHY=1
                   break
                 fi
                 echo "  Attempt $i/18: health=$status"
-                if [ $i -eq 18 ]; then
-                  echo "ERROR: web-api did not become healthy within 3 min"
-                  sudo -u "$APP_USER" docker compose logs --tail=60 web-api
-                  exit 1
-                fi
               done
 
-              # ── Wait for scanner ───────────────────────────────────────────────
-              # ── Wait for market-data ──────────────────────────────────────────
+              if [ "$WEB_API_HEALTHY" = "0" ]; then
+                echo "ERROR: web-api did not become healthy within 3 min — printing logs"
+                _dc logs --tail 60 web-api 2>/dev/null \
+                  || sudo docker logs --tail 60 nasdaq-web-api 2>/dev/null \
+                  || echo "(could not retrieve logs)"
+                exit 1
+              fi
+
+              # ── Wait for market-data (non-fatal warning) ───────────────────────
               echo "=== Waiting for market-data to become healthy (max 90s) ==="
               for i in $(seq 1 9); do
                 sleep 10
@@ -147,12 +177,11 @@ jobs:
                 echo "  Attempt $i/9: health=$status"
                 if [ $i -eq 9 ]; then
                   echo "WARNING: market-data not yet healthy after 90s — check logs"
-                  sudo -u "$APP_USER" docker compose logs --tail=30 market-data
+                  _dc logs --tail 30 market-data 2>/dev/null || true
                 fi
               done
 
-              # Scanner healthcheck: python3 Valkey ping — passes once Valkey is
-              # reachable. start_period=90s so we allow up to 2 min total.
+              # ── Wait for scanner (non-fatal; first scan cycle can take 90s) ────
               echo "=== Waiting for scanner to become healthy (max 2 min) ==="
               for i in $(seq 1 12); do
                 sleep 10
@@ -164,12 +193,11 @@ jobs:
                 echo "  Attempt $i/12: health=$status"
                 if [ $i -eq 12 ]; then
                   echo "WARNING: scanner not yet healthy after 2 min — check logs"
-                  sudo -u "$APP_USER" docker compose logs --tail=30 scanner
-                  # Non-fatal: scanner may still be initialising its first scan cycle
+                  _dc logs --tail 30 scanner 2>/dev/null || true
                 fi
               done
 
-              # ── Wait for scheduler ─────────────────────────────────────────────
+              # ── Wait for scheduler (non-fatal; just needs Valkey) ─────────────
               echo "=== Waiting for scheduler to become healthy (max 2 min) ==="
               for i in $(seq 1 12); do
                 sleep 10
@@ -181,8 +209,7 @@ jobs:
                 echo "  Attempt $i/12: health=$status"
                 if [ $i -eq 12 ]; then
                   echo "WARNING: scheduler not yet healthy after 2 min"
-                  sudo -u "$APP_USER" docker compose logs --tail=30 scheduler
-                  # Non-fatal: scheduler writes heartbeat every 30s, just needs Valkey
+                  _dc logs --tail 30 scheduler 2>/dev/null || true
                 fi
               done
 
@@ -201,11 +228,19 @@ jobs:
               # ── Services summary from /api/services ───────────────────────────
               echo "=== Service health summary ==="
               curl -sf --max-time 10 http://localhost:8000/api/services 2>/dev/null \
-                | python3 -c "import sys,json; d=json.load(sys.stdin); [print('  '+s+': '+('UP' if i.get('up') else 'STALE' if i.get('up') is False else 'UNKNOWN')+(' ('+str(round(i['last_seen_ago_s']))+'s)' if i.get('last_seen_ago_s') else '')) for s,i in d.get('containers',{}).items()]; pa=(d.get('market_data') or {}).get('price_age_s'); pa and print('  md:prices  : '+str(round(pa))+'s ago')" \
-                2>/dev/null || echo "  (api/services not reachable)"
+                | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for s, i in d.get('containers', {}).items():
+    state = 'UP' if i.get('up') else ('STALE' if i.get('up') is False else 'UNKNOWN')
+    age = (' (' + str(round(i['last_seen_ago_s'])) + 's)') if i.get('last_seen_ago_s') else ''
+    print('  ' + s + ': ' + state + age)
+pa = (d.get('market_data') or {}).get('price_age_s')
+if pa: print('  md:prices  : ' + str(round(pa)) + 's ago')
+" 2>/dev/null || echo "  (api/services not reachable)"
 
               echo "=== Service status (Docker) ==="
-              sudo -u "$APP_USER" docker compose ps
+              _dc ps
 
               echo "=== Deployed via Docker Compose successfully ==="
 
