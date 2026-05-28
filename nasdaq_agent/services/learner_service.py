@@ -120,6 +120,8 @@ def _continuous_deep_loop() -> None:
 
     The scanner never runs this work. Docker CPU and memory limits keep this
     background learner from starving the market-data and scanner containers.
+    Training is skipped while the market is open to avoid CPU contention with
+    the live scanner — consistent with the module's market-hours contract.
     """
     if not _DEEP_ENABLED:
         _log.info("Continuous deep learner disabled by LEARNER_DEEP_ENABLED=0")
@@ -131,6 +133,10 @@ def _continuous_deep_loop() -> None:
             return
 
     while not _runner.stopped:
+        if _is_market_hours():
+            _log.debug("Skipping deep cycle — market is open; rechecking in 5 min")
+            _runner._stop.wait(300)
+            continue
         _run_deep_cycle()
         _runner._stop.wait(_DEEP_INTERVAL_S)
 
@@ -243,7 +249,8 @@ def _publish_status_loop() -> None:
 
         except Exception as exc:
             _log.debug("learner:status publish failed: %s", exc)
-        time.sleep(60)
+        if _runner._stop.wait(60):
+            break
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -266,7 +273,8 @@ def _monitor_loop() -> None:
             )
         except Exception:
             pass
-        time.sleep(300)   # every 5 min
+        if _runner._stop.wait(300):
+            break
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

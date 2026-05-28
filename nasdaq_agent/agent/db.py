@@ -298,6 +298,8 @@ class _PgConnection:
                     lv_sp.execute("ROLLBACK TO SAVEPOINT _lastval_sp")
                 except Exception:
                     pass
+            finally:
+                lv_sp.close()
 
         return _PgCursor(cur, lastrowid)
 

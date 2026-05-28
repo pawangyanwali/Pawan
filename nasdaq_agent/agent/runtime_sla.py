@@ -137,7 +137,8 @@ def evaluate_runtime_sla(
                 action="Check market-data, Schwab tokens, Valkey price bus, and REST fallback health.",
             )
         elif trusted_2s < 95.0:
-            severity = WARN if trusted_5s >= 95.0 else CRITICAL
+            # Treat missing price_5s data (startup, no 5-s window yet) as WARN not CRITICAL.
+            severity = WARN if (not price_5s or trusted_5s >= 95.0) else CRITICAL
             _alert(
                 alerts,
                 severity,
