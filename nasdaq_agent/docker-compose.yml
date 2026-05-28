@@ -291,6 +291,9 @@ services:
   watchdog:
     <<: *common
     container_name: nasdaq-watchdog
+    # Must run as root: needs read access to /var/run/docker.sock which is
+    # owned by root:docker on the host. All other containers run as nasdaq (1000).
+    user: root
     command: ["python", "-m", "services.watchdog_service"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # Docker Engine access
