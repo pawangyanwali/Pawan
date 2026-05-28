@@ -336,11 +336,11 @@ def _get_min_confidence() -> float:
     trading recommendations and is NOT used here — doing so would starve the
     learner by blocking 80%+ of signals before any outcome is recorded.
 
-    The floor is read from config so it can be tuned without a code deploy.
+    The floor is read from config_store so it can be tuned without a code deploy.
     """
     try:
-        from config import PAPER_TRADE_MIN_CONFIDENCE
-        return float(PAPER_TRADE_MIN_CONFIDENCE)
+        from agent.config_manager import config as _cfg
+        return float(_cfg.get("paper.min_confidence", _PAPER_MIN_CONF))
     except Exception:
         return _PAPER_MIN_CONF
 
@@ -487,20 +487,11 @@ def maybe_open_trade(
             ).fetchone()["n"]
 
             # ── Capital gate: check available capital before sizing ────────────
-            cfg = c.execute(
-                "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades FROM account_config WHERE id=1"
-            ).fetchone()
-            if cfg:
-                _budget       = float(cfg["total_budget"])
-                _max_trade_v  = _budget * float(cfg["max_trade_pct"])  / 100.0
-                _max_alloc_v  = _budget * float(cfg["max_allocated_pct"]) / 100.0
-                _max_open     = int(cfg["max_open_trades"])
-            else:
-                from config import PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT
-                _budget      = PAPER_BUDGET
-                _max_trade_v = _budget * PAPER_MAX_TRADE_PCT  / 100.0
-                _max_alloc_v = _budget * PAPER_MAX_ALLOCATED_PCT / 100.0
-                _max_open    = _max_concurrent()
+            from agent.config_manager import config as _cfg
+            _budget      = float(_cfg.get("paper.budget",            50000.0))
+            _max_trade_v = _budget * float(_cfg.get("paper.max_trade_pct",     5.0))  / 100.0
+            _max_alloc_v = _budget * float(_cfg.get("paper.max_allocated_pct", 40.0)) / 100.0
+            _max_open    = int(_cfg.get("paper.max_open_trades", 10))
 
             if open_count >= _max_open:
                 logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_max_open}) reached")
