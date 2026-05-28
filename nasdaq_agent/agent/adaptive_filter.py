@@ -188,14 +188,15 @@ def _save():
 _load()
 
 # ── Startup poisoned-state guard ──────────────────────────────────────────────
-# If we previously crashed into a state with very low WR and many blocked
-# contexts (false-positive flood from bad VWAP_LOSS logic), auto-reset rather
-# than letting the system start in a permanently broken configuration.
+# Only reset if the state is catastrophically broken: win rate below 10%
+# (near-zero — originally caused by a VWAP_LOSS false-positive flood) AND
+# more than 20 contexts blocked.  A rough patch (25-30% WR) is genuine
+# underperformance and should NOT wipe 3000+ trades of learned calibration.
 def _auto_reset_if_poisoned() -> None:
     with _lock:
         wr      = _state.get("current_win_rate", 0.0)
         blocked = len(_state.get("blocked_contexts", {}))
-    if wr < 0.30 and blocked > 10:
+    if wr < 0.10 and blocked > 20:
         logger.warning(
             f"[AdaptiveFilter] Poisoned state detected on load "
             f"(WR={wr*100:.1f}%, {blocked} blocked contexts) — auto-resetting."
