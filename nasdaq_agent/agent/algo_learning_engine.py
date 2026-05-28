@@ -104,19 +104,58 @@ _PARAM_SPEC: dict[str, dict] = {
 }
 
 
+_TUNE_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS param_tune_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    family     TEXT NOT NULL,
+    param      TEXT NOT NULL,
+    old_val    REAL NOT NULL,
+    new_val    REAL NOT NULL,
+    reason     TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'auto',
+    tuned_at   TEXT NOT NULL
+)
+"""
+
+
 class ParameterControlRegistry:
     """
     Persists current tuned parameters per algo-family to data/algo_params.json.
     Enforces bounds, cooldown periods, and directional-only updates.
+    All parameter changes are also written to param_tune_log for audit history.
     """
 
     _PATH = _DATA_DIR / "algo_params.json"
 
     def __init__(self):
         self._lock = threading.Lock()
-        # Structure: {family: {param: {current, previous, rollback, last_updated_cycle}}}
+        # Structure: {family: {param: {current, previous, rollback, last_updated_cycle, last_reason}}}
         self._state: dict[str, dict] = {}
         self._load_defaults()
+        self._ensure_tune_log_table()
+
+    def _ensure_tune_log_table(self) -> None:
+        try:
+            from agent.db import get_conn
+            _db = Path(__file__).parent.parent / "data" / "live_backtest.db"
+            with get_conn(_db) as c:
+                c.execute(_TUNE_LOG_DDL)
+        except Exception as exc:
+            logger.debug("[ParamRegistry] _ensure_tune_log_table: %s", exc)
+
+    def _log_tune(self, family: str, param: str, old_val: float, new_val: float,
+                  reason: str, source: str = "auto") -> None:
+        try:
+            from agent.db import get_conn
+            _db = Path(__file__).parent.parent / "data" / "live_backtest.db"
+            with get_conn(_db) as c:
+                c.execute(
+                    "INSERT INTO param_tune_log (family, param, old_val, new_val, reason, source, tuned_at) VALUES (?,?,?,?,?,?,?)",
+                    (family, param, round(old_val, 6), round(new_val, 6), reason, source,
+                     datetime.now(timezone.utc).isoformat()),
+                )
+        except Exception as exc:
+            logger.debug("[ParamRegistry] _log_tune error: %s", exc)
 
     def _load_defaults(self) -> None:
         for family in _ALL_FAMILIES:
@@ -127,6 +166,7 @@ class ParameterControlRegistry:
                     "previous": spec["default"],
                     "rollback": spec["default"],
                     "last_updated_cycle": 0,
+                    "last_reason": "",
                 }
 
     def load(self) -> None:
@@ -212,8 +252,10 @@ class ParameterControlRegistry:
             entry["previous"] = current
             entry["current"] = round(new_val, 6)
             entry["last_updated_cycle"] = cycle_num
+            entry["last_reason"] = reason
 
         logger.info(f"[ParamRegistry] {family}.{param}: {current} → {new_val:.4f} ({reason})")
+        self._log_tune(family, param, current, new_val, reason, source="auto")
         return True
 
     def get_all_params(self, algo_name: str) -> dict:
@@ -229,24 +271,50 @@ class ParameterControlRegistry:
         return result
 
     def get_all_families_full(self) -> dict:
-        """Return current params + spec for all families — for dashboard display."""
+        """Return current params + history fields for all families — for dashboard display."""
         result = {}
         with self._lock:
             for family in sorted(_ALL_FAMILIES):
                 result[family] = {}
                 fam_state = self._state.get(family, {})
                 for param, spec in _PARAM_SPEC.items():
-                    current = fam_state.get(param, {}).get("current", spec["default"])
+                    entry = fam_state.get(param, {})
+                    current  = entry.get("current",            spec["default"])
+                    previous = entry.get("previous",           spec["default"])
                     result[family][param] = {
-                        "current":  round(current, 4),
-                        "default":  spec["default"],
-                        "min":      spec["min"],
-                        "max":      spec["max"],
-                        "step":     spec.get("max_change", 0.05),
-                        "auto":     spec["auto"],
-                        "is_tuned": abs(current - spec["default"]) > 1e-4,
+                        "current":           round(current, 4),
+                        "previous":          round(previous, 4),
+                        "default":           spec["default"],
+                        "min":               spec["min"],
+                        "max":               spec["max"],
+                        "step":              spec.get("max_change", 0.05),
+                        "auto":              spec["auto"],
+                        "is_tuned":          abs(current - spec["default"]) > 1e-4,
+                        "last_updated_cycle": entry.get("last_updated_cycle", 0),
+                        "last_reason":       entry.get("last_reason", ""),
                     }
         return result
+
+    def get_tune_history(self, family: str | None = None, limit: int = 100) -> list[dict]:
+        """Return recent param tuning history from the DB log."""
+        try:
+            from agent.db import get_conn
+            _db = Path(__file__).parent.parent / "data" / "live_backtest.db"
+            with get_conn(_db) as c:
+                if family:
+                    rows = c.execute(
+                        "SELECT * FROM param_tune_log WHERE family=? ORDER BY id DESC LIMIT ?",
+                        (family, limit),
+                    ).fetchall()
+                else:
+                    rows = c.execute(
+                        "SELECT * FROM param_tune_log ORDER BY id DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.debug("[ParamRegistry] get_tune_history error: %s", exc)
+            return []
 
     def set_manual(self, family: str, param: str, value: float) -> tuple[bool, str]:
         """Manual override — respects bounds but bypasses cooldown and directional constraints."""
@@ -256,6 +324,7 @@ class ParameterControlRegistry:
         if spec is None:
             return False, f"Unknown param: {param}"
         clamped = round(float(max(spec["min"], min(spec["max"], value))), 6)
+        reason = "manual override"
         with self._lock:
             entry = self._state[family][param]
             old = float(entry["current"])
@@ -263,8 +332,10 @@ class ParameterControlRegistry:
             entry["previous"] = old
             entry["current"] = clamped
             entry["last_updated_cycle"] = 0  # reset so auto-tuner can refine next cycle
+            entry["last_reason"] = reason
         self.save()
-        msg = f"{family}.{param}: {old} → {clamped} (manual override)"
+        self._log_tune(family, param, old, clamped, reason, source="manual")
+        msg = f"{family}.{param}: {old} → {clamped} ({reason})"
         logger.info(f"[ParamRegistry] {msg}")
         return True, msg
 
@@ -274,12 +345,16 @@ class ParameterControlRegistry:
             return False
         with self._lock:
             for param, spec in _PARAM_SPEC.items():
+                old = float(self._state[family][param].get("current", spec["default"]))
                 self._state[family][param] = {
                     "current":            spec["default"],
-                    "previous":           spec["default"],
+                    "previous":           old,
                     "rollback":           spec["default"],
                     "last_updated_cycle": 0,
+                    "last_reason":        "reset to default",
                 }
+                if abs(old - spec["default"]) > 1e-4:
+                    self._log_tune(family, param, old, spec["default"], "reset to default", source="manual")
         self.save()
         logger.info(f"[ParamRegistry] {family} reset to defaults")
         return True
@@ -1292,15 +1367,24 @@ def get_selector_weights(algo_names: list, context_key: str) -> dict:
 
 
 def get_all_families_full() -> dict:
-    """Return current params + spec for all algo families — for dashboard display."""
+    """Return current params + history fields for all algo families — for dashboard display."""
     try:
         return get_engine()._registry.get_all_families_full()
     except Exception:
-        return {f: {p: {"current": s["default"], "default": s["default"],
+        return {f: {p: {"current": s["default"], "previous": s["default"], "default": s["default"],
                         "min": s["min"], "max": s["max"], "step": s.get("max_change", 0.05),
-                        "auto": s["auto"], "is_tuned": False}
+                        "auto": s["auto"], "is_tuned": False,
+                        "last_updated_cycle": 0, "last_reason": ""}
                     for p, s in _PARAM_SPEC.items()}
                 for f in _ALL_FAMILIES}
+
+
+def get_algo_tune_history(family: str | None = None, limit: int = 100) -> list[dict]:
+    """Return recent param tuning history from param_tune_log."""
+    try:
+        return get_engine()._registry.get_tune_history(family=family, limit=limit)
+    except Exception:
+        return []
 
 
 def set_algo_param_manual(family: str, param: str, value: float) -> tuple[bool, str]:

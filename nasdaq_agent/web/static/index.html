@@ -5046,26 +5046,34 @@ async function stLoadAlgosTab() {
     _algoParamsData = data.families;
 
     const families = Object.entries(data.families).sort(([a],[b]) => a.localeCompare(b));
+    const anyTunedGlobal = families.some(([, params]) => Object.values(params).some(p => p.is_tuned));
 
     el.innerHTML = `
     <div>
-      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Algo Family Parameters</div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
-        The auto-tuner adjusts these every 90 seconds based on loss root-cause analysis.
-        Manual overrides are applied immediately and can be further refined by the tuner.
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:8px">
+        <div style="font-size:12px;font-weight:700;color:var(--text)">Algo Family Parameters</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          ${anyTunedGlobal
+            ? `<span style="font-size:10px;background:#f59e0b22;color:#f59e0b;padding:2px 8px;border-radius:4px;font-weight:700">⚡ ${families.filter(([,p])=>Object.values(p).some(x=>x.is_tuned)).length} families auto-tuned</span>`
+            : `<span style="font-size:10px;color:var(--muted)">All families at defaults — tuner activates after loss patterns accumulate</span>`}
+          <button onclick="stLoadAlgoHistory()"
+            style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">
+            📋 Tuning History
+          </button>
+        </div>
       </div>
-      <div style="padding:8px 12px;background:#6366f111;border:1px solid #6366f133;border-radius:6px;margin-bottom:8px;font-size:10px;color:var(--muted)">
-        <strong style="color:#818cf8">Auto-tune direction:</strong>
-        <span style="margin-left:4px">target_mult / rvol_gate / entry_window → both directions &nbsp;·&nbsp;
-        stop_mult → reduce only (never tighten) &nbsp;·&nbsp; conf_gate → increase only (never relax)</span>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+        The auto-tuner analyzes loss patterns every 90s and nudges params toward better outcomes.
+        Values shown below are <strong style="color:var(--text)">live running values</strong> — what each algo is actually using right now.
+        Use the override inputs to manually set values; the tuner can continue refining from there.
       </div>
       <div style="padding:8px 12px;background:#f59e0b11;border:1px solid #f59e0b33;border-radius:6px;margin-bottom:16px;font-size:10px;color:var(--muted)">
         <strong style="color:#f59e0b">Timeframes:</strong>
-        All algos evaluate their signal conditions from <strong>1-minute bars</strong> (live streaming price data).
-        ML confidence scores are computed from <strong>5-minute aggregations</strong>, with swing/deep model predictions using <strong>15-minute resampled</strong> data.
-        "Entry Window (scan cycles)" has nothing to do with candle bars — it counts how many consecutive
-        30–60s scanner ticks the same signal can fire before it's treated as stale and skipped.
+        All algos evaluate signal conditions from <strong>1-minute bars</strong> (live streaming price data).
+        ML confidence uses <strong>5-minute aggregations</strong>; swing/deep models use <strong>15-minute resampled</strong> data.
+        "Entry Window (scan cycles)" counts consecutive 30–60s scanner ticks — NOT candle bars.
       </div>
+      <div id="st-algo-history-panel" style="display:none;margin-bottom:16px"></div>
       <div style="display:flex;flex-direction:column;gap:16px">
         ${families.map(([family, params]) => _renderAlgoFamilyCard(family, params)).join('')}
       </div>
@@ -5075,10 +5083,82 @@ async function stLoadAlgosTab() {
   }
 }
 
+async function stLoadAlgoHistory(family) {
+  const panel = document.getElementById('st-algo-history-panel');
+  if (!panel) return;
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  panel.innerHTML = '<div style="color:var(--muted);font-size:10px;padding:8px">Loading history…</div>';
+  try {
+    const url = family
+      ? `${BACKEND_HTTP}/api/learning/params/history?family=${encodeURIComponent(family)}&limit=60`
+      : `${BACKEND_HTTP}/api/learning/params/history?limit=60`;
+    const d = await (await _authFetch(url, {signal: AbortSignal.timeout(8000)})).json();
+    if (!d.success || !d.rows.length) {
+      panel.innerHTML = `<div style="padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted)">
+        No tuning history yet — the auto-tuner records changes here once it detects loss patterns.
+        <button onclick="document.getElementById('st-algo-history-panel').style.display='none'"
+          style="margin-left:12px;background:none;border:none;color:var(--muted);cursor:pointer;font-size:10px">✕ close</button>
+      </div>`;
+      return;
+    }
+    const rows = d.rows;
+    panel.innerHTML = `
+      <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--surface2);border-bottom:1px solid var(--border)">
+          <span style="font-size:11px;font-weight:700;color:var(--text)">📋 Parameter Tuning History</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-size:10px;color:var(--muted)">${rows.length} most recent changes</span>
+            <button onclick="document.getElementById('st-algo-history-panel').style.display='none'"
+              style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px">✕</button>
+          </div>
+        </div>
+        <div style="max-height:260px;overflow-y:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:10px">
+            <thead>
+              <tr style="background:var(--surface2);text-align:left">
+                <th style="padding:5px 10px;color:var(--muted);font-weight:600">When</th>
+                <th style="padding:5px 10px;color:var(--muted);font-weight:600">Family</th>
+                <th style="padding:5px 10px;color:var(--muted);font-weight:600">Param</th>
+                <th style="padding:5px 10px;color:var(--muted);font-weight:600">Change</th>
+                <th style="padding:5px 10px;color:var(--muted);font-weight:600">Source</th>
+                <th style="padding:5px 10px;color:var(--muted);font-weight:600">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => {
+                const delta = r.new_val - r.old_val;
+                const dir = delta > 0 ? '▲' : '▼';
+                const dirCol = delta > 0 ? '#22c55e' : '#f97316';
+                const srcCol = r.source === 'manual' ? '#818cf8' : '#f59e0b';
+                const when = r.tuned_at ? new Date(r.tuned_at).toLocaleString() : '—';
+                return `<tr style="border-top:1px solid #ffffff06">
+                  <td style="padding:5px 10px;color:var(--muted)">${when}</td>
+                  <td style="padding:5px 10px;color:var(--text);font-weight:600">${r.family}</td>
+                  <td style="padding:5px 10px;color:var(--muted)">${r.param}</td>
+                  <td style="padding:5px 10px">
+                    <span style="color:var(--muted)">${r.old_val}</span>
+                    <span style="color:${dirCol};margin:0 4px">${dir}</span>
+                    <span style="color:${dirCol};font-weight:700">${r.new_val}</span>
+                  </td>
+                  <td style="padding:5px 10px"><span style="color:${srcCol};font-weight:600">${r.source}</span></td>
+                  <td style="padding:5px 10px;color:var(--muted);max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${r.reason}">${r.reason}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  } catch(e) {
+    panel.innerHTML = `<div style="color:var(--red);font-size:10px;padding:8px">Failed to load history: ${e.message}</div>`;
+  }
+}
+
 function _renderAlgoFamilyCard(family, params) {
   const anyTuned = Object.values(params).some(p => p.is_tuned);
+  const tunedCount = Object.values(params).filter(p => p.is_tuned).length;
   const tunedBadge = anyTuned
-    ? `<span style="font-size:9px;background:#f59e0b22;color:#f59e0b;padding:1px 6px;border-radius:3px;font-weight:700">AUTO-TUNED</span>`
+    ? `<span style="font-size:9px;background:#f59e0b22;color:#f59e0b;padding:1px 6px;border-radius:3px;font-weight:700">⚡ AUTO-TUNED (${tunedCount}/${Object.keys(params).length})</span>`
     : `<span style="font-size:9px;background:#64748b22;color:#64748b;padding:1px 6px;border-radius:3px">DEFAULTS</span>`;
 
   const familyMeta = _ALGO_FAMILY_META[family] || {};
@@ -5090,31 +5170,56 @@ function _renderAlgoFamilyCard(family, params) {
   const paramRows = Object.entries(params).map(([p, info]) => {
     const meta = _ALGO_PARAM_META[p] || {};
     const tuned = info.is_tuned;
+    const delta = info.current - info.previous;
+    const deltaNonZero = Math.abs(delta) > 1e-4;
     const borderCol = tuned ? '#f59e0b' : 'var(--border)';
-    const valCol    = tuned ? '#f59e0b' : 'var(--text)';
-    // Special display for entry_window_bars: show "cycles (≈Xs–Ys)"
+
+    // Delta indicator: previous → current with direction arrow
+    const deltaHTML = tuned && deltaNonZero
+      ? (() => {
+          const dir = delta > 0 ? '▲' : '▼';
+          const col = delta > 0 ? '#22c55e' : '#f97316';
+          const reasonShort = info.last_reason ? info.last_reason.split(':')[0] : '';
+          return `<div style="font-size:9px;margin-top:3px;display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+            <span style="color:var(--muted)">${info.previous}</span>
+            <span style="color:${col}">${dir}</span>
+            <span style="color:${col};font-weight:700">${info.current}</span>
+            ${reasonShort ? `<span style="color:#64748b;background:#64748b22;padding:0 4px;border-radius:2px">${reasonShort}</span>` : ''}
+          </div>`;
+        })()
+      : tuned
+        ? `<div style="font-size:9px;color:#f59e0b;margin-top:2px">tuned from default ${info.default}</div>`
+        : '';
+
     const unitNote = p === 'entry_window_bars'
       ? `<div style="font-size:9px;color:#475569;margin-top:1px">scan cycles · 30–60s each</div>`
       : `<div style="font-size:9px;color:#475569;margin-top:1px">${info.auto} · [${info.min}–${info.max}]</div>`;
+
     return `
-    <div style="display:grid;grid-template-columns:160px 1fr 80px;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid #ffffff08">
+    <div style="display:grid;grid-template-columns:150px 90px 1fr 60px;gap:8px;align-items:start;padding:6px 0;border-bottom:1px solid #ffffff08">
       <div>
         <div style="font-size:10px;font-weight:600;color:var(--muted)">${meta.label || p}</div>
         ${unitNote}
       </div>
       <div>
+        <div style="font-size:13px;font-weight:700;color:${tuned ? '#f59e0b' : 'var(--text)'};padding:4px 0">${info.current}</div>
+        <div style="font-size:9px;color:#64748b">live value</div>
+        ${deltaHTML}
+      </div>
+      <div>
         <input id="st-algo-${family}-${p}" type="number"
           min="${info.min}" max="${info.max}" step="${meta.step || info.step || 0.05}"
           value="${info.current}"
-          style="width:100%;background:var(--surface2);border:1px solid ${borderCol};border-radius:5px;padding:5px 8px;color:${valCol};font-size:12px;font-family:inherit;font-weight:${tuned?'700':'400'}">
-        ${tuned ? `<div style="font-size:9px;color:#f59e0b;margin-top:2px">⚡ tuned from default ${info.default}</div>` : ''}
+          placeholder="override"
+          style="width:100%;background:var(--surface2);border:1px solid ${borderCol};border-radius:5px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+        <div style="font-size:9px;color:#475569;margin-top:2px">manual override</div>
       </div>
-      <div style="font-size:9px;color:#475569;text-align:right">default<br><span style="color:var(--muted)">${info.default}</span></div>
+      <div style="font-size:9px;color:#475569;text-align:right;padding-top:4px">default<br><span style="color:var(--muted)">${info.default}</span></div>
     </div>`;
   }).join('');
 
   return `
-  <div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--surface)">
+  <div style="border:1px solid ${anyTuned ? '#f59e0b44' : 'var(--border)'};border-radius:8px;padding:14px;background:var(--surface)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:6px">
       <div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -5125,6 +5230,10 @@ function _renderAlgoFamilyCard(family, params) {
         <div style="font-size:10px;color:var(--muted);margin-top:3px">${familyMeta.desc || ''}</div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0">
+        <button onclick="stLoadAlgoHistory('${family}')"
+          style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:4px 10px;cursor:pointer;font-family:inherit;font-size:10px">
+          📋 History
+        </button>
         <button onclick="stResetAlgoFamily('${family}', this)"
           style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:4px 10px;cursor:pointer;font-family:inherit;font-size:10px">
           ↺ Reset
@@ -5134,6 +5243,12 @@ function _renderAlgoFamilyCard(family, params) {
           Save
         </button>
       </div>
+    </div>
+    <div style="display:grid;grid-template-columns:150px 90px 1fr 60px;gap:8px;padding:4px 0 6px;border-bottom:1px solid #ffffff12">
+      <div style="font-size:9px;color:#475569;font-weight:600">PARAMETER</div>
+      <div style="font-size:9px;color:#475569;font-weight:600">LIVE VALUE</div>
+      <div style="font-size:9px;color:#475569;font-weight:600">MANUAL OVERRIDE</div>
+      <div style="font-size:9px;color:#475569;font-weight:600;text-align:right">DEFAULT</div>
     </div>
     ${paramRows}
     <div id="st-algo-status-${family}" style="font-size:10px;color:var(--muted);margin-top:8px"></div>

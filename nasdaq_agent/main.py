@@ -98,6 +98,7 @@ try:
         get_all_families_full as _get_all_families_full,
         set_algo_param_manual as _set_algo_param_manual,
         reset_algo_family as _reset_algo_family,
+        get_algo_tune_history as _get_algo_tune_history,
     )
     _ALE_AVAILABLE = True
 except (ImportError, Exception):
@@ -105,6 +106,7 @@ except (ImportError, Exception):
     _get_all_families_full = None     # type: ignore[assignment]
     _set_algo_param_manual = None     # type: ignore[assignment]
     _reset_algo_family = None         # type: ignore[assignment]
+    _get_algo_tune_history = None     # type: ignore[assignment]
     _ALE_AVAILABLE = False
 
 try:
@@ -2436,6 +2438,20 @@ async def learning_params_reset(family: str, _current=Depends(require_trader)):
         global _learning_params_cache
         _learning_params_cache = None
     return {"success": ok, "family": family}
+
+
+@app.get("/api/learning/params/history")
+async def learning_params_history(
+    family: str | None = None,
+    limit: int = 100,
+    _current=Depends(require_trader),
+):
+    """Return recent parameter tuning history from param_tune_log."""
+    if not _ALE_AVAILABLE or _get_algo_tune_history is None:
+        return JSONResponse({"success": False, "error": "Learning engine not available"}, status_code=503)
+    loop = asyncio.get_running_loop()
+    rows = await loop.run_in_executor(None, lambda: _get_algo_tune_history(family=family, limit=min(limit, 200)))
+    return {"success": True, "rows": rows, "count": len(rows)}
 
 
 @app.get("/api/learning-status")
