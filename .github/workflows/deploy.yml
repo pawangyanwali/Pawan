@@ -77,15 +77,14 @@ jobs:
             APP_DIR="/opt/nasdaq-agent"
             APP_USER="nasdaq"
 
-            # ── Fix ownership before any git or docker operation ───────────────
-            # Earlier sudo operations (mkdir, chown) can leave files owned by root
-            # inside APP_DIR.  Git 2.35.2+ refuses to run in repos with mixed
-            # ownership ('dubious ownership' error).  Docker also needs its config
-            # directory (~/.docker/config.json) to be owned by the running user.
+            # ── Fix repo ownership for git ────────────────────────────────────
+            # Earlier sudo ops can leave files owned by root; git 2.35.2+ refuses
+            # to run in repos with mixed ownership ('dubious ownership' error).
+            # Scope: only the git repo files, NOT the EBS bind-mount dirs whose
+            # ownership must be UID 1000 for the container user.
             sudo chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
 
-            # Register the directory as safe for the nasdaq user so git never
-            # refuses to operate here regardless of how ownership evolves.
+            # Register as safe so git never refuses regardless of future chown ops.
             sudo -u "$APP_USER" git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
 
             echo "=== Pulling latest code ==="
@@ -93,12 +92,8 @@ jobs:
             sudo -u "$APP_USER" git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
 
             # ── Docker Compose path ────────────────────────────────────────────
-            # Used when Docker is installed on the EC2 instance.
-            # Activate by running: sudo apt-get install -y docker.io docker-compose-plugin
-            # then: sudo usermod -aG docker $APP_USER
             if command -v docker &>/dev/null && sudo -u "$APP_USER" docker info &>/dev/null; then
               echo "=== Docker detected — building and restarting services ==="
-              cd "$APP_DIR"
 
               # Ensure .env exists (operator must place this on the server; never committed)
               if [ ! -f "$APP_DIR/.env" ]; then
@@ -106,17 +101,29 @@ jobs:
                 exit 1
               fi
 
-              # Ensure EBS bind-mount directories exist and are owned by container UID 1000.
-              # Run as root (sudo) because they may not exist yet on first deploy.
+              # ── EBS bind-mount directories ────────────────────────────────────
+              # Create dirs as root (they may not exist on first deploy).
+              # Ownership MUST be UID 1000 — that is the container user (nasdaq,
+              # created with useradd -u 1000 in the Dockerfile).
+              # This chown runs AFTER the repo chown above so it is never overwritten.
               sudo mkdir -p "$APP_DIR/models" "$APP_DIR/tokens" "$APP_DIR/tokens/backup" \
                             "$APP_DIR/cache"  "$APP_DIR/logs"
               sudo chown -R 1000:1000 "$APP_DIR/models" "$APP_DIR/tokens" \
                                       "$APP_DIR/cache"  "$APP_DIR/logs"
-              # Restore nasdaq ownership so docker and git keep working.
-              sudo chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+
+              # ── Build the Docker image ────────────────────────────────────────
+              # Use 'docker build' directly so the build context is unambiguous:
+              # $APP_DIR/nasdaq_agent/ contains both the Dockerfile and all app code.
+              # 'docker compose build' with --project-directory resolves context: .
+              # relative to the project dir (not the compose file), which would look
+              # for the Dockerfile one level up and fail.
+              echo "=== Building image ==="
+              IMAGE_TAG="${IMAGE_TAG:-latest}"
+              sudo -u "$APP_USER" docker build \
+                -t "nasdaq-agent:${IMAGE_TAG}" \
+                "$APP_DIR/nasdaq_agent"
 
               # Shorthand: docker compose with explicit compose file path.
-              # docker-compose.yml lives under nasdaq_agent/, not the repo root.
               _dc() { sudo -u "$APP_USER" docker compose \
                         -f "$APP_DIR/nasdaq_agent/docker-compose.yml" \
                         --project-directory "$APP_DIR" "$@"; }
@@ -130,9 +137,6 @@ jobs:
                   | python3 -c "import sys,json; raw=sys.stdin.read().strip(); d=json.loads(raw) if raw else {}; o=d[0] if isinstance(d,list) else d; print(o.get('Health',o.get('health',o.get('State','unknown'))))" \
                   2>/dev/null || echo "unknown"
               }
-
-              # Build the new image (uses layer cache; only rebuilds changed layers)
-              _dc build --pull
 
               # Rolling update: bring up new containers; remove old ones when healthy
               _dc up -d --remove-orphans
