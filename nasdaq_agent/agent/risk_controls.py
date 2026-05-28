@@ -44,6 +44,17 @@ from config import (
 
 _lock = threading.Lock()
 
+
+def _rcfg(key: str, fallback):
+    """Read a runtime-configurable risk param from config_store, falling back to the
+    module-level constant so the engine keeps working even before config is loaded."""
+    try:
+        from agent.config_manager import config as _cfg
+        val = _cfg.get(key)
+        return val if val is not None else fallback
+    except Exception:
+        return fallback
+
 # ── State — resets each trading day ──────────────────────────────────────────
 _circuit_open:        bool  = False
 _circuit_reason:      str   = ""
@@ -132,29 +143,31 @@ def record_trade_outcome(won: bool) -> None:
             if IS_PAPER_TRADING:
                 # Paper mode: log streaks for observability but never block trading.
                 # Blocking reduces training data volume without protecting real capital.
-                if _consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+                if _consecutive_losses >= _rcfg("risk.max_consecutive_losses", MAX_CONSECUTIVE_LOSSES):
                     logger.warning(
                         f"[RiskControls] {_consecutive_losses} consecutive losses "
                         f"(would halt in live mode) — paper trading continues"
                     )
-                elif _consecutive_losses >= COOLDOWN_AFTER_LOSSES:
+                elif _consecutive_losses >= _rcfg("risk.cooldown_after_losses", COOLDOWN_AFTER_LOSSES):
                     logger.warning(
                         f"[RiskControls] {_consecutive_losses} consecutive losses "
                         f"(would cooldown in live mode) — paper trading continues"
                     )
                 return
 
-            if _consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+            _max_consec = _rcfg("risk.max_consecutive_losses", MAX_CONSECUTIVE_LOSSES)
+            _cooldown_n = _rcfg("risk.cooldown_after_losses",  COOLDOWN_AFTER_LOSSES)
+            if _consecutive_losses >= _max_consec:
                 _circuit_open        = True
                 _circuit_pnl_based   = False   # consecutive-loss halt, NOT P&L-based
                 _circuit_reason      = (
                     f"Full trading halt: {_consecutive_losses} consecutive losses "
-                    f"(limit {MAX_CONSECUTIVE_LOSSES}). Resume tomorrow."
+                    f"(limit {_max_consec}). Resume tomorrow."
                 )
                 _circuit_date        = date.today()
                 logger.warning(f"[RiskControls] {_circuit_reason}")
 
-            elif _consecutive_losses >= COOLDOWN_AFTER_LOSSES:
+            elif _consecutive_losses >= _cooldown_n:
                 _cooldown_until = _time.time() + 30 * 60   # 30-min cooldown
                 logger.warning(
                     f"[RiskControls] {_consecutive_losses} consecutive losses — "
@@ -235,10 +248,11 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
         _peak_daily_pnl = max(_peak_daily_pnl, pnl_dollar)
 
         # ── Tier 3: 2.5% account loss → HALT for the day ────────────────────
-        if acct_loss_pct <= -DAILY_LOSS_HALT_PCT:
+        _halt_pct = _rcfg("risk.daily_loss_halt_pct", DAILY_LOSS_HALT_PCT)
+        if acct_loss_pct <= -_halt_pct:
             reason = (
                 f"🛑 Daily loss halt: {acct_loss_pct:+.2f}% account loss today "
-                f"(limit -{DAILY_LOSS_HALT_PCT}%). Trading halted until tomorrow."
+                f"(limit -{_halt_pct}%). Trading halted until tomorrow."
             )
             _circuit_open      = True
             _circuit_pnl_based = True   # P&L-based — persists even in AH
@@ -248,10 +262,11 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
             return True, reason
 
         # ── Profit ceiling: $1,500 → halt ───────────────────────────────────
-        if pnl_dollar >= DAILY_PROFIT_MAX_USD:
+        _profit_max = _rcfg("risk.daily_profit_max_usd", DAILY_PROFIT_MAX_USD)
+        if pnl_dollar >= _profit_max:
             reason = (
                 f"✅ Daily profit ceiling reached: ${pnl_dollar:,.0f} "
-                f"(max ${DAILY_PROFIT_MAX_USD:,.0f}). Locking in gains — no new trades."
+                f"(max ${_profit_max:,.0f}). Locking in gains — no new trades."
             )
             _circuit_open      = True
             _circuit_pnl_based = True   # P&L-based — persists even in AH
@@ -261,7 +276,8 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
             return True, reason
 
         # ── Profit Protect Mode drawdown check ──────────────────────────────
-        if pnl_dollar >= DAILY_PROFIT_TARGET_USD:
+        _profit_target = _rcfg("risk.daily_profit_target_usd", DAILY_PROFIT_TARGET_USD)
+        if pnl_dollar >= _profit_target:
             peak_drawdown = _peak_daily_pnl - pnl_dollar
             if peak_drawdown >= PROFIT_PROTECT_DRAWDOWN:
                 reason = (
@@ -276,11 +292,12 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
                 return True, reason
 
         # ── Tier 1: 1.5% account loss warning — NOT a halt, just log once ────
-        if acct_loss_pct <= -DAILY_LOSS_WARNING_PCT and not _warning_issued:
+        _warn_pct = _rcfg("risk.daily_loss_warning_pct", DAILY_LOSS_WARNING_PCT)
+        if acct_loss_pct <= -_warn_pct and not _warning_issued:
             _warning_issued = True
             logger.warning(
                 f"[RiskControls] ⚠ Daily loss warning: {acct_loss_pct:+.2f}% "
-                f"(warning at -{DAILY_LOSS_WARNING_PCT}%). Review open positions."
+                f"(warning at -{_warn_pct}%). Review open positions."
             )
 
     return False, ""
@@ -294,11 +311,12 @@ def get_profit_protect_state() -> dict:
     PPM activates when daily P&L >= DAILY_PROFIT_TARGET_USD ($1,000 default).
     """
     pnl_dollar, _ = _get_today_pnl()
-    active = pnl_dollar >= DAILY_PROFIT_TARGET_USD
+    _profit_target = _rcfg("risk.daily_profit_target_usd", DAILY_PROFIT_TARGET_USD)
+    active = pnl_dollar >= _profit_target
     return {
         "active":       active,
         "pnl_today":    round(pnl_dollar, 2),
-        "target":       DAILY_PROFIT_TARGET_USD,
+        "target":       _profit_target,
         "min_conf":     PROFIT_PROTECT_MIN_CONF if active else 0.0,
         "size_mult":    PROFIT_PROTECT_SIZE_MULT if active else 1.0,
         "drawdown_cap": PROFIT_PROTECT_DRAWDOWN,
@@ -330,13 +348,15 @@ def get_portfolio_heat() -> dict:
                 risk_per_share = abs(entry - stop)
                 total_risk += risk_per_share * shares
         heat_pct = total_risk / DEFAULT_ACCOUNT_SIZE * 100 if DEFAULT_ACCOUNT_SIZE > 0 else 0.0
+        _heat_limit   = _rcfg("risk.max_portfolio_heat_pct", MAX_PORTFOLIO_HEAT_PCT)
+        _max_conc     = _rcfg("risk.max_concurrent_trades",  MAX_CONCURRENT_TRADES)
         return {
             "total_risk_dollar": round(total_risk, 2),
             "heat_pct":          round(heat_pct, 3),
-            "limit_pct":         MAX_PORTFOLIO_HEAT_PCT,
-            "blocked":           heat_pct >= MAX_PORTFOLIO_HEAT_PCT,
+            "limit_pct":         _heat_limit,
+            "blocked":           heat_pct >= _heat_limit,
             "open_count":        len(open_trades),
-            "max_concurrent":    MAX_CONCURRENT_TRADES,
+            "max_concurrent":    _max_conc,
         }
     except Exception as e:
         logger.debug(f"[RiskControls] portfolio heat error: {e}")
@@ -351,7 +371,7 @@ def check_portfolio_heat() -> tuple[bool, str]:
     if heat["blocked"]:
         reason = (
             f"Portfolio heat {heat['heat_pct']:.2f}% exceeds limit "
-            f"{MAX_PORTFOLIO_HEAT_PCT}%. Reduce open risk before new trades."
+            f"{heat['limit_pct']}%. Reduce open risk before new trades."
         )
         return True, reason
     open_count = heat.get("open_count", 0)
@@ -476,9 +496,10 @@ def check_max_daily_trades() -> tuple[bool, str]:
         from agent.paper_trading import get_today_pnl
         today_stats = get_today_pnl()
         total_today = int(today_stats.get("total", 0) or 0)
-        if total_today >= MAX_DAILY_TRADES:
+        _max_trades = _rcfg("risk.max_daily_trades", MAX_DAILY_TRADES)
+        if total_today >= _max_trades:
             reason = (
-                f"Max daily trades reached: {total_today}/{MAX_DAILY_TRADES}. "
+                f"Max daily trades reached: {total_today}/{_max_trades}. "
                 "No new entries until tomorrow."
             )
             logger.info(f"[RiskControls] {reason}")
@@ -639,15 +660,15 @@ def get_risk_status() -> dict:
         # Daily P&L progress
         "pnl_today_dollar":       round(pnl_dollar, 2),
         "pnl_today_pct":          round(pnl_pct, 3),
-        "daily_target":           DAILY_PROFIT_TARGET_USD,
-        "daily_max":              DAILY_PROFIT_MAX_USD,
-        "progress_to_target_pct": round(min(pnl_dollar / DAILY_PROFIT_TARGET_USD * 100, 100), 1) if (pnl_dollar > 0 and DAILY_PROFIT_TARGET_USD > 0) else 0.0,
+        "daily_target":           _rcfg("risk.daily_profit_target_usd", DAILY_PROFIT_TARGET_USD),
+        "daily_max":              _rcfg("risk.daily_profit_max_usd",    DAILY_PROFIT_MAX_USD),
+        "progress_to_target_pct": round(min(pnl_dollar / max(_rcfg("risk.daily_profit_target_usd", DAILY_PROFIT_TARGET_USD), 1) * 100, 100), 1) if pnl_dollar > 0 else 0.0,
         # Loss limits
-        "daily_loss_warning_pct": DAILY_LOSS_WARNING_PCT,
-        "daily_loss_halt_pct":    DAILY_LOSS_HALT_PCT,
+        "daily_loss_warning_pct": _rcfg("risk.daily_loss_warning_pct", DAILY_LOSS_WARNING_PCT),
+        "daily_loss_halt_pct":    _rcfg("risk.daily_loss_halt_pct",    DAILY_LOSS_HALT_PCT),
         # Consecutive losses
         "consecutive_losses":     consec,
-        "max_consecutive":        MAX_CONSECUTIVE_LOSSES,
+        "max_consecutive":        _rcfg("risk.max_consecutive_losses", MAX_CONSECUTIVE_LOSSES),
         "cooldown_remaining_s":   cooldown_secs,
         # Phase 2.3: Volatility halt
         "volatility_halted":      vol_halted,
@@ -656,7 +677,7 @@ def get_risk_status() -> dict:
         "volatility_halt_mult":   VOLATILITY_HALT_ATR_MULT,
         # Phase 2.4: Max daily trades
         "daily_trade_count":      daily_cnt,
-        "max_daily_trades":       MAX_DAILY_TRADES,
+        "max_daily_trades":       _rcfg("risk.max_daily_trades", MAX_DAILY_TRADES),
         # Phase 2.6: Drawdown throttle
         "drawdown_throttle":      dthrottle,
         # Profit Protect Mode

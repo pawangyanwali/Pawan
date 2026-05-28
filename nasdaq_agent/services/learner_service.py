@@ -123,22 +123,32 @@ def _continuous_deep_loop() -> None:
     Training is skipped while the market is open to avoid CPU contention with
     the live scanner — consistent with the module's market-hours contract.
     """
-    if not _DEEP_ENABLED:
-        _log.info("Continuous deep learner disabled by LEARNER_DEEP_ENABLED=0")
-        return
-
     if _DEEP_STARTUP_DELAY_S:
         _log.info("Continuous deep learner waiting %ss before first cycle", _DEEP_STARTUP_DELAY_S)
         if _runner._stop.wait(_DEEP_STARTUP_DELAY_S):
             return
 
     while not _runner.stopped:
+        try:
+            from agent.config_manager import config as _cfg
+            deep_on = _cfg.get("learner.deep_enabled", _DEEP_ENABLED)
+        except Exception:
+            deep_on = _DEEP_ENABLED
+        if not deep_on:
+            _log.debug("Deep learner disabled via config; rechecking in 60s")
+            _runner._stop.wait(60)
+            continue
         if _is_market_hours():
             _log.debug("Skipping deep cycle — market is open; rechecking in 5 min")
             _runner._stop.wait(300)
             continue
         _run_deep_cycle()
-        _runner._stop.wait(_DEEP_INTERVAL_S)
+        try:
+            from agent.config_manager import config as _cfg
+            interval = int(_cfg.get("learner.deep_interval_s", _DEEP_INTERVAL_S))
+        except Exception:
+            interval = _DEEP_INTERVAL_S
+        _runner._stop.wait(interval)
 
 
 def _run_deep_cycle() -> None:
@@ -155,7 +165,12 @@ def _run_deep_cycle() -> None:
         from agent.deep_model import retrain_deep_all
         from config import TRAINING_TICKERS
 
-        tickers = list(TRAINING_TICKERS)[:_DEEP_TICKER_LIMIT]
+        try:
+            from agent.config_manager import config as _cfg
+            _ticker_limit = int(_cfg.get("learner.deep_ticker_limit", _DEEP_TICKER_LIMIT))
+        except Exception:
+            _ticker_limit = _DEEP_TICKER_LIMIT
+        tickers = list(TRAINING_TICKERS)[:_ticker_limit]
         _log.info("Continuous deep cycle starting (%d tickers)", len(tickers))
         hist_15m = fetch_batch_interval(
             tickers,
@@ -285,6 +300,12 @@ def main() -> None:
 
     _log.info("=== learner_service starting ===")
     _log.info("Continuous learning active; training work stays inside learner container limits.")
+
+    from agent.config_manager import config as _cfg
+    _cfg.load()
+    _cfg.seed_defaults()
+    _cfg.start_listener(_runner)
+    _log.info("Runtime config loaded (%d keys)", len(_cfg.all()))
 
     _run_learning_engine()
     _run_weekend_learner()

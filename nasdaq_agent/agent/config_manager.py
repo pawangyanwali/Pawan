@@ -1,5 +1,5 @@
 """
-Runtime configuration store — Phase 1.
+Runtime configuration store — Phase 2.
 
 Stores runtime-tunable settings in a PostgreSQL `config_store` table.
 Values are JSON-encoded TEXT (supports float, int, bool, str, list).
@@ -27,13 +27,29 @@ logger = logging.getLogger(__name__)
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict[str, Any] = {
+    # ── Paper trading ──────────────────────────────────────────────────────────
     "paper.budget":                        lambda: float(os.getenv("PAPER_BUDGET", "50000")),
     "paper.max_trade_pct":                 lambda: float(os.getenv("PAPER_MAX_TRADE_PCT", "5.0")),
     "paper.max_allocated_pct":             lambda: float(os.getenv("PAPER_MAX_ALLOCATED_PCT", "40.0")),
     "paper.max_open_trades":               lambda: int(os.getenv("PAPER_MAX_OPEN_TRADES", "10")),
     "paper.min_confidence":                lambda: float(os.getenv("PAPER_TRADE_MIN_CONFIDENCE", "25.0")),
+    # ── Scanner / earnings ─────────────────────────────────────────────────────
     "scanner.pre_earnings_blackout_days":  lambda: 3,
     "scanner.post_earnings_cooldown_days": lambda: 1,
+    # ── Risk controls ──────────────────────────────────────────────────────────
+    "risk.daily_loss_warning_pct":  lambda: float(os.getenv("DAILY_LOSS_WARNING_PCT", "1.5")),
+    "risk.daily_loss_halt_pct":     lambda: float(os.getenv("DAILY_LOSS_HALT_PCT",     "2.5")),
+    "risk.daily_profit_target_usd": lambda: float(os.getenv("DAILY_PROFIT_TARGET",     "1000")),
+    "risk.daily_profit_max_usd":    lambda: float(os.getenv("DAILY_PROFIT_MAX",        "1500")),
+    "risk.max_concurrent_trades":   lambda: int(os.getenv(  "MAX_CONCURRENT_TRADES",   "3")),
+    "risk.max_portfolio_heat_pct":  lambda: float(os.getenv("MAX_PORTFOLIO_HEAT_PCT",  "1.5")),
+    "risk.max_consecutive_losses":  lambda: int(os.getenv(  "MAX_CONSECUTIVE_LOSSES",  "5")),
+    "risk.cooldown_after_losses":   lambda: int(os.getenv(  "COOLDOWN_LOSSES",         "3")),
+    "risk.max_daily_trades":        lambda: int(os.getenv(  "MAX_DAILY_TRADES",         "30")),
+    # ── Learner ────────────────────────────────────────────────────────────────
+    "learner.deep_enabled":      lambda: os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes"),
+    "learner.deep_interval_s":   lambda: max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600"))),
+    "learner.deep_ticker_limit": lambda: max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100"))),
 }
 
 # Legacy column map: config_store key → account_config column name

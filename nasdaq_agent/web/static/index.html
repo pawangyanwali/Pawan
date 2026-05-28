@@ -898,6 +898,7 @@
       <button id="pt-tab-closed"  onclick="ptTab('closed')"  class="pt-tab">Closed Trades</button>
       <button id="pt-tab-account" onclick="ptTab('account')" class="pt-tab">Account</button>
       <button id="pt-tab-budget"  onclick="ptTab('budget')"  class="pt-tab">Budget Config</button>
+      <button id="pt-tab-risk"    onclick="ptTab('risk')"    class="pt-tab">Risk Config</button>
       <button id="pt-tab-learn"   onclick="ptTab('learn')"   class="pt-tab">What We're Learning</button>
     </div>
 
@@ -905,6 +906,7 @@
     <div id="pt-panel-closed"  style="display:none"></div>
     <div id="pt-panel-account" style="display:none"></div>
     <div id="pt-panel-budget"  style="display:none"></div>
+    <div id="pt-panel-risk"    style="display:none"></div>
     <div id="pt-panel-learn"   style="display:none"></div>
   </div>
 </div>
@@ -4051,12 +4053,13 @@ function populateMacroSection(s) {
 let _ptData = null, _ptLearn = null;
 
 function ptTab(name) {
-  ['open','closed','account','budget','learn'].forEach(t => {
+  ['open','closed','account','budget','risk','learn'].forEach(t => {
     document.getElementById('pt-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('pt-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
   if (name === 'account') ptLoadAccountTab();
   if (name === 'budget')  ptLoadBudgetTab();
+  if (name === 'risk')    ptLoadRiskTab();
 }
 
 function _ptExitBadge(reason) {
@@ -4783,6 +4786,147 @@ async function ptSaveSignalConfig(btn) {
   } finally {
     btn.disabled = false;
   }
+}
+
+// ─── Risk Config tab ───────────────────────────────────────────────────────────
+async function ptLoadRiskTab() {
+  const panel = document.getElementById('pt-panel-risk');
+  if (!panel) return;
+  try {
+    const [riskResp, learnerResp] = await Promise.all([
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`,    {signal: AbortSignal.timeout(10000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=learner.`, {signal: AbortSignal.timeout(10000)}),
+    ]);
+    const rc = ((await riskResp.json()).config)    || {};
+    const lc = ((await learnerResp.json()).config) || {};
+
+    const inp = (id, val, extra='') =>
+      `<input id="${id}" type="number" value="${val}" ${extra}
+        style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">`;
+    const field = (label, id, val, hint, extra='') => `
+      <div>
+        <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">${label}</label>
+        ${inp(id, val, extra)}
+        <div style="font-size:9px;color:var(--muted);margin-top:3px">${hint}</div>
+      </div>`;
+
+    panel.innerHTML = `
+      <div style="padding:4px 0;max-height:65vh;overflow-y:auto">
+
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Risk Controls</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+          Daily circuit breakers and position limits. Changes take effect immediately — no restart needed.
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px">
+          ${field('DAILY PROFIT TARGET ($)', 'rc-profit-target', rc['risk.daily_profit_target_usd'] ?? 1000, 'Activates Profit Protect Mode when day P&amp;L reaches this.', 'min="0" step="50"')}
+          ${field('DAILY PROFIT CEILING ($)', 'rc-profit-max', rc['risk.daily_profit_max_usd'] ?? 1500, 'Halts all trading when day P&amp;L reaches this.', 'min="0" step="50"')}
+          ${field('DAILY LOSS WARNING (%)', 'rc-loss-warn', rc['risk.daily_loss_warning_pct'] ?? 1.5, 'Issues a log warning at this drawdown level.', 'min="0" max="10" step="0.1"')}
+          ${field('DAILY LOSS HALT (%)', 'rc-loss-halt', rc['risk.daily_loss_halt_pct'] ?? 2.5, 'Halts all trading for the day at this drawdown level.', 'min="0" max="10" step="0.1"')}
+          ${field('MAX CONCURRENT TRADES', 'rc-max-concurrent', rc['risk.max_concurrent_trades'] ?? 3, 'Hard cap on simultaneous open positions.', 'min="1" max="50" step="1"')}
+          ${field('MAX PORTFOLIO HEAT (%)', 'rc-heat', rc['risk.max_portfolio_heat_pct'] ?? 1.5, 'Max combined open risk as % of account. Blocks new trades above this.', 'min="0" max="20" step="0.1"')}
+          ${field('MAX CONSECUTIVE LOSSES', 'rc-consec-losses', rc['risk.max_consecutive_losses'] ?? 5, 'Triggers full halt after N consecutive losses.', 'min="1" max="20" step="1"')}
+          ${field('COOLDOWN AFTER LOSSES', 'rc-cooldown-losses', rc['risk.cooldown_after_losses'] ?? 3, '30-min cooldown triggered after N consecutive losses.', 'min="1" max="10" step="1"')}
+          ${field('MAX DAILY TRADES', 'rc-max-daily', rc['risk.max_daily_trades'] ?? 30, 'Hard cap on total trades per day.', 'min="1" max="200" step="1"')}
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+          <button onclick="ptSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
+            Save Risk Config
+          </button>
+          <span id="rc-status" style="font-size:11px;color:var(--muted)"></span>
+        </div>
+
+        <div style="margin-top:28px">
+          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Learner Config</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+            Deep BiLSTM retraining schedule. Changes take effect on the next sleep cycle.
+          </div>
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <div>
+              <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:6px;font-weight:600">DEEP LEARNING ENABLED</label>
+              <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+                <input type="checkbox" id="lc-deep-enabled" ${lc['learner.deep_enabled'] !== false ? 'checked' : ''}
+                  style="width:16px;height:16px;cursor:pointer">
+                <span style="font-size:12px;color:var(--text)">Enable continuous BiLSTM retraining</span>
+              </label>
+              <div style="font-size:9px;color:var(--muted);margin-top:4px">Only runs outside market hours. Disable if learner container is CPU-constrained.</div>
+            </div>
+            ${field('RETRAIN INTERVAL (seconds)', 'lc-interval', lc['learner.deep_interval_s'] ?? 3600, 'How often to retrain (min 300s). Next cycle picks up the new value.', 'min="300" max="86400" step="300"')}
+            ${field('MAX TICKERS PER CYCLE', 'lc-ticker-limit', lc['learner.deep_ticker_limit'] ?? 100, 'Limit tickers trained per cycle to control memory pressure.', 'min="1" max="500" step="10"')}
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+            <button onclick="ptSaveLearnerConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
+              Save Learner Config
+            </button>
+            <span id="lc-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+        </div>
+
+      </div>`;
+  } catch(e) {
+    if (panel) panel.innerHTML = `<div style="color:var(--red);font-size:12px">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function ptSaveRiskConfig(btn) {
+  const get = id => document.getElementById(id)?.value;
+  const status = document.getElementById('rc-status');
+  const updates = {
+    "risk.daily_profit_target_usd": parseFloat(get('rc-profit-target')),
+    "risk.daily_profit_max_usd":    parseFloat(get('rc-profit-max')),
+    "risk.daily_loss_warning_pct":  parseFloat(get('rc-loss-warn')),
+    "risk.daily_loss_halt_pct":     parseFloat(get('rc-loss-halt')),
+    "risk.max_concurrent_trades":   parseInt(get('rc-max-concurrent'), 10),
+    "risk.max_portfolio_heat_pct":  parseFloat(get('rc-heat')),
+    "risk.max_consecutive_losses":  parseInt(get('rc-consec-losses'), 10),
+    "risk.cooldown_after_losses":   parseInt(get('rc-cooldown-losses'), 10),
+    "risk.max_daily_trades":        parseInt(get('rc-max-daily'), 10),
+  };
+  if (Object.values(updates).some(v => isNaN(v))) {
+    if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updates), signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
+}
+
+async function ptSaveLearnerConfig(btn) {
+  const status = document.getElementById('lc-status');
+  const deepEnabled = document.getElementById('lc-deep-enabled')?.checked ?? true;
+  const interval    = parseInt(document.getElementById('lc-interval')?.value, 10);
+  const tickerLimit = parseInt(document.getElementById('lc-ticker-limit')?.value, 10);
+  if (isNaN(interval) || isNaN(tickerLimit)) {
+    if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        "learner.deep_enabled":      deepEnabled,
+        "learner.deep_interval_s":   Math.max(300, interval),
+        "learner.deep_ticker_limit": Math.max(1, tickerLimit),
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
 }
 
 // ─── Watchlist ─────────────────────────────────────────────────────────────────
