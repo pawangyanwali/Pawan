@@ -520,6 +520,7 @@
     </button>
     <!-- Live price data freshness indicator -->
     <span id="data-freshness" title="Time since last live price update from Schwab" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">● PRICES</span>
+    <span id="price-source-breakdown" title="Visible price source counts" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">WS 0 | REST 0 | STALE 0</span>
     <span id="ops-sla-chip" title="Runtime SLA status" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">SLA ...</span>
     <span style="white-space:nowrap">Last scan: <span id="last-scan">—</span></span>
     <span id="api-credit-chip" title="Twelve Data API credits used in rolling 60s window" style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;display:none">API —/377</span>
@@ -2445,12 +2446,44 @@ setInterval(_pollSchwabHeaderStatus, 30000);
 // Heartbeat: send pong to server every 20s to keep proxy/NAT alive
 setInterval(() => _wsSend({ type: 'pong' }), _WS_HEARTBEAT_MS);
 
+function _setPriceSourceBreakdown(cov, state='UNKNOWN') {
+  const el = document.getElementById('price-source-breakdown');
+  if (!el) return;
+  const c = cov || {};
+  const total = Number(c.total || 0);
+  const live = Number(c.live || 0);
+  const fallback = Number(c.fallback || 0);
+  const snapshot = Number(c.snapshot || 0);
+  const stale = Number(c.stale || 0);
+  el.textContent = snapshot
+    ? `WS ${live} | REST ${fallback} | SNAP ${snapshot} | STALE ${stale}`
+    : `WS ${live} | REST ${fallback} | STALE ${stale}`;
+  el.title = total
+    ? `Visible price source counts: ${live} WebSocket, ${fallback} REST fallback, ${snapshot} scanner snapshots, ${stale} stale/no-print out of ${total}`
+    : 'Visible price source counts: no price coverage reported yet';
+  const upper = String(state || '').toUpperCase();
+  if (!total || upper === 'CLOSED' || upper === 'NO_DATA') {
+    el.style.color = 'var(--muted)';
+    el.style.borderColor = 'var(--border)';
+  } else if (upper === 'LIVE' && live === total && stale === 0 && fallback === 0 && snapshot === 0) {
+    el.style.color = 'var(--green, #26a65b)';
+    el.style.borderColor = 'var(--green, #26a65b)';
+  } else if (upper === 'STALE' || stale >= Math.max(1, Math.ceil(total * 0.25))) {
+    el.style.color = 'var(--red, #e74c3c)';
+    el.style.borderColor = 'var(--red, #e74c3c)';
+  } else {
+    el.style.color = '#f5a623';
+    el.style.borderColor = '#f5a623';
+  }
+}
+
 // Price freshness indicator: updates every second and shows source truth.
 setInterval(() => {
   const el = document.getElementById('data-freshness');
   if (!el) return;
   const session = _sessionInfo?.session || '';
   if (!_lastPriceAt) {
+    _setPriceSourceBreakdown(_lastPriceCoverage, session === 'CLOSED' ? 'CLOSED' : 'NO_DATA');
     el.textContent = session === 'CLOSED' ? 'MARKET CLOSED' : 'NO DATA';
     el.style.color = 'var(--muted)';
     el.style.borderColor = 'var(--border)';
@@ -2459,6 +2492,7 @@ setInterval(() => {
   }
   const age = Math.floor((Date.now() - _lastPriceAt) / 1000);
   const cov = _lastPriceCoverage || {};
+  _setPriceSourceBreakdown(cov, _lastPriceStatus);
   const sourceBreakdown = cov.total
     ? `${cov.live || 0} WS / ${cov.fallback || 0} REST / ${cov.stale || 0} stale`
     : '';
@@ -2466,17 +2500,17 @@ setInterval(() => {
     ? `${sourceBreakdown} · ${cov.fresh || 0}/${cov.total || 0} fresh · ${cov.snapshot || 0} snapshot`
     : '';
   if (_lastPriceStatus === 'LIVE' && age < 2) {
-    el.textContent = cov.total ? `LIVE ${cov.live}/${cov.total}` : 'LIVE';
+    el.textContent = 'LIVE';
     el.style.color = 'var(--green, #26a65b)';
     el.style.borderColor = 'var(--green, #26a65b)';
     el.title = `Schwab WebSocket live quotes are fresh across the dashboard${detailedBreakdown ? ': ' + detailedBreakdown : ''}`;
   } else if (_lastPriceStatus === 'PARTIAL_LIVE' && age < 5) {
-    el.textContent = sourceBreakdown ? `HYBRID LIVE ${sourceBreakdown}` : `HYBRID LIVE ${age}s`;
+    el.textContent = 'HYBRID LIVE';
     el.style.color = '#f5a623';
     el.style.borderColor = '#f5a623';
     el.title = `Mixed data sources: Schwab WebSocket + REST fallback + stale/no-print symbols${detailedBreakdown ? ' · ' + detailedBreakdown : ''}`;
   } else if (_lastPriceStatus === 'REST_FALLBACK' && age < 10) {
-    el.textContent = cov.total ? `REST FALLBACK ${cov.fallback}/${cov.total}` : `REST FALLBACK ${age}s`;
+    el.textContent = 'REST FALLBACK';
     el.style.color = '#f5a623';
     el.style.borderColor = '#f5a623';
     el.title = `Fresh Schwab REST fallback quotes are being used; this is not streaming live data${detailedBreakdown ? ' · ' + detailedBreakdown : ''}`;

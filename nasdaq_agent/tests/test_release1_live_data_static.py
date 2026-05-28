@@ -86,6 +86,10 @@ def test_dashboard_displays_price_source_truth_instead_of_reconnecting_on_snapsh
     assert "function _updatePriceBusState(prices, fallbackStatus='UNKNOWN')" in src
     assert "let _priceBusCache = {}" in src
     assert "Evaluate the whole dashboard cache" in src
+    assert 'id="price-source-breakdown"' in src
+    assert "function _setPriceSourceBreakdown(cov, state='UNKNOWN')" in src
+    assert "`WS ${live} | REST ${fallback} | STALE ${stale}`" in src
+    assert "`WS ${live} | REST ${fallback} | SNAP ${snapshot} | STALE ${stale}`" in src
     assert "REST FALLBACK" in src
     assert "HYBRID LIVE" in src
     assert "WS /" in src
