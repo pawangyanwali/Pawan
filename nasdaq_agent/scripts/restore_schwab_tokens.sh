@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # restore_schwab_tokens.sh
 #
-# Verifies Schwab token JSON files in the host bind-mounted data directory,
+# Verifies Schwab token JSON files in the host bind-mounted token directory,
 # fixes ownership for container writes, and restarts token-consuming services.
 #
 # Usage (run from /opt/nasdaq-agent):
 #   sudo bash nasdaq_agent/scripts/restore_schwab_tokens.sh
 #
 # Token source (host):
-#   /opt/nasdaq-agent/nasdaq_agent/data/schwab_tokens.json    (trading A+T)
-#   /opt/nasdaq-agent/nasdaq_agent/data/schwab_md_tokens.json (market-data MD)
+#   /opt/nasdaq-agent/tokens/schwab_tokens.json    (trading A+T)
+#   /opt/nasdaq-agent/tokens/schwab_md_tokens.json (market-data MD)
 #
 # Token destination (container):
-#   /app/data/ bind-mounted from /opt/nasdaq-agent/nasdaq_agent/data
+#   /app/tokens/ bind-mounted from /opt/nasdaq-agent/tokens
 
 set -euo pipefail
 
-HOST_DATA_DIR="/opt/nasdaq-agent/nasdaq_agent/data"
+HOST_TOKEN_DIR="/opt/nasdaq-agent/tokens"
 COMPOSE_FILE="/opt/nasdaq-agent/docker-compose.yml"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -25,8 +25,8 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
 # ── Verify token files exist on host ──────────────────────────────────────────
-TRADING_TOKEN="$HOST_DATA_DIR/schwab_tokens.json"
-MD_TOKEN="$HOST_DATA_DIR/schwab_md_tokens.json"
+TRADING_TOKEN="$HOST_TOKEN_DIR/schwab_tokens.json"
+MD_TOKEN="$HOST_TOKEN_DIR/schwab_md_tokens.json"
 
 [[ -f "$TRADING_TOKEN" ]] || error "schwab_tokens.json not found at $TRADING_TOKEN"
 [[ -f "$MD_TOKEN"      ]] || error "schwab_md_tokens.json not found at $MD_TOKEN"

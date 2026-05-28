@@ -46,10 +46,13 @@ x-common: &common
     - nasdaq-net
   logging: *logging
   volumes:
-    # Persist model files, token files, and runtime data on the host.
+    # Persist model files and runtime data on the host.
     # Bind-mount means the host directory IS the container path — no docker cp needed.
     # Ensure the directory exists before first run: mkdir -p /opt/nasdaq-agent/nasdaq_agent/data
     - /opt/nasdaq-agent/nasdaq_agent/data:/app/data
+    # Persist Schwab OAuth tokens outside the code/data tree.
+    # Ensure the directory exists before first run: mkdir -p /opt/nasdaq-agent/tokens
+    - /opt/nasdaq-agent/tokens:/app/tokens
     # Bind-mount host log directory so all service logs appear in one place
     # on the host at /opt/nasdaq-agent/logs
     - /opt/nasdaq-agent/logs:/app/logs
@@ -74,6 +77,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "0"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      SCHWAB_TOKEN_DIR:            "/app/tokens"
       LOG_DIR:                     "/app/logs"
     command: ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]
     # HEALTHCHECK is defined in Dockerfile — hits /api/health
@@ -97,6 +101,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "1"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      SCHWAB_TOKEN_DIR:            "/app/tokens"
       LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.market_data_service"]
     healthcheck:
@@ -124,6 +129,7 @@ services:
       NASDAQ_MARKET_DATA_ENABLED:  "0"
       NASDAQ_LEARNER_ENABLED:      "0"
       NASDAQ_SCHEDULER_ENABLED:    "0"
+      SCHWAB_TOKEN_DIR:            "/app/tokens"
       LOG_DIR:                     "/app/logs"
     command: ["python", "-m", "services.scanner_service"]
     depends_on:

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import pickle
 import threading
 import time
@@ -105,6 +106,7 @@ _trained = False
 _training_history: list[dict] = []   # [{epoch, total_epochs, loss, ts, tickers, cluster}]
 _is_training_now:  bool       = False
 _MAX_HISTORY       = 500
+_torch_runtime_configured = False
 
 # ── Ticker → cluster-local index mapping ──────────────────────────────────────
 # Built at module load time from config. Index 0 is reserved (padding_idx).
@@ -241,6 +243,38 @@ def _save_scaler(scaler, path: Path) -> None:
 
 # ── Per-cluster model loader ──────────────────────────────────────────────────
 
+def _configure_torch_runtime(torch_mod) -> None:
+    """
+    Keep CPU inference predictable in the threaded scanner.
+
+    The scanner already runs multiple tickers concurrently. Letting each
+    PyTorch inference spawn its own CPU worker pool can oversubscribe small EC2
+    instances and turn a few slow tickers into a stale dashboard.
+    """
+    global _torch_runtime_configured
+    if _torch_runtime_configured:
+        return
+
+    try:
+        num_threads = max(1, int(os.getenv("TORCH_NUM_THREADS", "1")))
+    except ValueError:
+        num_threads = 1
+    try:
+        interop_threads = max(1, int(os.getenv("TORCH_INTEROP_THREADS", "1")))
+    except ValueError:
+        interop_threads = 1
+
+    try:
+        torch_mod.set_num_threads(num_threads)
+    except Exception as exc:
+        logger.debug("[DeepModel] torch.set_num_threads skipped: %s", exc)
+    try:
+        torch_mod.set_num_interop_threads(interop_threads)
+    except Exception as exc:
+        logger.debug("[DeepModel] torch.set_num_interop_threads skipped: %s", exc)
+    _torch_runtime_configured = True
+
+
 def _get_cluster_model(cluster: str):
     """Load or return cached model for the given cluster."""
     global _cluster_models, _cluster_scalers, _cluster_trained
@@ -257,6 +291,7 @@ def _get_cluster_model(cluster: str):
         cfg = _CLUSTER_CONFIGS[cluster]
         try:
             import torch
+            _configure_torch_runtime(torch)
             model_path = cfg["path"]
             if model_path.exists():
                 model.load_state_dict(
@@ -688,6 +723,7 @@ def predict_deep(ticker: str, df_15m: pd.DataFrame) -> float:
 
     try:
         import torch
+        _configure_torch_runtime(torch)
 
         df = _prepare_df(df_15m, ticker)
         if len(df) < SEQ_LEN:

@@ -11,14 +11,16 @@ echo "[1/5] Pulling latest code from $BRANCH ..."
 git -C "$APP_DIR" fetch origin
 git -C "$APP_DIR" reset --hard "origin/$BRANCH"
 
-echo "[2/5] Ensuring data directory exists on host ..."
+echo "[2/5] Ensuring data/token directories exist on host ..."
 # This is the bind-mount source for /app/data in every container.
-# Token files placed here are immediately visible to all containers.
+# Schwab token files live in /opt/nasdaq-agent/tokens and mount to /app/tokens.
 mkdir -p "$APP_DIR/nasdaq_agent/data/models"
 mkdir -p "$APP_DIR/nasdaq_agent/data/cache"
+mkdir -p "$APP_DIR/tokens"
 mkdir -p "$APP_DIR/logs"
 # Containers run as UID 1000 (nasdaq) — ensure they can write to the data dir.
 chown -R 1000:1000 "$APP_DIR/nasdaq_agent/data" 2>/dev/null || true
+chown -R 1000:1000 "$APP_DIR/tokens" 2>/dev/null || true
 
 echo "[3/5] Building image ..."
 docker compose -f "$APP_DIR/docker-compose.yml" build
@@ -31,14 +33,14 @@ sleep 6
 docker compose -f "$APP_DIR/docker-compose.yml" ps --format "table {{.Name}}\t{{.Status}}"
 
 echo ""
-echo "Token files expected at: $APP_DIR/nasdaq_agent/data/schwab_tokens.json"
-echo "                         $APP_DIR/nasdaq_agent/data/schwab_md_tokens.json"
-if [[ -f "$APP_DIR/nasdaq_agent/data/schwab_tokens.json" ]]; then
+echo "Token files expected at: $APP_DIR/tokens/schwab_tokens.json"
+echo "                         $APP_DIR/tokens/schwab_md_tokens.json"
+if [[ -f "$APP_DIR/tokens/schwab_tokens.json" ]]; then
     echo "✓ schwab_tokens.json present"
 else
     echo "✗ schwab_tokens.json MISSING — visit /schwab/auth or copy from backup"
 fi
-if [[ -f "$APP_DIR/nasdaq_agent/data/schwab_md_tokens.json" ]]; then
+if [[ -f "$APP_DIR/tokens/schwab_md_tokens.json" ]]; then
     echo "✓ schwab_md_tokens.json present"
 else
     echo "✗ schwab_md_tokens.json MISSING — visit /schwab/auth/md or copy from backup"

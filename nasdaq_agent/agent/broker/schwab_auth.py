@@ -19,6 +19,7 @@ Environment variables (.env):
     SCHWAB_MD_CLIENT_SECRET — Market Data app secret
     SCHWAB_ACCOUNT_NUMBER   — Paper/live account number
     SCHWAB_PAPER_TRADING    — "true" for paper, "false" for live
+    SCHWAB_TOKEN_DIR        — optional token directory override
 """
 from __future__ import annotations
 
@@ -41,7 +42,12 @@ logger = logging.getLogger(__name__)
 AUTH_URL  = "https://api.schwabapi.com/v1/oauth/authorize"
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 
-_DATA_DIR = Path(__file__).parent.parent.parent / "data"
+_DEFAULT_TOKEN_DIR = Path(__file__).parent.parent.parent / "data"
+
+
+def _configured_token_dir() -> Path:
+    """Return the directory used for Schwab token JSON files."""
+    return Path(os.getenv("SCHWAB_TOKEN_DIR", str(_DEFAULT_TOKEN_DIR))).expanduser()
 
 # Persistent backup dir in the app user's home — writable without sudo, survives redeploys.
 # Override with SCHWAB_TOKEN_BACKUP_DIR env var if a different path is preferred.
@@ -58,7 +64,8 @@ class _TokenManager:
         self.name             = name
         self._id_env          = client_id_env
         self._secret_env      = client_secret_env
-        self._token_path      = _DATA_DIR / token_filename
+        self._token_dir       = _configured_token_dir()
+        self._token_path      = self._token_dir / token_filename
         self._tokens: dict    = {}
         self._lock            = threading.Lock()
         self._refresh_timer: Optional[threading.Timer] = None
@@ -86,7 +93,7 @@ class _TokenManager:
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def _save(self) -> None:
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._token_dir.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self._tokens, indent=2)
         self._token_path.write_text(payload)
         # Mirror to persistent backup so tokens survive git-pull redeploys / container restarts.
@@ -97,18 +104,35 @@ class _TokenManager:
             logger.debug(f"[Schwab/{self.name}] Token backup write skipped: {_e}")
 
     def _load_from_disk(self) -> dict:
-        if self._token_path.exists():
+        candidates = [self._token_path]
+        legacy_path = _DEFAULT_TOKEN_DIR / self._token_path.name
+        if legacy_path != self._token_path:
+            candidates.append(legacy_path)
+
+        for path in candidates:
+            if not path.exists():
+                continue
             try:
-                return json.loads(self._token_path.read_text())
+                data = json.loads(path.read_text())
             except Exception:
-                pass
+                continue
+            if path != self._token_path:
+                try:
+                    self._token_dir.mkdir(parents=True, exist_ok=True)
+                    self._token_path.write_text(json.dumps(data, indent=2))
+                    logger.info(
+                        f"[Schwab/{self.name}] Tokens migrated from {path} -> {self._token_path}"
+                    )
+                except Exception as _e:
+                    logger.warning(f"[Schwab/{self.name}] Token migration skipped: {_e}")
+            return data
         # Primary path missing (fresh deploy / container restart) — try persistent backup.
         backup_path = _BACKUP_DIR / self._token_path.name
         if backup_path.exists():
             try:
                 data = json.loads(backup_path.read_text())
                 # Restore to primary location so normal path works from here on.
-                _DATA_DIR.mkdir(parents=True, exist_ok=True)
+                self._token_dir.mkdir(parents=True, exist_ok=True)
                 self._token_path.write_text(json.dumps(data, indent=2))
                 logger.info(
                     f"[Schwab/{self.name}] Tokens restored from persistent backup → {self._token_path}"
