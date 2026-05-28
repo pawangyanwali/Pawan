@@ -228,6 +228,62 @@ class ParameterControlRegistry:
                 result[param] = fam_state.get(param, {}).get("current", spec["default"])
         return result
 
+    def get_all_families_full(self) -> dict:
+        """Return current params + spec for all families — for dashboard display."""
+        result = {}
+        with self._lock:
+            for family in sorted(_ALL_FAMILIES):
+                result[family] = {}
+                fam_state = self._state.get(family, {})
+                for param, spec in _PARAM_SPEC.items():
+                    current = fam_state.get(param, {}).get("current", spec["default"])
+                    result[family][param] = {
+                        "current":  round(current, 4),
+                        "default":  spec["default"],
+                        "min":      spec["min"],
+                        "max":      spec["max"],
+                        "step":     spec.get("max_change", 0.05),
+                        "auto":     spec["auto"],
+                        "is_tuned": abs(current - spec["default"]) > 1e-4,
+                    }
+        return result
+
+    def set_manual(self, family: str, param: str, value: float) -> tuple[bool, str]:
+        """Manual override — respects bounds but bypasses cooldown and directional constraints."""
+        if family not in _ALL_FAMILIES:
+            return False, f"Unknown family: {family}"
+        spec = _PARAM_SPEC.get(param)
+        if spec is None:
+            return False, f"Unknown param: {param}"
+        clamped = round(float(max(spec["min"], min(spec["max"], value))), 6)
+        with self._lock:
+            entry = self._state[family][param]
+            old = float(entry["current"])
+            entry["rollback"] = entry["previous"]
+            entry["previous"] = old
+            entry["current"] = clamped
+            entry["last_updated_cycle"] = 0  # reset so auto-tuner can refine next cycle
+        self.save()
+        msg = f"{family}.{param}: {old} → {clamped} (manual override)"
+        logger.info(f"[ParamRegistry] {msg}")
+        return True, msg
+
+    def reset_family(self, family: str) -> bool:
+        """Reset all params for a family to their defaults."""
+        if family not in _ALL_FAMILIES:
+            return False
+        with self._lock:
+            for param, spec in _PARAM_SPEC.items():
+                self._state[family][param] = {
+                    "current":            spec["default"],
+                    "previous":           spec["default"],
+                    "rollback":           spec["default"],
+                    "last_updated_cycle": 0,
+                }
+        self.save()
+        logger.info(f"[ParamRegistry] {family} reset to defaults")
+        return True
+
 
 # ── 2. OutcomeClassifier ──────────────────────────────────────────────────────
 
@@ -1233,3 +1289,31 @@ def get_selector_weights(algo_names: list, context_key: str) -> dict:
         return get_engine().get_algo_selector_weights(algo_names, context_key)
     except Exception:
         return {a: 1.0 for a in algo_names}
+
+
+def get_all_families_full() -> dict:
+    """Return current params + spec for all algo families — for dashboard display."""
+    try:
+        return get_engine()._registry.get_all_families_full()
+    except Exception:
+        return {f: {p: {"current": s["default"], "default": s["default"],
+                        "min": s["min"], "max": s["max"], "step": s.get("max_change", 0.05),
+                        "auto": s["auto"], "is_tuned": False}
+                    for p, s in _PARAM_SPEC.items()}
+                for f in _ALL_FAMILIES}
+
+
+def set_algo_param_manual(family: str, param: str, value: float) -> tuple[bool, str]:
+    """Manual override for a single algo-family parameter."""
+    try:
+        return get_engine()._registry.set_manual(family, param, value)
+    except Exception as exc:
+        return False, str(exc)
+
+
+def reset_algo_family(family: str) -> bool:
+    """Reset all params for a family to defaults."""
+    try:
+        return get_engine()._registry.reset_family(family)
+    except Exception:
+        return False

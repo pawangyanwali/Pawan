@@ -93,10 +93,18 @@ except (ImportError, Exception):
     _P2_AVAILABLE = False
 
 try:
-    from agent.algo_learning_engine import get_algo_params as _get_algo_params
+    from agent.algo_learning_engine import (
+        get_algo_params as _get_algo_params,
+        get_all_families_full as _get_all_families_full,
+        set_algo_param_manual as _set_algo_param_manual,
+        reset_algo_family as _reset_algo_family,
+    )
     _ALE_AVAILABLE = True
 except (ImportError, Exception):
-    _get_algo_params = None  # type: ignore[assignment]
+    _get_algo_params = None           # type: ignore[assignment]
+    _get_all_families_full = None     # type: ignore[assignment]
+    _set_algo_param_manual = None     # type: ignore[assignment]
+    _reset_algo_family = None         # type: ignore[assignment]
     _ALE_AVAILABLE = False
 
 try:
@@ -2386,6 +2394,48 @@ async def learning_params_status():
     _learning_params_cache = payload
     _learning_params_cache_ts = now
     return payload
+
+
+@app.get("/api/learning/params/full")
+async def learning_params_full(_current=Depends(require_trader)):
+    """Full algo-family parameter state with bounds and tuning metadata — for Settings panel."""
+    if not _ALE_AVAILABLE or _get_all_families_full is None:
+        return {"available": False, "families": {}, "spec": {}}
+    loop = asyncio.get_running_loop()
+    families = await loop.run_in_executor(None, _get_all_families_full)
+    return {"available": True, "families": families}
+
+
+@app.post("/api/learning/params/set")
+async def learning_params_set(request: Request, _current=Depends(require_trader)):
+    """Manually override a single algo-family parameter (respects bounds, bypasses cooldown)."""
+    if not _ALE_AVAILABLE or _set_algo_param_manual is None:
+        return JSONResponse({"success": False, "error": "Learning engine not available"}, status_code=503)
+    body = await request.json()
+    family = body.get("family", "")
+    param  = body.get("param", "")
+    value  = body.get("value")
+    if not family or not param or value is None:
+        return JSONResponse({"success": False, "error": "family, param, and value are required"}, status_code=400)
+    loop = asyncio.get_running_loop()
+    ok, msg = await loop.run_in_executor(None, lambda: _set_algo_param_manual(family, param, float(value)))
+    if ok:
+        global _learning_params_cache
+        _learning_params_cache = None  # bust the cache
+    return {"success": ok, "message": msg}
+
+
+@app.post("/api/learning/params/reset/{family}")
+async def learning_params_reset(family: str, _current=Depends(require_trader)):
+    """Reset all parameters for an algo family back to their built-in defaults."""
+    if not _ALE_AVAILABLE or _reset_algo_family is None:
+        return JSONResponse({"success": False, "error": "Learning engine not available"}, status_code=503)
+    loop = asyncio.get_running_loop()
+    ok = await loop.run_in_executor(None, lambda: _reset_algo_family(family))
+    if ok:
+        global _learning_params_cache
+        _learning_params_cache = None
+    return {"success": ok, "family": family}
 
 
 @app.get("/api/learning-status")
