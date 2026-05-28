@@ -29,6 +29,14 @@ def test_scanner_full_cycle_preserves_previous_signals_on_zero_result_scan():
     assert "leaving the dashboard snapshot unchanged" in src[zero_guard:assign]
 
 
+def test_scanner_closed_session_uses_5min_cache_as_proxy_when_1min_unavailable():
+    src = _src("agent/scanner.py")
+
+    assert 'if _sess.get("session", "").upper() == "CLOSED":' in src
+    assert "batch_1m[_ticker] = _df_proxy" in src
+    assert "Closed-session scan using 5min cached bars as a 1min proxy" in src
+
+
 def test_data_fetcher_closed_session_stale_cache_fallback_is_scoped():
     src = _src("agent/data_fetcher.py")
 

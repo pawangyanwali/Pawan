@@ -1666,6 +1666,38 @@ class Scanner:
         # and triggering 429 storms.  Sequential keeps peak concurrency at ≤10.
         batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
         batch_5m = fetch_batch_interval(active_tickers, "5min", 500, CACHE_TTL_5M)
+        if _sess.get("session", "").upper() == "CLOSED":
+            restored_from_5m: list[str] = []
+            try:
+                from agent.valkey_client import get_all_prices as _vk_all_prices
+                _latest_prices = _vk_all_prices()
+            except Exception:
+                _latest_prices = {}
+            for _ticker in active_tickers:
+                if _ticker in batch_1m:
+                    continue
+                _df5 = batch_5m.get(_ticker)
+                if _df5 is None or _df5.empty or len(_df5) < 5:
+                    continue
+                _df_proxy = _df5.copy()
+                try:
+                    _quote = _latest_prices.get(_ticker, {}) if isinstance(_latest_prices, dict) else {}
+                    _last_px = float(_quote.get("last") or 0)
+                    if _last_px > 0 and {"Close", "High", "Low"}.issubset(_df_proxy.columns):
+                        _last_idx = _df_proxy.index[-1]
+                        _df_proxy.loc[_last_idx, "Close"] = _last_px
+                        _df_proxy.loc[_last_idx, "High"] = max(float(_df_proxy.loc[_last_idx, "High"]), _last_px)
+                        _df_proxy.loc[_last_idx, "Low"] = min(float(_df_proxy.loc[_last_idx, "Low"]), _last_px)
+                except Exception:
+                    pass
+                batch_1m[_ticker] = _df_proxy
+                restored_from_5m.append(_ticker)
+            if restored_from_5m:
+                logger.warning(
+                    "Closed-session scan using 5min cached bars as a 1min proxy "
+                    "for %d tickers because live/REST 1min data is unavailable.",
+                    len(restored_from_5m),
+                )
         batch_1h = fetch_batch_interval(active_tickers, "1h",   500, CACHE_TTL_1H)
         # On cold start (first scan), all three prior fetches made real API calls.
         # A brief pause lets Schwab's per-minute bucket partially refill before
