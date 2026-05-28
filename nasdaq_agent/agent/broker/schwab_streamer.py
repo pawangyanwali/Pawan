@@ -230,6 +230,7 @@ def _process_levelone_equities(content: list) -> None:
                 "bid":        float(quote.get("bid")  or 0),
                 "ask":        float(quote.get("ask")  or 0),
                 "volume":     float(quote.get("volume") or 0),
+                "open":       float(quote.get("open") or 0),
                 "high":       float(quote.get("high") or 0),
                 "low":        float(quote.get("low")  or 0),
                 "pct_change": float(quote.get("net_pct_change") or 0),
@@ -586,19 +587,40 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
         with _lock:
             for sym, q in quotes.items():
                 quote = _live_quotes.setdefault(sym, {})
+                rest_open = float(q.get("open") or 0)
                 if (
                     quote.get("source_status") == "LIVE"
                     and time.time() - float(quote.get("updated_at") or 0.0) <= 2.0
                 ):
                     # Keep true WS ticks visible as LIVE instead of overwriting
-                    # them with REST fallback for the same ticker.
+                    # them with REST fallback for the same ticker. Still seed
+                    # regular-session open from REST: Schwab WS ticks are
+                    # compact and often omit open, but the dashboard needs it.
+                    if rest_open > 0 and abs(float(quote.get("open") or 0) - rest_open) > 1e-9:
+                        quote["open"] = rest_open
+                        upd.append((sym, dict(quote)))
+                        bulk[sym] = {
+                            "last":       float(quote.get("last") or 0),
+                            "mark":       float(quote.get("mark") or 0),
+                            "open":       rest_open,
+                            "bid":        float(quote.get("bid") or 0),
+                            "ask":        float(quote.get("ask") or 0),
+                            "volume":     float(quote.get("volume") or 0),
+                            "high":       float(quote.get("high") or 0),
+                            "low":        float(quote.get("low") or 0),
+                            "pct_change": float(quote.get("net_pct_change") or 0),
+                            "updated_at": float(quote.get("updated_at") or time.time()),
+                            "source": "SCHWAB_WS",
+                            "source_status": "LIVE",
+                            "is_live": True,
+                        }
                     continue
                 quote["last"]       = float(q.get("last") or 0)
                 quote["mark"]       = float(q.get("mark") or 0)
                 quote["bid"]        = float(q.get("bid")  or 0)
                 quote["ask"]        = float(q.get("ask")  or 0)
                 quote["volume"]     = float(q.get("volume") or 0)
-                quote["open"]       = float(q.get("open")  or 0)
+                quote["open"]       = rest_open
                 quote["high"]       = float(q.get("high")  or 0)
                 quote["low"]        = float(q.get("low")   or 0)
                 quote["prev_close"] = float(q.get("close") or 0)

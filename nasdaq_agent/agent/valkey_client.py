@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _CHANNEL = "md:prices"
 _HASH    = "md:prices"
+_STICKY_PRICE_FIELDS = ("open",)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,33 @@ def _reset_client() -> None:
 
 # ── Price write (MD Poller → Valkey) ──────────────────────────────────────────
 
+def _positive_float(value) -> float:
+    try:
+        v = float(value or 0.0)
+        return v if v > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _merge_sticky_price_fields(incoming: dict, existing: Optional[dict]) -> dict:
+    """
+    Preserve session fields that Schwab WebSocket ticks can omit.
+
+    LEVELONE_EQUITIES updates are compact and may not include regular-session
+    open. Without this merge a fresh WS tick can replace the Valkey ticker JSON
+    and erase an open price that REST/bootstrap already supplied.
+    """
+    if not existing:
+        return incoming
+    merged = dict(incoming)
+    for field in _STICKY_PRICE_FIELDS:
+        if _positive_float(merged.get(field)) <= 0:
+            prev = _positive_float(existing.get(field))
+            if prev > 0:
+                merged[field] = prev
+    return merged
+
+
 def publish_prices(bulk: dict[str, dict]) -> bool:
     """
     Write a batch of quotes from the MD Poller into Valkey.
@@ -117,17 +145,35 @@ def publish_prices(bulk: dict[str, dict]) -> bool:
         return False
 
     try:
+        existing_by_ticker: dict[str, Optional[dict]] = {}
+        try:
+            keys = list(bulk.keys())
+            raw_existing = client.hmget(_HASH, keys) if keys else []
+            for ticker, raw in zip(keys, raw_existing):
+                if raw is None:
+                    existing_by_ticker[ticker] = None
+                    continue
+                existing_by_ticker[ticker] = json.loads(raw)
+        except Exception as exc:
+            logger.debug("[Valkey] sticky price merge skipped: %s", exc)
+            existing_by_ticker = {}
+
+        merged_bulk = {
+            ticker: _merge_sticky_price_fields(quote, existing_by_ticker.get(ticker))
+            for ticker, quote in bulk.items()
+        }
+
         pipe = client.pipeline(transaction=False)
 
         # HSET: flatten into field/value pairs
         hset_args: list = []
-        for ticker, quote in bulk.items():
+        for ticker, quote in merged_bulk.items():
             hset_args.append(ticker)
             hset_args.append(json.dumps(quote, separators=(",", ":")))
         pipe.hset(_HASH, mapping=dict(zip(hset_args[::2], hset_args[1::2])))
 
         # PUBLISH the full batch dict so subscribers get everything at once
-        pipe.publish(_CHANNEL, json.dumps(bulk, separators=(",", ":")))
+        pipe.publish(_CHANNEL, json.dumps(merged_bulk, separators=(",", ":")))
 
         pipe.execute()
         _publish_count += len(bulk)

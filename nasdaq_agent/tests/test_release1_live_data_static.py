@@ -58,6 +58,31 @@ def test_price_bus_health_does_not_treat_scanner_snapshots_as_trusted(monkeypatc
     assert health["status"] == "SCAN_SNAPSHOT"
 
 
+def test_price_bus_preserves_open_when_ws_tick_omits_it():
+    from agent.valkey_client import _merge_sticky_price_fields
+
+    merged = _merge_sticky_price_fields(
+        {"last": 101.0, "open": 0.0, "source_status": "LIVE"},
+        {"last": 100.0, "open": 98.5, "source_status": "REST_FALLBACK"},
+    )
+
+    assert merged["last"] == 101.0
+    assert merged["open"] == 98.5
+    assert merged["source_status"] == "LIVE"
+
+
+def test_streamer_seeds_open_from_rest_without_downgrading_live_ws():
+    src = _src("agent/broker/schwab_streamer.py")
+    valkey = _src("agent/valkey_client.py")
+
+    assert '"open":       float(quote.get("open") or 0)' in src
+    assert "rest_open = float(q.get(\"open\") or 0)" in src
+    assert 'quote.get("source_status") == "LIVE"' in src
+    assert '"source_status": "LIVE"' in src
+    assert "_STICKY_PRICE_FIELDS = (\"open\",)" in valkey
+    assert "client.hmget(_HASH, keys)" in valkey
+
+
 def test_scanner_side_training_is_disabled_by_default_in_production():
     src = _src("agent/scanner.py")
     compose = _repo("docker-compose.yml")
