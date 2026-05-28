@@ -1565,6 +1565,7 @@ TRADING_MAX_POSITION_PCT=10
     <!-- Tabs -->
     <div class="bt-tabs">
       <button class="bt-tab active" data-tab="attribution" onclick="switchBtTab(this,'attribution')">Attribution</button>
+      <button class="bt-tab" data-tab="by-algo" onclick="switchBtTab(this,'by-algo')">By Algo</button>
       <button class="bt-tab" data-tab="tracking" onclick="switchBtTab(this,'tracking')">Live Tracking</button>
       <button class="bt-tab" data-tab="recent" onclick="switchBtTab(this,'recent')">Recent Resolved</button>
       <button class="bt-tab" data-tab="heatmap" onclick="switchBtTab(this,'heatmap')">Win Rate Map</button>
@@ -1573,6 +1574,12 @@ TRADING_MAX_POSITION_PCT=10
     <!-- Attribution panel -->
     <div id="bt-panel-attribution">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px" id="bt-attr-grids"></div>
+    </div>
+
+    <!-- By Algo panel -->
+    <div id="bt-panel-by-algo" style="display:none">
+      <div class="bt-section-title">Win Rate by Algo Family (45%+ confidence signals, last 30d)</div>
+      <div id="bt-algo-family-wrap"></div>
     </div>
 
     <!-- Tracking panel -->
@@ -5540,13 +5547,111 @@ function switchBtTab(el, tab) {
   document.querySelectorAll('#bt-modal .bt-tab').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
   _btTab = tab;
-  ['attribution','tracking','recent','heatmap'].forEach(t => {
+  ['attribution','by-algo','tracking','recent','heatmap'].forEach(t => {
     const p = document.getElementById(`bt-panel-${t}`);
     if (p) p.style.display = t === tab ? '' : 'none';
   });
   if (tab === 'tracking') loadBtTracking();
   if (tab === 'recent')   loadBtRecent();
   if (tab === 'heatmap')  loadBtHeatmap();
+  if (tab === 'by-algo')  loadBtAlgoFamily();
+}
+
+async function loadBtAlgoFamily() {
+  const days = document.getElementById('bt-lookback').value;
+  const wrap = document.getElementById('bt-algo-family-wrap');
+  wrap.innerHTML = `<div style="color:var(--muted);padding:16px;font-size:11px">Loading…</div>`;
+  try {
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/performance/breakdown?lookback_days=${days}`)).json();
+    renderBtAlgoFamily(d);
+  } catch(e) {
+    wrap.innerHTML = `<div style="color:var(--muted);padding:16px;font-size:11px">No data yet — signals need to resolve first.</div>`;
+  }
+}
+
+function renderBtAlgoFamily(data) {
+  const wrap = document.getElementById('bt-algo-family-wrap');
+  const families = data.by_algo_family || {};
+  const keys = Object.keys(families).sort((a, b) => {
+    return (families[b].win_rate || 0) - (families[a].win_rate || 0);
+  });
+  if (!keys.length) {
+    wrap.innerHTML = `<div style="color:var(--muted);padding:16px;font-size:11px">No algo-family data yet — algo signals need to resolve first.</div>`;
+    return;
+  }
+  const TARGET_WR = 0.56;
+  let html = `<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:8px">
+    <thead><tr style="color:var(--muted);border-bottom:1px solid var(--border)">
+      <th style="text-align:left;padding:6px 8px">Family</th>
+      <th style="text-align:right;padding:6px 8px">Trades</th>
+      <th style="text-align:right;padding:6px 8px">W / L</th>
+      <th style="text-align:right;padding:6px 8px">Win Rate</th>
+      <th style="text-align:right;padding:6px 8px">Avg R</th>
+      <th style="text-align:right;padding:6px 8px">Expectancy</th>
+      <th style="text-align:left;padding:6px 8px">Bar</th>
+    </tr></thead><tbody>`;
+  keys.forEach(fam => {
+    const s = families[fam];
+    const wr = s.win_rate || 0;
+    const wrPct = (wr * 100).toFixed(1);
+    const wrColor = wr >= TARGET_WR ? '#00c853' : wr >= 0.45 ? '#ffb300' : '#ef4444';
+    const barPct  = Math.min(100, Math.round(wr * 100));
+    const barColor = wrColor;
+    const exp = (s.expectancy || 0).toFixed(3);
+    const expColor = s.expectancy > 0 ? '#00c853' : '#ef4444';
+    const isML = fam === 'ML';
+    html += `<tr style="border-bottom:1px solid var(--border);${isML ? 'opacity:0.7' : ''}">
+      <td style="padding:6px 8px;font-weight:600;color:var(--text)">${fam}${isML ? ' <span style="color:var(--muted);font-weight:400;font-size:10px">(model)</span>' : ''}</td>
+      <td style="text-align:right;padding:6px 8px;color:var(--muted)">${s.total}</td>
+      <td style="text-align:right;padding:6px 8px;color:var(--muted)">${s.wins}/${s.losses}</td>
+      <td style="text-align:right;padding:6px 8px;color:${wrColor};font-weight:700">${wrPct}%</td>
+      <td style="text-align:right;padding:6px 8px;color:var(--muted)">${(s.avg_r || 0).toFixed(2)}R</td>
+      <td style="text-align:right;padding:6px 8px;color:${expColor}">${exp}R</td>
+      <td style="padding:6px 8px;min-width:80px">
+        <div style="background:var(--border);border-radius:3px;height:8px;position:relative">
+          <div style="background:${barColor};width:${barPct}%;height:8px;border-radius:3px"></div>
+          <div style="position:absolute;top:-1px;left:${Math.min(barPct, 94)}%;width:1px;height:10px;background:#888;opacity:0.5" title="Target 56%"></div>
+        </div>
+      </td>
+    </tr>`;
+  });
+  // Summary row
+  const ov = data.quality_overall || {};
+  const ovWr = ((ov.win_rate || 0) * 100).toFixed(1);
+  const ovColor = (ov.win_rate||0) >= TARGET_WR ? '#00c853' : '#ef4444';
+  html += `</tbody><tfoot><tr style="border-top:2px solid var(--border);font-weight:700">
+    <td style="padding:6px 8px;color:var(--text)">ALL (45%+ conf)</td>
+    <td style="text-align:right;padding:6px 8px;color:var(--muted)">${ov.total||0}</td>
+    <td style="text-align:right;padding:6px 8px;color:var(--muted)">${ov.wins||0}/${ov.losses||0}</td>
+    <td style="text-align:right;padding:6px 8px;color:${ovColor}">${ovWr}%</td>
+    <td style="text-align:right;padding:6px 8px;color:var(--muted)">${(ov.avg_r||0).toFixed(2)}R</td>
+    <td style="text-align:right;padding:6px 8px;color:${(ov.expectancy||0)>0?'#00c853':'#ef4444'}">${(ov.expectancy||0).toFixed(3)}R</td>
+    <td></td>
+  </tr></tfoot></table>`;
+
+  // Also render session and regime mini-breakdowns below
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px">`;
+  for (const [label, key] of [['Session', 'by_session'], ['Regime', 'by_regime'], ['VWAP Event', 'by_vwap_event'], ['Direction', 'by_direction']]) {
+    const breakdown = data[key] || {};
+    const bkeys = Object.keys(breakdown).sort((a,b) => (breakdown[b].win_rate||0)-(breakdown[a].win_rate||0));
+    if (!bkeys.length) continue;
+    html += `<div style="background:var(--surface);border-radius:6px;padding:12px;border:1px solid var(--border)">
+      <div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase">${label}</div>`;
+    bkeys.forEach(k => {
+      const s = breakdown[k];
+      const wr = (s.win_rate||0) * 100;
+      const wrC = wr >= 56 ? '#00c853' : wr >= 45 ? '#ffb300' : '#ef4444';
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-size:10px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${k}</span>
+        <span style="font-size:10px;color:var(--muted);margin:0 6px">${s.total}t</span>
+        <span style="font-size:10px;font-weight:700;color:${wrC};min-width:38px;text-align:right">${wr.toFixed(0)}%</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+  html += `</div>`;
+
+  wrap.innerHTML = html;
 }
 
 async function loadBtHeatmap() {

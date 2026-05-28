@@ -1023,6 +1023,7 @@ def analyse_ticker(
                 rsi_zone     = pred.get("rsi_zone", ""),
                 entry_type   = pred.get("entry_type", ""),
                 direction    = pred["direction"],
+                sector_trend = sector_ctx.sector_trend,
                 confidence   = pred["confidence"],
             )
             if _is_suppressed:
@@ -1423,23 +1424,41 @@ def analyse_ticker(
                         ticker, _asig["algo"],
                     )
                 else:
-                    _trade_id = maybe_open_trade(
-                        ticker            = ticker,
-                        direction         = _asig["direction"],
-                        price             = float(_asig["entry"]),
-                        target            = float(_asig["target"]),
-                        stop              = float(_asig["stop"]),
-                        confidence        = float(_asig["confidence"]),
-                        rr_qualifies      = float(_asig.get("rr", 0)) >= 1.5,
-                        rr_ratio          = float(_asig.get("rr", 0)),
-                        session           = sess_info.get("session", ""),
-                        regime            = regime.regime,
-                        entry_type        = "ALGO",
-                        order_flow_score  = _of_score,
-                        size_mult         = 1.0,
-                        trading_tier      = _trading_tier,
-                        algo_name         = _asig["algo"],
+                    # Apply adaptive filter to algo signals (checks per-family blocking)
+                    _algo_suppressed, _algo_suppress_reason = should_suppress(
+                        vwap_event   = vwap_sig.get("event", ""),
+                        session      = sess_info.get("session", ""),
+                        regime       = regime.regime,
+                        rsi_zone     = pred.get("rsi_zone", ""),
+                        entry_type   = "ALGO",
+                        direction    = _asig["direction"],
+                        sector_trend = sector_ctx.sector_trend,
+                        algo_name    = _asig["algo"],
+                        confidence   = float(_asig["confidence"]),
                     )
+                    if _algo_suppressed:
+                        logger.debug(
+                            "[%s] %s suppressed by adaptive filter: %s",
+                            ticker, _asig["algo"], _algo_suppress_reason,
+                        )
+                    else:
+                        _trade_id = maybe_open_trade(
+                            ticker            = ticker,
+                            direction         = _asig["direction"],
+                            price             = float(_asig["entry"]),
+                            target            = float(_asig["target"]),
+                            stop              = float(_asig["stop"]),
+                            confidence        = float(_asig["confidence"]),
+                            rr_qualifies      = float(_asig.get("rr", 0)) >= 1.5,
+                            rr_ratio          = float(_asig.get("rr", 0)),
+                            session           = sess_info.get("session", ""),
+                            regime            = regime.regime,
+                            entry_type        = "ALGO",
+                            order_flow_score  = _of_score,
+                            size_mult         = 1.0,
+                            trading_tier      = _trading_tier,
+                            algo_name         = _asig["algo"],
+                        )
                 if _trade_id:
                     _algo_trade_opened = True
             try:

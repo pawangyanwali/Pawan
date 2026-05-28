@@ -2340,6 +2340,31 @@ async def backtest_path(signal_id: str):
     return {"signal_id": signal_id, "path": get_price_path(signal_id)}
 
 
+@app.get("/api/performance/breakdown")
+async def performance_breakdown(lookback_days: int = 30):
+    """
+    Win-rate breakdown by algo family, session, regime, vwap_event and direction.
+    Used by the Performance Analytics dashboard panel.
+    """
+    loop  = asyncio.get_running_loop()
+    stats = await loop.run_in_executor(
+        None, lambda: get_performance_stats(lookback_days=lookback_days)
+    )
+    return JSONResponse(content=_sanitize({
+        "overall":        stats.get("overall", {}),
+        "quality_overall": stats.get("quality_overall", {}),
+        "by_algo_family": stats.get("by_algo_family", {}),
+        "by_session":     stats.get("by_session", {}),
+        "by_regime":      stats.get("by_regime", {}),
+        "by_vwap_event":  stats.get("by_vwap_event", {}),
+        "by_direction":   stats.get("by_direction", {}),
+        "by_entry_type":  stats.get("by_entry_type", {}),
+        "by_confidence":  stats.get("by_confidence", {}),
+        "exit_reasons":   stats.get("exit_reasons", {}),
+        "lookback_days":  lookback_days,
+    }))
+
+
 _LEARNING_PARAMS_CACHE_TTL_SECS = 2.0
 _learning_params_cache: dict | None = None
 _learning_params_cache_ts: float = 0.0

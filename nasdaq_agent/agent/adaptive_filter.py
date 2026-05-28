@@ -272,14 +272,15 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
 
     # ── Context blocking / boosting (ALL sources contribute) ─────────────────
     context_keys = [
-        ("vwap_event",   stats.get("by_vwap_event",  {})),
-        ("session",      stats.get("by_session",      {})),
-        ("regime",       stats.get("by_regime",       {})),
-        ("rsi_zone",     stats.get("by_rsi_zone",     {})),
-        ("entry_type",   stats.get("by_entry_type",   {})),
-        ("direction",    stats.get("by_direction",    {})),
-        ("sector_trend", stats.get("by_sector_trend", {})),
-        ("ah_bias",      stats.get("by_ah_bias",      {})),
+        ("vwap_event",   stats.get("by_vwap_event",   {})),
+        ("session",      stats.get("by_session",       {})),
+        ("regime",       stats.get("by_regime",        {})),
+        ("rsi_zone",     stats.get("by_rsi_zone",      {})),
+        ("entry_type",   stats.get("by_entry_type",    {})),
+        ("direction",    stats.get("by_direction",     {})),
+        ("sector_trend", stats.get("by_sector_trend",  {})),
+        ("ah_bias",      stats.get("by_ah_bias",       {})),
+        ("algo_family",  stats.get("by_algo_family",   {})),
     ]
 
     new_blocked: dict = {}
@@ -439,24 +440,39 @@ def record_false_negative_check(direction: str, price_moved: float) -> None:
 
 
 def should_suppress(
-    vwap_event:  str = "",
-    session:     str = "",
-    regime:      str = "",
-    rsi_zone:    str = "",
-    entry_type:  str = "",
-    direction:   str = "",
+    vwap_event:   str = "",
+    session:      str = "",
+    regime:       str = "",
+    rsi_zone:     str = "",
+    entry_type:   str = "",
+    direction:    str = "",
     sector_trend: str = "",
-    confidence:  float = 0.0,
+    algo_name:    str = "",
+    confidence:   float = 0.0,
 ) -> tuple[bool, str]:
     with _lock:
         throttled = dict(_state["blocked_contexts"])
         threshold = float(_state["dynamic_threshold"])
 
+    # Map algo_name → family for per-family context blocking
+    algo_family = ""
+    if algo_name:
+        try:
+            from agent.algo_learning_engine import _ALGO_FAMILY_MAP as _afm
+            algo_family = _afm.get(algo_name, algo_name)
+        except Exception:
+            algo_family = algo_name
+
     reason = ""
     for dim, val in [
-        ("vwap_event", vwap_event), ("session", session), ("regime", regime),
-        ("rsi_zone", rsi_zone), ("entry_type", entry_type),
-        ("direction", direction), ("sector_trend", sector_trend),
+        ("vwap_event",  vwap_event),
+        ("session",     session),
+        ("regime",      regime),
+        ("rsi_zone",    rsi_zone),
+        ("entry_type",  entry_type),
+        ("direction",   direction),
+        ("sector_trend", sector_trend),
+        ("algo_family", algo_family),
     ]:
         if not val:
             continue

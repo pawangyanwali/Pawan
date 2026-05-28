@@ -537,6 +537,18 @@ def get_performance_stats(
             else:        bands["80+"].append(r)
         return {k: _stats(v) for k, v in bands.items() if len(v) >= min_resolved}
 
+    def _algo_family_breakdown() -> dict:
+        try:
+            from agent.algo_learning_engine import _ALGO_FAMILY_MAP as _afm
+        except Exception:
+            _afm = {}
+        groups: dict[str, list] = {}
+        for r in quality_rows:
+            name   = r.get("algo_name") or ""
+            family = _afm.get(name, name) if name else "ML"
+            groups.setdefault(family, []).append(r)
+        return {k: _stats(v) for k, v in groups.items() if len(v) >= min_resolved}
+
     # Exit reason breakdown
     exit_reasons: dict[str, int] = {}
     for r in rows:
@@ -559,6 +571,7 @@ def get_performance_stats(
         "by_entry_type":    _breakdown("entry_type"),
         "by_sector_trend":  _breakdown("sector_trend"),
         "by_mtf":           _breakdown("mtf_alignment"),
+        "by_algo_family":   _algo_family_breakdown(),
         # confidence bands: ALL signals, used for threshold calibration
         "by_confidence":    _confidence_bands(),
         "exit_reasons":     exit_reasons,
@@ -574,7 +587,7 @@ def _empty_stats() -> dict:
         "by_direction":{}, "by_session":{}, "by_regime":{},
         "by_vwap_event":{}, "by_rsi_zone":{}, "by_entry_type":{},
         "by_confidence":{}, "by_sector_trend":{}, "by_mtf":{},
-        "exit_reasons":{},
+        "by_algo_family":{}, "exit_reasons":{},
     }
 
 
