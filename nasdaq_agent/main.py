@@ -1289,7 +1289,7 @@ async def health():
     }
 
 
-def _container_health(valkey_connected: bool) -> dict:
+def _container_health_legacy(valkey_connected: bool) -> dict:
     """
     Derive container liveness from service state (PostgreSQL first, Valkey fallback).
 
@@ -1391,6 +1391,95 @@ def _container_health(valkey_connected: bool) -> dict:
     return result
 
 
+def _container_health(valkey_connected: bool) -> dict:
+    """Release 3 container health based on uniform service heartbeats."""
+    now = time.time()
+    result: dict = {
+        "web-api": {"up": True, "last_seen_ago_s": 0.0, "detail": "serving this response"},
+    }
+
+    def _pg_age(key: str) -> float | None:
+        try:
+            from agent.service_state import get_age_s as _ss_age
+            return _ss_age(key)
+        except Exception:
+            return None
+
+    def _vk_age(key: str) -> float | None:
+        if not valkey_connected:
+            return None
+        try:
+            from agent.valkey_client import _get_client as _vk_c
+            client = _vk_c()
+            if not client:
+                return None
+            raw = client.get(key)
+            if not raw:
+                return None
+            data = json.loads(raw)
+            ts = float(data.get("ts") or 0.0)
+            return max(0.0, now - ts) if ts else None
+        except Exception:
+            return None
+
+    def _age_for(key: str) -> float | None:
+        age = _pg_age(key)
+        return age if age is not None else _vk_age(key)
+
+    def _entry(age: float | None, ttl_s: int, missing_detail: str, label: str) -> dict:
+        if age is None:
+            return {"up": False, "last_seen_ago_s": None, "detail": missing_detail}
+        rounded = round(age, 1)
+        return {
+            "up": rounded < ttl_s,
+            "last_seen_ago_s": rounded,
+            "detail": f"{label} {rounded}s ago",
+        }
+
+    def _legacy_key(key: str, ttl_s: int, label: str) -> dict:
+        return _entry(_age_for(key), ttl_s, f"no {key} state", label)
+
+    def _heartbeat(service_name: str, ttl_s: int = 120, fallback: dict | None = None) -> dict:
+        age = _age_for(f"service:{service_name}:heartbeat")
+        if age is not None:
+            return _entry(age, ttl_s, f"no service:{service_name}:heartbeat state", "heartbeat")
+        if fallback is not None:
+            return fallback
+        return {
+            "up": False,
+            "last_seen_ago_s": None,
+            "detail": f"no service:{service_name}:heartbeat state",
+        }
+
+    result["market-data"] = _heartbeat(
+        "market-data",
+        120,
+        fallback=_legacy_key("scanner:streamer", 90, "streamer status"),
+    )
+    result["scanner"] = _heartbeat(
+        "scanner",
+        120,
+        fallback=_legacy_key("scan:latest", 660, "last scan"),
+    )
+    result["learner"] = _heartbeat(
+        "learner",
+        180,
+        fallback=_legacy_key("learner:status", 300, "learner status"),
+    )
+    result["scheduler"] = _heartbeat(
+        "scheduler",
+        120,
+        fallback=_legacy_key("scheduler:heartbeat", 120, "scheduler heartbeat"),
+    )
+    result["context-intel"] = _heartbeat(
+        "context-intel",
+        120,
+        fallback=_legacy_key("ctx:intel:heartbeat", 120, "context heartbeat"),
+    )
+    result["watchdog"] = _heartbeat("watchdog", 120)
+    return result
+
+
 @app.get("/api/services")
 async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     """
@@ -1489,6 +1578,7 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
             "running":     ws_st.get("running", False),
             "connected":   ws_st.get("connected", False),
             "live_quotes": ws_st.get("live_quotes", 0),
+            "fresh_coverage_pct": ws_st.get("fresh_coverage_pct", 0.0),
             "nq_bias":     ws_st.get("nq_bias", 0.0),
             "error":       ws_st.get("error"),
         },

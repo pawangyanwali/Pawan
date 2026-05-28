@@ -273,12 +273,14 @@ def _monitor_loop() -> None:
 
 def main() -> None:
     import threading
+    from agent.service_heartbeat import start_service_heartbeat
 
     _log.info("=== learner_service starting ===")
     _log.info("Continuous learning active; training work stays inside learner container limits.")
 
     _run_learning_engine()
     _run_weekend_learner()
+    start_service_heartbeat("learner", _runner)
 
     threading.Thread(target=_monitor_loop,        daemon=True, name="learner-monitor").start()
     threading.Thread(target=_publish_status_loop, daemon=True, name="learner-status-pub").start()

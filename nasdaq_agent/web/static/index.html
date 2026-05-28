@@ -1318,11 +1318,16 @@
       <!-- Container health (Docker only — derived from Valkey heartbeat keys) -->
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
         <div style="font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.04em;margin-bottom:6px">CONTAINER HEALTH</div>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));gap:6px">
           <div style="text-align:center">
             <div style="font-size:9px;color:var(--muted);margin-bottom:3px">web-api</div>
             <span id="ct-webapi-badge" style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;background:rgba(100,116,139,.2);color:var(--muted)">…</span>
             <div id="ct-webapi-detail" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:9px;color:var(--muted);margin-bottom:3px">market-data</div>
+            <span id="ct-marketdata-badge" style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;background:rgba(100,116,139,.2);color:var(--muted)">...</span>
+            <div id="ct-marketdata-detail" style="font-size:9px;color:var(--muted);margin-top:2px">-</div>
           </div>
           <div style="text-align:center">
             <div style="font-size:9px;color:var(--muted);margin-bottom:3px">scanner</div>
@@ -1338,6 +1343,16 @@
             <div style="font-size:9px;color:var(--muted);margin-bottom:3px">scheduler</div>
             <span id="ct-scheduler-badge" style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;background:rgba(100,116,139,.2);color:var(--muted)">…</span>
             <div id="ct-scheduler-detail" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:9px;color:var(--muted);margin-bottom:3px">context</div>
+            <span id="ct-context-badge" style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;background:rgba(100,116,139,.2);color:var(--muted)">...</span>
+            <div id="ct-context-detail" style="font-size:9px;color:var(--muted);margin-top:2px">-</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:9px;color:var(--muted);margin-bottom:3px">watchdog</div>
+            <span id="ct-watchdog-badge" style="font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;background:rgba(100,116,139,.2);color:var(--muted)">...</span>
+            <div id="ct-watchdog-detail" style="font-size:9px;color:var(--muted);margin-top:2px">-</div>
           </div>
         </div>
       </div>
@@ -6430,7 +6445,15 @@ async function refreshInfraStatus() {
       if (dt) dt.textContent = detail || '—';
     }
     const ct = d.containers || {};
-    const ctNames = [['ct-webapi','web-api'],['ct-scanner','scanner'],['ct-learner','learner'],['ct-scheduler','scheduler']];
+    const ctNames = [
+      ['ct-webapi','web-api'],
+      ['ct-marketdata','market-data'],
+      ['ct-scanner','scanner'],
+      ['ct-learner','learner'],
+      ['ct-scheduler','scheduler'],
+      ['ct-context','context-intel'],
+      ['ct-watchdog','watchdog'],
+    ];
     ctNames.forEach(([domId, key]) => {
       const c = ct[key] || {};
       const ago = c.last_seen_ago_s != null ? `${c.last_seen_ago_s}s ago` : null;
@@ -6440,7 +6463,7 @@ async function refreshInfraStatus() {
     ['infra-valkey-badge','infra-rds-badge','infra-wss-badge','infra-mdp-badge','infra-scanner-badge'].forEach(id => {
       setInfraBadge(id, false, 'ERROR');
     });
-    ['ct-webapi','ct-scanner','ct-learner','ct-scheduler'].forEach(id => {
+    ['ct-webapi','ct-marketdata','ct-scanner','ct-learner','ct-scheduler','ct-context','ct-watchdog'].forEach(id => {
       const el = document.getElementById(id+'-badge');
       if (el) { el.textContent='ERR'; el.style.color='var(--red)'; }
     });

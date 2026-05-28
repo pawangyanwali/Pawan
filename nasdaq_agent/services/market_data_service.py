@@ -191,6 +191,9 @@ def main() -> None:
     _log.info("=== market_data_service starting ===")
     _start(list(NASDAQ_TICKERS))
 
+    from agent.service_heartbeat import start_service_heartbeat
+    start_service_heartbeat("market-data", _runner)
+
     threading.Thread(target=_health_loop,                  daemon=True, name="md-health").start()
     threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="md-streamer-status").start()
     threading.Thread(target=_token_reload_loop,            daemon=True, name="md-token-reload").start()

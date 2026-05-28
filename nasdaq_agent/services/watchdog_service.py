@@ -182,6 +182,9 @@ def main() -> int:
         _log.error("Docker socket not found at %s", _SOCKET_PATH)
         return 1
 
+    from agent.service_heartbeat import start_service_heartbeat
+
+    start_service_heartbeat("watchdog", _runner)
     _runner.register_signals()
     _watch_loop()
     return 0
