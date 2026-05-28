@@ -520,6 +520,7 @@
     </button>
     <!-- Live price data freshness indicator -->
     <span id="data-freshness" title="Time since last live price update from Schwab" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">● PRICES</span>
+    <span id="ops-sla-chip" title="Runtime SLA status" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">SLA ...</span>
     <span style="white-space:nowrap">Last scan: <span id="last-scan">—</span></span>
     <span id="api-credit-chip" title="Twelve Data API credits used in rolling 60s window" style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;display:none">API —/377</span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
@@ -2475,6 +2476,57 @@ setInterval(() => {
     }
   }
 }, 1000);
+
+function _setOpsSlaChip(sla) {
+  const el = document.getElementById('ops-sla-chip');
+  if (!el) return;
+  const status = String(sla?.status || 'UNKNOWN').toUpperCase();
+  const alerts = Array.isArray(sla?.alerts) ? sla.alerts : [];
+  const actionable = alerts.filter(a => ['CRITICAL', 'WARN'].includes(String(a.severity || '').toUpperCase()));
+  const count = sla?.alert_count ?? actionable.length;
+  if (status === 'OK') {
+    el.textContent = 'SLA OK';
+    el.style.color = 'var(--green, #26a65b)';
+    el.style.borderColor = 'var(--green, #26a65b)';
+  } else if (status === 'DEGRADED') {
+    el.textContent = `SLA DEGRADED ${count}`;
+    el.style.color = '#f5a623';
+    el.style.borderColor = '#f5a623';
+  } else if (status === 'CRITICAL') {
+    el.textContent = `SLA CRITICAL ${count}`;
+    el.style.color = 'var(--red, #e74c3c)';
+    el.style.borderColor = 'var(--red, #e74c3c)';
+  } else {
+    el.textContent = 'SLA UNKNOWN';
+    el.style.color = 'var(--muted)';
+    el.style.borderColor = 'var(--border)';
+  }
+  const lines = actionable.slice(0, 4).map(a => {
+    const sev = String(a.severity || '').toUpperCase();
+    return `${sev} ${a.component || 'system'}: ${a.message || ''}${a.detail ? ' - ' + a.detail : ''}`;
+  });
+  el.title = lines.length ? lines.join('\n') : 'Runtime SLA healthy';
+}
+
+async function pollRuntimeSla() {
+  try {
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/runtime-health`, {signal: AbortSignal.timeout(8000)})).json();
+    _setOpsSlaChip(d.sla || {});
+  } catch(e) {
+    _setOpsSlaChip({
+      status: 'CRITICAL',
+      alert_count: 1,
+      alerts: [{
+        severity: 'CRITICAL',
+        component: 'web-api',
+        message: 'Runtime health request failed',
+        detail: e?.message || 'request failed',
+      }],
+    });
+  }
+}
+pollRuntimeSla();
+setInterval(pollRuntimeSla, 10000);
 
 // Reconnect immediately when tab becomes visible (e.g. phone unlock, tab switch back)
 document.addEventListener('visibilitychange', () => {

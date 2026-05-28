@@ -1624,6 +1624,37 @@ async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
         scan_age_s = _ss_age("scan:latest")
     except Exception:
         pass
+    containers = _container_health(vk.get("connected", False))
+    scanner_state = {
+        "signals": len(sigs),
+        "last_scan": last_scan,
+        "scan_age_s": scan_age_s,
+        "from_cache": from_cache,
+    }
+    try:
+        from agent.runtime_sla import evaluate_runtime_sla
+        sla = evaluate_runtime_sla(
+            session=session,
+            price_2s=price_2s,
+            price_5s=price_5s,
+            scanner=scanner_state,
+            containers=containers,
+            valkey=vk,
+        )
+    except Exception as exc:
+        sla = {
+            "status": "CRITICAL",
+            "active_session": session != "CLOSED",
+            "alert_count": 1,
+            "alerts": [{
+                "id": "runtime_sla:evaluator_failed",
+                "severity": "CRITICAL",
+                "component": "runtime-sla",
+                "message": "Runtime SLA evaluator failed",
+                "detail": str(exc),
+                "action": "Inspect web-api logs and runtime_sla.py.",
+            }],
+        }
 
     return {
         "session": session,
@@ -1633,14 +1664,10 @@ async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
             "active_session": session != "CLOSED",
             "trusted_live": session != "CLOSED" and price_2s.get("status") == "LIVE",
         },
-        "scanner": {
-            "signals": len(sigs),
-            "last_scan": last_scan,
-            "scan_age_s": scan_age_s,
-            "from_cache": from_cache,
-        },
-        "containers": _container_health(vk.get("connected", False)),
+        "scanner": scanner_state,
+        "containers": containers,
         "valkey": vk,
+        "sla": sla,
     }
 
 
