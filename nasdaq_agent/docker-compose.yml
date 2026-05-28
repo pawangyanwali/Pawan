@@ -55,15 +55,6 @@ x-log-env: &log-env
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_DIR:   /app/logs
 
-x-trading-env: &trading-env
-  IS_PAPER_TRADING:       ${IS_PAPER_TRADING:-true}
-  TRADING_ACCOUNT_SIZE:   ${TRADING_ACCOUNT_SIZE:-50000}
-  TRADING_RISK_PCT:       ${TRADING_RISK_PCT:-1.5}
-  PAPER_BUDGET:           ${PAPER_BUDGET:-50000}
-  PAPER_MAX_OPEN_TRADES:  ${PAPER_MAX_OPEN_TRADES:-10}
-  MAX_CONCURRENT_TRADES:  ${MAX_CONCURRENT_TRADES:-3}
-  DAILY_LOSS_HALT_PCT:    ${DAILY_LOSS_HALT_PCT:-2.5}
-
 # ── Shared service defaults ───────────────────────────────────────────────────
 
 x-common: &common
@@ -99,7 +90,7 @@ services:
       - cache:/app/data/cache
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *schwab-env, *log-env, *trading-env]
+      <<: [*db-env, *valkey-env, *schwab-env, *log-env]
       # All background services run in their own containers.
       NASDAQ_SCANNER_ENABLED:     "0"
       NASDAQ_LEARNER_ENABLED:     "0"
@@ -112,9 +103,7 @@ services:
       APP_ENV:             ${APP_ENV:-production}
       # CORS — set to your EC2 public IP or domain in .env
       CORS_ORIGINS:        ${CORS_ORIGINS:-http://localhost:8000}
-      SCHWAB_AUTO_TRADE:   ${SCHWAB_AUTO_TRADE:-false}
       SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL:-}
-      SCHWAB_PAPER_TRADING: ${SCHWAB_PAPER_TRADING:-true}
       FINNHUB_API_KEY:     ${FINNHUB_API_KEY:-}
     deploy:
       resources:
@@ -145,7 +134,7 @@ services:
       - cache:/app/data/cache     # OHLCV bar cache
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *log-env, *trading-env]
+      <<: [*db-env, *valkey-env, *log-env]
       # Market data runs in its own container; scanner reads prices from Valkey.
       NASDAQ_MARKET_DATA_ENABLED: "0"
       PIPELINE_WORKERS: ${PIPELINE_WORKERS:-8}
@@ -217,11 +206,9 @@ services:
       - logs:/app/logs
     environment:
       <<: [*db-env, *valkey-env, *log-env]
-      LEARNER_DEEP_ENABLED:         ${LEARNER_DEEP_ENABLED:-1}
-      LEARNER_DEEP_INTERVAL_S:      ${LEARNER_DEEP_INTERVAL_S:-3600}
       # 5-minute startup delay so scanner settles before first deep cycle.
+      # Runtime knobs (deep_enabled, interval, ticker_limit) live in PG config_store.
       LEARNER_DEEP_STARTUP_DELAY_S: ${LEARNER_DEEP_STARTUP_DELAY_S:-300}
-      LEARNER_DEEP_TICKER_LIMIT:    ${LEARNER_DEEP_TICKER_LIMIT:-100}
     deploy:
       resources:
         limits:

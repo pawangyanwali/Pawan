@@ -33,26 +33,45 @@ _DEFAULTS: dict[str, Any] = {
     "paper.max_allocated_pct":             lambda: float(os.getenv("PAPER_MAX_ALLOCATED_PCT", "40.0")),
     "paper.max_open_trades":               lambda: int(os.getenv("PAPER_MAX_OPEN_TRADES", "10")),
     "paper.min_confidence":                lambda: float(os.getenv("PAPER_TRADE_MIN_CONFIDENCE", "25.0")),
-    # ── Scanner / earnings ─────────────────────────────────────────────────────
+    # ── Trading / account sizing ───────────────────────────────────────────────
+    # Seeded from env on first deploy; live-editable via /api/config thereafter.
+    "trading.account_size":                lambda: float(os.getenv("TRADING_ACCOUNT_SIZE", "50000")),
+    "trading.risk_pct":                    lambda: float(os.getenv("TRADING_RISK_PCT", "1.5")),
+    "trading.max_position_pct":            lambda: float(os.getenv("TRADING_MAX_POSITION_PCT", "10.0")),
+    "trading.is_paper":                    lambda: os.getenv("IS_PAPER_TRADING", "true").lower() != "false",
+    # ── Broker flags ──────────────────────────────────────────────────────────
+    "broker.auto_trade":                   lambda: os.getenv("SCHWAB_AUTO_TRADE", "false").lower() == "true",
+    "broker.paper_trading":                lambda: os.getenv("SCHWAB_PAPER_TRADING", "true").lower() == "true",
+    # ── Scanner cadence ────────────────────────────────────────────────────────
+    # scan_interval_s can be reduced from 60→30 during REGULAR session without restart.
+    "scanner.scan_interval_s":             lambda: int(os.getenv("SCAN_INTERVAL_SECONDS", "60")),
     "scanner.pre_earnings_blackout_days":  lambda: 3,
     "scanner.post_earnings_cooldown_days": lambda: 1,
     # ── Risk controls ──────────────────────────────────────────────────────────
-    "risk.daily_loss_warning_pct":  lambda: float(os.getenv("DAILY_LOSS_WARNING_PCT", "1.5")),
-    "risk.daily_loss_halt_pct":     lambda: float(os.getenv("DAILY_LOSS_HALT_PCT",     "2.5")),
-    "risk.daily_profit_target_usd": lambda: float(os.getenv("DAILY_PROFIT_TARGET",     "1000")),
-    "risk.daily_profit_max_usd":    lambda: float(os.getenv("DAILY_PROFIT_MAX",        "1500")),
-    "risk.max_concurrent_trades":   lambda: int(os.getenv(  "MAX_CONCURRENT_TRADES",   "3")),
-    "risk.max_portfolio_heat_pct":  lambda: float(os.getenv("MAX_PORTFOLIO_HEAT_PCT",  "1.5")),
-    "risk.max_consecutive_losses":  lambda: int(os.getenv(  "MAX_CONSECUTIVE_LOSSES",  "5")),
-    "risk.cooldown_after_losses":   lambda: int(os.getenv(  "COOLDOWN_LOSSES",         "3")),
-    "risk.max_daily_trades":        lambda: int(os.getenv(  "MAX_DAILY_TRADES",         "30")),
+    "risk.daily_loss_warning_pct":         lambda: float(os.getenv("DAILY_LOSS_WARNING_PCT", "1.5")),
+    "risk.daily_loss_halt_pct":            lambda: float(os.getenv("DAILY_LOSS_HALT_PCT", "2.5")),
+    "risk.daily_profit_target_usd":        lambda: float(os.getenv("DAILY_PROFIT_TARGET", "1000")),
+    "risk.daily_profit_max_usd":           lambda: float(os.getenv("DAILY_PROFIT_MAX", "1500")),
+    "risk.max_concurrent_trades":          lambda: int(os.getenv("MAX_CONCURRENT_TRADES", "3")),
+    "risk.max_portfolio_heat_pct":         lambda: float(os.getenv("MAX_PORTFOLIO_HEAT_PCT", "1.5")),
+    "risk.max_consecutive_losses":         lambda: int(os.getenv("MAX_CONSECUTIVE_LOSSES", "5")),
+    "risk.cooldown_after_losses":          lambda: int(os.getenv("COOLDOWN_LOSSES", "3")),
+    "risk.max_daily_trades":               lambda: int(os.getenv("MAX_DAILY_TRADES", "30")),
+    # ── Profit Protect Mode ────────────────────────────────────────────────────
+    "risk.profit_protect_min_conf":        lambda: float(os.getenv("PROFIT_PROTECT_CONF", "80.0")),
+    "risk.profit_protect_size_mult":       lambda: float(os.getenv("PROFIT_PROTECT_SIZE", "0.60")),
+    "risk.profit_protect_drawdown":        lambda: float(os.getenv("PROFIT_PROTECT_DRAWDOWN", "300")),
+    # ── Volatility / drawdown circuit breakers ─────────────────────────────────
+    "risk.volatility_halt_atr_mult":       lambda: float(os.getenv("VOLATILITY_HALT_ATR_MULT", "2.5")),
+    "risk.drawdown_throttle_1_pct":        lambda: float(os.getenv("DRAWDOWN_THROTTLE_1_PCT", "0.5")),
+    "risk.drawdown_throttle_2_pct":        lambda: float(os.getenv("DRAWDOWN_THROTTLE_2_PCT", "1.0")),
     # ── Learner ────────────────────────────────────────────────────────────────
-    "learner.deep_enabled":      lambda: os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes"),
-    "learner.deep_interval_s":   lambda: max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600"))),
-    "learner.deep_ticker_limit": lambda: max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100"))),
+    "learner.deep_enabled":                lambda: os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes"),
+    "learner.deep_interval_s":             lambda: max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600"))),
+    "learner.deep_ticker_limit":           lambda: max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100"))),
     # ── Adaptive filter ────────────────────────────────────────────────────────
-    "filter.throttle_start_wr":  lambda: 0.50,  # confidence penalty starts below this win rate
-    "filter.max_penalty_pts":    lambda: 35,     # max extra confidence pts for a throttled context
+    "filter.throttle_start_wr":            lambda: 0.50,
+    "filter.max_penalty_pts":              lambda: 35,
 }
 
 # Legacy column map: config_store key → account_config column name
