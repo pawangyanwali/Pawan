@@ -536,6 +536,7 @@
     <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Schwab connections &amp; data sources">🏦 Schwab <span id="schwab-hdr-dot" style="font-size:9px;transition:color .3s">○</span></button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="openAlertModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Alert settings">🔔 Alerts</button>
+    <button onclick="openSettings('paper')" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="System settings">⚙️ Settings</button>
     <button class="hamburger" onclick="toggleMobileNav()" title="Menu">☰</button>
   </div>
 </header>
@@ -552,6 +553,7 @@
   <button onclick="openBroker();toggleMobileNav()">🏦 TOS Broker</button>
   <button onclick="openWatchlist();toggleMobileNav()">📋 Watchlist</button>
   <button onclick="openAlertModal();toggleMobileNav()" id="alert-toggle-mobile">🔔 Alerts</button>
+  <button onclick="openSettings('paper');toggleMobileNav()">⚙️ Settings</button>
 </div>
 
 <!-- Macro Event Banner (hidden by default) -->
@@ -897,16 +899,13 @@
       <button id="pt-tab-open"    onclick="ptTab('open')"    class="pt-tab pt-tab-active">Open Trades</button>
       <button id="pt-tab-closed"  onclick="ptTab('closed')"  class="pt-tab">Closed Trades</button>
       <button id="pt-tab-account" onclick="ptTab('account')" class="pt-tab">Account</button>
-      <button id="pt-tab-budget"  onclick="ptTab('budget')"  class="pt-tab">Budget Config</button>
-      <button id="pt-tab-risk"    onclick="ptTab('risk')"    class="pt-tab">Risk Config</button>
       <button id="pt-tab-learn"   onclick="ptTab('learn')"   class="pt-tab">What We're Learning</button>
+      <button onclick="openSettings('paper')" class="pt-tab" style="border-color:var(--accent);color:var(--accent)" title="Open Settings panel">⚙️ Settings</button>
     </div>
 
     <div id="pt-panel-open"    style="display:block"></div>
     <div id="pt-panel-closed"  style="display:none"></div>
     <div id="pt-panel-account" style="display:none"></div>
-    <div id="pt-panel-budget"  style="display:none"></div>
-    <div id="pt-panel-risk"    style="display:none"></div>
     <div id="pt-panel-learn"   style="display:none"></div>
   </div>
 </div>
@@ -1426,6 +1425,30 @@ TRADING_MAX_POSITION_PCT=10
     <div id="wl-custom" style="margin-bottom:12px"></div>
     <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Base Universe (50 tickers)</div>
     <div id="wl-base" style="line-height:2"></div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="history-modal" id="settings-modal">
+  <div class="history-modal-inner" style="max-width:620px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <div style="font-size:14px;font-weight:700;color:var(--text)">⚙️ Settings</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">All configuration — changes take effect immediately without a restart</div>
+      </div>
+      <button onclick="closeSettings()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <!-- Tab bar -->
+    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap">
+      <button id="st-tab-paper"   onclick="settingsTab('paper')"   class="pt-tab pt-tab-active">Paper Trading</button>
+      <button id="st-tab-signal"  onclick="settingsTab('signal')"  class="pt-tab">Signal Config</button>
+      <button id="st-tab-risk"    onclick="settingsTab('risk')"    class="pt-tab">Risk Controls</button>
+      <button id="st-tab-learner" onclick="settingsTab('learner')" class="pt-tab">Learner</button>
+    </div>
+    <div id="st-panel-paper"   style="display:block;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-signal"  style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-risk"    style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-learner" style="display:none;max-height:72vh;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -4053,13 +4076,11 @@ function populateMacroSection(s) {
 let _ptData = null, _ptLearn = null;
 
 function ptTab(name) {
-  ['open','closed','account','budget','risk','learn'].forEach(t => {
+  ['open','closed','account','learn'].forEach(t => {
     document.getElementById('pt-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('pt-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
   if (name === 'account') ptLoadAccountTab();
-  if (name === 'budget')  ptLoadBudgetTab();
-  if (name === 'risk')    ptLoadRiskTab();
 }
 
 function _ptExitBadge(reason) {
@@ -4573,144 +4594,95 @@ async function ptLoadAccountTab() {
 }
 
 // ─── Paper Trading — Budget Config tab ────────────────────────────────────────
-async function ptLoadBudgetTab() {
-  const el = document.getElementById('pt-panel-budget');
+// ─── Settings Modal ────────────────────────────────────────────────────────────
+function openSettings(tab) {
+  document.getElementById('settings-modal').classList.add('open');
+  settingsTab(tab || 'paper');
+}
+function closeSettings() {
+  document.getElementById('settings-modal').classList.remove('open');
+}
+function settingsTab(name) {
+  ['paper','signal','risk','learner'].forEach(t => {
+    document.getElementById('st-panel-'+t).style.display = t===name ? 'block' : 'none';
+    document.getElementById('st-tab-'+t).classList.toggle('pt-tab-active', t===name);
+  });
+  if (name === 'paper')   stLoadPaperTab();
+  if (name === 'signal')  stLoadSignalTab();
+  if (name === 'risk')    stLoadRiskTab();
+  if (name === 'learner') stLoadLearnerTab();
+}
+
+async function stLoadPaperTab() {
+  const el = document.getElementById('st-panel-paper');
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const [paperResp, scannerResp] = await Promise.all([
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`, {signal: AbortSignal.timeout(12000)}),
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=scanner.`, {signal: AbortSignal.timeout(12000)}),
-    ]);
-    const paperData   = await paperResp.json();
-    const scannerData = await scannerResp.json();
-    const pc = paperData.config   || {};
-    const sc = scannerData.config || {};
-    const budget     = pc["paper.budget"]            ?? 50000;
-    const maxTrade   = pc["paper.max_trade_pct"]     ?? 5;
-    const maxAlloc   = pc["paper.max_allocated_pct"] ?? 40;
-    const maxOpen    = pc["paper.max_open_trades"]   ?? 10;
-    const minConf    = pc["paper.min_confidence"]    ?? 25;
-    const preEarnings  = sc["scanner.pre_earnings_blackout_days"]  ?? 3;
-    const postEarnings = sc["scanner.post_earnings_cooldown_days"] ?? 1;
+    const resp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`, {signal: AbortSignal.timeout(12000)});
+    const pc = (await resp.json()).config || {};
+    const budget   = pc["paper.budget"]            ?? 50000;
+    const maxTrade = pc["paper.max_trade_pct"]     ?? 5;
+    const maxAlloc = pc["paper.max_allocated_pct"] ?? 40;
+    const maxOpen  = pc["paper.max_open_trades"]   ?? 10;
+    const minConf  = pc["paper.min_confidence"]    ?? 25;
 
     el.innerHTML = `
     <div style="max-width:520px">
-      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Paper Trading Budget Configuration</div>
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Paper Trading Budget</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
-        These settings control how capital is allocated across paper trades.
-        Changes apply immediately to future trade sizing.
+        Capital allocation settings for paper trading simulation. Changes apply immediately to future trade sizing.
       </div>
-
       <div style="display:flex;flex-direction:column;gap:14px">
-
         <div>
-          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
-            TOTAL BUDGET ($)
-          </label>
-          <input id="pt-cfg-budget" type="number" min="1000" step="1000" value="${budget}"
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">TOTAL BUDGET ($)</label>
+          <input id="st-cfg-budget" type="number" min="1000" step="1000" value="${budget}"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
           <div style="font-size:9px;color:var(--muted);margin-top:3px">Total simulated capital pool. All sizing and utilisation percentages are relative to this.</div>
         </div>
-
         <div>
-          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
-            MAX TRADE SIZE (% of budget)
-          </label>
-          <input id="pt-cfg-trade-pct" type="number" min="0.5" max="25" step="0.5" value="${maxTrade}"
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">MAX TRADE SIZE (% of budget)</label>
+          <input id="st-cfg-trade-pct" type="number" min="0.5" max="25" step="0.5" value="${maxTrade}"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
-          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max capital committed to a single trade. At $${Number(budget).toFixed(0)}: <span id="pt-cfg-trade-dollar">${(Number(budget) * Number(maxTrade) / 100).toFixed(0)}</span> per trade.</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max capital per trade. At $${Number(budget).toFixed(0)}: <span id="st-cfg-trade-dollar">${(Number(budget)*Number(maxTrade)/100).toFixed(0)}</span> per trade.</div>
         </div>
-
         <div>
-          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
-            MAX ALLOCATED (% of budget)
-          </label>
-          <input id="pt-cfg-alloc-pct" type="number" min="10" max="100" step="5" value="${maxAlloc}"
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">MAX ALLOCATED (% of budget)</label>
+          <input id="st-cfg-alloc-pct" type="number" min="10" max="100" step="5" value="${maxAlloc}"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
-          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max total capital that can be allocated across all open trades simultaneously.</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Max total capital allocated across all open trades simultaneously.</div>
         </div>
-
         <div>
-          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
-            MAX OPEN TRADES
-          </label>
-          <input id="pt-cfg-max-open" type="number" min="1" max="50" step="1" value="${maxOpen}"
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">MAX OPEN TRADES</label>
+          <input id="st-cfg-max-open" type="number" min="1" max="50" step="1" value="${maxOpen}"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
           <div style="font-size:9px;color:var(--muted);margin-top:3px">Hard cap on concurrent open positions. New trades are blocked when this is reached.</div>
         </div>
-
         <div>
-          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
-            MIN CONFIDENCE (%)
-          </label>
-          <input id="pt-cfg-min-conf" type="number" min="1" max="100" step="1" value="${minConf}"
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">MIN CONFIDENCE (%)</label>
+          <input id="st-cfg-min-conf" type="number" min="1" max="100" step="1" value="${minConf}"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
-          <div style="font-size:9px;color:var(--muted);margin-top:3px">Minimum signal confidence required to open a paper trade (data collection floor).</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Minimum signal confidence required to open a paper trade.</div>
         </div>
-
       </div>
-
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
-        <button onclick="ptSaveBudgetConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
-          Save Changes
-        </button>
-        <span id="pt-cfg-status" style="font-size:11px;color:var(--muted)"></span>
+        <button onclick="stSavePaperConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Changes</button>
+        <span id="st-paper-status" style="font-size:11px;color:var(--muted)"></span>
       </div>
-
       <div style="margin-top:16px;padding:10px 12px;background:#f59e0b11;border:1px solid #f59e0b33;border-radius:6px">
         <div style="font-size:10px;font-weight:700;color:#f59e0b;margin-bottom:4px">How capital gates work</div>
         <div style="font-size:10px;color:var(--muted)">
-          Before opening a new position the system checks:<br>
+          Before opening a position the system checks:<br>
           1. Open trades &lt; max open trades<br>
-          2. Allocated capital + new cost_basis ≤ budget × max_allocated%<br>
+          2. Allocated + new cost_basis ≤ budget × max_allocated%<br>
           3. New position size ≤ budget × max_trade%<br>
           If any gate fails, the trade is skipped for that cycle.
         </div>
       </div>
-
-      <div style="margin-top:24px">
-        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Signal Config</div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
-          Earnings blackout windows — suppress trading signals near earnings announcements.
-          Changes take effect immediately without a restart.
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:14px">
-
-          <div>
-            <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
-              PRE-EARNINGS BLACKOUT (days)
-            </label>
-            <input id="pt-cfg-pre-earnings" type="number" min="0" max="14" step="1" value="${preEarnings}"
-              style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
-            <div style="font-size:9px;color:var(--muted);margin-top:3px">Block signals this many days before earnings (gap risk protection).</div>
-          </div>
-
-          <div>
-            <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">
-              POST-EARNINGS COOLDOWN (days)
-            </label>
-            <input id="pt-cfg-post-earnings" type="number" min="0" max="7" step="1" value="${postEarnings}"
-              style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
-            <div style="font-size:9px;color:var(--muted);margin-top:3px">Block signals this many days after earnings (gap-fill trap protection).</div>
-          </div>
-
-        </div>
-
-        <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
-          <button onclick="ptSaveSignalConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
-            Save Signal Config
-          </button>
-          <span id="pt-cfg-signal-status" style="font-size:11px;color:var(--muted)"></span>
-        </div>
-      </div>
     </div>`;
 
-    // Live-update the per-trade dollar hint when inputs change
-    const budgetEl = document.getElementById('pt-cfg-budget');
-    const tradePctEl = document.getElementById('pt-cfg-trade-pct');
-    const dollarEl = document.getElementById('pt-cfg-trade-dollar');
+    const budgetEl   = document.getElementById('st-cfg-budget');
+    const tradePctEl = document.getElementById('st-cfg-trade-pct');
+    const dollarEl   = document.getElementById('st-cfg-trade-dollar');
     function _updateHint() {
       const b = parseFloat(budgetEl.value) || 0;
       const p = parseFloat(tradePctEl.value) || 0;
@@ -4724,13 +4696,13 @@ async function ptLoadBudgetTab() {
   }
 }
 
-async function ptSaveBudgetConfig(btn) {
-  const budget   = parseFloat(document.getElementById('pt-cfg-budget')?.value)     || null;
-  const tradePct = parseFloat(document.getElementById('pt-cfg-trade-pct')?.value)  || null;
-  const allocPct = parseFloat(document.getElementById('pt-cfg-alloc-pct')?.value)  || null;
-  const maxOpen  = parseInt(  document.getElementById('pt-cfg-max-open')?.value, 10) || null;
-  const minConf  = parseFloat(document.getElementById('pt-cfg-min-conf')?.value)   || null;
-  const status   = document.getElementById('pt-cfg-status');
+async function stSavePaperConfig(btn) {
+  const budget   = parseFloat(document.getElementById('st-cfg-budget')?.value)      || null;
+  const tradePct = parseFloat(document.getElementById('st-cfg-trade-pct')?.value)   || null;
+  const allocPct = parseFloat(document.getElementById('st-cfg-alloc-pct')?.value)   || null;
+  const maxOpen  = parseInt(  document.getElementById('st-cfg-max-open')?.value, 10) || null;
+  const minConf  = parseFloat(document.getElementById('st-cfg-min-conf')?.value)    || null;
+  const status   = document.getElementById('st-paper-status');
   if (!budget || !tradePct || !allocPct || !maxOpen || !minConf) {
     if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
     return;
@@ -4738,13 +4710,10 @@ async function ptSaveBudgetConfig(btn) {
   btn.disabled = true;
   try {
     const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        "paper.budget": budget,
-        "paper.max_trade_pct": tradePct,
-        "paper.max_allocated_pct": allocPct,
-        "paper.max_open_trades": maxOpen,
+        "paper.budget": budget, "paper.max_trade_pct": tradePct,
+        "paper.max_allocated_pct": allocPct, "paper.max_open_trades": maxOpen,
         "paper.min_confidence": minConf,
       }),
       signal: AbortSignal.timeout(8000),
@@ -4754,15 +4723,54 @@ async function ptSaveBudgetConfig(btn) {
     if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
   } catch(e) {
     if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
-  } finally {
-    btn.disabled = false;
+  } finally { btn.disabled = false; }
+}
+
+async function stLoadSignalTab() {
+  const el = document.getElementById('st-panel-signal');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
+  try {
+    const resp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=scanner.`, {signal: AbortSignal.timeout(12000)});
+    const sc = (await resp.json()).config || {};
+    const preEarnings  = sc["scanner.pre_earnings_blackout_days"]  ?? 3;
+    const postEarnings = sc["scanner.post_earnings_cooldown_days"] ?? 1;
+
+    el.innerHTML = `
+    <div style="max-width:520px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Signal Config</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+        Earnings blackout windows — suppress trading signals near earnings announcements.
+        Changes take effect immediately without a restart.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">PRE-EARNINGS BLACKOUT (days)</label>
+          <input id="st-sig-pre-earnings" type="number" min="0" max="14" step="1" value="${preEarnings}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Block signals this many days before earnings (gap risk protection).</div>
+        </div>
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">POST-EARNINGS COOLDOWN (days)</label>
+          <input id="st-sig-post-earnings" type="number" min="0" max="7" step="1" value="${postEarnings}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <div style="font-size:9px;color:var(--muted);margin-top:3px">Block signals this many days after earnings (gap-fill trap protection).</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+        <button onclick="stSaveSignalConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Signal Config</button>
+        <span id="st-sig-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px 0">Error loading config: ${e.message}</div>`;
   }
 }
 
-async function ptSaveSignalConfig(btn) {
-  const preEarnings  = parseInt(document.getElementById('pt-cfg-pre-earnings')?.value,  10);
-  const postEarnings = parseInt(document.getElementById('pt-cfg-post-earnings')?.value, 10);
-  const status = document.getElementById('pt-cfg-signal-status');
+async function stSaveSignalConfig(btn) {
+  const preEarnings  = parseInt(document.getElementById('st-sig-pre-earnings')?.value,  10);
+  const postEarnings = parseInt(document.getElementById('st-sig-post-earnings')?.value, 10);
+  const status = document.getElementById('st-sig-status');
   if (isNaN(preEarnings) || isNaN(postEarnings)) {
     if (status) { status.textContent = 'Both fields required.'; status.style.color = 'var(--red)'; }
     return;
@@ -4770,8 +4778,7 @@ async function ptSaveSignalConfig(btn) {
   btn.disabled = true;
   try {
     const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         "scanner.pre_earnings_blackout_days": preEarnings,
         "scanner.post_earnings_cooldown_days": postEarnings,
@@ -4783,105 +4790,65 @@ async function ptSaveSignalConfig(btn) {
     if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
   } catch(e) {
     if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
-  } finally {
-    btn.disabled = false;
-  }
+  } finally { btn.disabled = false; }
 }
 
-// ─── Risk Config tab ───────────────────────────────────────────────────────────
-async function ptLoadRiskTab() {
-  const panel = document.getElementById('pt-panel-risk');
-  if (!panel) return;
+async function stLoadRiskTab() {
+  const el = document.getElementById('st-panel-risk');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const [riskResp, learnerResp] = await Promise.all([
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`,    {signal: AbortSignal.timeout(10000)}),
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=learner.`, {signal: AbortSignal.timeout(10000)}),
-    ]);
-    const rc = ((await riskResp.json()).config)    || {};
-    const lc = ((await learnerResp.json()).config) || {};
+    const resp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`, {signal: AbortSignal.timeout(10000)});
+    const rc = (await resp.json()).config || {};
 
-    const inp = (id, val, extra='') =>
-      `<input id="${id}" type="number" value="${val}" ${extra}
-        style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">`;
     const field = (label, id, val, hint, extra='') => `
       <div>
         <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">${label}</label>
-        ${inp(id, val, extra)}
+        <input id="${id}" type="number" value="${val}" ${extra}
+          style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
         <div style="font-size:9px;color:var(--muted);margin-top:3px">${hint}</div>
       </div>`;
 
-    panel.innerHTML = `
-      <div style="padding:4px 0;max-height:65vh;overflow-y:auto">
-
-        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Risk Controls</div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
-          Daily circuit breakers and position limits. Changes take effect immediately — no restart needed.
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:14px">
-          ${field('DAILY PROFIT TARGET ($)', 'rc-profit-target', rc['risk.daily_profit_target_usd'] ?? 1000, 'Activates Profit Protect Mode when day P&amp;L reaches this.', 'min="0" step="50"')}
-          ${field('DAILY PROFIT CEILING ($)', 'rc-profit-max', rc['risk.daily_profit_max_usd'] ?? 1500, 'Halts all trading when day P&amp;L reaches this.', 'min="0" step="50"')}
-          ${field('DAILY LOSS WARNING (%)', 'rc-loss-warn', rc['risk.daily_loss_warning_pct'] ?? 1.5, 'Issues a log warning at this drawdown level.', 'min="0" max="10" step="0.1"')}
-          ${field('DAILY LOSS HALT (%)', 'rc-loss-halt', rc['risk.daily_loss_halt_pct'] ?? 2.5, 'Halts all trading for the day at this drawdown level.', 'min="0" max="10" step="0.1"')}
-          ${field('MAX CONCURRENT TRADES', 'rc-max-concurrent', rc['risk.max_concurrent_trades'] ?? 3, 'Hard cap on simultaneous open positions.', 'min="1" max="50" step="1"')}
-          ${field('MAX PORTFOLIO HEAT (%)', 'rc-heat', rc['risk.max_portfolio_heat_pct'] ?? 1.5, 'Max combined open risk as % of account. Blocks new trades above this.', 'min="0" max="20" step="0.1"')}
-          ${field('MAX CONSECUTIVE LOSSES', 'rc-consec-losses', rc['risk.max_consecutive_losses'] ?? 5, 'Triggers full halt after N consecutive losses.', 'min="1" max="20" step="1"')}
-          ${field('COOLDOWN AFTER LOSSES', 'rc-cooldown-losses', rc['risk.cooldown_after_losses'] ?? 3, '30-min cooldown triggered after N consecutive losses.', 'min="1" max="10" step="1"')}
-          ${field('MAX DAILY TRADES', 'rc-max-daily', rc['risk.max_daily_trades'] ?? 30, 'Hard cap on total trades per day.', 'min="1" max="200" step="1"')}
-        </div>
-
-        <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
-          <button onclick="ptSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
-            Save Risk Config
-          </button>
-          <span id="rc-status" style="font-size:11px;color:var(--muted)"></span>
-        </div>
-
-        <div style="margin-top:28px">
-          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Learner Config</div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
-            Deep BiLSTM retraining schedule. Changes take effect on the next sleep cycle.
-          </div>
-          <div style="display:flex;flex-direction:column;gap:14px">
-            <div>
-              <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:6px;font-weight:600">DEEP LEARNING ENABLED</label>
-              <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
-                <input type="checkbox" id="lc-deep-enabled" ${lc['learner.deep_enabled'] !== false ? 'checked' : ''}
-                  style="width:16px;height:16px;cursor:pointer">
-                <span style="font-size:12px;color:var(--text)">Enable continuous BiLSTM retraining</span>
-              </label>
-              <div style="font-size:9px;color:var(--muted);margin-top:4px">Only runs outside market hours. Disable if learner container is CPU-constrained.</div>
-            </div>
-            ${field('RETRAIN INTERVAL (seconds)', 'lc-interval', lc['learner.deep_interval_s'] ?? 3600, 'How often to retrain (min 300s). Next cycle picks up the new value.', 'min="300" max="86400" step="300"')}
-            ${field('MAX TICKERS PER CYCLE', 'lc-ticker-limit', lc['learner.deep_ticker_limit'] ?? 100, 'Limit tickers trained per cycle to control memory pressure.', 'min="1" max="500" step="10"')}
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
-            <button onclick="ptSaveLearnerConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">
-              Save Learner Config
-            </button>
-            <span id="lc-status" style="font-size:11px;color:var(--muted)"></span>
-          </div>
-        </div>
-
-      </div>`;
+    el.innerHTML = `
+    <div style="max-width:520px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Risk Controls</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+        Daily circuit breakers and position limits. Changes take effect immediately — no restart needed.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        ${field('DAILY PROFIT TARGET ($)',   'st-rc-profit-target',  rc['risk.daily_profit_target_usd'] ?? 1000, 'Activates Profit Protect Mode when day P&amp;L reaches this.', 'min="0" step="50"')}
+        ${field('DAILY PROFIT CEILING ($)',  'st-rc-profit-max',     rc['risk.daily_profit_max_usd']    ?? 1500, 'Halts all trading when day P&amp;L reaches this.', 'min="0" step="50"')}
+        ${field('DAILY LOSS WARNING (%)',    'st-rc-loss-warn',      rc['risk.daily_loss_warning_pct']  ?? 1.5,  'Issues a log warning at this drawdown level.', 'min="0" max="10" step="0.1"')}
+        ${field('DAILY LOSS HALT (%)',       'st-rc-loss-halt',      rc['risk.daily_loss_halt_pct']     ?? 2.5,  'Halts all trading for the day at this drawdown level.', 'min="0" max="10" step="0.1"')}
+        ${field('MAX CONCURRENT TRADES',    'st-rc-max-concurrent', rc['risk.max_concurrent_trades']   ?? 3,    'Hard cap on simultaneous open positions.', 'min="1" max="50" step="1"')}
+        ${field('MAX PORTFOLIO HEAT (%)',   'st-rc-heat',           rc['risk.max_portfolio_heat_pct']  ?? 1.5,  'Max combined open risk as % of account. Blocks new trades above this.', 'min="0" max="20" step="0.1"')}
+        ${field('MAX CONSECUTIVE LOSSES',   'st-rc-consec-losses',  rc['risk.max_consecutive_losses']  ?? 5,    'Triggers full halt after N consecutive losses.', 'min="1" max="20" step="1"')}
+        ${field('COOLDOWN AFTER LOSSES',    'st-rc-cooldown-losses',rc['risk.cooldown_after_losses']   ?? 3,    '30-min cooldown triggered after N consecutive losses.', 'min="1" max="10" step="1"')}
+        ${field('MAX DAILY TRADES',         'st-rc-max-daily',      rc['risk.max_daily_trades']        ?? 30,   'Hard cap on total trades per day.', 'min="1" max="200" step="1"')}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+        <button onclick="stSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Risk Config</button>
+        <span id="st-rc-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>`;
   } catch(e) {
-    if (panel) panel.innerHTML = `<div style="color:var(--red);font-size:12px">Failed to load: ${e.message}</div>`;
+    el.innerHTML = `<div style="color:var(--red);font-size:12px">Failed to load: ${e.message}</div>`;
   }
 }
 
-async function ptSaveRiskConfig(btn) {
+async function stSaveRiskConfig(btn) {
   const get = id => document.getElementById(id)?.value;
-  const status = document.getElementById('rc-status');
+  const status = document.getElementById('st-rc-status');
   const updates = {
-    "risk.daily_profit_target_usd": parseFloat(get('rc-profit-target')),
-    "risk.daily_profit_max_usd":    parseFloat(get('rc-profit-max')),
-    "risk.daily_loss_warning_pct":  parseFloat(get('rc-loss-warn')),
-    "risk.daily_loss_halt_pct":     parseFloat(get('rc-loss-halt')),
-    "risk.max_concurrent_trades":   parseInt(get('rc-max-concurrent'), 10),
-    "risk.max_portfolio_heat_pct":  parseFloat(get('rc-heat')),
-    "risk.max_consecutive_losses":  parseInt(get('rc-consec-losses'), 10),
-    "risk.cooldown_after_losses":   parseInt(get('rc-cooldown-losses'), 10),
-    "risk.max_daily_trades":        parseInt(get('rc-max-daily'), 10),
+    "risk.daily_profit_target_usd": parseFloat(get('st-rc-profit-target')),
+    "risk.daily_profit_max_usd":    parseFloat(get('st-rc-profit-max')),
+    "risk.daily_loss_warning_pct":  parseFloat(get('st-rc-loss-warn')),
+    "risk.daily_loss_halt_pct":     parseFloat(get('st-rc-loss-halt')),
+    "risk.max_concurrent_trades":   parseInt(get('st-rc-max-concurrent'), 10),
+    "risk.max_portfolio_heat_pct":  parseFloat(get('st-rc-heat')),
+    "risk.max_consecutive_losses":  parseInt(get('st-rc-consec-losses'), 10),
+    "risk.cooldown_after_losses":   parseInt(get('st-rc-cooldown-losses'), 10),
+    "risk.max_daily_trades":        parseInt(get('st-rc-max-daily'), 10),
   };
   if (Object.values(updates).some(v => isNaN(v))) {
     if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
@@ -4901,11 +4868,56 @@ async function ptSaveRiskConfig(btn) {
   } finally { btn.disabled = false; }
 }
 
-async function ptSaveLearnerConfig(btn) {
-  const status = document.getElementById('lc-status');
-  const deepEnabled = document.getElementById('lc-deep-enabled')?.checked ?? true;
-  const interval    = parseInt(document.getElementById('lc-interval')?.value, 10);
-  const tickerLimit = parseInt(document.getElementById('lc-ticker-limit')?.value, 10);
+async function stLoadLearnerTab() {
+  const el = document.getElementById('st-panel-learner');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
+  try {
+    const resp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=learner.`, {signal: AbortSignal.timeout(10000)});
+    const lc = (await resp.json()).config || {};
+
+    const field = (label, id, val, hint, extra='') => `
+      <div>
+        <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">${label}</label>
+        <input id="${id}" type="number" value="${val}" ${extra}
+          style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+        <div style="font-size:9px;color:var(--muted);margin-top:3px">${hint}</div>
+      </div>`;
+
+    el.innerHTML = `
+    <div style="max-width:520px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Learner Config</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+        Deep BiLSTM retraining schedule. Changes take effect on the next sleep cycle — no restart needed.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:6px;font-weight:600">DEEP LEARNING ENABLED</label>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+            <input type="checkbox" id="st-lc-deep-enabled" ${lc['learner.deep_enabled'] !== false ? 'checked' : ''}
+              style="width:16px;height:16px;cursor:pointer">
+            <span style="font-size:12px;color:var(--text)">Enable continuous BiLSTM retraining</span>
+          </label>
+          <div style="font-size:9px;color:var(--muted);margin-top:4px">Only runs outside market hours. Disable if learner container is CPU-constrained.</div>
+        </div>
+        ${field('RETRAIN INTERVAL (seconds)', 'st-lc-interval',     lc['learner.deep_interval_s']   ?? 3600, 'How often to retrain (min 300s). Next cycle picks up the new value.',   'min="300" max="86400" step="300"')}
+        ${field('MAX TICKERS PER CYCLE',      'st-lc-ticker-limit', lc['learner.deep_ticker_limit'] ?? 100,  'Limit tickers trained per cycle to control memory pressure.', 'min="1" max="500" step="10"')}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+        <button onclick="stSaveLearnerConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Learner Config</button>
+        <span id="st-lc-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:12px">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function stSaveLearnerConfig(btn) {
+  const status      = document.getElementById('st-lc-status');
+  const deepEnabled = document.getElementById('st-lc-deep-enabled')?.checked ?? true;
+  const interval    = parseInt(document.getElementById('st-lc-interval')?.value, 10);
+  const tickerLimit = parseInt(document.getElementById('st-lc-ticker-limit')?.value, 10);
   if (isNaN(interval) || isNaN(tickerLimit)) {
     if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
     return;
