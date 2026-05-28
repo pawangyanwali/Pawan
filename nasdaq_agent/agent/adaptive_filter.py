@@ -1,12 +1,29 @@
 """
-Adaptive signal filter — self-learning system that suppresses losing patterns
-and dynamically raises the confidence gate until win rate targets are met.
+Adaptive signal filter — self-learning system that tunes losing algo/context
+patterns via graduated confidence penalties and dynamically adjusts the
+global confidence gate until win-rate targets are met.
+
+Graduated throttling (replaces hard-block)
+------------------------------------------
+Rather than permanently blocking a bad context, the system raises the minimum
+confidence required for that context to fire.  A context with 25% win rate
+needs 80% confidence (vs. the 55% default) — only very strong signals can
+still trade.  As the parameter tuner improves the algo, more signals pass the
+higher gate, real outcomes flow back in, and the penalty decays automatically.
+
+  THROTTLE_START_WR = 0.50  → penalty starts when WR falls below 50%
+  penalty_pts = min(MAX_PENALTY_PTS, round((THROTTLE_START_WR - wr) * 100))
+  e.g. WR=35%: +15pts → need 70% conf   WR=25%: +25pts → need 80% conf
+
+No context is ever permanently dead — every context can still trade on a
+sufficiently strong signal.  This keeps the learning data flowing so the
+parameter tuner can actually improve the algo.
 
 Architecture (two-tier data quality)
 -------------------------------------
 TIER 1  "trade" sources  ("backtest", "paper", "weekend_walk_forward")
         → Actual TP/SL resolved trades — HIGH quality, slow feedback (~hours)
-        → Updates: current_win_rate, dynamic_threshold, context blocks/boosts
+        → Updates: current_win_rate, dynamic_threshold, context penalties/boosts
         → Uses EWMA so a single bad batch doesn't destroy accumulated history
 
 TIER 2  "observation" source  (short-term 90s direction checks from scanner)
@@ -14,8 +31,9 @@ TIER 2  "observation" source  (short-term 90s direction checks from scanner)
           price almost always moves against a reversal signal for the first
           few bars, so 90s-resolution accuracy is ~15-30% even for trades
           that eventually hit target.
-        → Updates: observation_win_rate + context blocks/boosts ONLY
+        → Updates: observation_win_rate + context penalties ONLY
         → Does NOT touch current_win_rate or dynamic_threshold
+        → Uses a lower throttle threshold (0.25) to avoid noisy false penalties
 
 Anti-deadlock
 -------------
@@ -45,9 +63,11 @@ logger = logging.getLogger(__name__)
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 TARGET_WIN_RATE   = 0.55   # goal win rate — system tightens until reached
-SUPPRESS_BELOW    = 0.35   # suppress context pattern if win_rate < this
+THROTTLE_START_WR = 0.50   # apply confidence penalty below this win rate (trade sources)
+SUPPRESS_BELOW    = 0.25   # obs-source penalty threshold (kept low — obs data is noisy)
+MAX_PENALTY_PTS   = 35     # max extra confidence pts required for a bad context
 BOOST_ABOVE       = 0.72   # boost confidence if win_rate >= this
-MIN_SAMPLE        = 8      # minimum resolved trades before suppressing a context
+MIN_SAMPLE        = 8      # minimum resolved trades before applying a confidence penalty
 RELAX_ABOVE       = 0.85   # if win rate exceeds this, slightly relax threshold
 DEFAULT_THRESHOLD = 55.0   # starting confidence gate
 MIN_THRESHOLD     = 50.0   # never go below this
@@ -278,10 +298,18 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
     new_blocked: dict = {}
     new_boosted: dict = {}
 
-    # For observation source: use higher MIN_SAMPLE and tighter SUPPRESS_BELOW
-    # to avoid killing context patterns based on noisy short-term checks
-    obs_suppress_below = 0.20 if not is_trade_source else SUPPRESS_BELOW
-    obs_min_sample     = max(MIN_SAMPLE * 3, 25) if not is_trade_source else MIN_SAMPLE
+    # Trade sources use THROTTLE_START_WR (0.50); obs source uses SUPPRESS_BELOW (0.25)
+    # to avoid generating spurious penalties from noisy short-term direction checks.
+    throttle_start = THROTTLE_START_WR if is_trade_source else SUPPRESS_BELOW
+    obs_min_sample = max(MIN_SAMPLE * 3, 25) if not is_trade_source else MIN_SAMPLE
+
+    # Read config-store overrides if available (falls back to module constants)
+    try:
+        from agent.config_manager import config as _cfg
+        throttle_start = float(_cfg.get("filter.throttle_start_wr", throttle_start))
+        max_penalty    = int(_cfg.get("filter.max_penalty_pts",    MAX_PENALTY_PTS))
+    except Exception:
+        max_penalty = MAX_PENALTY_PTS
 
     for dim, breakdown in context_keys:
         for val, s in breakdown.items():
@@ -290,11 +318,16 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
             if count < obs_min_sample:
                 continue
             key = f"{dim}:{val}"
-            if wr < obs_suppress_below:
+            if wr < throttle_start:
+                # Graduated penalty: further below throttle_start → more confidence needed.
+                # This keeps the algo alive in this context for strong signals while
+                # natural parameter tuning has time to improve win rate.
+                penalty_pts = min(max_penalty, round((throttle_start - wr) * 100))
                 new_blocked[key] = {
-                    "win_rate": round(wr, 3),
-                    "count":    count,
-                    "reason":   f"{dim}={val} wins only {wr*100:.0f}% ({count} trades) [{source}]",
+                    "win_rate":    round(wr, 3),
+                    "count":       count,
+                    "penalty_pts": penalty_pts,
+                    "reason":      f"{dim}={val} {wr*100:.0f}% WR ({count} trades) [+{penalty_pts}pt conf penalty, {source}]",
                 }
             elif wr >= BOOST_ABOVE and is_trade_source:
                 # Only boost from high-quality trade data
@@ -429,7 +462,7 @@ def should_suppress(
     confidence:  float = 0.0,
 ) -> tuple[bool, str]:
     with _lock:
-        blocked   = dict(_state["blocked_contexts"])
+        throttled = dict(_state["blocked_contexts"])
         threshold = float(_state["dynamic_threshold"])
 
     reason = ""
@@ -441,9 +474,18 @@ def should_suppress(
         if not val:
             continue
         key = f"{dim}:{val}"
-        if key in blocked:
-            reason = f"Adaptive advisory: {blocked[key]['reason']}"
-            break
+        if key in throttled:
+            info = throttled[key]
+            # Graduated penalty: legacy entries without penalty_pts get MAX_PENALTY_PTS
+            penalty = info.get("penalty_pts", MAX_PENALTY_PTS)
+            required_conf = threshold + penalty
+            if confidence < required_conf:
+                reason = (
+                    f"Context {dim}={val} ({info['win_rate']*100:.0f}% WR) "
+                    f"needs {required_conf:.0f}% confidence (signal={confidence:.1f}%)"
+                )
+                break
+            # Signal is strong enough to override the penalty — allow it through
 
     if not reason and confidence < threshold:
         reason = f"Confidence {confidence:.1f}% below learned threshold {threshold:.1f}%"
@@ -483,13 +525,24 @@ def get_confidence_boost(
 def get_status() -> dict:
     """Return current filter state for the API and dashboard."""
     with _lock:
+        throttled = _state["blocked_contexts"]
+        threshold = _state["dynamic_threshold"]
         return {
-            "dynamic_threshold":    _state["dynamic_threshold"],
+            "dynamic_threshold":    threshold,
             "current_win_rate":     round(_state["current_win_rate"] * 100, 1),
             "observation_win_rate": round(_state.get("observation_win_rate", 0.0) * 100, 1),
-            "target_win_rate":      round(TARGET_WIN_RATE * 100, 1),   # fix 55.000000001% display
+            "target_win_rate":      round(TARGET_WIN_RATE * 100, 1),
             "total_resolved":       _state["total_resolved"],
-            "blocked_contexts":     _state["blocked_contexts"],
+            # throttled_contexts includes all penalised entries with penalty_pts + required_confidence
+            "throttled_contexts":   {
+                k: {**v, "required_confidence": round(threshold + v.get("penalty_pts", MAX_PENALTY_PTS), 1)}
+                for k, v in throttled.items()
+            },
+            # blocked_contexts alias kept for backwards compat
+            "blocked_contexts":     {
+                k: {**v, "required_confidence": round(threshold + v.get("penalty_pts", MAX_PENALTY_PTS), 1)}
+                for k, v in throttled.items()
+            },
             "boosted_contexts":     _state["boosted_contexts"],
             "suppressed_count":     _state["suppressed_count"],
             "false_negative_count": _state.get("false_negative_count", 0),

@@ -50,6 +50,9 @@ _DEFAULTS: dict[str, Any] = {
     "learner.deep_enabled":      lambda: os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes"),
     "learner.deep_interval_s":   lambda: max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600"))),
     "learner.deep_ticker_limit": lambda: max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100"))),
+    # ── Adaptive filter ────────────────────────────────────────────────────────
+    "filter.throttle_start_wr":  lambda: 0.50,  # confidence penalty starts below this win rate
+    "filter.max_penalty_pts":    lambda: 35,     # max extra confidence pts for a throttled context
 }
 
 # Legacy column map: config_store key → account_config column name

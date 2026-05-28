@@ -1806,11 +1806,11 @@ TRADING_MAX_POSITION_PCT=10
       <div style="display:flex;align-items:flex-end;gap:6px;height:60px;padding:0 4px" id="learn-thresh-history"></div>
     </div>
 
-    <!-- Blocked contexts -->
+    <!-- Throttled contexts -->
     <div style="margin-bottom:20px">
-      <div class="bt-section-title" style="color:var(--red)">🚫 Blocked Context Patterns (<span id="learn-blocked-count">0</span>) <span style="font-weight:400;font-size:9px;color:var(--muted)">— specific setups the system auto-avoids</span></div>
+      <div class="bt-section-title" style="color:#f97316">⚡ Throttled Context Patterns (<span id="learn-blocked-count">0</span>) <span style="font-weight:400;font-size:9px;color:var(--muted)">— bad win-rate contexts need higher confidence to fire (not blocked, just harder)</span></div>
       <div class="learn-context-grid" id="learn-blocked-grid">
-        <div style="color:var(--muted);font-size:11px;padding:8px">No contexts suppressed yet — system is learning.</div>
+        <div style="color:var(--muted);font-size:11px;padding:8px">No contexts throttled yet — system is learning.</div>
       </div>
     </div>
 
@@ -4731,10 +4731,16 @@ async function stLoadSignalTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const resp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=scanner.`, {signal: AbortSignal.timeout(12000)});
-    const sc = (await resp.json()).config || {};
-    const preEarnings  = sc["scanner.pre_earnings_blackout_days"]  ?? 3;
-    const postEarnings = sc["scanner.post_earnings_cooldown_days"] ?? 1;
+    const [scanResp, filterResp] = await Promise.all([
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=scanner.`, {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=filter.`,  {signal: AbortSignal.timeout(12000)}),
+    ]);
+    const sc = (await scanResp.json()).config   || {};
+    const fc = (await filterResp.json()).config || {};
+    const preEarnings     = sc["scanner.pre_earnings_blackout_days"]  ?? 3;
+    const postEarnings    = sc["scanner.post_earnings_cooldown_days"] ?? 1;
+    const throttleStartWr = ((fc["filter.throttle_start_wr"] ?? 0.50) * 100).toFixed(0);
+    const maxPenaltyPts   = fc["filter.max_penalty_pts"] ?? 35;
 
     el.innerHTML = `
     <div style="max-width:520px">
@@ -4760,6 +4766,38 @@ async function stLoadSignalTab() {
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <button onclick="stSaveSignalConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Signal Config</button>
         <span id="st-sig-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+
+      <div style="margin-top:28px;padding-top:20px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Adaptive Filter Tuning</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
+          Controls how bad contexts are throttled. Instead of hard-blocking, bad contexts require
+          higher confidence signals to fire — algorithms keep trading and improving, just with a higher bar.
+        </div>
+        <div style="padding:10px 12px;background:#f9731611;border:1px solid #f9731633;border-radius:6px;margin-bottom:16px;font-size:10px;color:var(--muted)">
+          <strong style="color:#f97316">How throttling works:</strong> If a context has win rate &lt; Throttle Start,
+          a confidence penalty is applied: <em>penalty = (throttle_start - win_rate) × 100</em>.
+          A 35% WR context with 50% throttle start → +15pt penalty → signal needs 70% confidence (vs 55% default).
+          No context is ever permanently disabled — stronger signals always get through.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">THROTTLE START WIN RATE (%)</label>
+            <input id="st-flt-throttle-start" type="number" min="30" max="70" step="5" value="${throttleStartWr}"
+              style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+            <div style="font-size:9px;color:var(--muted);margin-top:3px">Contexts below this win rate get a confidence penalty. Lower = fewer penalties; higher = tighter filtering.</div>
+          </div>
+          <div>
+            <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">MAX CONFIDENCE PENALTY (pts)</label>
+            <input id="st-flt-max-penalty" type="number" min="10" max="50" step="5" value="${maxPenaltyPts}"
+              style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+            <div style="font-size:9px;color:var(--muted);margin-top:3px">Max extra confidence required for the worst contexts. At 35pts + 55% base = 90% max needed. Signals above this always trade.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
+          <button onclick="stSaveFilterConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Filter Config</button>
+          <span id="st-flt-status" style="font-size:11px;color:var(--muted)"></span>
+        </div>
       </div>
     </div>`;
   } catch(e) {
@@ -4788,6 +4826,32 @@ async function stSaveSignalConfig(btn) {
     const d = await r.json();
     if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
     if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
+}
+
+async function stSaveFilterConfig(btn) {
+  const throttleStartPct = parseFloat(document.getElementById('st-flt-throttle-start')?.value);
+  const maxPenalty       = parseInt(document.getElementById('st-flt-max-penalty')?.value, 10);
+  const status = document.getElementById('st-flt-status');
+  if (isNaN(throttleStartPct) || isNaN(maxPenalty)) {
+    if (status) { status.textContent = 'Both fields required.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        "filter.throttle_start_wr": throttleStartPct / 100,
+        "filter.max_penalty_pts":   maxPenalty,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved! Takes effect on next learning cycle.'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 4000); }
   } catch(e) {
     if (status) { status.textContent = 'Save failed: ' + e.message; status.style.color = 'var(--red)'; }
   } finally { btn.disabled = false; }
@@ -5802,21 +5866,32 @@ function renderLearningStatus(d) {
     document.getElementById('learn-thresh-history').innerHTML = `<div style="color:var(--muted);font-size:11px">No history yet.</div>`;
   }
 
-  // Blocked contexts
-  const blocked = d.blocked_contexts || {};
-  const blockedKeys = Object.keys(blocked);
+  // Throttled contexts (graduated confidence penalty — not hard-blocked)
+  const throttled = d.throttled_contexts || d.blocked_contexts || {};
+  const blockedKeys = Object.keys(throttled);
   document.getElementById('learn-blocked-count').textContent = blockedKeys.length;
+  const dynThresh = d.dynamic_threshold || 55;
   document.getElementById('learn-blocked-grid').innerHTML = blockedKeys.length
     ? blockedKeys.map(k => {
-        const info = blocked[k];
-        const wr2 = ((info.win_rate||0)*100).toFixed(0);
-        return `<div class="learn-ctx-card" style="border-color:rgba(239,68,68,.3)">
+        const info = throttled[k];
+        const wr2       = ((info.win_rate||0)*100).toFixed(0);
+        const penalty   = info.penalty_pts ?? 35;
+        const reqConf   = info.required_confidence ?? (dynThresh + penalty);
+        // Color by severity: yellow(mild) → orange(moderate) → red(heavy)
+        const col = penalty <= 15 ? '#f59e0b' : penalty <= 25 ? '#f97316' : '#ef4444';
+        const severity = penalty <= 15 ? 'MILD' : penalty <= 25 ? 'MODERATE' : 'HEAVY';
+        return `<div class="learn-ctx-card" style="border-color:${col}55">
           <div class="learn-ctx-key">${k}</div>
-          <div class="learn-ctx-val" style="color:var(--red)">${wr2}% win rate · ${info.count} trades</div>
+          <div class="learn-ctx-val" style="color:${col}">${wr2}% win rate · ${info.count} trades</div>
+          <div style="font-size:9px;margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span style="background:${col}22;color:${col};padding:1px 6px;border-radius:3px;font-weight:700">+${penalty}pt penalty</span>
+            <span style="color:var(--muted)">needs ≥${reqConf.toFixed(0)}% confidence</span>
+            <span style="color:#64748b">${severity}</span>
+          </div>
           <div style="font-size:9px;color:var(--muted);margin-top:3px">${info.reason||''}</div>
         </div>`;
       }).join('')
-    : `<div style="color:var(--muted);font-size:11px;padding:8px">No contexts suppressed yet — system is still learning.</div>`;
+    : `<div style="color:var(--muted);font-size:11px;padding:8px">No contexts throttled yet — system is still learning.</div>`;
 
   // Boosted contexts
   const boosted = d.boosted_contexts || {};
