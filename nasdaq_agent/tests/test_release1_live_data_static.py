@@ -105,6 +105,7 @@ def test_market_data_healthcheck_uses_price_bus_coverage_thresholds():
 def test_watchdog_service_restarts_stopped_or_unhealthy_containers():
     src = _src("services/watchdog_service.py")
     compose = _repo("docker-compose.yml")
+    healthcheck = _src("services/watchdog_healthcheck.py")
 
     assert "WATCHDOG_SERVICES" in src
     assert "/containers/json?all=1" in src
@@ -112,4 +113,9 @@ def test_watchdog_service_restarts_stopped_or_unhealthy_containers():
     assert '"health=unhealthy"' in src
     assert "WATCHDOG_UNHEALTHY_STRIKES" in src
     assert 'command: ["python", "-m", "services.watchdog_service"]' in compose
+    assert 'user: "0:0"' in compose
     assert "/var/run/docker.sock:/var/run/docker.sock" in compose
+    assert 'test: ["CMD", "python3", "/app/services/watchdog_healthcheck.py"]' in compose
+    assert 'os.getenv("WATCHDOG_DOCKER_SOCKET", "/var/run/docker.sock")' in healthcheck
+    assert "GET /_ping HTTP/1.1" in healthcheck
+    assert 'b"200 OK"' in healthcheck

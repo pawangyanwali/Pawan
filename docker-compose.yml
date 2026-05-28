@@ -238,6 +238,9 @@ services:
   # processes; this restarts containers that become unhealthy or remain stopped.
   watchdog:
     <<: *common
+    # The Docker socket is root-owned on the host. Restrict this elevated user
+    # to watchdog only; application services continue to run as non-root.
+    user: "0:0"
     environment:
       NASDAQ_SCANNER_ENABLED:      "0"
       NASDAQ_MARKET_DATA_ENABLED:  "0"
@@ -253,6 +256,12 @@ services:
       - /opt/nasdaq-agent/tokens:/app/tokens
       - /opt/nasdaq-agent/logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python3", "/app/services/watchdog_healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: always
     mem_limit: 128m
     cpus: "0.05"
