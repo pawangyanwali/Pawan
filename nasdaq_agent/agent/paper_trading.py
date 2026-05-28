@@ -485,21 +485,26 @@ def maybe_open_trade(
             open_count = c.execute(
                 "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
             ).fetchone()["n"]
-            if open_count >= _max_concurrent():
-                logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_max_concurrent()}) reached")
-                return None
 
             # ── Capital gate: check available capital before sizing ────────────
-            cfg = c.execute("SELECT total_budget, max_trade_pct, max_allocated_pct FROM account_config WHERE id=1").fetchone()
+            cfg = c.execute(
+                "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades FROM account_config WHERE id=1"
+            ).fetchone()
             if cfg:
                 _budget       = float(cfg["total_budget"])
                 _max_trade_v  = _budget * float(cfg["max_trade_pct"])  / 100.0
                 _max_alloc_v  = _budget * float(cfg["max_allocated_pct"]) / 100.0
+                _max_open     = int(cfg["max_open_trades"])
             else:
                 from config import PAPER_BUDGET, PAPER_MAX_TRADE_PCT, PAPER_MAX_ALLOCATED_PCT
                 _budget      = PAPER_BUDGET
                 _max_trade_v = _budget * PAPER_MAX_TRADE_PCT  / 100.0
                 _max_alloc_v = _budget * PAPER_MAX_ALLOCATED_PCT / 100.0
+                _max_open    = _max_concurrent()
+
+            if open_count >= _max_open:
+                logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_max_open}) reached")
+                return None
 
             realized_pnl_row = c.execute(
                 "SELECT COALESCE(SUM(pnl_dollar),0) AS rpnl FROM paper_trades WHERE status='CLOSED'"
@@ -1647,12 +1652,27 @@ def update_account_config(
             new_trade_pct = max_trade_pct     if max_trade_pct     is not None else cur.get("max_trade_pct", 5.0)
             new_alloc_pct = max_allocated_pct if max_allocated_pct is not None else cur.get("max_allocated_pct", 40.0)
             new_max_open  = max_open_trades   if max_open_trades   is not None else cur.get("max_open_trades", 10)
-            c.execute("""
-                INSERT OR REPLACE INTO account_config
-                (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
-                VALUES (1, ?, ?, ?, ?, ?)
-            """, (new_budget, new_trade_pct, new_alloc_pct, new_max_open,
-                  datetime.now(timezone.utc).isoformat()))
+            ts = datetime.now(timezone.utc).isoformat()
+            vals = (new_budget, new_trade_pct, new_alloc_pct, new_max_open, ts)
+            from agent.db import using_postgres
+            if using_postgres():
+                c.execute("""
+                    INSERT INTO account_config
+                        (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
+                    VALUES (1, ?, ?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        total_budget      = EXCLUDED.total_budget,
+                        max_trade_pct     = EXCLUDED.max_trade_pct,
+                        max_allocated_pct = EXCLUDED.max_allocated_pct,
+                        max_open_trades   = EXCLUDED.max_open_trades,
+                        updated_at        = EXCLUDED.updated_at
+                """, vals)
+            else:
+                c.execute("""
+                    INSERT OR REPLACE INTO account_config
+                        (id, total_budget, max_trade_pct, max_allocated_pct, max_open_trades, updated_at)
+                    VALUES (1, ?, ?, ?, ?, ?)
+                """, vals)
             c.commit()
     return {
         "total_budget":      new_budget,
