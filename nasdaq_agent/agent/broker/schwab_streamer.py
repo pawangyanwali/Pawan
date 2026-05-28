@@ -194,6 +194,7 @@ def _process_levelone_equities(content: list) -> None:
     if content:
         _last_ws_data_at = time.time()
     updated: list[tuple[str, dict]] = []
+    need_open_backfill: list[str] = []
     with _lock:
         for item in content:
             sym = item.get("key", "")
@@ -242,8 +243,15 @@ def _process_levelone_equities(content: list) -> None:
                 "source_status": "LIVE",
                 "is_live": True,
             }
+            if (
+                float(quote.get("open") or 0) <= 0
+                and float(quote.get("last") or quote.get("mark") or 0) > 0
+            ):
+                need_open_backfill.append(sym)
 
     # Fire tick callbacks outside the lock — 250ms throttle per ticker
+    _schedule_open_backfill(need_open_backfill)
+
     if updated and _tick_callbacks:
         now = time.time()
         for sym, quote in updated:
