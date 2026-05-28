@@ -2396,10 +2396,13 @@ setInterval(() => {
     el.textContent = `● STALE ${age}s`;
     el.style.color = 'var(--red, #e74c3c)';
     el.style.borderColor = 'var(--red, #e74c3c)';
-    // Force reconnect if stale >45s and WS appears open — covers silent proxy drops
-    // that haven't tripped the watchdog yet
-    if (age > 45 && ws && ws.readyState === WebSocket.OPEN) {
-      console.warn(`[WS] Price stale ${age}s — forcing reconnect`);
+    // Stale prices are not the same as a dead WebSocket: closed market hours,
+    // token gaps, or provider outages can all pause prices while server pings
+    // still prove the socket is healthy. Reconnect only if the socket itself
+    // has also gone silent.
+    const wsSilent = !_wsLastMsgAt || (Date.now() - _wsLastMsgAt > _WS_WATCHDOG_MS);
+    if (age > 45 && ws && ws.readyState === WebSocket.OPEN && wsSilent) {
+      console.warn(`[WS] Price stale ${age}s and socket silent - forcing reconnect`);
       try { ws.close(); } catch(_) {}
     }
   }

@@ -33,7 +33,7 @@ loglevel  = "info"
 
 
 _BACKUP_PROBE_RE = _re.compile(
-    r'"GET\s+/v2/[^ ]+\.(?:zip|tar\.gz|tgz|tar|tar\.bz2|tar\.xz|7z|rar|gz|bz2|zst|sql(?:\.gz|\.bz2)?)\s+HTTP/1\.[01]"\s+404\b'
+    r'"GET\s+/[^ ?"]+\.(?:zip|tar\.gz|tgz|tar|tar\.bz2|tar\.xz|7z|rar|gz|bz2|zst|sql(?:\.gz|\.bz2)?)\s+HTTP/1\.[01]"\s+404\b'
 )
 _HEALTH_OK_RE = _re.compile(r'"GET\s+/api/health\s+HTTP/1\.[01]"\s+200\b')
 

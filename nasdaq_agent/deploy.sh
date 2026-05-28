@@ -125,6 +125,10 @@ SVCEOF
 
 mkdir -p "$APP_DIR/logs"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR/logs"
+mkdir -p "$APP_DIR/tokens"
+chown -R 1000:1000 "$APP_DIR/tokens"
+chmod 700 "$APP_DIR/tokens"
+find "$APP_DIR/tokens" -maxdepth 1 -type f -name 'schwab*_tokens.json' -exec chmod 600 {} \; 2>/dev/null || true
 systemctl daemon-reload
 systemctl enable "$SERVICE"
 info "systemd service created and enabled."
@@ -145,7 +149,19 @@ server {
         proxy_set_header   Upgrade \$http_upgrade;
         proxy_set_header   Connection "upgrade";
         proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
         proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # High-volume internet scanner probes for backup/archive dumps.
+    # They are still rejected, but they do not clutter access logs.
+    location ~* ^/.*\.(zip|tar\.gz|tgz|tar|tar\.bz2|tar\.xz|7z|rar|gz|bz2|zst|sql|sql\.gz|sql\.bz2)$ {
+        access_log off;
+        return 404;
     }
 
     # API + dashboard

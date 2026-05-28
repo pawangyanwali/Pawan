@@ -21,6 +21,8 @@ mkdir -p "$APP_DIR/logs"
 # Containers run as UID 1000 (nasdaq) — ensure they can write to the data dir.
 chown -R 1000:1000 "$APP_DIR/nasdaq_agent/data" 2>/dev/null || true
 chown -R 1000:1000 "$APP_DIR/tokens" 2>/dev/null || true
+chmod 700 "$APP_DIR/tokens" 2>/dev/null || true
+find "$APP_DIR/tokens" -maxdepth 1 -type f -name 'schwab*_tokens.json' -exec chmod 600 {} \; 2>/dev/null || true
 
 echo "[3/5] Building image ..."
 docker compose -f "$APP_DIR/docker-compose.yml" build

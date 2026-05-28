@@ -24,6 +24,12 @@ def test_backup_sql_probes_are_filtered(monkeypatch, tmp_path):
     assert conf._is_noise_probe_message(msg)
 
 
+def test_deploy_archive_probes_are_filtered(monkeypatch, tmp_path):
+    conf = _load_gunicorn_conf(monkeypatch, tmp_path)
+    msg = '34.18.163.161 - - "GET /deploy/redis.tar.gz HTTP/1.1" 404'
+    assert conf._is_noise_probe_message(msg)
+
+
 def test_normal_404_is_kept(monkeypatch, tmp_path):
     conf = _load_gunicorn_conf(monkeypatch, tmp_path)
     msg = '172.18.0.1:50392 - "GET /watchlist/missing HTTP/1.0" 404'
