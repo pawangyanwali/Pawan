@@ -59,6 +59,9 @@ x-log-env: &log-env
 
 x-common: &common
   image: nasdaq-agent:${IMAGE_TAG:-latest}
+  build:
+    context: .
+    dockerfile: Dockerfile
   restart: unless-stopped
   networks:
     - nasdaq-net
