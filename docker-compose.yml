@@ -106,6 +106,7 @@ services:
       NASDAQ_WS_STANDDOWN_FRESH_PCT: "0.95"
       MD_HEALTH_MAX_PRICE_AGE_S:   "5"
       MD_HEALTH_MIN_FRESH_PCT:     "90"
+      MD_HEALTH_MIN_FRESH_PCT_EXTENDED: "60"
     command: ["python", "-m", "services.market_data_service"]
     healthcheck:
       # Three-tier check:
