@@ -608,18 +608,23 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         logger.info(f"[retrain_all] Starting {batch_label}")
 
         # ── Fetch data for this batch only ────────────────────────────────────
+        # extended_hours=False: regular-session bars only, which ARE persisted
+        # to the ohlcv_bars PostgreSQL table so subsequent retrains hit the cache
+        # instead of re-calling Schwab.  Extended-hours bars are deliberately
+        # excluded from training because their volatility/volume patterns differ
+        # from regular session and degrade model accuracy.
         if hist_5m is not None:
             b5m = {t: hist_5m[t] for t in batch if t in hist_5m}
         else:
             b5m = fetch_batch_interval(
-                batch, "1min", 3900, ttl=86400, background=True, extended_hours=True
+                batch, "1min", 3900, ttl=86400, background=True, extended_hours=False
             )
 
         if hist_15m is not None:
             b15m = {t: hist_15m[t] for t in batch if t in hist_15m}
         else:
             b15m = fetch_batch_interval(
-                batch, "15min", 5000, ttl=86400, background=True, extended_hours=True
+                batch, "15min", 5000, ttl=86400, background=True, extended_hours=False
             )
 
         if daily_data is not None:
@@ -627,8 +632,14 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         else:
             bday = fetch_batch_interval(batch, "1day", 500, ttl=86400, background=True)
 
+        # Log bar counts to make it easy to spot empty API responses in the logs.
+        _b5m_bars  = sum(len(v) for v in b5m.values())
+        _b15m_bars = sum(len(v) for v in b15m.values())
         logger.info(
-            f"[retrain_all] {batch_label}: 1min={len(b5m)} 15min={len(b15m)} daily={len(bday)} tickers"
+            f"[retrain_all] {batch_label}: "
+            f"1min={len(b5m)} tickers ({_b5m_bars} bars) | "
+            f"15min={len(b15m)} tickers ({_b15m_bars} bars) | "
+            f"daily={len(bday)} tickers"
         )
 
         # Accumulate 15-min frames for deep model (hold only the DataFrame references —
