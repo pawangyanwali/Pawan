@@ -1,6 +1,10 @@
 """
 Learning / adaptive-filter routes:
   GET  /api/learning/params
+  GET  /api/learning/params/full
+  GET  /api/learning/params/history
+  POST /api/learning/params/set
+  POST /api/learning/params/reset/{family}
   GET  /api/learning-status
   GET  /api/learning/phase2
   GET  /api/learning/walk-forward-stats
@@ -17,7 +21,8 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Body
+from fastapi import Path as FPath
 
 from auth.dependencies import require_viewer, require_admin, AuthenticatedUser
 from routers._deps import _pt_executor
@@ -89,6 +94,69 @@ async def learning_params_status():
     _learning_params_cache = payload
     _learning_params_cache_ts = now
     return payload
+
+
+@router.get("/api/learning/params/full")
+async def learning_params_full():
+    """Full per-family parameter data for the Algo Params dashboard tab."""
+    try:
+        from agent.algo_learning_engine import get_all_families_full as _get_full
+        families = _get_full()
+        return {"available": True, "families": families}
+    except Exception as exc:
+        logger.warning("learning/params/full error: %s", exc)
+        return {"available": False, "families": {}}
+
+
+@router.get("/api/learning/params/history")
+async def learning_params_history(family: str | None = None, limit: int = 60):
+    """Recent parameter tuning history records."""
+    try:
+        from agent.algo_learning_engine import get_algo_tune_history as _get_hist
+        rows = _get_hist(family=family, limit=limit)
+        return {"success": True, "rows": rows}
+    except Exception as exc:
+        logger.warning("learning/params/history error: %s", exc)
+        return {"success": False, "rows": []}
+
+
+@router.post("/api/learning/params/set")
+async def learning_params_set(
+    payload: dict = Body(...),
+    _current: AuthenticatedUser = Depends(require_admin),
+):
+    """Manually override a single algo-family parameter value."""
+    family = payload.get("family", "")
+    param  = payload.get("param", "")
+    value  = payload.get("value")
+    if not family or not param or value is None:
+        return {"success": False, "error": "family, param, and value are required"}
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "value must be numeric"}
+    try:
+        from agent.algo_learning_engine import set_algo_param_manual as _set_param
+        ok, msg = _set_param(family, param, value)
+        return {"success": ok, "message": msg}
+    except Exception as exc:
+        logger.warning("learning/params/set error: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/api/learning/params/reset/{family}")
+async def learning_params_reset(
+    family: str = FPath(...),
+    _current: AuthenticatedUser = Depends(require_admin),
+):
+    """Reset all parameters for an algo family back to defaults."""
+    try:
+        from agent.algo_learning_engine import reset_algo_family as _reset
+        ok = _reset(family)
+        return {"success": ok}
+    except Exception as exc:
+        logger.warning("learning/params/reset error: %s", exc)
+        return {"success": False, "error": str(exc)}
 
 
 @router.get("/api/learning-status")

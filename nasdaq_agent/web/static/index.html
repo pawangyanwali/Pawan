@@ -5033,6 +5033,22 @@ const _ALGO_FAMILY_META = {
   VWAP_SCALP:  { desc: 'VWAP Scalp — scalps VWAP touch/reclaim and HOD/LOD VWAP confluence setups', signal_tf: '1-min bars (intraday VWAP)', ml_tf: '5-min' },
   LEVEL_SCALP: { desc: 'Level Scalp — scalps rejection off key S/R levels and micro pullback entries', signal_tf: '1-min bars', ml_tf: '5-min' },
   RS_REGIME:   { desc: 'Relative Strength / Regime — sector leaders, SPY beta catch-ups, regime-aligned momentum', signal_tf: '1-min + 5-min + 1-hour', ml_tf: '5-min + 15-min' },
+  // Phase 5 — Quantitative Strategy Reference
+  OFI:          { desc: 'Order Flow Imbalance — trades aggressive volume and bid/ask imbalance bursts', signal_tf: '1-min bars (tick-level)', ml_tf: '1-min + 5-min' },
+  VWAP_OFI:     { desc: 'VWAP + Order Flow — VWAP pull-to setups confirmed by order flow direction', signal_tf: '1-min bars (intraday VWAP)', ml_tf: '5-min' },
+  EMA_PULL:     { desc: 'EMA Slope Pullback — trades pullbacks into rising/falling fast EMA with slope confirmation', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  VWAP_TREND:   { desc: 'VWAP Trend Break — trades decisive VWAP reclaim or loss as trend entry', signal_tf: '1-min bars (intraday VWAP)', ml_tf: '5-min' },
+  DONCHIAN:     { desc: 'Donchian Channel Breakout — trades 20-bar channel breakouts with volume and ATR filters', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  ORB_ZV:       { desc: 'ORB + VWAP Zero-Volume — ORB break with VWAP reclaim and volume squeeze confirmation', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  MACD_ACC:     { desc: 'MACD Acceleration — trades histogram inflection confirming momentum direction change', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  SUPERTREND:   { desc: 'Supertrend Flip — trades direction change on ATR-based Supertrend indicator', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  VOL_SHOCK:    { desc: 'Volatility Shock — trades sudden realized-volatility expansion as trend catalyst', signal_tf: '1-min bars', ml_tf: '5-min' },
+  BB_REV:       { desc: 'Bollinger Band Mean Reversion — trades extreme BB touches with RSI2 exhaustion confirmation', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  KELTNER_FADE: { desc: 'Keltner Channel Fade — fades Keltner channel extremes and failed breakouts back inside', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  SQUEEZE:      { desc: 'Squeeze Expansion — detects BB inside KC compression (Squeeze) and trades the breakout', signal_tf: '1-min bars', ml_tf: '5-min + 15-min' },
+  PAIR_ARB:     { desc: 'Pair Stat Arb — trades mean-reverting spread between correlated tickers', signal_tf: '1-min bars (spread z-score)', ml_tf: '5-min' },
+  REGIME_SW:    { desc: 'Regime Switch — adapts direction (trend vs. fade) based on detected intraday market regime', signal_tf: '1-min + 5-min + 1-hour', ml_tf: '5-min + 15-min' },
+  META_ENS:     { desc: 'Meta Ensemble — weighted vote across all active algos; fires when consensus confidence is high', signal_tf: 'all timeframes', ml_tf: 'all models' },
 };
 // Keep a simple desc accessor for backwards compat
 const _ALGO_FAMILY_DESC = Object.fromEntries(Object.entries(_ALGO_FAMILY_META).map(([k,v]) => [k, v.desc]));
