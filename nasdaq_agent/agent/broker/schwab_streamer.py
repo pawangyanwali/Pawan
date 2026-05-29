@@ -317,6 +317,9 @@ def _process_chart_equity(content: list) -> None:
         except _q.Full:
             pass
 
+    if new_bars:
+        _publish_candles_to_valkey(new_bars)
+
 
 def _bar_persist_worker() -> None:
     """
@@ -379,12 +382,6 @@ def _ensure_bar_persist_worker() -> None:
     t = threading.Thread(target=_bar_persist_worker, daemon=True, name="BarPersist")
     t.start()
     logger.info("[Streamer] CHART_EQUITY persistence worker started → ohlcv_bars")
-
-    # Publish candles to Valkey so the scanner container can read them
-    # even when market-data runs in a separate container.
-    # Key: md:1m:{ticker}  Type: Redis LIST  Max length: 200 bars  TTL: 7200s
-    if new_bars:
-        _publish_candles_to_valkey(new_bars)
 
 
 def _publish_candles_to_valkey(bars: list[tuple[str, dict]]) -> None:
