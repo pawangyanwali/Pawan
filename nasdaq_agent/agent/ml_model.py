@@ -308,7 +308,7 @@ class StockMLModel:
                 self._path(),
             )
         except Exception as e:
-            logger.debug(f"[{self.ticker}] scalp save failed: {e}")
+            logger.warning(f"[{self.ticker}] scalp save failed: {e}")
 
     def _load(self) -> None:
         try:
@@ -707,7 +707,7 @@ class DailyMLModel:
                 self._path(),
             )
         except Exception as e:
-            logger.debug(f"[{self.ticker}] daily save failed: {e}")
+            logger.warning(f"[{self.ticker}] daily save failed: {e}")
 
     def _load(self) -> None:
         try:
@@ -910,7 +910,7 @@ class ReversalMLModel:
                 self._path(),
             )
         except Exception as e:
-            logger.debug(f"[{self.ticker}] reversal save failed: {e}")
+            logger.warning(f"[{self.ticker}] reversal save failed: {e}")
 
     def _load(self) -> None:
         try:
@@ -1106,7 +1106,7 @@ class SwingMLModel:
                 self._path(),
             )
         except Exception as e:
-            logger.debug(f"[{self.ticker}] swing save failed: {e}")
+            logger.warning(f"[{self.ticker}] swing save failed: {e}")
 
     def _load(self) -> None:
         try:
@@ -1280,7 +1280,7 @@ class EnsembleMLModel:
                 self._path(),
             )
         except Exception as e:
-            logger.debug(f"[{self.ticker}] ensemble save failed: {e}")
+            logger.warning(f"[{self.ticker}] ensemble save failed: {e}")
 
     def _load(self) -> None:
         try:

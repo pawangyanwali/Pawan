@@ -25,13 +25,18 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
     from agent.ml_model import (
         _model_registry, _daily_model_registry,
         _reversal_model_registry, _ensemble_registry,
-        _swing_model_registry, get_retrain_progress,
+        _swing_model_registry, get_retrain_progress, _MODEL_DIR,
     )
     import os
 
-    def _count(registry):
-        total   = len(registry)
-        trained = sum(1 for m in registry.values() if getattr(m, 'trained', False))
+    def _count(registry, prefix: str) -> dict:
+        # Count .joblib files on disk — always accurate after restarts.
+        # In-memory registry is lazy-loaded so would show 0/0 after a restart
+        # even when hundreds of trained models are persisted on disk.
+        disk_trained = len(list(_MODEL_DIR.glob(f"{prefix}_*.joblib")))
+        in_mem_trained = sum(1 for m in registry.values() if getattr(m, 'trained', False))
+        trained = max(disk_trained, in_mem_trained)
+        total   = max(len(registry), disk_trained)
         return {"total": total, "trained": trained}
 
     blend_stats = None
@@ -72,11 +77,11 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
         "deep_trained":      deep_is_trained(),
         "is_training_now":   is_training_active(),
         "training_history":  get_training_history(),
-        "scalp_models":      _count(_model_registry),
-        "daily_models":      _count(_daily_model_registry),
-        "reversal_models":   _count(_reversal_model_registry),
-        "ensemble_models":   _count(_ensemble_registry),
-        "swing_models":      _count(_swing_model_registry),
+        "scalp_models":      _count(_model_registry,          "scalp"),
+        "daily_models":      _count(_daily_model_registry,    "daily"),
+        "reversal_models":   _count(_reversal_model_registry, "reversal"),
+        "ensemble_models":   _count(_ensemble_registry,       "ensemble"),
+        "swing_models":      _count(_swing_model_registry,    "swing"),
         "retrain_progress":  get_retrain_progress(),
         "blend_weights":     blend_stats,
         "pipeline_metrics":  pipeline_stats,
