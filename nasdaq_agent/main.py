@@ -1055,8 +1055,11 @@ async def lifespan(app: FastAPI):
             # even on days when no manual retrain is triggered.
             _t.sleep(86400)
 
-    import threading as _threading
-    _threading.Thread(target=_bar_accumulator_loop, daemon=True, name="BarAccumulator").start()
+    # Only run in the scanner container — Schwab MD credentials are not available
+    # in other containers (e.g. nasdaq-web-api reads Valkey only).
+    if _SCANNER_ENABLED:
+        import threading as _threading
+        _threading.Thread(target=_bar_accumulator_loop, daemon=True, name="BarAccumulator").start()
 
     yield
     scanner.stop()
