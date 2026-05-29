@@ -1267,9 +1267,9 @@ def get_daily_pnl(days: int = 30) -> list[dict]:
             GROUP BY date(closed_at)
             ORDER BY trade_date ASC
         """, (f'-{days} days',)).fetchall()
-        cfg_row = c.execute("SELECT total_budget FROM account_config WHERE id=1").fetchone()
 
-    budget = float(cfg_row["total_budget"]) if cfg_row else 50000.0
+    from agent.config_manager import config as _cfg
+    budget = float(_cfg.get("paper.budget", 50000.0))
     result = []
     running_equity = budget
     for r in rows:
@@ -1305,9 +1305,9 @@ def get_today_pnl() -> dict:
             FROM paper_trades
             WHERE status='CLOSED' AND closed_at::date = CURRENT_DATE
         """).fetchone()
-        cfg_row = c.execute("SELECT total_budget FROM account_config WHERE id=1").fetchone()
 
-    budget = float(cfg_row["total_budget"]) if cfg_row else 50000.0
+    from agent.config_manager import config as _cfg
+    budget = float(_cfg.get("paper.budget", 50000.0))
     d = dict(row) if row else {}
     total_dollar = float(d.get("total_pnl_dollar") or 0)
     d["total_pnl_pct"] = round(total_dollar / budget * 100, 3) if budget > 0 else 0.0
@@ -1428,12 +1428,9 @@ def get_summary() -> dict:
                 "SELECT entry_price, shares, entry_price*shares as cb "
                 "FROM paper_trades WHERE status='OPEN'"
             ).fetchall()
-        cfg_row = c.execute(
-            "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades "
-            "FROM account_config WHERE id=1"
-        ).fetchone()
 
-    budget = float(cfg_row["total_budget"]) if cfg_row else 50000.0
+    from agent.config_manager import config as _cfg
+    budget = float(_cfg.get("paper.budget", 50000.0))
     open_count  = len(open_rows)
     total       = len(closed)
     wins        = sum(1 for r in closed if (r["pnl_dollar"] or 0) > 0)

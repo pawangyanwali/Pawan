@@ -4152,20 +4152,24 @@ async function openPaperTrading() {
 
     // ── Summary stats ──
     const td   = s.total_dollar_pnl || 0;   // today P&L (primary)
-    const atd  = s.all_time_dollar  ?? null; // all-time P&L (secondary, may differ due to legacy trades)
+    const atd  = s.all_time_dollar  ?? null; // all-time P&L from ALL trades (no cap)
     const atLabel = (atd !== null && Math.abs(atd - td) > 1)
       ? `<div style="font-size:8px;color:var(--muted);margin-top:1px">All-time: ${atd>=0?'+$':'-$'}${Math.abs(atd).toFixed(0)}</div>`
       : '';
     const periodLabel = s.display_period === 'today' ? 'Today' : 'All-time';
+    // today_closed = COUNT(*) from DB (never capped), daily_trades_allowed = config limit
+    const todayClosed   = s.today_closed          ?? s.closed ?? 0;
+    const dailyAllowed  = s.daily_trades_allowed  ?? 30;
+    const dailyColor    = todayClosed > dailyAllowed ? 'var(--red)' : todayClosed >= dailyAllowed * 0.8 ? 'var(--yellow)' : 'var(--green)';
     document.getElementById('paper-stats').innerHTML = [
-      ['Open',                     s.open,                               'var(--blue)'],
-      [periodLabel+' Closed',      s.closed,                             'var(--text)'],
-      [periodLabel+' Wins',        s.wins,                               'var(--green)'],
-      [periodLabel+' Losses',      s.losses,                             'var(--red)'],
-      [periodLabel+' Win Rate',    s.win_rate+'%',                       s.win_rate>=target?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
-      ['Avg P&L',                  (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%', s.avg_pnl>=0?'var(--green)':'var(--red)'],
-      ['Today P&L',                (td>=0?'+$':'-$')+Math.abs(td).toFixed(2)+atLabel, td>=0?'var(--green-s)':'var(--red-s)'],
-      ['Target',                   target+'% WR',                        'var(--muted)'],
+      ['Open',            (s.open ?? 0),                                                          'var(--blue)'],
+      ['Closed Today',    todayClosed,                                                             todayClosed > dailyAllowed ? 'var(--red)' : 'var(--text)'],
+      [periodLabel+' Wins',   s.wins,                                                             'var(--green)'],
+      [periodLabel+' Losses', s.losses,                                                           'var(--red)'],
+      [periodLabel+' Win Rate', s.win_rate+'%',                                                   s.win_rate>=target?'var(--green)':s.win_rate>=50?'var(--yellow)':'var(--red)'],
+      ['Avg P&L',         (s.avg_pnl>=0?'+':'')+s.avg_pnl+'%',                                   s.avg_pnl>=0?'var(--green)':'var(--red)'],
+      ['Today P&L',       (td>=0?'+$':'-$')+Math.abs(td).toFixed(2)+atLabel,                     td>=0?'var(--green-s)':'var(--red-s)'],
+      ['Daily Allowed',   `${todayClosed} / ${dailyAllowed}`,                                     dailyColor],
     ].map(([l,v,c])=>`<div class="paper-stat">
       <div style="font-size:9px;color:var(--muted);margin-bottom:2px">${l}</div>
       <div style="font-size:15px;font-weight:700;color:${c}">${v}</div>
@@ -6764,14 +6768,14 @@ async function loadRiskStatus() {
           </div>
           <div style="display:flex;justify-content:space-between;margin-bottom:4px">
             <span style="font-size:10px;color:var(--muted)">Daily P&amp;L</span>
-            <span style="font-size:11px;color:${(d.daily_pnl_pct||0)<0?'var(--red)':'var(--green)'}">${((d.daily_pnl_pct||0)>=0?'+':'') + ((d.daily_pnl_pct||0)).toFixed(2)}%</span>
+            <span style="font-size:11px;color:${(d.pnl_today_pct||0)<0?'var(--red)':'var(--green)'}">${((d.pnl_today_pct||0)>=0?'+':'') + ((d.pnl_today_pct||0)).toFixed(2)}%</span>
           </div>
           <div style="display:flex;justify-content:space-between;margin-bottom:4px">
             <span style="font-size:10px;color:var(--muted)">Trades today</span>
-            <span style="font-size:11px;color:var(--text)">${d.trades_today||0} / ${d.max_trades||20}</span>
+            <span style="font-size:11px;color:var(--text)">${d.daily_trade_count||0} / ${d.max_daily_trades||30}</span>
           </div>
           <div class="nn-bar-track" style="margin-top:6px">
-            <div class="nn-bar-fill" style="width:${Math.min(((d.trades_today||0)/(d.max_trades||20))*100,100)}%;background:${(d.trades_today||0)>=(d.max_trades||20)?'var(--red)':'var(--accent)'}"></div>
+            <div class="nn-bar-fill" style="width:${Math.min(((d.daily_trade_count||0)/(d.max_daily_trades||30))*100,100)}%;background:${(d.daily_trade_count||0)>=(d.max_daily_trades||30)?'var(--red)':'var(--accent)'}"></div>
           </div>
           ${d.circuit_reason ? `<div style="font-size:10px;color:var(--red);margin-top:6px">${d.circuit_reason}</div>` : ''}
         </div>

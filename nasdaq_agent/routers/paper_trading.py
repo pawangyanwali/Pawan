@@ -66,30 +66,37 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
     _today_losses = _today_total - _today_wins
     _today_dollar = float(today_db.get("total_pnl_dollar") or 0)
     _today_wr     = round(_today_wins / _today_total * 100, 1) if _today_total else 0.0
-    _budget       = float(today_db.get("budget") or summary.get("budget") or 50000)
+    # Budget from get_summary() which reads ConfigManager — never use account_config default
+    _budget       = float(summary.get("starting_balance") or 50000)
     _avg_pnl_pct  = round(_today_dollar / _budget * 100 / _today_total, 3) if _today_total else 0.0
 
-    all_dollars = [t["pnl_dollar"] for t in closed if t.get("pnl_dollar") is not None]
-    all_dollar_total = round(sum(all_dollars), 2) if all_dollars else 0.0
+    # All-time stats from pt_summary() which queries ALL closed trades (no LIMIT cap)
+    _all_time_dollar = round(float(summary.get("total_dollar_pnl") or 0.0), 2)
+    _all_time_closed = int(summary.get("closed") or 0)
+
+    from agent.config_manager import config as _cfg_mgr
+    _max_daily = int(_cfg_mgr.get("risk.max_daily_trades", 30))
 
     use_today      = _today_total >= 3
     display_period = "today" if use_today else "all-time"
     summary.update({
-        "closed":           _today_total if use_today else len(closed),
-        "wins":             _today_wins  if use_today else sum(1 for t in closed if (t.get("pnl_dollar") or 0) > 0),
-        "losses":           _today_losses if use_today else sum(1 for t in closed if (t.get("pnl_dollar") or 0) <= 0),
-        "win_rate":         _today_wr if use_today else (
+        "closed":               _today_total if use_today else _all_time_closed,
+        "wins":                 _today_wins  if use_today else sum(1 for t in closed if (t.get("pnl_dollar") or 0) > 0),
+        "losses":               _today_losses if use_today else sum(1 for t in closed if (t.get("pnl_dollar") or 0) <= 0),
+        "win_rate":             _today_wr if use_today else (
             round(sum(1 for t in closed if (t.get("pnl_dollar") or 0) > 0) / len(closed) * 100, 1) if closed else 0.0
         ),
-        "avg_pnl":          _avg_pnl_pct if use_today else (
+        "avg_pnl":              _avg_pnl_pct if use_today else (
             round(sum(t.get("pnl_pct", 0) or 0 for t in closed) / len(closed), 3) if closed else 0.0
         ),
-        "total_pnl":        _avg_pnl_pct,
-        "total_dollar_pnl": _today_dollar,
-        "all_time_dollar":  all_dollar_total,
-        "all_time_closed":  len(closed),
-        "today_closed":     _today_total,
-        "display_period":   display_period,
+        "total_pnl":            _avg_pnl_pct,
+        "total_dollar_pnl":     _today_dollar,
+        "all_time_dollar":      _all_time_dollar,
+        "all_time_closed":      _all_time_closed,
+        "today_closed":         _today_total,
+        "display_period":       display_period,
+        "daily_trades_allowed": _max_daily,
+        "budget":               _budget,
     })
     return {
         "summary":       summary,
