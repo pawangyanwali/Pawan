@@ -71,8 +71,10 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
     _avg_pnl_pct  = round(_today_dollar / _budget * 100 / _today_total, 3) if _today_total else 0.0
 
     # All-time stats from pt_summary() which queries ALL closed trades (no LIMIT cap)
-    _all_time_dollar = round(float(summary.get("total_dollar_pnl") or 0.0), 2)
-    _all_time_closed = int(summary.get("closed") or 0)
+    _all_time_dollar  = round(float(summary.get("total_dollar_pnl") or 0.0), 2)
+    _all_time_closed  = int(summary.get("closed") or 0)
+    _all_time_wins    = int(summary.get("wins")   or 0)
+    _all_time_losses  = int(summary.get("losses") or 0)
 
     from agent.config_manager import config as _cfg_mgr
     _max_daily = int(_cfg_mgr.get("risk.max_daily_trades", 30))
@@ -93,7 +95,11 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
         "total_dollar_pnl":     _today_dollar,
         "all_time_dollar":      _all_time_dollar,
         "all_time_closed":      _all_time_closed,
+        "all_time_wins":        _all_time_wins,
+        "all_time_losses":      _all_time_losses,
         "today_closed":         _today_total,
+        "today_wins":           _today_wins,
+        "today_losses":         _today_losses,
         "display_period":       display_period,
         "daily_trades_allowed": _max_daily,
         "budget":               _budget,

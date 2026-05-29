@@ -588,34 +588,69 @@
   <div class="pill"><div class="pill-label">Strong Sell</div><div class="pill-value" style="color:var(--red-s)" id="s-ssell">—</div></div>
   <div class="pill"><div class="pill-label">Vol Spike ⚡</div><div class="pill-value" style="color:var(--yellow)" id="s-uvol">—</div></div>
   <!-- Paper trading summary pills -->
-  <div class="pill" id="pt-trades-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:130px" title="Click to open Paper Trading">
+  <div class="pill" id="pt-trades-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:220px" title="Click to open Paper Trading">
     <div class="pill-label">📊 Trades Today</div>
-    <div style="display:flex;align-items:baseline;gap:5px;margin-top:2px">
-      <span id="pt-open-count" style="font-size:16px;font-weight:700;color:var(--blue)">—</span>
-      <span style="font-size:10px;color:var(--muted)">open</span>
-      <span style="font-size:10px;color:var(--muted)">·</span>
-      <span id="pt-closed-count" style="font-size:13px;font-weight:700;color:var(--text)">—</span>
-      <span style="font-size:10px;color:var(--muted)">closed</span>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:3px 8px;margin-top:5px">
+      <div>
+        <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Open</div>
+        <div style="font-size:15px;font-weight:700;color:var(--blue)" id="pt-open-count">—</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Closed Today</div>
+        <div style="font-size:15px;font-weight:700;color:var(--text)" id="pt-closed-count">—</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Total</div>
+        <div style="font-size:15px;font-weight:700;color:var(--muted)" id="pt-total-count">—</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Win Today</div>
+        <div style="font-size:13px;font-weight:700;color:var(--green)" id="pt-wins">—</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Loss Today</div>
+        <div style="font-size:13px;font-weight:700;color:var(--red)" id="pt-losses">—</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">All W / L</div>
+        <div style="font-size:11px;font-weight:700;margin-top:2px">
+          <span style="color:var(--green)" id="pt-all-wins">—</span><span style="color:var(--muted);font-size:9px">/</span><span style="color:var(--red)" id="pt-all-losses">—</span>
+        </div>
+      </div>
     </div>
-    <div style="display:flex;gap:8px;margin-top:2px;font-size:9px">
-      <span>W: <strong id="pt-wins" style="color:var(--green)">—</strong></span>
-      <span>L: <strong id="pt-losses" style="color:var(--red)">—</strong></span>
-      <span id="pt-wr-badge" style="color:var(--muted)"></span>
+    <div id="pt-wr-badge" style="font-size:9px;color:var(--muted);margin-top:4px"></div>
+  </div>
+  <div class="pill" id="pt-pnl-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:130px" title="Click to open Paper Trading">
+    <div class="pill-label">💰 P&amp;L</div>
+    <div style="margin-top:5px">
+      <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Today</div>
+      <div id="pt-pnl-val" style="font-size:16px;font-weight:700;color:var(--muted)">—</div>
     </div>
+    <div style="margin-top:4px">
+      <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Overall</div>
+      <div id="pt-pnl-overall" style="font-size:13px;font-weight:700;color:var(--muted)">—</div>
+    </div>
+    <div id="pt-pnl-pct" style="font-size:9px;color:var(--muted);margin-top:3px">—</div>
   </div>
-  <div class="pill" id="pt-pnl-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:110px" title="Click to open Paper Trading">
-    <div class="pill-label">💰 P&amp;L Today</div>
-    <div id="pt-pnl-val" style="font-size:16px;font-weight:700;margin-top:2px;color:var(--muted)">—</div>
-    <div id="pt-pnl-pct" style="font-size:10px;color:var(--muted);margin-top:1px">—</div>
-  </div>
-  <div class="pill" id="streak-pill" onclick="openPaperTrading()" style="cursor:pointer;width:100px;min-width:100px;max-width:100px" title="Today's win/loss breakdown">
+  <div class="pill" id="streak-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:110px" title="Win/loss breakdown">
     <div class="pill-label">🎯 W / L</div>
-    <div style="display:flex;align-items:baseline;gap:4px;margin-top:3px">
-      <span id="streak-wins"  style="font-size:15px;font-weight:700;color:var(--green)">—</span>
-      <span style="font-size:10px;color:var(--muted)">/</span>
-      <span id="streak-losses" style="font-size:15px;font-weight:700;color:var(--red)">—</span>
+    <div style="margin-top:5px">
+      <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Today</div>
+      <div style="display:flex;align-items:baseline;gap:3px;margin-top:2px">
+        <span id="streak-wins"  style="font-size:15px;font-weight:700;color:var(--green)">—</span>
+        <span style="font-size:9px;color:var(--muted)">/</span>
+        <span id="streak-losses" style="font-size:15px;font-weight:700;color:var(--red)">—</span>
+      </div>
     </div>
-    <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px;overflow:hidden">
+    <div style="margin-top:4px">
+      <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">All Time</div>
+      <div style="display:flex;align-items:baseline;gap:3px;margin-top:2px">
+        <span id="streak-all-wins"  style="font-size:12px;font-weight:700;color:var(--green)">—</span>
+        <span style="font-size:9px;color:var(--muted)">/</span>
+        <span id="streak-all-losses" style="font-size:12px;font-weight:700;color:var(--red)">—</span>
+      </div>
+    </div>
+    <div style="height:3px;background:var(--border);border-radius:2px;margin-top:5px;overflow:hidden">
       <div id="streak-bar" style="height:100%;border-radius:2px;background:var(--green);width:0%;transition:width .4s"></div>
     </div>
     <div id="streak-label" style="font-size:9px;color:var(--muted);margin-top:2px">—</div>
@@ -6998,61 +7033,101 @@ async function triggerHistBacktest(btn) {
 
 // Update backtest header button live with win rate from WebSocket
 function updatePtPills(s, openTradesMap) {
-  // s = get_summary() shape: {open, closed, wins, losses, win_rate, avg_pnl, total_pnl, total_dollar_pnl}
   if (!s) return;
-  const closed    = s.closed            ?? 0;
-  const wins      = s.wins              ?? 0;
-  const losses    = s.losses            ?? (closed - wins);
-  const wr        = s.win_rate          ?? (closed > 0 ? Math.round(wins / closed * 100) : null);
-  const pnlDollar = s.total_dollar_pnl  ?? null;
-  const target    = (JSON.parse(localStorage.getItem('lastLearnState') || '{}').target_win_rate) || 55;
-  const pnlPct    = s.total_pnl         ?? null;
-  // open count: prefer live open_trades map, fall back to summary field
-  const openCount = openTradesMap ? Object.keys(openTradesMap).length : (s.open ?? 0);
+  const target = (JSON.parse(localStorage.getItem('lastLearnState') || '{}').target_win_rate) || 55;
 
-  const elOpen    = document.getElementById('pt-open-count');
-  const elClosed  = document.getElementById('pt-closed-count');
-  const elWins    = document.getElementById('pt-wins');
-  const elLoss    = document.getElementById('pt-losses');
-  const elWrBadge = document.getElementById('pt-wr-badge');
-  const elPnlVal  = document.getElementById('pt-pnl-val');
-  const elPnlPct  = document.getElementById('pt-pnl-pct');
+  // Open: prefer live map count
+  const openCount   = openTradesMap ? Object.keys(openTradesMap).length : (s.open ?? 0);
 
-  if (elOpen)   elOpen.textContent   = openCount;
-  if (elClosed) elClosed.textContent = closed;
-  if (elWins)   elWins.textContent   = wins;
-  if (elLoss)   elLoss.textContent   = losses;
-  if (elWrBadge && wr !== null) {
-    elWrBadge.textContent = wr.toFixed(1) + '% WR';
-    elWrBadge.style.color = wr >= target ? 'var(--green)' : wr >= 50 ? 'var(--yellow)' : 'var(--red)';
-  }
-  if (elPnlVal && pnlDollar !== null) {
-    const pos = pnlDollar >= 0;
-    elPnlVal.textContent = (pos ? '+$' : '-$') + Math.abs(pnlDollar).toFixed(0);
-    elPnlVal.style.color = pos ? 'var(--green)' : 'var(--red)';
-  }
-  if (elPnlPct && pnlPct !== null) {
-    const pos = pnlPct >= 0;
-    elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% avg/trade';
-    elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
+  // Today-specific counts (always COUNT(*) from DB, never capped)
+  const closedToday  = s.today_closed   ?? s.closed ?? 0;
+  const winsToday    = s.today_wins     ?? s.wins   ?? 0;
+  const lossesToday  = s.today_losses   ?? s.losses ?? Math.max(0, closedToday - winsToday);
+  const wrTodayRaw   = closedToday > 0 ? winsToday / closedToday : null;
+
+  // All-time counts (from full DB scan, no limit)
+  const totalTrades  = s.all_time_closed  ?? 0;
+  const allWins      = s.all_time_wins    ?? 0;
+  const allLosses    = s.all_time_losses  ?? Math.max(0, totalTrades - allWins);
+
+  // P&L
+  const todayPnl     = s.total_dollar_pnl ?? null;
+  const overallPnl   = s.all_time_dollar  ?? null;
+  const pnlPct       = s.total_pnl        ?? null;
+
+  // ── Trades Today pill ──────────────────────────────────────────────────────
+  const elOpen     = document.getElementById('pt-open-count');
+  const elClosed   = document.getElementById('pt-closed-count');
+  const elTotal    = document.getElementById('pt-total-count');
+  const elWins     = document.getElementById('pt-wins');
+  const elLoss     = document.getElementById('pt-losses');
+  const elAllWins  = document.getElementById('pt-all-wins');
+  const elAllLoss  = document.getElementById('pt-all-losses');
+  const elWrBadge  = document.getElementById('pt-wr-badge');
+
+  if (elOpen)    elOpen.textContent    = openCount;
+  if (elClosed)  elClosed.textContent  = closedToday;
+  if (elTotal)   elTotal.textContent   = totalTrades;
+  if (elWins)    elWins.textContent    = winsToday;
+  if (elLoss)    elLoss.textContent    = lossesToday;
+  if (elAllWins) elAllWins.textContent = allWins;
+  if (elAllLoss) elAllLoss.textContent = allLosses;
+  if (elWrBadge) {
+    if (wrTodayRaw !== null) {
+      const wrPct = Math.round(wrTodayRaw * 100);
+      elWrBadge.textContent = `${wrPct}% WR today`;
+      elWrBadge.style.color = wrPct >= target ? 'var(--green)' : wrPct >= 50 ? 'var(--yellow)' : 'var(--red)';
+    } else {
+      elWrBadge.textContent = 'No trades today';
+      elWrBadge.style.color = 'var(--muted)';
+    }
   }
 
-  // Streak pill — compact W/L counter + win-rate bar (no per-trade dots)
-  const wEl    = document.getElementById('streak-wins');
-  const lEl    = document.getElementById('streak-losses');
-  const barEl  = document.getElementById('streak-bar');
-  const labelEl = document.getElementById('streak-label');
-  if (wEl) wEl.textContent = wins;
-  if (lEl) lEl.textContent = Math.max(0, losses);
+  // ── P&L pill ────────────────────────────────────────────────────────────────
+  const elPnlVal     = document.getElementById('pt-pnl-val');
+  const elPnlOverall = document.getElementById('pt-pnl-overall');
+  const elPnlPct     = document.getElementById('pt-pnl-pct');
+
+  if (elPnlVal) {
+    const pos = (todayPnl ?? 0) >= 0;
+    elPnlVal.textContent = todayPnl !== null ? (pos ? '+$' : '-$') + Math.abs(todayPnl).toFixed(2) : '—';
+    elPnlVal.style.color = todayPnl === null ? 'var(--muted)' : pos ? 'var(--green)' : 'var(--red)';
+  }
+  if (elPnlOverall) {
+    const pos = (overallPnl ?? 0) >= 0;
+    elPnlOverall.textContent = overallPnl !== null ? (pos ? '+$' : '-$') + Math.abs(overallPnl).toFixed(2) : '—';
+    elPnlOverall.style.color = overallPnl === null ? 'var(--muted)' : pos ? 'var(--green)' : 'var(--red)';
+  }
+  if (elPnlPct) {
+    if (pnlPct !== null) {
+      const pos = pnlPct >= 0;
+      elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% avg/trade';
+      elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
+    } else {
+      elPnlPct.textContent = '—';
+    }
+  }
+
+  // ── W/L pill ────────────────────────────────────────────────────────────────
+  const wEl       = document.getElementById('streak-wins');
+  const lEl       = document.getElementById('streak-losses');
+  const wAllEl    = document.getElementById('streak-all-wins');
+  const lAllEl    = document.getElementById('streak-all-losses');
+  const barEl     = document.getElementById('streak-bar');
+  const labelEl   = document.getElementById('streak-label');
+
+  if (wEl) wEl.textContent = winsToday;
+  if (lEl) lEl.textContent = lossesToday;
+  if (wAllEl) wAllEl.textContent = allWins;
+  if (lAllEl) lAllEl.textContent = allLosses;
   if (barEl) {
-    const wrPct = closed > 0 ? Math.round(wins / closed * 100) : 0;
+    const wrPct = wrTodayRaw !== null ? Math.round(wrTodayRaw * 100) : 0;
     barEl.style.width = wrPct + '%';
     barEl.style.background = wrPct >= 60 ? 'var(--green)' : wrPct >= 45 ? 'var(--yellow)' : 'var(--red)';
   }
   if (labelEl) {
-    const wrToday = closed > 0 ? wins / closed : null;
-    labelEl.textContent = wrToday !== null ? `${Math.round(wrToday * 100)}% WR` : 'No trades';
-    labelEl.style.color  = wrToday === null ? 'var(--muted)' : wrToday >= 0.6 ? 'var(--green)' : wrToday >= 0.45 ? 'var(--yellow)' : 'var(--red)';
+    labelEl.textContent = wrTodayRaw !== null ? `${Math.round(wrTodayRaw * 100)}% WR` : 'No trades';
+    labelEl.style.color = wrTodayRaw === null ? 'var(--muted)' : wrTodayRaw >= 0.6 ? 'var(--green)' : wrTodayRaw >= 0.45 ? 'var(--yellow)' : 'var(--red)';
   }
 }
 
