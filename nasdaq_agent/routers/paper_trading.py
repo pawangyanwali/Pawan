@@ -43,11 +43,13 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
     from datetime import date
 
     try:
+        from agent.paper_trading import get_today_pnl as _get_today_pnl
         loop = asyncio.get_running_loop()
-        closed, summary, open_trades = await asyncio.gather(
-            loop.run_in_executor(_pt_executor, get_closed_trades, 200),
+        closed, summary, open_trades, today_db = await asyncio.gather(
+            loop.run_in_executor(_pt_executor, get_closed_trades, 50),
             loop.run_in_executor(_pt_executor, pt_summary),
             loop.run_in_executor(_pt_executor, get_open_trades),
+            loop.run_in_executor(_pt_executor, _get_today_pnl),
         )
     except Exception as _e:
         logging.getLogger(__name__).error(f"[PT] paper-trading endpoint error: {_e}", exc_info=True)
@@ -57,52 +59,42 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
             "display_period": "all-time",
         }, "open_trades": [], "closed_trades": []})
 
-    today_str    = date.today().isoformat()
-    today_trades = [t for t in closed if (t.get("closed_at") or "")[:10] == today_str]
-    all_trades   = closed
+    # today_db comes directly from a COUNT(*) SQL query — always accurate regardless
+    # of how many trades exist. Do not derive today's count from the display list.
+    _today_total  = int(today_db.get("total")  or 0)
+    _today_wins   = int(today_db.get("wins")   or 0)
+    _today_losses = _today_total - _today_wins
+    _today_dollar = float(today_db.get("total_pnl_dollar") or 0)
+    _today_wr     = round(_today_wins / _today_total * 100, 1) if _today_total else 0.0
+    _budget       = float(today_db.get("budget") or summary.get("budget") or 50000)
+    _avg_pnl_pct  = round(_today_dollar / _budget * 100 / _today_total, 3) if _today_total else 0.0
 
-    def _stats(trades):
-        total   = len(trades)
-        wins    = sum(1 for t in trades if (t.get("pnl_dollar") or 0) > 0)
-        dollars = [t["pnl_dollar"] for t in trades if t.get("pnl_dollar") is not None]
-        pcts    = [t["pnl_pct"]    for t in trades if t.get("pnl_pct")    is not None]
-        return {
-            "closed":           total,
-            "wins":             wins,
-            "losses":           total - wins,
-            "win_rate":         round(wins / total * 100, 1) if total else 0.0,
-            "avg_pnl":          round(sum(pcts) / len(pcts), 3) if pcts else 0.0,
-            "total_dollar_pnl": round(sum(dollars), 2) if dollars else 0.0,
-        }
+    all_dollars = [t["pnl_dollar"] for t in closed if t.get("pnl_dollar") is not None]
+    all_dollar_total = round(sum(all_dollars), 2) if all_dollars else 0.0
 
-    today_stats = _stats(today_trades)
-    all_stats   = _stats(all_trades)
-
-    display_stats  = today_stats if today_stats["closed"] >= 3 else all_stats
-    display_period = "today" if today_stats["closed"] >= 3 else "all-time"
+    use_today      = _today_total >= 3
+    display_period = "today" if use_today else "all-time"
     summary.update({
-        "closed":           display_stats["closed"],
-        "wins":             display_stats["wins"],
-        "losses":           display_stats["losses"],
-        "win_rate":         display_stats["win_rate"],
-        "avg_pnl":          display_stats["avg_pnl"],
-        "total_pnl":        display_stats["avg_pnl"],
-        "total_dollar_pnl": today_stats["total_dollar_pnl"],
-        "all_time_dollar":  all_stats["total_dollar_pnl"],
-        "all_time_closed":  all_stats["closed"],
-        "today_closed":     today_stats["closed"],
+        "closed":           _today_total if use_today else len(closed),
+        "wins":             _today_wins  if use_today else sum(1 for t in closed if (t.get("pnl_dollar") or 0) > 0),
+        "losses":           _today_losses if use_today else sum(1 for t in closed if (t.get("pnl_dollar") or 0) <= 0),
+        "win_rate":         _today_wr if use_today else (
+            round(sum(1 for t in closed if (t.get("pnl_dollar") or 0) > 0) / len(closed) * 100, 1) if closed else 0.0
+        ),
+        "avg_pnl":          _avg_pnl_pct if use_today else (
+            round(sum(t.get("pnl_pct", 0) or 0 for t in closed) / len(closed), 3) if closed else 0.0
+        ),
+        "total_pnl":        _avg_pnl_pct,
+        "total_dollar_pnl": _today_dollar,
+        "all_time_dollar":  all_dollar_total,
+        "all_time_closed":  len(closed),
+        "today_closed":     _today_total,
         "display_period":   display_period,
     })
     return {
         "summary":       summary,
         "open_trades":   open_trades,
         "closed_trades": closed[:30],
-        "_debug_pnl":    {
-            "n_trades":      len(all_trades),
-            "total_dollar":  all_stats["total_dollar_pnl"],
-            "today_dollar":  today_stats["total_dollar_pnl"],
-            "per_trade":     [(t["ticker"], t.get("pnl_dollar") or 0, (t.get("closed_at") or "")[:10]) for t in all_trades],
-        },
     }
 
 

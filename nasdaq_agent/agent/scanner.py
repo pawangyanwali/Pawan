@@ -75,7 +75,7 @@ from agent.adaptive_filter import (
 )
 from agent.ensemble_model import get_meta_prediction
 from agent.deep_model import predict_deep
-from agent.risk_controls import check_circuit_breaker, check_sector_concentration, update_volatility_state
+from agent.risk_controls import check_circuit_breaker, check_sector_concentration, check_max_daily_trades, update_volatility_state
 from agent.order_flow import compute_order_flow, get_signal_strength
 from agent.after_hours_monitor import (
     init_db as ah_init_db,
@@ -1070,11 +1070,15 @@ def analyse_ticker(
             if _cb_blocked:
                 _trade_blocked_reason = _cb_msg
             else:
-                _sec_blocked, _sec_msg = check_sector_concentration(
-                    ticker, "BUY" if "BUY" in pred["direction"] else "SELL"
-                )
-                if _sec_blocked:
-                    _trade_blocked_reason = _sec_msg
+                _dt_blocked, _dt_msg = check_max_daily_trades()
+                if _dt_blocked:
+                    _trade_blocked_reason = _dt_msg
+                else:
+                    _sec_blocked, _sec_msg = check_sector_concentration(
+                        ticker, "BUY" if "BUY" in pred["direction"] else "SELL"
+                    )
+                    if _sec_blocked:
+                        _trade_blocked_reason = _sec_msg
 
         # ── Adaptive filter context enforcement ──────────────────────────────
         # should_suppress() checks the learned blocked_contexts (low win-rate

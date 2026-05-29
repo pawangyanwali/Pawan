@@ -1303,7 +1303,7 @@ def get_today_pnl() -> dict:
                 ROUND(MAX(pnl_dollar), 2) as best_trade,
                 ROUND(MIN(pnl_dollar), 2) as worst_trade
             FROM paper_trades
-            WHERE status='CLOSED' AND date(closed_at) = date('now')
+            WHERE status='CLOSED' AND closed_at::date = CURRENT_DATE
         """).fetchone()
         cfg_row = c.execute("SELECT total_budget FROM account_config WHERE id=1").fetchone()
 
@@ -1511,7 +1511,7 @@ def get_account_state(open_prices: dict | None = None) -> dict:
         today_row = c.execute("""
             SELECT ROUND(SUM(COALESCE(pnl_dollar,0)),2) as today_pnl
             FROM paper_trades
-            WHERE status='CLOSED' AND date(closed_at) = date('now')
+            WHERE status='CLOSED' AND closed_at::date = CURRENT_DATE
         """).fetchone()
 
     from agent.config_manager import config as _cfg
