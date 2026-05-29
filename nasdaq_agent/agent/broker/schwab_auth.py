@@ -140,6 +140,16 @@ class _TokenManager:
                 return data
             except Exception as _e:
                 logger.warning(f"[Schwab/{self.name}] Backup restore failed: {_e}")
+        # Last resort: PostgreSQL (survives both file-dir wipes and container restarts)
+        data = self._pg_load()
+        if data:
+            try:
+                self._token_dir.mkdir(parents=True, exist_ok=True)
+                self._token_path.write_text(json.dumps(data, indent=2))
+                logger.info(f"[Schwab/{self.name}] Tokens restored from PostgreSQL → {self._token_path}")
+            except Exception as _e:
+                logger.warning(f"[Schwab/{self.name}] Could not write restored tokens to file: {_e}")
+            return data
         return {}
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
@@ -173,10 +183,18 @@ class _TokenManager:
 
     def _store(self, data: dict) -> None:
         with self._lock:
+            # Preserve the refresh_token if Schwab's response omits it (e.g. rotating
+            # token implementations that only return a new access_token on refresh).
+            existing_rt = self._tokens.get("refresh_token")
             self._tokens.clear()
             self._tokens.update(data)
+            if "refresh_token" not in self._tokens and existing_rt:
+                self._tokens["refresh_token"] = existing_rt
             self._tokens["stored_at"] = time.time()
+            snapshot = dict(self._tokens)
         self._save()
+        # Persist to PostgreSQL as a durable fallback — survives token-dir wipes.
+        self._pg_save(snapshot)
         # Reset account-hash cache so discovery retries with the new token
         if self.name == "Trader":
             try:
@@ -187,6 +205,26 @@ class _TokenManager:
             except Exception:
                 pass
         logger.info(f"[Schwab/{self.name}] Tokens saved.")
+
+    def _pg_save(self, tokens: dict) -> None:
+        """Mirror tokens to PostgreSQL service_state as a durable backup."""
+        try:
+            from agent.service_state import set_state
+            # TTL = 8 days (Schwab refresh tokens last 7 days; +1 day buffer)
+            set_state(f"schwab:tokens:{self.name.lower()}", tokens, ttl_s=8 * 86400)
+        except Exception as exc:
+            logger.debug(f"[Schwab/{self.name}] PG token backup failed: {exc}")
+
+    def _pg_load(self) -> dict:
+        """Load tokens from PostgreSQL backup (fallback when file is missing)."""
+        try:
+            from agent.service_state import get_state
+            data = get_state(f"schwab:tokens:{self.name.lower()}", ignore_expiry=False)
+            if data and "access_token" in data:
+                return data
+        except Exception as exc:
+            logger.debug(f"[Schwab/{self.name}] PG token restore failed: {exc}")
+        return {}
 
     # ── Refresh ───────────────────────────────────────────────────────────────
 
@@ -201,6 +239,16 @@ class _TokenManager:
             self._store(data)
             self._schedule_refresh(data.get("expires_in", 1800))
             logger.info(f"[Schwab/{self.name}] Access token refreshed.")
+            # Notify market-data's _token_reload_loop so it can (re)start the streamer
+            # if the initial startup was skipped because tokens were expired then.
+            try:
+                from agent.valkey_client import _get_client as _vk_c
+                _vc = _vk_c()
+                if _vc:
+                    _vc.publish("schwab:tokens_refreshed",
+                                json.dumps({"ts": time.time(), "app": self.name.lower()}))
+            except Exception:
+                pass
             return True
         except urllib.error.HTTPError as e:
             if e.code == 400:
