@@ -565,88 +565,100 @@ def _train_one_ticker(
     return t, ticker_models_ok, round(time.time() - t0, 1)
 
 
+_RETRAIN_BATCH_SIZE = 50   # tickers per fetch+train cycle; limits peak RAM to ~1.5 GB
+
+
 def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = None,
                         hist_5m: dict = None, hist_15m: dict = None,
                         skip_deep: bool = False) -> None:
-    """Internal retrain — only called while _retrain_lock is held."""
+    """Internal retrain — only called while _retrain_lock is held.
+
+    Tickers are processed in batches of _RETRAIN_BATCH_SIZE to avoid loading
+    three full data dicts (1min × 3900 bars, 15min × 5000 bars, daily × 500 bars)
+    for all tickers simultaneously, which caused OOM kills on 4-8 GB hosts.
+    Each batch: fetch → train → explicitly free → gc.collect() → next batch.
+    Pre-fetched dicts (hist_5m / hist_15m / daily_data) are sliced per batch,
+    so the caller-supplied fast-path still works without re-fetching.
+    """
     import time as _t
     from agent.data_fetcher import fetch_batch_interval
 
-    _rp_set(is_running=True, phase="fetching_1m",
-            phase_label="Fetching 1-min data (Schwab ~10 days)…",
+    _rp_set(is_running=True, phase="xgboost",
+            phase_label="Training XGBoost models (batched fetch+train)…",
             started_at=_t.time(), total=len(tickers),
             done_count=0, completed=[], failed=[],
             current_ticker="", current_model="")
 
-    # ── 1-min data: ~10 days (XGBoost scalp/ensemble/reversal models) ────────
-    # hist_5m param accepted for API compat — callers may pass pre-fetched data;
-    # treat it as 1-min data (same variable, just a different source interval now).
-    if hist_5m is not None:
-        logger.info(f"[retrain_all] Using pre-fetched 1min data: {len(hist_5m)} tickers "
-                    f"(avg {sum(len(v) for v in hist_5m.values())//max(len(hist_5m),1)} bars each)")
-    else:
-        # ttl=86400 → SQLite check uses 4-day window, so stored history is used
-        # instead of live API calls whenever the scan has previously written bars.
-        logger.info(f"[retrain_all] Fetching 1min history for {len(tickers)} tickers (SQLite-first, extended hours)…")
-        hist_5m = fetch_batch_interval(
-            tickers, "1min", 3900, ttl=86400, background=True, extended_hours=True
+    # When caller already has all data (e.g. deep-model retrain re-uses fetched dicts),
+    # honour it by slicing — but don't load a second copy of the universe into RAM.
+    _have_prefetch = (hist_5m is not None or hist_15m is not None or daily_data is not None)
+
+    # Deep BiLSTM needs 15-min history across ALL tickers; accumulate a thin dict
+    # {ticker: df} while we train so we never hold it AND training data in RAM at once.
+    _all_15m_for_deep: dict = {}
+
+    batches = [tickers[i:i + _RETRAIN_BATCH_SIZE] for i in range(0, len(tickers), _RETRAIN_BATCH_SIZE)]
+    logger.info(f"[retrain_all] {len(tickers)} tickers → {len(batches)} batches of ≤{_RETRAIN_BATCH_SIZE}")
+
+    for batch_idx, batch in enumerate(batches):
+        batch_label = f"batch {batch_idx+1}/{len(batches)} ({len(batch)} tickers)"
+        _rp_set(phase="xgboost",
+                phase_label=f"Training XGBoost models… {batch_label}",
+                current_ticker=batch[0])
+        logger.info(f"[retrain_all] Starting {batch_label}")
+
+        # ── Fetch data for this batch only ────────────────────────────────────
+        if hist_5m is not None:
+            b5m = {t: hist_5m[t] for t in batch if t in hist_5m}
+        else:
+            b5m = fetch_batch_interval(
+                batch, "1min", 3900, ttl=86400, background=True, extended_hours=True
+            )
+
+        if hist_15m is not None:
+            b15m = {t: hist_15m[t] for t in batch if t in hist_15m}
+        else:
+            b15m = fetch_batch_interval(
+                batch, "15min", 5000, ttl=86400, background=True, extended_hours=True
+            )
+
+        if daily_data is not None:
+            bday = {t: daily_data[t] for t in batch if t in daily_data}
+        else:
+            bday = fetch_batch_interval(batch, "1day", 500, ttl=86400, background=True)
+
+        logger.info(
+            f"[retrain_all] {batch_label}: 1min={len(b5m)} 15min={len(b15m)} daily={len(bday)} tickers"
         )
-        logger.info(f"[retrain_all] Got 1min history for {len(hist_5m)}/{len(tickers)} tickers")
 
-    # ── 15-min data: ~6 months (swing models + deep BiLSTM) ─────────────────
-    _rp_set(phase="fetching_15m", phase_label="Fetching 15-min data (SQLite/Schwab)…")
-    if hist_15m is not None:
-        logger.info(f"[retrain_all] Using pre-fetched 15min data: {len(hist_15m)} tickers")
-    else:
-        logger.info(f"[retrain_all] Fetching 15min history ({len(tickers)} tickers, SQLite-first, extended hours)…")
-        hist_15m = fetch_batch_interval(
-            tickers, "15min", 5000, ttl=86400, background=True, extended_hours=True
-        )
-        logger.info(f"[retrain_all] 15min data: {len(hist_15m)}/{len(tickers)} tickers")
+        # Accumulate 15-min frames for deep model (hold only the DataFrame references —
+        # they're already in b15m so no extra copy).
+        _all_15m_for_deep.update(b15m)
 
-    # ── Daily data: ~2 years (DailyMLModel — next-day direction) ─────────────
-    _rp_set(phase="fetching_daily", phase_label="Fetching daily bars (SQLite/Schwab)…")
-    if daily_data is not None:
-        logger.info(f"[retrain_all] Using pre-fetched daily data: {len(daily_data)} tickers")
-    else:
-        logger.info(f"[retrain_all] Fetching daily history ({len(tickers)} tickers, SQLite-first)…")
-        daily_data = fetch_batch_interval(tickers, "1day", 500, ttl=86400, background=True)
-        logger.info(f"[retrain_all] Daily data: {len(daily_data)}/{len(tickers)} tickers")
+        # ── Train tickers in this batch (2 workers max) ───────────────────────
+        _workers = max(1, min((os.cpu_count() or 2) // 2, 2))
+        with ThreadPoolExecutor(max_workers=_workers) as executor:
+            futures = {
+                executor.submit(_train_one_ticker, t, b5m.get(t), b15m.get(t), bday): t
+                for t in batch
+            }
+            for future in as_completed(futures):
+                try:
+                    t, models_ok, elapsed = future.result()
+                except Exception as exc:
+                    t = futures[future]
+                    logger.warning(f"[{t}] _train_one_ticker raised: {exc}")
+                    _rp_append_failed({"ticker": t, "model": "unknown", "error": str(exc)})
+                    elapsed = 0.0
+                    models_ok = []
+                _rp_append_completed({"ticker": t, "models": models_ok, "elapsed_s": elapsed})
 
-    _rp_set(phase="xgboost", phase_label="Training XGBoost models per ticker…")
+        # ── Free batch data before fetching the next batch ────────────────────
+        del b5m, bday
+        gc.collect()
+        logger.info(f"[retrain_all] {batch_label} complete — memory freed")
 
-    # ── Parallel ticker training ───────────────────────────────────────────────
-    # Cap at 2 workers regardless of CPU count — on a 4GB host each XGBoost
-    # retrain + feature engineering can spike 100-200 MB, so running 4+ in
-    # parallel risks OOM before the deep model phase even starts.
-    _workers = max(1, min((os.cpu_count() or 2) // 2, 2))
-    with ThreadPoolExecutor(max_workers=_workers) as executor:
-        futures = {
-            executor.submit(
-                _train_one_ticker,
-                t,
-                hist_5m.get(t),
-                hist_15m.get(t),
-                daily_data,
-            ): t
-            for t in tickers
-        }
-        for future in as_completed(futures):
-            try:
-                t, models_ok, elapsed = future.result()
-            except Exception as exc:
-                t = futures[future]
-                logger.warning(f"[{t}] _train_one_ticker raised: {exc}")
-                _rp_append_failed({"ticker": t, "model": "unknown", "error": str(exc)})
-                elapsed = 0.0
-                models_ok = []
-            _rp_append_completed({
-                "ticker":    t,
-                "models":    models_ok,
-                "elapsed_s": elapsed,
-            })
-
-    # Free XGBoost training memory before starting the deeper BiLSTM phase
+    # Free remaining 1-min references (b15m still referenced in _all_15m_for_deep)
     gc.collect()
 
     # ── Deep BiLSTM model: universal, trained across all tickers ─────────────
@@ -659,10 +671,13 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
                 current_ticker="all tickers", current_model="bilstm")
         try:
             from agent.deep_model import retrain_deep_all
-            logger.info(f"[retrain_all] Training deep BiLSTM on {len(hist_15m)} tickers…")
-            retrain_deep_all(hist_15m)
+            logger.info(f"[retrain_all] Training deep BiLSTM on {len(_all_15m_for_deep)} tickers…")
+            retrain_deep_all(_all_15m_for_deep)
         except Exception as e:
             logger.warning(f"[retrain_all] Deep model training failed: {e}")
+
+    del _all_15m_for_deep
+    gc.collect()
 
     _rp_set(phase="done", phase_label="Complete", is_running=False,
             current_ticker="", current_model="")
@@ -1338,13 +1353,12 @@ class EnsembleMLModel:
             except Exception:
                 old_acc = 0.0
 
-        # Train each member in its own thread (3 × independent XGBoost fits)
-        def _fit_member(args):
-            i, cfg = args
-            return _fast_xgb_fit(Xtr_fit, ytr_fit, Xtr_es, ytr_es, **cfg)
-
-        with ThreadPoolExecutor(max_workers=len(self._CONFIGS)) as ex:
-            candidate_models = list(ex.map(_fit_member, enumerate(self._CONFIGS)))
+        # Train members sequentially — running 3 XGBoost fits in parallel on top
+        # of 2 outer ticker workers (6 simultaneous fits) was OOM-killing the process.
+        candidate_models = [
+            _fast_xgb_fit(Xtr_fit, ytr_fit, Xtr_es, ytr_es, **cfg)
+            for cfg in self._CONFIGS
+        ]
 
         preds = np.array([m.predict(Xte) for m in candidate_models])
         majority = (preds.mean(axis=0) >= 0.5).astype(int)
