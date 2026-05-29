@@ -386,6 +386,10 @@ def fetch_batch_realtime(
                             _df.index = pd.to_datetime(_df[_ts_col], unit="ms", utc=True).dt.tz_convert("America/New_York")
                             _df.drop(columns=[_ts_col], inplace=True, errors="ignore")
                         if not _df.empty and "Close" in _df.columns:
+                            # CHART_EQUITY streaming candles omit volume — ensure
+                            # the column exists so compute_indicators never KeyErrors.
+                            if "Volume" not in _df.columns:
+                                _df["Volume"] = 0.0
                             # Freshness gate: during regular session only accept
                             # Valkey candles whose newest bar is ≤ 5 min old.
                             if _in_sess_vk and _now_et_vk is not None:

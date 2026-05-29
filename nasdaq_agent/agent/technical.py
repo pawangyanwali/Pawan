@@ -12,6 +12,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df    = df.copy()
+    # CHART_EQUITY streaming candles omit volume — fill with 0 so indicators
+    # that need volume (MFI, rVol) get a valid series rather than a KeyError.
+    if "Volume" not in df.columns:
+        df["Volume"] = 0.0
     close = df["Close"]
     high  = df["High"]
     low   = df["Low"]
