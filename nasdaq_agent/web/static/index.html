@@ -6470,7 +6470,9 @@ function renderNeuralPanel(d) {
       sessionBar.style.border = '1px solid rgba(245,158,11,.3)';
       sessionDot.style.background = '#f59e0b';
       sessionText.style.color = '#fbbf24';
-      const closeTime = sess === 'PRE_MARKET' ? 'opens at 9:30 AM ET' : 'closes at 4:00 PM ET';
+      const closeTime = sess === 'PRE_MARKET'   ? 'opens at 9:30 AM ET'
+                      : sess === 'AFTER_HOURS' ? 'closed — retrain available overnight'
+                      : 'closes at 4:00 PM ET';
       sessionText.textContent = `⏰ Market ${sess} — Full Retrain (XGBoost) blocked until CLOSED. Market ${closeTime}.`;
       if (sessionBilstmNote) sessionBilstmNote.style.display = 'inline';
     }
@@ -6932,15 +6934,25 @@ async function triggerDeepTrain(btn) {
   btn.textContent = '⏳ Starting…';
   try {
     const r = await (await _authFetch(`${BACKEND_HTTP}/api/deep-model/train`, { method: 'POST' })).json();
-    btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '✓ Started';
-    btn.style.background = '#16a34a';
-    // Begin polling for progress automatically
-    if (!_nnPollTimer) {
-      _nnPollTimer = setInterval(() => {
-        if (_nnData && _nnData.is_training_now) loadNeuralStatus();
-      }, 2000);
+    if (r.status === 'already_running') {
+      btn.textContent = '⏳ Running…';
+      btn.style.background = '#5b21b6';
+    } else if (r.status === 'deferred') {
+      btn.textContent = '⏰ Deferred';
+      btn.style.background = '#92400e';
+      // Show reason
+      const sessionText = document.getElementById('nn-session-text');
+      if (sessionText) sessionText.textContent = r.message || 'BiLSTM training deferred.';
+    } else {
+      btn.textContent = '✓ Started';
+      btn.style.background = '#16a34a';
+      if (!_nnPollTimer) {
+        _nnPollTimer = setInterval(() => {
+          if (_nnData && _nnData.is_training_now) loadNeuralStatus();
+        }, 2000);
+      }
+      setTimeout(() => { loadNeuralStatus(); }, 1500);
     }
-    setTimeout(() => { loadNeuralStatus(); }, 1500);
     setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.background = '#7c3aed'; }, 8000);
   } catch(e) {
     btn.textContent = '✕ Error';
