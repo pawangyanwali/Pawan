@@ -191,6 +191,55 @@ def _bar_accumulator_loop(tickers: list[str]) -> None:
         time.sleep(86400)
 
 
+# ── Token status publisher ────────────────────────────────────────────────────
+
+def _publish_token_status_loop() -> None:
+    """
+    Publish Schwab token TTL/connection status every 30s so the web-api
+    Schwab & Data Sources panel can display accurate state.
+
+    web-api has NASDAQ_MARKET_DATA_ENABLED=0 so it never loads tokens into
+    memory; its get_token_status() always returns connected=False.  This loop
+    writes the real status from market-data to shared storage so broker_status
+    can read it cross-container.
+    """
+    import json as _json
+
+    _TTL = 90  # 3× the publish interval — stale after 3 missed cycles
+
+    while not _runner.stopped:
+        try:
+            from agent.broker.schwab_auth import get_token_status, get_md_token_status
+            trader_status = get_token_status()
+            md_status     = get_md_token_status()
+
+            # Mark the source so web-api knows this is cross-container data
+            trader_status["_source"] = "market-data"
+            md_status["_source"]     = "market-data"
+
+            # ── PostgreSQL (durable) ──────────────────────────────────────────
+            try:
+                from agent.service_state import set_state
+                set_state("schwab:token_status:trader",     trader_status, ttl_s=_TTL)
+                set_state("schwab:token_status:marketdata", md_status,     ttl_s=_TTL)
+            except Exception as exc:
+                _log.debug("Token status PG write failed: %s", exc)
+
+            # ── Valkey (fast-path) ────────────────────────────────────────────
+            try:
+                from agent.valkey_client import _get_client
+                client = _get_client()
+                if client:
+                    client.setex("schwab:token_status:trader",     _TTL, _json.dumps(trader_status))
+                    client.setex("schwab:token_status:marketdata", _TTL, _json.dumps(md_status))
+            except Exception as exc:
+                _log.debug("Token status Valkey write failed: %s", exc)
+
+        except Exception as exc:
+            _log.debug("Token status collection failed: %s", exc)
+        time.sleep(30)
+
+
 # ── Health / stats logger ─────────────────────────────────────────────────────
 
 def _health_loop() -> None:
@@ -224,6 +273,7 @@ def main() -> None:
 
     threading.Thread(target=_health_loop,                  daemon=True, name="md-health").start()
     threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="md-streamer-status").start()
+    threading.Thread(target=_publish_token_status_loop,    daemon=True, name="md-token-status").start()
     threading.Thread(target=_token_reload_loop,            daemon=True, name="md-token-reload").start()
     threading.Thread(target=_bar_accumulator_loop,         daemon=True, name="BarAccumulator",
                      args=(list(NASDAQ_TICKERS),)).start()

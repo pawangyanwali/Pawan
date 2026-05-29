@@ -68,6 +68,38 @@ def _get_streamer_status():
         return {"connected": False, "disabled": True}
 
 
+def _get_cross_container_token_status(key: str) -> dict | None:
+    """
+    Read token status published by the market-data container.
+
+    web-api never loads Schwab tokens (NASDAQ_MARKET_DATA_ENABLED=0) so its
+    in-memory get_token_status() always shows disconnected.  market-data writes
+    the real status to Valkey and PostgreSQL every 30s; this reads it back so
+    the Schwab & Data Sources panel shows accurate state.
+
+    Try Valkey first (fast, ~1 ms), fall back to PostgreSQL (durable).
+    """
+    # Valkey fast-path
+    try:
+        from agent.valkey_client import _get_client
+        client = _get_client()
+        if client:
+            raw = client.get(key)
+            if raw:
+                return json.loads(raw)
+    except Exception:
+        pass
+    # PostgreSQL fallback
+    try:
+        from agent.service_state import get_state
+        data = get_state(key, ignore_expiry=False)
+        if data:
+            return data
+    except Exception:
+        pass
+    return None
+
+
 def _start_md_poller_and_register(tickers):
     try:
         from agent.broker.schwab_streamer import start_md_poller, is_streamer_ready
@@ -214,6 +246,19 @@ async def broker_status(_user: AuthenticatedUser = Depends(require_viewer)):
     try:
         ts    = get_token_status()
         ts_md = get_md_token_status()
+
+        # web-api has NASDAQ_MARKET_DATA_ENABLED=0 and never loads tokens, so its
+        # in-memory get_token_status() always returns connected=False / ttl=0.
+        # Fall back to the status that market-data publishes every 30s.
+        if not ts.get("connected") and ts.get("access_token_ttl_s", 0) == 0:
+            remote = _get_cross_container_token_status("schwab:token_status:trader")
+            if remote:
+                ts = remote
+        if not ts_md.get("connected") and ts_md.get("access_token_ttl_s", 0) == 0:
+            remote_md = _get_cross_container_token_status("schwab:token_status:marketdata")
+            if remote_md:
+                ts_md = remote_md
+
         acct  = {}
         if SCHWAB_ENABLED and ts.get("connected"):
             try:
@@ -350,6 +395,10 @@ async def streamer_status_endpoint():
     try:
         status = _get_streamer_status()
         ts = get_token_status()
+        if not ts.get("connected") and ts.get("access_token_ttl_s", 0) == 0:
+            remote = _get_cross_container_token_status("schwab:token_status:trader")
+            if remote:
+                ts = remote
         status["schwab_connected"]       = ts.get("connected", False)
         status["access_token_ttl_s"]     = ts.get("access_token_ttl_s", 0)
         status["refresh_token_ttl_s"]    = ts.get("refresh_token_ttl_s", 0)
