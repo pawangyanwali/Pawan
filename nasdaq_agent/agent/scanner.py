@@ -252,6 +252,8 @@ class StockSignal:
     earnings_date:     str   = ""
     earnings_days_away: int  = 0
     earnings_phase:    str   = ""   # "" | "blackout" | "caution" | "cooldown"
+    earnings_hour:     str   = ""   # "bmo" | "amc" | "dmh" | ""
+    eps_surprise_pct:  float = 0.0  # (actual/estimate − 1)*100; 0 = unknown
 
     # ── Gap analysis ──────────────────────────────────────────────────────────
     gap_type:         str   = "FLAT"
@@ -687,10 +689,15 @@ def analyse_ticker(
         # Falls back: Valkey → PostgreSQL → safe defaults.
         # When FINNHUB_API_KEY is absent or context-intel is not running, all
         # fields default to 0.0 / "" / 999 — identical to the pre-Phase-1 stubs.
-        from agent.context_snapshot import get_context_snapshot as _get_ctx
-        _ctx      = _get_ctx(ticker)
-        sent      = float(_ctx.get("sentiment_30m", 0.0))
-        headlines = list(_ctx.get("recent_headlines", []))
+        from agent.context_snapshot import (
+            get_context_snapshot as _get_ctx,
+            get_market_context_snapshot as _get_mkt_ctx,
+        )
+        _ctx           = _get_ctx(ticker)
+        sent           = float(_ctx.get("sentiment_30m", 0.0))
+        headlines      = list(_ctx.get("recent_headlines", []))
+        _earnings_hour = str(_ctx.get("earnings_hour", ""))
+        _eps_surp      = float(_ctx.get("eps_surprise_pct", 0.0))
 
         # Build earnings blackout dict from context snapshot (matches expected keys)
         _ep = _ctx.get("earnings_phase", "")
@@ -700,6 +707,13 @@ def analyse_ticker(
             "next_date": _ctx.get("earnings_next_date", ""),
             "days_away": int(_ctx.get("earnings_days_away", 999)),
         }
+
+        # ── Market-wide sentiment gate ─────────────────────────────────────────
+        # Reads ctx:market from Valkey (published by context-intel service).
+        # Gate: strong negative market sentiment penalises LONG signals;
+        #       strong positive market sentiment penalises SHORT signals.
+        _mkt_ctx       = _get_mkt_ctx()
+        _mkt_sentiment = float(_mkt_ctx.get("market_sentiment", 0.0))
 
         rvol            = rvol_time_of_day(df_ind, df_1d)
         uvol            = detect_unusual_volume(df_ind)
@@ -964,6 +978,81 @@ def analyse_ticker(
             # No AH bias data — use static tier for downstream use
             _trading_tier = _static_tier
 
+        # ── Earnings hour gating ──────────────────────────────────────────────
+        # Reduce confidence during the most volatile windows on earnings day:
+        #   bmo (before-market-open):  9:30–9:45 ET — gap/spike on open
+        #   amc (after-market-close):  15:45–16:00 ET — closing auction chop
+        if _earnings_hour and pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            try:
+                from agent.market_hours import ET as _ET
+                import datetime as _dt
+                _t = _dt.datetime.now(_ET).time()
+                _OPEN_START  = _dt.time(9, 30)
+                _OPEN_END    = _dt.time(9, 45)
+                _CLOSE_START = _dt.time(15, 45)
+                _CLOSE_END   = _dt.time(16, 0)
+                if _earnings_hour == "bmo" and _OPEN_START <= _t <= _OPEN_END:
+                    pred["confidence"] = round(float(max(pred["confidence"] - 12.0, 25.0)), 1)
+                    pred["reasons"].insert(0,
+                        "⚠ BMO earnings open window (9:30–9:45 ET) — confidence reduced")
+                elif _earnings_hour == "amc" and _CLOSE_START <= _t <= _CLOSE_END:
+                    pred["confidence"] = round(float(max(pred["confidence"] - 12.0, 25.0)), 1)
+                    pred["reasons"].insert(0,
+                        "⚠ AMC earnings closing window (15:45–16:00 ET) — confidence reduced")
+            except Exception:
+                pass
+
+        # ── EPS surprise adjustment ───────────────────────────────────────────
+        # Post-earnings fundamental signal: large beat boosts LONG conviction;
+        # large miss boosts SHORT conviction.  |surprise| < 5% → no adjustment.
+        if _eps_surp != 0.0 and pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            _is_long = pred["direction"] in ("BUY", "STRONG BUY")
+            if _eps_surp > 10.0:
+                _eps_adj = +3.0 if _is_long else -3.0
+                pred["reasons"].append(
+                    f"EPS beat +{_eps_surp:.1f}% — fundamental tailwind for longs")
+            elif _eps_surp > 5.0:
+                _eps_adj = +1.5 if _is_long else -1.5
+                pred["reasons"].append(
+                    f"EPS beat +{_eps_surp:.1f}% — modest fundamental support")
+            elif _eps_surp < -10.0:
+                _eps_adj = -3.0 if _is_long else +3.0
+                pred["reasons"].append(
+                    f"EPS miss {_eps_surp:.1f}% — fundamental headwind for longs")
+            elif _eps_surp < -5.0:
+                _eps_adj = -1.5 if _is_long else +1.5
+                pred["reasons"].append(
+                    f"EPS miss {_eps_surp:.1f}% — modest fundamental drag")
+            else:
+                _eps_adj = 0.0
+            if _eps_adj != 0.0:
+                pred["confidence"] = round(float(
+                    min(max(pred["confidence"] + _eps_adj, 25.0), 95.0)), 1)
+
+        # ── Market-wide sentiment gate ────────────────────────────────────────
+        # Penalty: bearish market hurts LONG signals; bullish market hurts SHORTs.
+        # Extreme sentiment (|mkt| ≥ 0.5) blocks the contrary direction entirely.
+        if _mkt_sentiment != 0.0 and pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            _is_long = pred["direction"] in ("BUY", "STRONG BUY")
+            if _mkt_sentiment < -0.5 and _is_long:
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"].insert(0,
+                    f"⛔ Market sentiment {_mkt_sentiment:.2f} — extreme negative, LONG blocked")
+            elif _mkt_sentiment > 0.5 and not _is_long:
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"].insert(0,
+                    f"⛔ Market sentiment +{_mkt_sentiment:.2f} — extreme positive, SHORT blocked")
+            elif _mkt_sentiment < -0.25 and _is_long:
+                _mkt_penalty = round(abs(_mkt_sentiment) * 15.0, 1)   # up to −7.5 pts
+                pred["confidence"] = round(float(max(pred["confidence"] - _mkt_penalty, 25.0)), 1)
+                pred["reasons"].append(
+                    f"Market sentiment {_mkt_sentiment:.2f} — broad negative bias, LONG confidence reduced")
+            elif _mkt_sentiment > 0.25 and not _is_long:
+                _mkt_penalty = round(abs(_mkt_sentiment) * 15.0, 1)
+                pred["confidence"] = round(float(max(pred["confidence"] - _mkt_penalty, 25.0)), 1)
+                pred["reasons"].append(
+                    f"Market sentiment +{_mkt_sentiment:.2f} — broad positive bias, SHORT confidence reduced")
+
         # Check if ticker already has an open paper trade
         _has_open_position = False
         try:
@@ -1213,6 +1302,8 @@ def analyse_ticker(
             earnings_date      = eb["next_date"],
             earnings_days_away = int(eb["days_away"]),
             earnings_phase     = _ep,
+            earnings_hour      = _earnings_hour,
+            eps_surprise_pct   = _eps_surp,
             news_shock         = bool(_ctx.get("news_shock", False)),
             sentiment_velocity = round(float(_ctx.get("sentiment_velocity", 0.0)), 4),
             news_count_30m     = int(_ctx.get("news_count_30m", 0)),

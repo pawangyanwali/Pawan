@@ -67,6 +67,8 @@ _EMPTY_PAYLOAD: dict = {
     "earnings_reason":    "",
     "earnings_next_date": "",
     "earnings_days_away": 999,
+    "earnings_hour":      "",       # "bmo" | "amc" | "dmh" | ""
+    "eps_surprise_pct":   0.0,      # (actual/estimate − 1)*100; 0 = unknown
     "asof_ts":            0.0,
     "stale_age_s":        9999.0,
 }
@@ -185,7 +187,7 @@ def _computed_at_to_unix(features: dict) -> float:
 def _read_pg(ticker: str) -> Optional[dict]:
     """Assemble a context payload from PostgreSQL tables."""
     try:
-        from agent.context_store import get_features, get_next_earnings_from_db
+        from agent.context_store import get_features, get_next_earnings_from_db, get_earnings_context
         from datetime import datetime, timezone
 
         features = get_features(ticker)
@@ -218,6 +220,10 @@ def _read_pg(ticker: str) -> Optional[dict]:
                 earnings_phase  = "caution"
                 earnings_reason = f"Earnings in {days}d — reduce size"
 
+        earns_ctx        = get_earnings_context(ticker)
+        earnings_hour    = earns_ctx["earnings_hour"]
+        eps_surprise_pct = earns_ctx["eps_surprise_pct"]
+
         hl = features.get("recent_headlines", [])
         if isinstance(hl, str):
             try:
@@ -242,6 +248,8 @@ def _read_pg(ticker: str) -> Optional[dict]:
             "earnings_reason":    earnings_reason,
             "earnings_next_date": earnings_next_date,
             "earnings_days_away": earnings_days_away,
+            "earnings_hour":      earnings_hour,
+            "eps_surprise_pct":   eps_surprise_pct,
             "asof_ts":            asof_ts,
         }
     except Exception as exc:
@@ -256,6 +264,8 @@ def build_payload_from_features(
     earnings_reason: str    = "",
     earnings_next_date: str = "",
     earnings_days_away: int = 999,
+    earnings_hour: str      = "",
+    eps_surprise_pct: float = 0.0,
 ) -> dict:
     """
     Helper used by the context-intel service to build a full payload before
@@ -285,5 +295,43 @@ def build_payload_from_features(
         "earnings_reason":    earnings_reason,
         "earnings_next_date": earnings_next_date,
         "earnings_days_away": earnings_days_away,
+        "earnings_hour":      earnings_hour,
+        "eps_surprise_pct":   float(eps_surprise_pct),
         # asof_ts is injected by publish_context_snapshot()
     }
+
+
+# ── Market-wide context ───────────────────────────────────────────────────────
+
+def get_market_context_snapshot() -> dict:
+    """
+    Return the market-wide context snapshot from Valkey (ctx:market key).
+
+    Fields present when the context-intel service publishes them:
+      market_sentiment   : float  − weighted average sentiment across all tickers
+      market_shock       : bool   − any broad market shock event detected
+      asof_ts            : float  − unix timestamp of last write
+
+    Returns safe defaults (sentiment 0.0) when key is absent or Valkey is down.
+    """
+    _MARKET_DEFAULTS = {
+        "market_sentiment": 0.0,
+        "market_shock":     False,
+        "asof_ts":          0.0,
+    }
+    c = _client()
+    if c is None:
+        return dict(_MARKET_DEFAULTS)
+    try:
+        raw = c.get(_MARKET_KEY)
+        if raw is None:
+            return dict(_MARKET_DEFAULTS)
+        data = json.loads(raw)
+        return {
+            "market_sentiment": float(data.get("market_sentiment", 0.0)),
+            "market_shock":     bool(data.get("market_shock", False)),
+            "asof_ts":          float(data.get("asof_ts", 0.0)),
+        }
+    except Exception as exc:
+        logger.debug("[context_snapshot] get_market_context error: %s", exc)
+        return dict(_MARKET_DEFAULTS)

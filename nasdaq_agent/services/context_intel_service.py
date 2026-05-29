@@ -138,6 +138,7 @@ def _run_earnings_poll() -> None:
             "report_ts":    d,
             "hour":         hour,
             "eps_estimate": item.get("epsEstimate"),
+            "eps_actual":   item.get("epsActual"),
             "rev_estimate": item.get("revenueEstimate"),
         })
 
@@ -306,6 +307,7 @@ def _run_feature_compute() -> None:
         compute_features_for_ticker,
         upsert_features,
         get_next_earnings_from_db,
+        get_earnings_context,
     )
     from agent.context_snapshot import publish_context_snapshot, build_payload_from_features
     from agent.ticker_universe import TIER1
@@ -347,6 +349,11 @@ def _run_feature_compute() -> None:
                     earnings_phase  = "caution"
                     earnings_reason = f"Earnings in {days}d — reduce size"
 
+            # EPS surprise + earnings hour from most-recent calendar row
+            earns_ctx       = get_earnings_context(ticker)
+            earnings_hour   = earns_ctx["earnings_hour"]
+            eps_surprise_pct = earns_ctx["eps_surprise_pct"]
+
             payload = build_payload_from_features(
                 ticker,
                 features,
@@ -354,6 +361,8 @@ def _run_feature_compute() -> None:
                 earnings_reason    = earnings_reason,
                 earnings_next_date = earnings_next_date,
                 earnings_days_away = earnings_days_away,
+                earnings_hour      = earnings_hour,
+                eps_surprise_pct   = eps_surprise_pct,
             )
             publish_context_snapshot(ticker, payload)
             updated += 1

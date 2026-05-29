@@ -88,12 +88,15 @@ _DDL_STATEMENTS = [
         report_ts       TIMESTAMPTZ NOT NULL,
         hour            TEXT        NOT NULL DEFAULT '',
         eps_estimate    REAL        NULL,
+        eps_actual      DOUBLE PRECISION NULL,
         rev_estimate    REAL        NULL,
         source          TEXT        NOT NULL DEFAULT 'finnhub',
         fetched_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         CONSTRAINT earnings_calendar_pk PRIMARY KEY (ticker, report_ts)
     )
     """,
+    # Migration: add eps_actual to existing deployments
+    "ALTER TABLE earnings_calendar ADD COLUMN IF NOT EXISTS eps_actual DOUBLE PRECISION NULL",
     "CREATE INDEX IF NOT EXISTS idx_ctx_events_hash ON context_events (content_hash)",
     "CREATE INDEX IF NOT EXISTS idx_ctx_events_ticker_ts ON context_events (ticker, published_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_earnings_ticker_ts ON earnings_calendar (ticker, report_ts)",
@@ -525,6 +528,7 @@ def upsert_earnings(entries: list[dict]) -> int:
     Optional:
       hour           : "bmo" | "amc" | "dmh"
       eps_estimate   : float | None
+      eps_actual     : float | None   ← actual EPS reported (post-earnings)
       rev_estimate   : float | None
 
     Returns count of rows upserted.
@@ -555,11 +559,12 @@ def upsert_earnings(entries: list[dict]) -> int:
                     conn.execute(
                         """
                         INSERT INTO earnings_calendar
-                            (ticker, report_ts, hour, eps_estimate, rev_estimate, fetched_at)
-                        VALUES (?, ?, ?, ?, ?, NOW())
+                            (ticker, report_ts, hour, eps_estimate, eps_actual, rev_estimate, fetched_at)
+                        VALUES (?, ?, ?, ?, ?, ?, NOW())
                         ON CONFLICT (ticker, report_ts) DO UPDATE SET
                             hour         = EXCLUDED.hour,
                             eps_estimate = EXCLUDED.eps_estimate,
+                            eps_actual   = COALESCE(EXCLUDED.eps_actual, earnings_calendar.eps_actual),
                             rev_estimate = EXCLUDED.rev_estimate,
                             fetched_at   = NOW()
                         """,
@@ -568,6 +573,7 @@ def upsert_earnings(entries: list[dict]) -> int:
                             ts,
                             e.get("hour", ""),
                             e.get("eps_estimate"),
+                            e.get("eps_actual"),
                             e.get("rev_estimate"),
                         ),
                     )
@@ -610,6 +616,50 @@ def get_next_earnings_from_db(ticker: str) -> Optional[datetime]:
     except Exception as exc:
         logger.debug("[context_store] get_next_earnings(%s) error: %s", ticker, exc)
         return None
+
+
+def get_earnings_context(ticker: str) -> dict:
+    """
+    Return earnings context for *ticker* from the most recent calendar row.
+
+    Returned dict always has:
+      earnings_hour      : "bmo" | "amc" | "dmh" | ""
+      eps_surprise_pct   : float   (actual/estimate − 1)*100, 0.0 if unavailable
+      eps_beat           : bool    True when eps_actual > eps_estimate
+
+    Used by context-intel service to populate Valkey payload fields.
+    """
+    _ensure_init()
+    result = {"earnings_hour": "", "eps_surprise_pct": 0.0, "eps_beat": False}
+    try:
+        from agent.db import get_conn
+        with get_conn() as conn:
+            # Pick the most recently fetched row (covers both past and future dates)
+            row = conn.execute(
+                """
+                SELECT hour, eps_estimate, eps_actual
+                FROM earnings_calendar
+                WHERE ticker = ?
+                ORDER BY fetched_at DESC
+                LIMIT 1
+                """,
+                (ticker,),
+            ).fetchone()
+        if row is None:
+            return result
+        result["earnings_hour"] = (row["hour"] or "").lower().strip()
+        est = row["eps_estimate"]
+        act = row["eps_actual"]
+        if est is not None and act is not None and est != 0.0:
+            try:
+                surprise = (float(act) / float(est) - 1.0) * 100.0
+                result["eps_surprise_pct"] = round(surprise, 2)
+                result["eps_beat"] = float(act) > float(est)
+            except (ZeroDivisionError, TypeError, ValueError):
+                pass
+    except Exception as exc:
+        logger.debug("[context_store] get_earnings_context(%s) error: %s", ticker, exc)
+    return result
 
 
 def get_recent_news_for_ticker(ticker: str, max_items: int = 10) -> list[dict]:
