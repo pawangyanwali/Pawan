@@ -1023,23 +1023,74 @@ def close_stale_positions() -> int:
     open when the market closed (scanner may not have been running at 3:45 PM).
     Uses the last market close time (not now) so stale closes don't pollute
     today's P&L when the service restarts on a weekend.
+
+    During AFTER_HOURS: only close regular-session trades (session != 'AFTER_HOURS')
+    that leaked past the 3:45 PM hard close — intentional AH positions are left open.
+    During HARD_CLOSE/CLOSED: close everything.
+
     Returns number of positions closed.
     """
     from agent.market_hours import is_after_hours, no_new_entries
-    if not no_new_entries():
-        return 0  # Market is open — don't sweep
+
+    _is_ah = is_after_hours()
+    if not no_new_entries() and not _is_ah:
+        return 0  # Regular market hours — don't sweep
 
     with _lock:
         with _conn() as c:
-            count = c.execute(
-                "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
-            ).fetchone()["n"]
+            if _is_ah:
+                # Only sweep regular-hour trades that leaked past 3:45 PM.
+                # AH-opened positions (session='AFTER_HOURS') are intentional — leave them.
+                rows = c.execute(
+                    "SELECT id FROM paper_trades WHERE status='OPEN' "
+                    "AND (session IS NULL OR session NOT IN ('AFTER_HOURS', 'PRE_MARKET'))"
+                ).fetchall()
+                stale_ids = [r["id"] for r in rows]
+            else:
+                count_row = c.execute(
+                    "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
+                ).fetchone()
+                stale_ids = list(range(count_row["n"])) if count_row["n"] else []
 
-    if count == 0:
+    if not stale_ids and _is_ah:
         return 0
 
+    if _is_ah:
+        # Force-close only the leaked regular-hour positions
+        from agent.data_fetcher import get_last_cached_close
+        with _lock:
+            with _conn() as c:
+                rows = c.execute(
+                    "SELECT id, ticker, direction, entry_price, "
+                    "COALESCE(shares_remaining, shares, 1) as shares_rem, "
+                    "COALESCE(partial_pnl_dollar, 0) as partial_pnl, "
+                    "COALESCE(shares, 1) as shares_total "
+                    "FROM paper_trades WHERE status='OPEN' "
+                    "AND (session IS NULL OR session NOT IN ('AFTER_HOURS', 'PRE_MARKET'))"
+                ).fetchall()
+                closed = 0
+                for row in rows:
+                    ep = get_last_cached_close(row["ticker"])
+                    if ep is None:
+                        ep = float(row["entry_price"])
+                    _record_close(
+                        c, row["id"], ep, "STALE_REGULAR_HOUR_LEAKED_TO_AH",
+                        float(row["entry_price"]), row["direction"],
+                        int(row["shares_rem"]), float(row["partial_pnl"]),
+                        int(row["shares_total"]), ticker=row["ticker"],
+                    )
+                    closed += 1
+                c.commit()
+        if closed:
+            logger.warning(
+                f"[PAPER] AH stale sweep: closed {closed} regular-hour position(s) "
+                "that leaked past 3:45 PM hard close"
+            )
+            _trigger_paper_feedback()
+        return closed
+
     logger.warning(
-        f"[PAPER] Found {count} stale open position(s) while market is closed — force-closing"
+        f"[PAPER] Found {len(stale_ids)} stale open position(s) while market is closed — force-closing"
     )
     return close_all_positions_eod(reason="STALE_MARKET_CLOSED")
 

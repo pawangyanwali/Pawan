@@ -1700,7 +1700,8 @@ class Scanner:
 
         # ── EOD Hard Close (PRD 6.4): close all positions at 3:45 PM ET ──────
         from agent.market_hours import (
-            is_hard_close_window, is_closing_caution, no_new_entries, is_ah_eod_close_window,
+            is_hard_close_window, is_closing_caution, no_new_entries,
+            is_ah_eod_close_window, is_after_hours,
         )
 
         # ── After-hours EOD hard close at 7:55 PM ET ─────────────────────────
@@ -1723,7 +1724,11 @@ class Scanner:
                 logger.warning(f"[Scanner] EOD hard close failed: {_eod_e}")
 
         # ── After-hours stale-trade sweep — catches anything missed at 3:45 ──
-        elif no_new_entries():
+        # Runs for no_new_entries() (HARD_CLOSE/CLOSED) AND during AFTER_HOURS.
+        # close_stale_positions() is session-aware: during AH it only closes
+        # regular-hour trades that leaked past 3:45 PM; intentional AH positions
+        # are left open until the 7:55 PM AH EOD close.
+        elif no_new_entries() or is_after_hours():
             try:
                 from agent.paper_trading import close_stale_positions
                 swept_n = close_stale_positions()
