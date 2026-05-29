@@ -135,8 +135,8 @@
       <span style="font-size:10px;color:var(--muted)" id="overview-updated"></span>
     </div>
     <div class="grid-kpi" id="kpi-strip">
-      <div class="kpi-card"><div class="kpi-val" id="kpi-fires">—</div><div class="kpi-lbl">Signals Today</div></div>
-      <div class="kpi-card"><div class="kpi-val" id="kpi-trades">—</div><div class="kpi-lbl">Trades Today</div></div>
+      <div class="kpi-card"><div class="kpi-val" id="kpi-evals">—</div><div class="kpi-lbl">Evaluations Today</div></div>
+      <div class="kpi-card"><div class="kpi-val" id="kpi-fires">—</div><div class="kpi-lbl">Fires (Trades Opened)</div></div>
       <div class="kpi-card"><div class="kpi-val" id="kpi-fire-rate">—</div><div class="kpi-lbl">Fire→Trade Rate</div></div>
       <div class="kpi-card"><div class="kpi-val" id="kpi-tunes">—</div><div class="kpi-lbl">Tune Events</div></div>
       <div class="kpi-card"><div class="kpi-val" id="kpi-gate">—</div><div class="kpi-lbl">Confidence Gate</div></div>
@@ -362,8 +362,8 @@ async function loadOverview() {
   const d = await _apiFetch('/api/algo/overview');
   if (!d) return;
 
+  document.getElementById('kpi-evals').textContent = fmtNum(d.evals_today);
   document.getElementById('kpi-fires').textContent = fmtNum(d.fires_today);
-  document.getElementById('kpi-trades').textContent = fmtNum(d.trades_today);
   document.getElementById('kpi-fire-rate').textContent = (d.fire_rate_pct||0).toFixed(1)+'%';
   document.getElementById('kpi-tunes').textContent = fmtNum(d.tune_events_today);
   document.getElementById('kpi-gate').textContent = (d.confidence_gate||55).toFixed(1)+'%';

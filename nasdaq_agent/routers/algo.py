@@ -161,7 +161,9 @@ async def algo_overview(
 ):
     """High-level algorithm system health: fires, trades, tune events, filter state."""
 
+    evals_today = 0
     fires_today = 0
+    filtered_today = 0
     trades_today = 0
     fire_rate_pct = 0.0
     tune_events_today = 0
@@ -170,23 +172,29 @@ async def algo_overview(
     feedback_loop_active = False
 
     # 1. Signal fires and trades-opened today
+    # fires_today  = entries where trade_opened = 1  (algo actually fired a trade)
+    # evals_today  = total signal evaluations logged  (pass to frontend separately)
     try:
         with get_conn() as c:
             row = c.execute(
                 """
                 SELECT
-                    COUNT(*) AS fires,
-                    COALESCE(SUM(CASE WHEN trade_opened = 1 THEN 1 ELSE 0 END), 0) AS trades
+                    COUNT(*) AS evals,
+                    COALESCE(SUM(CASE WHEN trade_opened = 1 THEN 1 ELSE 0 END), 0) AS fires,
+                    COALESCE(SUM(CASE WHEN trade_opened = 0 THEN 1 ELSE 0 END), 0) AS filtered
                 FROM algo_signal_log
                 WHERE logged_at::TIMESTAMPTZ::DATE = CURRENT_DATE
                 """
             ).fetchone()
         if row:
-            fires_today = _safe_int(row["fires"])
-            trades_today = _safe_int(row["trades"])
-            if fires_today > 0:
-                fire_rate_pct = round(trades_today / fires_today * 100, 1)
+            evals_today   = _safe_int(row["evals"])
+            fires_today   = _safe_int(row["fires"])
+            trades_today  = fires_today            # fires == trades opened
+            filtered_today = _safe_int(row["filtered"])
+            if evals_today > 0:
+                fire_rate_pct = round(fires_today / evals_today * 100, 1)
     except Exception as exc:
+        evals_today = filtered_today = 0
         logger.debug("algo/overview signal query error: %s", exc)
 
     # 2. Param tune events today
@@ -228,12 +236,14 @@ async def algo_overview(
         logger.debug("algo/overview learning_engine error: %s", exc)
 
     return {
-        "fires_today": fires_today,
-        "trades_today": trades_today,
-        "fire_rate_pct": fire_rate_pct,
-        "tune_events_today": tune_events_today,
-        "confidence_gate": confidence_gate,
-        "last_cycle_ago_s": last_cycle_ago_s,
+        "evals_today":        evals_today,
+        "fires_today":        fires_today,
+        "filtered_today":     filtered_today,
+        "trades_today":       trades_today,
+        "fire_rate_pct":      fire_rate_pct,
+        "tune_events_today":  tune_events_today,
+        "confidence_gate":    confidence_gate,
+        "last_cycle_ago_s":   last_cycle_ago_s,
         "feedback_loop_active": feedback_loop_active,
     }
 
@@ -686,6 +696,9 @@ def _build_tune_log(range_val: str, page: int, per_page: int, family_filter: str
             ).fetchone()
         total = _safe_int(row["cnt"]) if row else 0
 
+        # Fetch tune events + triggering trade via LEFT JOIN.
+        # Post-tune outcome is computed in a separate query below to avoid
+        # correlated subqueries against TEXT-typed closed_at column.
         with get_conn() as c:
             rows = c.execute(
                 f"""
@@ -703,21 +716,7 @@ def _build_tune_log(range_val: str, page: int, per_page: int, family_filter: str
                     pt.ticker       AS trigger_ticker,
                     pt.direction    AS trigger_dir,
                     pt.status       AS trigger_status,
-                    pt.pnl_pct      AS trigger_pnl,
-                    (SELECT COUNT(*) FROM paper_trades p2
-                     WHERE p2.algo_name = tl.family
-                       AND p2.closed_at IS NOT NULL AND p2.closed_at != ''
-                       AND p2.closed_at::TIMESTAMPTZ > tl.tuned_at
-                       AND p2.closed_at::TIMESTAMPTZ < tl.tuned_at + INTERVAL '2 hours'
-                       AND p2.status IS NOT NULL AND p2.status != ''
-                    ) AS post_total,
-                    (SELECT COUNT(*) FROM paper_trades p2
-                     WHERE p2.algo_name = tl.family
-                       AND p2.closed_at IS NOT NULL AND p2.closed_at != ''
-                       AND p2.closed_at::TIMESTAMPTZ > tl.tuned_at
-                       AND p2.closed_at::TIMESTAMPTZ < tl.tuned_at + INTERVAL '2 hours'
-                       AND p2.status = 'WIN'
-                    ) AS post_wins
+                    pt.pnl_pct      AS trigger_pnl
                 FROM param_tune_log tl
                 LEFT JOIN paper_trades pt ON pt.id = tl.trigger_trade_id
                 WHERE 1=1 {range_clause} {fam_clause}
@@ -730,6 +729,50 @@ def _build_tune_log(range_val: str, page: int, per_page: int, family_filter: str
         logger.warning("algo/tune-log query error: %s", exc)
         return {"items": [], "total": 0}
 
+    # Post-tune outcome: for each tune event, count closed trades for that family
+    # in the 2 hours following the tune.  Done as a single aggregated query (not
+    # per-row correlated subquery) to avoid casting TEXT closed_at inside a
+    # correlated subquery where bad values can't be filtered out before the cast.
+    post_tune_map: dict[int, dict] = {}
+    if rows:
+        try:
+            # Collect unique (id, family, tuned_at) combos from this page
+            tune_ids = [(r["id"], r["family"], r["tuned_at"]) for r in rows]
+            # Build a VALUES list so we can do one query instead of N
+            val_rows = ", ".join(
+                f"({tid}, '{fam}', '{tat}'::TIMESTAMPTZ)"
+                for tid, fam, tat in tune_ids
+            )
+            with get_conn() as c:
+                post_rows = c.execute(
+                    f"""
+                    WITH tune_windows(tid, family, tuned_at) AS (VALUES {val_rows})
+                    SELECT
+                        tw.tid,
+                        COUNT(pt.id)                               AS post_total,
+                        SUM(CASE WHEN pt.pnl_pct > 0 THEN 1 ELSE 0 END) AS post_wins
+                    FROM tune_windows tw
+                    LEFT JOIN paper_trades pt
+                        ON  pt.algo_name = tw.family
+                        AND pt.status = 'CLOSED'
+                        AND pt.closed_at IS NOT NULL AND pt.closed_at != ''
+                        AND pt.closed_at::TIMESTAMPTZ > tw.tuned_at
+                        AND pt.closed_at::TIMESTAMPTZ < tw.tuned_at + INTERVAL '2 hours'
+                    GROUP BY tw.tid
+                    """
+                ).fetchall()
+            for pr in post_rows:
+                pt_total = _safe_int(pr["post_total"])
+                pt_wins  = _safe_int(pr["post_wins"])
+                post_tune_map[pr["tid"]] = {
+                    "post_total":    pt_total,
+                    "post_wins":     pt_wins,
+                    "post_losses":   pt_total - pt_wins,
+                    "post_win_rate": round(pt_wins / pt_total * 100, 1) if pt_total > 0 else None,
+                }
+        except Exception as _pt_exc:
+            logger.debug("algo/tune-log post-tune stats error: %s", _pt_exc)
+
     items = []
     for r in rows:
         old_v  = _safe_float(r["old_val"])
@@ -737,10 +780,11 @@ def _build_tune_log(range_val: str, page: int, per_page: int, family_filter: str
         delta  = round(new_v - old_v, 4)
         direction = "up" if delta > 0 else ("down" if delta < 0 else "same")
 
-        post_total  = _safe_int(r.get("post_total", 0))
-        post_wins   = _safe_int(r.get("post_wins", 0))
-        post_losses = post_total - post_wins
-        post_wr     = round(post_wins / post_total * 100, 1) if post_total > 0 else None
+        pt_stats    = post_tune_map.get(r["id"], {})
+        post_total  = pt_stats.get("post_total", 0)
+        post_wins   = pt_stats.get("post_wins", 0)
+        post_losses = pt_stats.get("post_losses", 0)
+        post_wr     = pt_stats.get("post_win_rate")
 
         trigger_pnl = None
         if r.get("trigger_pnl") is not None:
@@ -946,6 +990,8 @@ async def algo_trade_attribution(
                     AVG(pnl_pct) AS avg_pnl_pct
                 FROM paper_trades
                 WHERE status = 'CLOSED'
+                  AND closed_at IS NOT NULL
+                  AND closed_at != ''
                 {range_clause}
                 GROUP BY {col}
                 ORDER BY total DESC
