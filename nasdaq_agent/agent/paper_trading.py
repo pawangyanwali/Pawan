@@ -388,6 +388,11 @@ def maybe_open_trade(
     size_mult:        float = 1.0,
     trading_tier:     str   = "REGULAR",
     algo_name:        str   = "",
+    ml_scalp_prob:    Optional[float] = None,
+    ml_daily_prob:    Optional[float] = None,
+    ml_swing_prob:    Optional[float] = None,
+    ml_deep_prob:     Optional[float] = None,
+    ml_ensemble_score: Optional[int] = None,
 ) -> Optional[int]:
     """
     Open a paper trade when all PRD entry gates pass.
@@ -564,8 +569,10 @@ def maybe_open_trade(
                    confidence, rr_ratio, rr_qualifies, shares, shares_remaining,
                    session, regime, vwap_event, rsi_zone, entry_type,
                    t1_price, t2_price, order_flow_score, size_mult, cost_basis,
-                   algo_name)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   algo_name,
+                   ml_scalp_prob, ml_daily_prob, ml_swing_prob, ml_deep_prob,
+                   ml_ensemble_score)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
@@ -577,6 +584,11 @@ def maybe_open_trade(
                 round(order_flow_score, 4), round(effective_size_mult, 2),
                 round(price * shares, 2),
                 algo_name,
+                round(ml_scalp_prob, 4) if ml_scalp_prob is not None else None,
+                round(ml_daily_prob, 4) if ml_daily_prob is not None else None,
+                round(ml_swing_prob, 4) if ml_swing_prob is not None else None,
+                round(ml_deep_prob, 4) if ml_deep_prob is not None else None,
+                ml_ensemble_score,
             ))
             c.commit()
             logger.info(

@@ -1178,6 +1178,11 @@ def analyse_ticker(
                 order_flow_score  = _of_score,
                 size_mult         = round(_sig_size_mult, 2),
                 trading_tier      = _trading_tier,
+                ml_scalp_prob     = ml_scalp,
+                ml_daily_prob     = ml_daily_p,
+                ml_swing_prob     = ml_swing_p,
+                ml_deep_prob      = ml_deep_p,
+                ml_ensemble_score = int(round(ml_ensemble_p * 100)),
             )
 
         # Update open paper trades + live backtest tracking.
@@ -1538,6 +1543,11 @@ def analyse_ticker(
                             size_mult         = 1.0,
                             trading_tier      = _trading_tier,
                             algo_name         = _asig["algo"],
+                            ml_scalp_prob     = ml_scalp,
+                            ml_daily_prob     = ml_daily_p,
+                            ml_swing_prob     = ml_swing_p,
+                            ml_deep_prob      = ml_deep_p,
+                            ml_ensemble_score = int(round(ml_ensemble_p * 100)),
                         )
                 if _trade_id:
                     _algo_trade_opened = True

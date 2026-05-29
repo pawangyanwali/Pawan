@@ -1156,12 +1156,13 @@ async def algo_ml_influence(
 
     # Try with ML columns first
     ml_cols = ", ml_scalp_prob, ml_daily_prob, ml_swing_prob, ml_deep_prob, ml_ensemble_score"
+    null_guard = "AND closed_at IS NOT NULL AND closed_at != ''"
     try:
         with get_conn() as c:
             cnt_row = c.execute(
                 f"""
                 SELECT COUNT(*) AS cnt FROM paper_trades
-                WHERE status = 'CLOSED' {range_clause}
+                WHERE status = 'CLOSED' {null_guard} {range_clause}
                 """
             ).fetchone()
             total = _safe_int(cnt_row["cnt"]) if cnt_row else 0
@@ -1173,7 +1174,7 @@ async def algo_ml_influence(
                        algo_name, session, regime, confidence
                        {ml_cols}
                 FROM paper_trades
-                WHERE status = 'CLOSED' {range_clause}
+                WHERE status = 'CLOSED' {null_guard} {range_clause}
                 ORDER BY closed_at DESC
                 LIMIT %s OFFSET %s
                 """,
@@ -1194,7 +1195,7 @@ async def algo_ml_influence(
                 cnt_row = c.execute(
                     f"""
                     SELECT COUNT(*) AS cnt FROM paper_trades
-                    WHERE status = 'CLOSED' {range_clause}
+                    WHERE status = 'CLOSED' {null_guard} {range_clause}
                     """
                 ).fetchone()
                 total = _safe_int(cnt_row["cnt"]) if cnt_row else 0
@@ -1205,7 +1206,7 @@ async def algo_ml_influence(
                            entry_price, exit_price, pnl_pct, pnl_dollar,
                            algo_name, session, regime, confidence
                     FROM paper_trades
-                    WHERE status = 'CLOSED' {range_clause}
+                    WHERE status = 'CLOSED' {null_guard} {range_clause}
                     ORDER BY closed_at DESC
                     LIMIT %s OFFSET %s
                     """,
