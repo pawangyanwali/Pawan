@@ -37,6 +37,26 @@ _AGE_THRESHOLD = {
 
 
 def main() -> int:
+    # ── 0. Container start time — suppress false-stale failures on redeploys ────
+    # Read PID-1 start time from /proc/1/stat (always available on Linux/Docker).
+    # Used to detect scan:latest keys left over from a previous deployment.
+    _proc_start: float | None = None
+    try:
+        import os as _os
+        with open("/proc/1/stat") as _f:
+            _fields = _f.read().split()
+        # Field 22 (0-indexed 21) = starttime in jiffies since boot
+        _jiffies = int(_fields[21])
+        _clk_tck = _os.sysconf("SC_CLK_TCK")  # typically 100
+        with open("/proc/stat") as _f:
+            for _line in _f:
+                if _line.startswith("btime "):
+                    _boot = int(_line.split()[1])
+                    break
+        _proc_start = _boot + _jiffies / _clk_tck
+    except Exception:
+        _proc_start = None  # can't determine; use fallback logic below
+
     # ── 1. Valkey reachability ────────────────────────────────────────────────
     try:
         from agent.valkey_client import _get_client
@@ -67,6 +87,25 @@ def main() -> int:
     except Exception as exc:
         print(f"WARN: scan:latest lookup error: {exc}")
         # Non-fatal during startup — fall through to session-aware check below.
+
+    # If scan_ts is from BEFORE this container started, it is a stale key left
+    # over from a previous deployment.  Treat it the same as absent so the
+    # container gets a clean start_period grace window for its first cycle.
+    if scan_ts is not None:
+        if _proc_start is not None and scan_ts < _proc_start:
+            print(
+                f"WARN: scan:latest ts ({scan_ts:.0f}) predates container start "
+                f"({_proc_start:.0f}) — treating as absent (prev-deploy remnant)"
+            )
+            scan_ts = None
+        elif _proc_start is None and (time.time() - scan_ts) > 600:
+            # Fallback: if key is >10 min old and we can't confirm container start,
+            # assume it's a previous-deployment remnant.
+            print(
+                f"WARN: scan:latest age {time.time()-scan_ts:.0f}s > 600s "
+                f"and process start unknown — treating as absent"
+            )
+            scan_ts = None
 
     # scan_ts being None is acceptable during start_period (cold start).
     # We only hard-fail on stale data during active market sessions (tier 3).
