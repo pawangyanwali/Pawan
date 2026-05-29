@@ -183,6 +183,19 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
             except Exception:
                 pass
 
+    # scanner.is_running is always False in web-api (scanner runs in its own
+    # container).  Derive running state from the scanner heartbeat instead;
+    # fall back to the in-process flag for monolith deployments.
+    _scanner_running = scanner.is_running
+    if not _scanner_running:
+        try:
+            from agent.service_state import get_age_s as _hb_age
+            _age = _hb_age("service:scanner:heartbeat")
+            if _age is not None and _age < 120:
+                _scanner_running = True
+        except Exception:
+            pass
+
     # RDS check — lightweight: just try to get a connection from the pool
     rds_ok = False
     rds_error = None
@@ -207,7 +220,7 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
 
     return {
         "scanner": {
-            "running":    scanner.is_running,
+            "running":    _scanner_running,
             "last_scan":  last_scan,
             "tickers":    len(sigs),
             "from_cache": from_cache,
