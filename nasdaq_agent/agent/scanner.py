@@ -385,6 +385,12 @@ class StockSignal:
     signal_strength:     str   = "STANDARD"   # STRONG|STANDARD|WEAK|CONFLICTED|BLOCKED|NO_SIGNAL
     signal_size_mult:    float = 1.0   # position size multiplier from arbitration
 
+    # ── Bar-level technical row (quant strategies read this) ──────────────────
+    # Populated from the last row of compute_indicators(df_1m) — all float values.
+    # Enables quant_strategies.py to access any computed indicator without adding
+    # individual fields to StockSignal for every new indicator.
+    tech_row: dict = field(default_factory=dict)
+
     # ── Algorithm signals (Phase 1+ trading algos) ────────────────────────────
     algo_signals: list = field(default_factory=list)  # list of AlgoResult dicts
 
@@ -1299,6 +1305,11 @@ def analyse_ticker(
             trade_plan          = tp.to_dict(),
             candles             = candles,
             headlines           = headlines[:5],
+            tech_row            = {
+                k: (float(v) if isinstance(v, (int, float)) and v == v else 0.0)
+                for k, v in last.items()
+                if not isinstance(v, (list, dict))
+            },
             is_suppressed       = bool(_trade_blocked_reason),
             suppress_reason     = _trade_blocked_reason,
             has_open_position   = _has_open_position,

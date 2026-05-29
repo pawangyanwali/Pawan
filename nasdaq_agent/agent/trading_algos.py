@@ -1899,6 +1899,12 @@ def eval_cross_sectional_rs(sig) -> Optional[AlgoResult]:
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
+try:
+    from agent.quant_strategies import QUANT_ALGO_REGISTRY as _QUANT_REGISTRY
+except Exception as _qe:
+    logger.warning("quant_strategies import failed — quant algos disabled: %s", _qe)
+    _QUANT_REGISTRY = []
+
 _ALGO_REGISTRY = [
     # Phase 1 — breakout / momentum
     eval_orb5,
@@ -1928,6 +1934,8 @@ _ALGO_REGISTRY = [
     eval_cross_sectional_rs,
     # Phase 4 — extreme gap fade
     eval_ah_gap_fade,
+    # Phase 5 — quantitative strategy reference (19 tradeable algos)
+    *_QUANT_REGISTRY,
 ]
 
 

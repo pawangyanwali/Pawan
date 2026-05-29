@@ -72,6 +72,28 @@ _DEFAULTS: dict[str, Any] = {
     # ── Adaptive filter ────────────────────────────────────────────────────────
     "filter.throttle_start_wr":            lambda: 0.50,
     "filter.max_penalty_pts":              lambda: 35,
+    # ── Quant strategy reference — Phase 5 configurable defaults ───────────────
+    # Each value is the reference-document default; the learning engine will tune
+    # these automatically from live trade outcomes (target_mult, stop_mult, etc.)
+    "algos.ofi.ofi_z_gate":               lambda: 1.5,    # OFI z-score threshold
+    "algos.ofi.avi_gate":                 lambda: 0.35,   # AVI threshold for momentum
+    "algos.ofi.qi_gate":                  lambda: 0.55,   # queue imbalance gate
+    "algos.vwap_ofi.rvol_gate":           lambda: 1.2,    # VWAP-OFI RVOL gate
+    "algos.ema_pull.rvol_gate":           lambda: 1.1,    # EMA pullback RVOL gate
+    "algos.vwap_trend.zv_gate":           lambda: 1.0,    # VWAP trend ZV gate
+    "algos.donchian.zv_gate":             lambda: 1.5,    # Donchian breakout ZV gate
+    "algos.orb_zv.zv_gate":              lambda: 1.5,    # ORB VWAP-ZV gate
+    "algos.macd_acc.rvol_gate":           lambda: 1.1,    # MACD acc RVOL gate
+    "algos.supertrend.rvol_gate":         lambda: 1.2,    # SuperTrend RVOL gate
+    "algos.vol_shock.ratio_min":          lambda: 2.0,    # short/long vol ratio threshold
+    "algos.bb_rev.rsi2_oversold":         lambda: 10.0,   # RSI(2) oversold gate
+    "algos.bb_rev.bb_z_gate":            lambda: -1.0,   # BB z-score gate (negative)
+    "algos.rsi2_snap.rsi2_extreme":       lambda: 5.0,    # RSI(2) extreme gate
+    "algos.keltner_fade.rvol_max":        lambda: 2.5,    # Keltner fade max RVOL
+    "algos.squeeze.zv_gate":             lambda: 1.0,    # squeeze expansion ZV gate
+    "algos.pair_arb.z_enter":            lambda: 2.0,    # pair arb entry z-score
+    "algos.regime_sw.adx_trend":         lambda: 25.0,   # ADX trend threshold
+    "algos.meta_ens.prob_gate":          lambda: 0.90,   # meta ensemble probability gate
 }
 
 # Legacy column map: config_store key → account_config column name

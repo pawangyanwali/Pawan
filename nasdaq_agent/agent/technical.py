@@ -115,6 +115,49 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ret_3"] = close.pct_change(3)
     df["ret_5"] = close.pct_change(5)
 
+    # ── Quant strategy indicators (Strategy Reference v1) ─────────────────────
+
+    # Donchian Channel (20-bar): shifted so strategies see prior channel, not current
+    df["donchian_high"] = high.rolling(20, min_periods=20).max().shift(1)
+    df["donchian_low"]  = low.rolling(20,  min_periods=20).min().shift(1)
+
+    # SuperTrend (period=10, multiplier=3): ATR-band trend direction
+    _st_atr   = ta.volatility.average_true_range(high, low, close, window=10)
+    _st_hl2   = (high + low) / 2
+    _st_ub    = _st_hl2 + 3.0 * _st_atr   # upper band (short bias when price below)
+    _st_lb    = _st_hl2 - 3.0 * _st_atr   # lower band (long bias when price above)
+    df["supertrend_upper"] = _st_ub
+    df["supertrend_lower"] = _st_lb
+    # +1 when close above lower band (bullish), -1 when close below upper band (bearish)
+    _st_dir = np.where(close > _st_lb, 1.0, np.where(close < _st_ub, -1.0, 0.0))
+    df["supertrend_dir"]  = _st_dir
+    df["supertrend_flip"] = (pd.Series(_st_dir, index=df.index) !=
+                             pd.Series(_st_dir, index=df.index).shift(1)).astype(float)
+
+    # Volume Z-score (ZV in Strategy Reference)
+    _vol_std = vol.rolling(20).std().replace(0, np.nan)
+    df["vol_z_score"] = ((vol - vol.rolling(20).mean()) / _vol_std).fillna(0.0)
+
+    # EMA slopes: rate of change of trend (positive = rising EMA)
+    df["ema_9_slope"]  = (df["ema_9"]  - df["ema_9"].shift(1)).fillna(0.0)
+    df["ema_20_slope"] = (df["ema_20"] - df["ema_20"].shift(1)).fillna(0.0)
+
+    # Realized-volatility shock ratio: short (5-bar) / long (20-bar) realised vol
+    _ret_pct   = close.pct_change()
+    _rv_short  = _ret_pct.rolling(5).std()
+    _rv_long   = _ret_pct.rolling(20).std().replace(0, np.nan)
+    df["vol_shock_ratio"] = (_rv_short / _rv_long).fillna(1.0).clip(0, 10)
+
+    # Aggressor Volume Imbalance (AVI proxy): normalised buy vs sell pressure [-1, +1]
+    df["avi_score"] = ((buy_vol - sell_vol) / vol.replace(0, np.nan)).fillna(0.0).clip(-1.0, 1.0)
+
+    # Bollinger Band Z-score: (close - mid) / half-band-width
+    _bb_half = ((df["bb_upper"] - df["bb_mid"]) / 2).replace(0, np.nan)
+    df["bb_z_score"] = ((close - df["bb_mid"]) / _bb_half).fillna(0.0)
+
+    # Previous-bar MACD histogram (for acceleration detection: hist > hist_prev)
+    df["macd_hist_prev"] = df["macd_hist"].shift(1)
+
     return df
 
 
