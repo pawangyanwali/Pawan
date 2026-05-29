@@ -114,13 +114,13 @@ def _check_open_paper_trade_geometry() -> dict:
         from agent.db import get_conn
         with get_conn() as c:
             trades = c.execute(
-                "SELECT direction, entry_price, stop_price, target_price "
+                "SELECT direction, entry_price, stop, target "
                 "FROM paper_trades WHERE status = 'OPEN' "
-                "AND target_price > 0 AND stop_price > 0"
+                "AND target > 0 AND stop > 0"
             ).fetchall()
         bad = 0
         for t in trades:
-            d, e, s, tgt = t["direction"], t["entry_price"], t["stop_price"], t["target_price"]
+            d, e, s, tgt = t["direction"], t["entry_price"], t["stop"], t["target"]
             if d == "BUY" and (s >= e or tgt <= e):
                 bad += 1
             elif d == "SELL" and (s <= e or tgt >= e):
