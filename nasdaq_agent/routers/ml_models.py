@@ -30,14 +30,14 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
     import os
 
     def _count(registry, prefix: str) -> dict:
-        # Count .joblib files on disk — always accurate after restarts.
-        # In-memory registry is lazy-loaded so would show 0/0 after a restart
-        # even when hundreds of trained models are persisted on disk.
-        disk_trained = len(list(_MODEL_DIR.glob(f"{prefix}_*.joblib")))
-        in_mem_trained = sum(1 for m in registry.values() if getattr(m, 'trained', False))
-        trained = max(disk_trained, in_mem_trained)
-        total   = max(len(registry), disk_trained)
-        return {"total": total, "trained": trained}
+        import os as _os
+        files = list(_MODEL_DIR.glob(f"{prefix}_*.joblib"))
+        disk_trained    = len(files)
+        in_mem_trained  = sum(1 for m in registry.values() if getattr(m, 'trained', False))
+        trained  = max(disk_trained, in_mem_trained)
+        total    = max(len(registry), disk_trained)
+        last_trained = max((_os.path.getmtime(str(f)) for f in files), default=None) if files else None
+        return {"total": total, "trained": trained, "last_trained": last_trained}
 
     blend_stats = None
     try:
@@ -72,6 +72,12 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
     except Exception:
         pass
 
+    try:
+        _sess = get_market_session()
+    except Exception:
+        _sess = "UNKNOWN"
+    _can_retrain = (_sess == "CLOSED")
+
     return {
         "deep_model":        get_model_info(),
         "deep_trained":      deep_is_trained(),
@@ -86,6 +92,13 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
         "blend_weights":     blend_stats,
         "pipeline_metrics":  pipeline_stats,
         "cluster_status":    cluster_status,
+        "market_session":    _sess,
+        "can_full_retrain":  _can_retrain,
+        "retrain_note": (
+            f"XGBoost retrain only runs when market is CLOSED (currently: {_sess}). "
+            "BiLSTM can train anytime."
+            if not _can_retrain else None
+        ),
     }
 
 
@@ -139,16 +152,6 @@ async def trigger_deep_train(
 
     if is_training_active():
         return {"status": "already_running", "message": "Deep model training already in progress."}
-
-    try:
-        session = get_market_session()
-    except Exception:
-        session = "UNKNOWN"
-    if session != "CLOSED":
-        return {
-            "status": "deferred",
-            "message": f"Deep model training deferred during {session}; run it in the CLOSED window.",
-        }
 
     def _run():
         try:

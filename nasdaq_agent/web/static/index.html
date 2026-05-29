@@ -968,6 +968,13 @@
       <span id="nn-epoch-badge" style="font-size:11px;color:var(--muted)"></span>
     </div>
 
+    <!-- Session / availability bar -->
+    <div id="nn-session-bar" style="border-radius:6px;padding:8px 12px;margin-bottom:14px;display:flex;align-items:center;gap:10px;font-size:11px;flex-wrap:wrap">
+      <span id="nn-session-dot" style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--muted)"></span>
+      <span id="nn-session-text" style="color:var(--muted);flex:1">Loading session…</span>
+      <span id="nn-session-bilstm-note" style="color:#a78bfa;font-size:10px;display:none">🧠 Train BiLSTM available now</span>
+    </div>
+
     <!-- Model grid -->
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:16px" id="nn-model-grid">
       <div style="color:var(--muted);font-size:11px;padding:20px;grid-column:1/-1;text-align:center">Loading model status…</div>
@@ -6443,6 +6450,43 @@ function renderNeuralPanel(d) {
   const rp = d.retrain_progress || {};
   const phase = rp.phase || '';
 
+  // Session availability bar
+  const sessionBar = document.getElementById('nn-session-bar');
+  const sessionDot = document.getElementById('nn-session-dot');
+  const sessionText = document.getElementById('nn-session-text');
+  const sessionBilstmNote = document.getElementById('nn-session-bilstm-note');
+  const sess = d.market_session || 'UNKNOWN';
+  const canRetrain = d.can_full_retrain ?? (sess === 'CLOSED');
+  if (sessionBar && sessionDot && sessionText) {
+    if (canRetrain) {
+      sessionBar.style.background = 'rgba(22,163,74,.1)';
+      sessionBar.style.border = '1px solid rgba(22,163,74,.35)';
+      sessionDot.style.background = 'var(--green)';
+      sessionText.style.color = 'var(--green)';
+      sessionText.textContent = `✓ Market ${sess} — Full Retrain available. Click "Full Retrain" to begin XGBoost + BiLSTM training.`;
+      if (sessionBilstmNote) sessionBilstmNote.style.display = 'none';
+    } else {
+      sessionBar.style.background = 'rgba(245,158,11,.07)';
+      sessionBar.style.border = '1px solid rgba(245,158,11,.3)';
+      sessionDot.style.background = '#f59e0b';
+      sessionText.style.color = '#fbbf24';
+      const closeTime = sess === 'PRE_MARKET' ? 'opens at 9:30 AM ET' : 'closes at 4:00 PM ET';
+      sessionText.textContent = `⏰ Market ${sess} — Full Retrain (XGBoost) blocked until CLOSED. Market ${closeTime}.`;
+      if (sessionBilstmNote) sessionBilstmNote.style.display = 'inline';
+    }
+  }
+
+  // Sync Full Retrain button state
+  const fullRetrainBtn = document.querySelector('button[onclick="triggerFullRetrain(this)"]');
+  if (fullRetrainBtn && !rp.is_running && !d.is_training_now) {
+    fullRetrainBtn.disabled = !canRetrain;
+    fullRetrainBtn.style.opacity = canRetrain ? '1' : '0.45';
+    fullRetrainBtn.style.cursor = canRetrain ? 'pointer' : 'not-allowed';
+    fullRetrainBtn.title = canRetrain
+      ? 'Retrain all models (XGBoost + Swing + BiLSTM)'
+      : `Blocked — XGBoost only retrains when market is CLOSED (currently ${sess}). Use "Train BiLSTM" to train the neural network now.`;
+  }
+
   // Training banner — phase-specific message
   const banner = document.getElementById('nn-training-banner');
   const isActive = rp.is_running || d.is_training_now;
@@ -6563,17 +6607,35 @@ function renderNeuralPanel(d) {
 
   // Model grid
   const modelDefs = [
-    { label: 'Scalp XGBoost',   icon: '📈', desc: '5-min · 15min ahead', ...d.scalp_models,
+    { label: 'Scalp XGBoost',    icon: '📈',
+      desc:  '5-min bars → 15-min momentum',
+      what:  'Scores breakout setups on 5-min OHLCV + RSI/VWAP/ATR. Fires on sharp momentum entries.',
+      train: 'Full Retrain (market closed)', ...d.scalp_models,
       active: ['xgboost','fetching_5m'].includes(phase) },
-    { label: 'Daily XGBoost',   icon: '📅', desc: '1-day · next-day',    ...d.daily_models,
+    { label: 'Daily XGBoost',    icon: '📅',
+      desc:  'Daily bars → next-day bias',
+      what:  'Reads daily OHLCV + macro context to predict tomorrow\'s directional lean. Used as a trend filter.',
+      train: 'Full Retrain (market closed)', ...d.daily_models,
       active: phase === 'xgboost' },
-    { label: 'Reversal XGBoost',icon: '🔄', desc: '5-min · reversal',   ...d.reversal_models,
+    { label: 'Reversal XGBoost', icon: '🔄',
+      desc:  '5-min bars → reversal zone',
+      what:  'Detects exhaustion and mean-reversion setups from 5-min bar patterns + order flow divergence.',
+      train: 'Full Retrain (market closed)', ...d.reversal_models,
       active: phase === 'xgboost' },
-    { label: 'Ensemble (×10)',   icon: '🎯', desc: '5-min · consensus',  ...d.ensemble_models,
+    { label: 'Ensemble (≥10)',   icon: '🎯',
+      desc:  '5-min bars → consensus',
+      what:  'Meta-model requiring ≥10 sub-signals to agree. Very low false-positive rate — highest conviction entries only.',
+      train: 'Full Retrain (market closed)', ...d.ensemble_models,
       active: phase === 'xgboost' },
-    { label: 'Swing XGBoost',   icon: '📊', desc: '15-min · 2h ahead',  ...d.swing_models,
+    { label: 'Swing XGBoost',    icon: '📊',
+      desc:  '15-min bars → 2h swing',
+      what:  'Identifies medium-term swing moves from 15-min bars trained on 9 months of history. Targets 2h ahead.',
+      train: 'Full Retrain (market closed)', ...d.swing_models,
       active: ['xgboost','fetching_15m'].includes(phase) },
-    { label: 'Deep BiLSTM',     icon: '🧠', desc: '15-min · universal',
+    { label: 'Deep BiLSTM',      icon: '🧠',
+      desc:  '15-min sequences → universal',
+      what:  'Bidirectional LSTM with attention trained across ALL 477 tickers simultaneously. 20-bar 15-min sequences, 34 features. Fine-tunes every hour during market.',
+      train: 'Train BiLSTM (anytime)',
       total: 1, trained: d.deep_trained ? 1 : 0, active: bilstmActive,
       queued: rp.is_running && !bilstmActive && !d.deep_trained },
   ];
@@ -6593,17 +6655,24 @@ function renderNeuralPanel(d) {
       : m.queued
       ? `<div style="width:7px;height:7px;border-radius:50%;background:#f59e0b;flex-shrink:0"></div>`
       : '';
+    const lastTrainedStr = m.last_trained
+      ? new Date(m.last_trained * 1000).toLocaleDateString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})
+      : null;
+    const needsRetrain = m.trained === 0 && m.total === 0 && !m.active;
     const statusText = m.active
       ? `<span style="font-size:10px;color:#a78bfa;font-weight:700;animation:pulse 1.5s infinite">Training…</span>`
       : m.queued
-      ? `<span style="font-size:10px;color:#f59e0b;font-weight:700">⏳ Queued</span>`
-      : `<span style="font-size:10px;color:${color};margin-top:3px">${pct}% trained</span>`;
-    return `<div class="nn-model-card" style="${border}">
+      ? `<span style="font-size:10px;color:#f59e0b;font-weight:700">⏳ Queued — trains after XGBoost</span>`
+      : needsRetrain
+      ? `<span style="font-size:10px;color:var(--muted)">Not trained · ${m.train}</span>`
+      : `<span style="font-size:10px;color:${color}">${pct}% trained${lastTrainedStr ? ' · ' + lastTrainedStr : ''}</span>`;
+    return `<div class="nn-model-card" style="${border}" title="${m.what}">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:4px">
         <span style="font-size:11px;font-weight:700">${m.icon} ${m.label}</span>
         <div style="display:flex;align-items:center;gap:5px">${activeDot}<span style="font-size:12px;font-weight:700;color:${color}">${m.trained}/${m.total}</span></div>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin:3px 0">${m.desc}</div>
+      <div style="font-size:10px;color:var(--muted);margin:2px 0 1px">${m.desc}</div>
+      <div style="font-size:9px;color:#4b5563;margin-bottom:4px;line-height:1.3">${m.what}</div>
       <div class="nn-bar-track">
         <div class="nn-bar-fill" style="width:${m.active ? 100 : pct}%;background:${color};${m.active ? 'animation:shimmer 1.5s linear infinite;background:linear-gradient(90deg,#7c3aed,#818cf8,#7c3aed);background-size:200% 100%' : ''}"></div>
       </div>
@@ -6881,16 +6950,29 @@ async function triggerDeepTrain(btn) {
 }
 
 async function triggerFullRetrain(btn) {
-  if (!confirm('This will retrain ALL ML models (XGBoost scalp/swing/reversal/ensemble + Deep BiLSTM). It runs in background and takes 5–20 minutes. Continue?')) return;
+  if (!confirm('Retrain ALL XGBoost models (scalp/daily/reversal/ensemble/swing) + Deep BiLSTM. Runs in background, takes 5–20 min. Continue?')) return;
   const orig = btn.textContent;
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
     const r = await (await _authFetch(`${BACKEND_HTTP}/api/ml-retrain`, { method: 'POST' })).json();
-    btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '✓ Started';
-    btn.style.color = 'var(--green)';
-    setTimeout(() => { loadNeuralStatus(); }, 3000);
-    setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.color = 'var(--muted)'; }, 12000);
+    if (r.status === 'deferred') {
+      btn.textContent = '⏰ Market Open';
+      btn.style.color = '#f59e0b';
+      // Show message in session bar
+      const sessionText = document.getElementById('nn-session-text');
+      if (sessionText) sessionText.textContent = `⏰ ${r.message}`;
+      setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.color = 'var(--muted)'; }, 5000);
+    } else if (r.status === 'already_running') {
+      btn.textContent = '⏳ Running…';
+      btn.style.color = '#818cf8';
+      setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.color = 'var(--muted)'; }, 6000);
+    } else {
+      btn.textContent = '✓ Started';
+      btn.style.color = 'var(--green)';
+      setTimeout(() => { loadNeuralStatus(); }, 3000);
+      setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.color = 'var(--muted)'; }, 12000);
+    }
   } catch(e) {
     btn.textContent = '✕ Error';
     btn.style.color = 'var(--red)';
