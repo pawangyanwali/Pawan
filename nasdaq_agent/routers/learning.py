@@ -181,11 +181,21 @@ async def learning_status():
         _P2_AVAILABLE = False
 
     loop = asyncio.get_running_loop()
-    status, obs = await asyncio.gather(
-        loop.run_in_executor(None, af_get_status),
-        loop.run_in_executor(_pt_executor, get_observation_summary),
-    )
-    engine_status = learning_engine.get_status()
+    try:
+        status = await loop.run_in_executor(None, af_get_status)
+    except Exception as _se:
+        logger.warning("af_get_status error: %s", _se)
+        status = {}
+    try:
+        obs = await loop.run_in_executor(_pt_executor, get_observation_summary)
+    except Exception as _oe:
+        logger.warning("get_observation_summary error: %s", _oe)
+        obs = {}
+    try:
+        engine_status = learning_engine.get_status()
+    except Exception as _ee:
+        logger.warning("learning_engine.get_status error: %s", _ee)
+        engine_status = {}
 
     if not _LEARNER_ENABLED:
         try:

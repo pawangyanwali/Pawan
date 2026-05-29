@@ -6251,11 +6251,15 @@ async function loadLearningLog() {
 async function loadLearningStatus() {
   try {
     const r = await _authFetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(12000)});
+    if (!r.ok) {
+      const txt = await r.text().catch(() => `HTTP ${r.status}`);
+      throw new Error(`Server ${r.status}: ${txt.slice(0, 200)}`);
+    }
     const d = await r.json();
     renderLearningStatus(d);
   } catch(e) {
     const msg = (e.name === 'TimeoutError' || e.name === 'AbortError') ? 'Request timed out — backend may be slow.' : (e.message || 'Unknown error');
-    document.getElementById('learn-kpis').innerHTML = `<div style="color:var(--muted);font-size:11px">⚠ ${msg}</div>`;
+    document.getElementById('learn-kpis').innerHTML = `<div style="color:var(--red);font-size:11px">⚠ ${msg}</div>`;
   }
 }
 
