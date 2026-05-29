@@ -63,11 +63,9 @@ logger = logging.getLogger(__name__)
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 TARGET_WIN_RATE   = 0.55   # goal win rate — system tightens until reached
-THROTTLE_START_WR = 0.50   # apply confidence penalty below this win rate (trade sources)
-SUPPRESS_BELOW    = 0.25   # obs-source penalty threshold (kept low — obs data is noisy)
-MAX_PENALTY_PTS   = 35     # max extra confidence pts required for a bad context
-BOOST_ABOVE       = 0.72   # boost confidence if win_rate >= this
-MIN_SAMPLE        = 8      # minimum resolved trades before applying a confidence penalty
+THROTTLE_START_WR = 0.50   # threshold for marking a context as underperforming (display only)
+SUPPRESS_BELOW    = 0.25   # obs-source display threshold
+MIN_SAMPLE        = 8      # minimum resolved trades before recording context stats
 RELAX_ABOVE       = 0.85   # if win rate exceeds this, slightly relax threshold
 DEFAULT_THRESHOLD = 55.0   # starting confidence gate
 MIN_THRESHOLD     = 50.0   # never go below this
@@ -204,6 +202,7 @@ def _auto_reset_if_poisoned() -> None:
         with _lock:
             _state["blocked_contexts"]     = {}
             _state["boosted_contexts"]     = {}
+            _state["context_stats"]        = {}
             _state["dynamic_threshold"]    = DEFAULT_THRESHOLD
             _state["current_win_rate"]     = 0.0
             _state["observation_win_rate"] = 0.0
@@ -284,22 +283,19 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
         ("algo_family",  stats.get("by_algo_family",   {})),
     ]
 
-    new_blocked: dict = {}
-    new_boosted: dict = {}
-
-    # Trade sources use THROTTLE_START_WR (0.50); obs source uses SUPPRESS_BELOW (0.25)
-    # to avoid generating spurious penalties from noisy short-term direction checks.
+    # Context performance — tracked for dashboard display only, never used to block signals.
+    # The system always trades in any context as long as confidence meets the dynamic threshold.
     throttle_start = THROTTLE_START_WR if is_trade_source else SUPPRESS_BELOW
     obs_min_sample = max(MIN_SAMPLE * 3, 25) if not is_trade_source else MIN_SAMPLE
 
-    # Read config-store overrides if available (falls back to module constants)
+    # Read config-store override for display threshold if available
     try:
         from agent.config_manager import config as _cfg
         throttle_start = float(_cfg.get("filter.throttle_start_wr", throttle_start))
-        max_penalty    = int(_cfg.get("filter.max_penalty_pts",    MAX_PENALTY_PTS))
     except Exception:
-        max_penalty = MAX_PENALTY_PTS
+        pass
 
+    new_context_stats: dict = {}
     for dim, breakdown in context_keys:
         for val, s in breakdown.items():
             count = s.get("total", 0)
@@ -307,29 +303,17 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
             if count < obs_min_sample:
                 continue
             key = f"{dim}:{val}"
-            if wr < throttle_start:
-                # Graduated penalty: further below throttle_start → more confidence needed.
-                # This keeps the algo alive in this context for strong signals while
-                # natural parameter tuning has time to improve win rate.
-                penalty_pts = min(max_penalty, round((throttle_start - wr) * 100))
-                new_blocked[key] = {
-                    "win_rate":    round(wr, 3),
-                    "count":       count,
-                    "penalty_pts": penalty_pts,
-                    "reason":      f"{dim}={val} {wr*100:.0f}% WR ({count} trades) [+{penalty_pts}pt conf penalty, {source}]",
-                }
-            elif wr >= BOOST_ABOVE and is_trade_source:
-                # Only boost from high-quality trade data
-                new_boosted[key] = {"win_rate": round(wr, 3), "count": count}
+            new_context_stats[key] = {
+                "win_rate":       round(wr, 3),
+                "count":          count,
+                "underperforming": wr < throttle_start,
+            }
 
-    # Observation source: only merge in NEW blocks, don't wipe existing trade-derived blocks
     if not is_trade_source:
         with _lock:
-            existing_blocked = dict(_state["blocked_contexts"])
-            existing_boosted = dict(_state["boosted_contexts"])
-            existing_blocked.update(new_blocked)  # add/update obs-derived blocks
-            _state["blocked_contexts"] = existing_blocked
-            # Don't touch boosted from observations
+            existing = dict(_state.get("context_stats", {}))
+            existing.update(new_context_stats)
+            _state["context_stats"] = existing
         _save()
         return
 
@@ -360,8 +344,9 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
         else:
             _state["_stuck_cycles"] = 0
 
-        _state["blocked_contexts"]  = new_blocked
-        _state["boosted_contexts"]  = new_boosted
+        _state["blocked_contexts"]  = {}  # never populated — no context blocking
+        _state["boosted_contexts"]  = {}  # never populated — no context boosting
+        _state["context_stats"]     = new_context_stats
         _state["dynamic_threshold"] = new_threshold
         _state["last_updated"]      = ts
         history = _state.setdefault("threshold_history", [])
@@ -451,56 +436,26 @@ def should_suppress(
     algo_name:    str = "",
     confidence:   float = 0.0,
 ) -> tuple[bool, str]:
+    """
+    Check whether a signal should be suppressed.
+
+    Context-specific blocking is intentionally absent: the system always trades
+    in any session/regime/context as long as confidence meets the dynamic threshold.
+    Learning happens by observing outcomes and the ML models improving over time —
+    not by blocking specific market contexts.
+
+    The only gate is the dynamically learned minimum confidence threshold.
+    """
     with _lock:
-        throttled = dict(_state["blocked_contexts"])
         threshold = float(_state["dynamic_threshold"])
 
-    # Map algo_name → family for per-family context blocking
-    algo_family = ""
-    if algo_name:
-        try:
-            from agent.algo_learning_engine import _ALGO_FAMILY_MAP as _afm
-            algo_family = _afm.get(algo_name, algo_name)
-        except Exception:
-            algo_family = algo_name
-
-    reason = ""
-    for dim, val in [
-        ("vwap_event",  vwap_event),
-        ("session",     session),
-        ("regime",      regime),
-        ("rsi_zone",    rsi_zone),
-        ("entry_type",  entry_type),
-        ("direction",   direction),
-        ("sector_trend", sector_trend),
-        ("algo_family", algo_family),
-    ]:
-        if not val:
-            continue
-        key = f"{dim}:{val}"
-        if key in throttled:
-            info = throttled[key]
-            # Graduated penalty: legacy entries without penalty_pts get MAX_PENALTY_PTS
-            penalty = info.get("penalty_pts", MAX_PENALTY_PTS)
-            required_conf = threshold + penalty
-            if confidence < required_conf:
-                reason = (
-                    f"Context {dim}={val} ({info['win_rate']*100:.0f}% WR) "
-                    f"needs {required_conf:.0f}% confidence (signal={confidence:.1f}%)"
-                )
-                break
-            # Signal is strong enough to override the penalty — allow it through
-
-    if not reason and confidence < threshold:
+    if confidence < threshold:
         reason = f"Confidence {confidence:.1f}% below learned threshold {threshold:.1f}%"
+        if _ENFORCEMENT_MODE in ("off", "observe", "advisory", "shadow"):
+            return False, reason  # advisory only — signal still trades
+        return True, reason
 
-    if not reason:
-        return False, ""
-
-    if _ENFORCEMENT_MODE in ("off", "observe", "advisory", "shadow"):
-        return False, reason
-
-    return True, reason
+    return False, ""
 
 
 def get_confidence_boost(
@@ -511,25 +466,13 @@ def get_confidence_boost(
     entry_type: str = "",
     direction:  str = "",
 ) -> float:
-    with _lock:
-        boosted = dict(_state["boosted_contexts"])
-
-    boosts = []
-    for dim, val in [("vwap_event", vwap_event), ("session", session),
-                     ("regime", regime), ("rsi_zone", rsi_zone),
-                     ("entry_type", entry_type), ("direction", direction)]:
-        key = f"{dim}:{val}"
-        if key in boosted:
-            wr = boosted[key]["win_rate"]
-            boosts.append((wr - BOOST_ABOVE) * 30)
-
-    return round(sum(boosts) / len(boosts), 1) if boosts else 0.0
+    """No context-specific confidence boost — ML model confidence is used as-is."""
+    return 0.0
 
 
 def get_status() -> dict:
     """Return current filter state for the API and dashboard."""
     with _lock:
-        throttled = _state["blocked_contexts"]
         threshold = _state["dynamic_threshold"]
         return {
             "dynamic_threshold":    threshold,
@@ -537,24 +480,19 @@ def get_status() -> dict:
             "observation_win_rate": round(_state.get("observation_win_rate", 0.0) * 100, 1),
             "target_win_rate":      round(TARGET_WIN_RATE * 100, 1),
             "total_resolved":       _state["total_resolved"],
-            # throttled_contexts includes all penalised entries with penalty_pts + required_confidence
-            "throttled_contexts":   {
-                k: {**v, "required_confidence": round(threshold + v.get("penalty_pts", MAX_PENALTY_PTS), 1)}
-                for k, v in throttled.items()
-            },
-            # blocked_contexts alias kept for backwards compat
-            "blocked_contexts":     {
-                k: {**v, "required_confidence": round(threshold + v.get("penalty_pts", MAX_PENALTY_PTS), 1)}
-                for k, v in throttled.items()
-            },
-            "boosted_contexts":     _state["boosted_contexts"],
+            # No context blocking — always empty; kept for API backwards compatibility
+            "throttled_contexts":   {},
+            "blocked_contexts":     {},
+            "boosted_contexts":     {},
+            # Context performance stats — informational only, never used for suppression
+            "context_stats":        dict(_state.get("context_stats", {})),
             "suppressed_count":     _state["suppressed_count"],
             "false_negative_count": _state.get("false_negative_count", 0),
             "last_updated":         _state["last_updated"],
             "threshold_history":    _state["threshold_history"],
             "is_learning":          _state["total_resolved"] >= MIN_SAMPLE,
             "stuck_cycles":         _state.get("_stuck_cycles", 0),
-            "enforcement_mode":      _ENFORCEMENT_MODE,
+            "enforcement_mode":     _ENFORCEMENT_MODE,
         }
 
 
@@ -574,6 +512,7 @@ def reset_filter(reason: str = "manual") -> dict:
     with _lock:
         _state["blocked_contexts"]     = {}
         _state["boosted_contexts"]     = {}
+        _state["context_stats"]        = {}
         _state["dynamic_threshold"]    = DEFAULT_THRESHOLD
         _state["current_win_rate"]     = 0.0
         _state["observation_win_rate"] = 0.0
@@ -584,8 +523,7 @@ def reset_filter(reason: str = "manual") -> dict:
         snapshot = dict(_state)
     _save()
     logger.info(
-        f"[AdaptiveFilter] RESET ({reason}): cleared all blocked/boosted contexts, "
-        f"win_rate → 0.0, threshold → {DEFAULT_THRESHOLD}%"
+        f"[AdaptiveFilter] RESET ({reason}): win_rate → 0.0, threshold → {DEFAULT_THRESHOLD}%"
     )
     return {"status": "reset", "reason": reason, "threshold": DEFAULT_THRESHOLD}
 
