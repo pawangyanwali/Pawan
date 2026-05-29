@@ -163,6 +163,34 @@ def _token_reload_loop() -> None:
             time.sleep(30)
 
 
+# ── Bar-history gap filler ────────────────────────────────────────────────────
+
+def _bar_accumulator_loop(tickers: list[str]) -> None:
+    """
+    Fill ohlcv_bars for any ticker that has fewer bars than the training
+    minimum so ML retrain never hits Schwab REST cold.
+
+    Waits 120 s at startup so the WebSocket streamer and MD poller finish
+    their own initialisation before we add background REST load.
+    Repeats every 24 h so non-streamed tickers stay current.
+    """
+    _log.info(
+        "[BarAccumulator] Starting — will fill 1-min/15-min/daily gaps for %d tickers",
+        len(tickers),
+    )
+    time.sleep(120)
+
+    while not _runner.stopped:
+        try:
+            from agent.historical_cache import fill_history_gaps
+            _log.info("[BarAccumulator] Running fill_history_gaps for all intervals…")
+            for _iv, _out, _min in [("1min", 3900, 200), ("15min", 5000, 200), ("1day", 500, 100)]:
+                fill_history_gaps(tickers, interval=_iv, min_bars=_min, outputsize=_out)
+        except Exception as exc:
+            _log.warning("[BarAccumulator] error: %s", exc)
+        time.sleep(86400)
+
+
 # ── Health / stats logger ─────────────────────────────────────────────────────
 
 def _health_loop() -> None:
@@ -197,6 +225,8 @@ def main() -> None:
     threading.Thread(target=_health_loop,                  daemon=True, name="md-health").start()
     threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="md-streamer-status").start()
     threading.Thread(target=_token_reload_loop,            daemon=True, name="md-token-reload").start()
+    threading.Thread(target=_bar_accumulator_loop,         daemon=True, name="BarAccumulator",
+                     args=(list(NASDAQ_TICKERS),)).start()
 
     _log.info("Market data running — waiting for SIGTERM/SIGINT …")
     _runner.register_signals()
