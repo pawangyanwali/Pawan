@@ -111,19 +111,18 @@ def _algo_to_family(algo_name: str) -> str:
 def _range_clause(col: str, range_val: str) -> tuple[str, list]:
     """
     Return (sql_fragment, params) for a WHERE range filter.
-    sql_fragment uses %s placeholder if params are needed.
+    Columns are TEXT containing ISO-8601 timestamps — cast to TIMESTAMPTZ first.
     """
     r = range_val or "today"
     if r == "today":
-        return f"AND DATE({col}) = CURRENT_DATE", []
+        return f"AND {col}::TIMESTAMPTZ::DATE = CURRENT_DATE", []
     elif r == "24h":
-        return f"AND {col} >= NOW() - INTERVAL '24 hours'", []
+        return f"AND {col}::TIMESTAMPTZ >= NOW() - INTERVAL '24 hours'", []
     elif r == "7d":
-        return f"AND {col} >= NOW() - INTERVAL '7 days'", []
+        return f"AND {col}::TIMESTAMPTZ >= NOW() - INTERVAL '7 days'", []
     elif r == "30d":
-        return f"AND {col} >= NOW() - INTERVAL '30 days'", []
-    # default to today
-    return f"AND DATE({col}) = CURRENT_DATE", []
+        return f"AND {col}::TIMESTAMPTZ >= NOW() - INTERVAL '30 days'", []
+    return f"AND {col}::TIMESTAMPTZ::DATE = CURRENT_DATE", []
 
 
 def _safe_float(val, default=0.0) -> float:
@@ -177,9 +176,9 @@ async def algo_overview(
                 """
                 SELECT
                     COUNT(*) AS fires,
-                    COALESCE(SUM(CASE WHEN trade_opened THEN 1 ELSE 0 END), 0) AS trades
+                    COALESCE(SUM(CASE WHEN trade_opened = 1 THEN 1 ELSE 0 END), 0) AS trades
                 FROM algo_signal_log
-                WHERE DATE(logged_at) = CURRENT_DATE
+                WHERE logged_at::TIMESTAMPTZ::DATE = CURRENT_DATE
                 """
             ).fetchone()
         if row:
@@ -194,7 +193,7 @@ async def algo_overview(
     try:
         with get_conn() as c:
             row = c.execute(
-                "SELECT COUNT(*) AS cnt FROM param_tune_log WHERE DATE(tuned_at) = CURRENT_DATE"
+                "SELECT COUNT(*) AS cnt FROM param_tune_log WHERE tuned_at::TIMESTAMPTZ::DATE = CURRENT_DATE"
             ).fetchone()
         if row:
             tune_events_today = _safe_int(row["cnt"])
@@ -620,7 +619,7 @@ async def algo_params_full(
     try:
         with get_conn() as c:
             rows = c.execute(
-                "SELECT family, COUNT(*) AS cnt FROM param_tune_log WHERE DATE(tuned_at) = CURRENT_DATE GROUP BY family"
+                "SELECT family, COUNT(*) AS cnt FROM param_tune_log WHERE tuned_at::TIMESTAMPTZ::DATE = CURRENT_DATE GROUP BY family"
             ).fetchall()
         for row in rows:
             tune_count_by_family[row["family"]] = _safe_int(row["cnt"])
@@ -898,9 +897,9 @@ async def algo_signal_feed(
         where_clauses.append("ticker = %s")
         params.append(ticker.upper())
     if result == "opened":
-        where_clauses.append("trade_opened = TRUE")
+        where_clauses.append("trade_opened = 1")
     elif result == "filtered":
-        where_clauses.append("trade_opened = FALSE")
+        where_clauses.append("trade_opened = 0")
 
     where_sql = " AND ".join(where_clauses)
     offset = (max(1, page) - 1) * per_page
