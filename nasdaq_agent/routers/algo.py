@@ -654,6 +654,131 @@ async def algo_params_full(
     return result
 
 
+# ── GET /api/algo/tune-log ────────────────────────────────────────────────────
+
+@router.get("/api/algo/tune-log")
+async def algo_tune_log(
+    range:    str = Query("today"),
+    page:     int = Query(1, ge=1),
+    per_page: int = Query(50, le=200),
+    family:   str = Query(""),
+    _user: AuthenticatedUser = Depends(require_viewer),
+):
+    """Tune event log: every param change, why it happened, and post-tune outcome."""
+    try:
+        return _build_tune_log(range, page, per_page, family.strip().upper())
+    except Exception as exc:
+        logger.warning("algo/tune-log error: %s", exc)
+        return {"items": [], "total": 0}
+
+
+def _build_tune_log(range_val: str, page: int, per_page: int, family_filter: str) -> dict:
+    range_clause, _ = _range_clause("tl.tuned_at", range_val)
+    fam_clause = "AND tl.family = %s" if family_filter else ""
+    params_list: list = [family_filter] if family_filter else []
+    offset = (page - 1) * per_page
+
+    try:
+        with get_conn() as c:
+            row = c.execute(
+                f"SELECT COUNT(*) AS cnt FROM param_tune_log tl WHERE 1=1 {range_clause} {fam_clause}",
+                params_list,
+            ).fetchone()
+        total = _safe_int(row["cnt"]) if row else 0
+
+        with get_conn() as c:
+            rows = c.execute(
+                f"""
+                SELECT
+                    tl.id,
+                    tl.family,
+                    tl.param,
+                    tl.old_val,
+                    tl.new_val,
+                    tl.reason,
+                    tl.source,
+                    tl.tuned_at,
+                    tl.trigger_trade_id,
+                    tl.trigger_ms,
+                    pt.ticker       AS trigger_ticker,
+                    pt.direction    AS trigger_dir,
+                    pt.status       AS trigger_status,
+                    pt.pnl_pct      AS trigger_pnl,
+                    (SELECT COUNT(*) FROM paper_trades p2
+                     WHERE p2.algo_name = tl.family
+                       AND p2.closed_at IS NOT NULL AND p2.closed_at != ''
+                       AND p2.closed_at::TIMESTAMPTZ > tl.tuned_at
+                       AND p2.closed_at::TIMESTAMPTZ < tl.tuned_at + INTERVAL '2 hours'
+                       AND p2.status IS NOT NULL AND p2.status != ''
+                    ) AS post_total,
+                    (SELECT COUNT(*) FROM paper_trades p2
+                     WHERE p2.algo_name = tl.family
+                       AND p2.closed_at IS NOT NULL AND p2.closed_at != ''
+                       AND p2.closed_at::TIMESTAMPTZ > tl.tuned_at
+                       AND p2.closed_at::TIMESTAMPTZ < tl.tuned_at + INTERVAL '2 hours'
+                       AND p2.status = 'WIN'
+                    ) AS post_wins
+                FROM param_tune_log tl
+                LEFT JOIN paper_trades pt ON pt.id = tl.trigger_trade_id
+                WHERE 1=1 {range_clause} {fam_clause}
+                ORDER BY tl.tuned_at DESC
+                LIMIT {per_page} OFFSET {offset}
+                """,
+                params_list,
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("algo/tune-log query error: %s", exc)
+        return {"items": [], "total": 0}
+
+    items = []
+    for r in rows:
+        old_v  = _safe_float(r["old_val"])
+        new_v  = _safe_float(r["new_val"])
+        delta  = round(new_v - old_v, 4)
+        direction = "up" if delta > 0 else ("down" if delta < 0 else "same")
+
+        post_total  = _safe_int(r.get("post_total", 0))
+        post_wins   = _safe_int(r.get("post_wins", 0))
+        post_losses = post_total - post_wins
+        post_wr     = round(post_wins / post_total * 100, 1) if post_total > 0 else None
+
+        trigger_pnl = None
+        if r.get("trigger_pnl") is not None:
+            try:
+                trigger_pnl = round(float(r["trigger_pnl"]), 2)
+            except (TypeError, ValueError):
+                pass
+
+        items.append({
+            "id":               r["id"],
+            "family":           r["family"],
+            "param":            r["param"],
+            "old_val":          round(old_v, 4),
+            "new_val":          round(new_v, 4),
+            "delta":            delta,
+            "direction":        direction,
+            "reason":           r["reason"] or "",
+            "source":           r["source"] or "auto",
+            "tuned_at":         (
+                r["tuned_at"].isoformat()
+                if r["tuned_at"] and hasattr(r["tuned_at"], "isoformat")
+                else str(r["tuned_at"] or "")
+            ),
+            "trigger_trade_id": r.get("trigger_trade_id"),
+            "trigger_ms":       r.get("trigger_ms"),
+            "trigger_ticker":   r.get("trigger_ticker"),
+            "trigger_dir":      r.get("trigger_dir"),
+            "trigger_status":   r.get("trigger_status"),
+            "trigger_pnl":      trigger_pnl,
+            "post_total":       post_total,
+            "post_wins":        post_wins,
+            "post_losses":      post_losses,
+            "post_win_rate":    post_wr,
+        })
+
+    return {"items": items, "total": total}
+
+
 # ── POST /api/algo/params/set ─────────────────────────────────────────────────
 
 @router.post("/api/algo/params/set")

@@ -235,6 +235,29 @@
     <div id="ml-body" style="overflow-x:auto"><div class="loading">Loading…</div></div>
     <div class="pagination" id="ml-pagination"></div>
   </div>
+
+  <!-- Panel 10: Tune Event Log -->
+  <div class="panel" style="margin-bottom:14px">
+    <div class="panel-hdr">
+      <div class="panel-title">⚙ Tune Event Log
+        <span id="tune-log-count" style="font-size:10px;color:var(--muted);font-weight:400;margin-left:8px"></span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="tune-family-filter" onchange="loadTuneLog(1)"
+          style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:3px 6px;border-radius:4px;font-size:11px">
+          <option value="">All Families</option>
+          <option>ORB</option><option>GAP_TREND</option><option>GAP_FADE</option>
+          <option>AH_GAP_FADE</option><option>BREAKOUT</option><option>FLAG</option>
+          <option>VWAP_SCALP</option><option>LEVEL_SCALP</option><option>RS_REGIME</option>
+          <option>OFI</option><option>VWAP_OFI</option><option>EMA_PULL</option>
+          <option>VWAP_TREND</option><option>DONCHIAN</option><option>ORB_ZV</option>
+        </select>
+        <button class="hdr-btn" onclick="loadTuneLog(1)">↺ Refresh</button>
+      </div>
+    </div>
+    <div id="tune-log-body" style="overflow-x:auto"><div class="loading">Loading…</div></div>
+    <div class="pagination" id="tune-log-pagination"></div>
+  </div>
 </main>
 
 <script>
@@ -245,6 +268,7 @@ let _attrTab  = 'algo';
 let _timelinePage = 1;
 let _signalPage   = 1;
 let _mlPage       = 1;
+let _tunePage     = 1;
 let _refreshTimer = null;
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -319,6 +343,7 @@ function loadAll() {
   loadFilter();
   loadSignalFeed(_signalPage);
   loadML(_mlPage);
+  loadTuneLog(_tunePage);
 }
 
 function onRangeChange() {
@@ -329,6 +354,7 @@ function onRangeChange() {
   loadAttribution();
   loadSignalFeed(1);
   loadML(1);
+  loadTuneLog(1);
 }
 
 // ── Panel 1: Overview ─────────────────────────────────────────────────────────
@@ -771,6 +797,132 @@ async function loadML(page) {
   html += '</tbody></table>';
   el.innerHTML = html;
   buildPagination('ml', data.total, _mlPage, 50, loadML);
+}
+
+// ── Panel 10: Tune Event Log ──────────────────────────────────────────────────
+const _PARAM_LABELS = {
+  stop_mult:          'Stop Mult',
+  target_mult:        'Target Mult',
+  rvol_gate:          'rVol Gate',
+  conf_gate:          'Conf Gate',
+  entry_window_bars:  'Entry Window',
+};
+// Whether increasing this param is "beneficial" (green ↑) or "tighter" (still green but different context)
+const _PARAM_UP_GOOD = {
+  stop_mult:         true,   // larger stop = less whipsawed
+  target_mult:       true,   // larger target = more profit
+  rvol_gate:         true,   // higher rVol gate = more selective
+  conf_gate:         true,   // higher conf gate = more selective
+  entry_window_bars: false,  // larger window = more permissive (neutral)
+};
+
+async function loadTuneLog(page) {
+  _tunePage = page || 1;
+  const el = document.getElementById('tune-log-body');
+  const fam = (document.getElementById('tune-family-filter') || {}).value || '';
+  const url = `/api/algo/tune-log?range=${_range}&page=${_tunePage}&per_page=50${fam ? '&family='+encodeURIComponent(fam) : ''}`;
+  const data = await _apiFetch(url);
+  if (!data) { el.innerHTML = '<div class="error-msg">Failed to load tune log</div>'; return; }
+
+  const items = data.items || [];
+  const total = data.total || 0;
+  document.getElementById('tune-log-count').textContent = total ? `${total} event${total!==1?'s':''} in range` : '';
+
+  if (!items.length) {
+    el.innerHTML = '<div class="loading">No tune events in this range — algo params are stable.</div>';
+    buildPagination('tune-log', 0, _tunePage, 50, loadTuneLog);
+    return;
+  }
+
+  let html = `<table>
+    <thead><tr>
+      <th>Time</th>
+      <th>Algo</th>
+      <th>Parameter</th>
+      <th>Change</th>
+      <th>Reason</th>
+      <th>Trigger Trade</th>
+      <th>Latency</th>
+      <th>Post-Tune (2h)</th>
+    </tr></thead><tbody>`;
+
+  for (const e of items) {
+    const tm = e.tuned_at ? new Date(e.tuned_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+    const pLabel = _PARAM_LABELS[e.param] || e.param;
+    const upGood = _PARAM_UP_GOOD[e.param] !== false;
+
+    // Direction arrow + colour
+    const arrowUp   = `<span style="color:var(--${upGood?'green':'yellow'})">↑</span>`;
+    const arrowDown = `<span style="color:var(--${upGood?'red':'yellow'})">↓</span>`;
+    const arrow     = e.direction === 'up' ? arrowUp : (e.direction === 'down' ? arrowDown : '→');
+    const deltaStr  = (e.delta > 0 ? '+' : '') + e.delta.toFixed(4);
+    const deltaCol  = e.direction === 'up' ? (upGood ? 'var(--green)' : 'var(--yellow)')
+                    : e.direction === 'down' ? (upGood ? 'var(--red)' : 'var(--yellow)')
+                    : 'var(--muted)';
+    const changeCell = `<td>
+      <span style="color:var(--muted)">${e.old_val.toFixed(4)}</span>
+      ${arrow}
+      <span style="color:var(--text);font-weight:600">${e.new_val.toFixed(4)}</span>
+      <span style="font-size:9px;color:${deltaCol};margin-left:4px">(${deltaStr})</span>
+    </td>`;
+
+    // Reason pill
+    const reasonColor = e.reason.includes('STOP_TOO_TIGHT') ? 'var(--red)'
+      : e.reason.includes('WRONG_DIR') || e.reason.includes('WRONG_DIRECTION') ? 'var(--red)'
+      : e.reason.includes('WIN') || e.reason.includes('rate') ? 'var(--green)'
+      : 'var(--yellow)';
+    const reasonCell = `<td><span style="font-size:10px;color:${reasonColor};white-space:nowrap">${esc(e.reason)}</span></td>`;
+
+    // Trigger trade
+    let triggerCell = '<td style="color:var(--muted)">—</td>';
+    if (e.trigger_ticker) {
+      const tStatus = e.trigger_status || '';
+      const tCol = tStatus === 'WIN' ? 'var(--green)' : tStatus === 'LOSS' ? 'var(--red)' : 'var(--muted)';
+      const pnlStr = e.trigger_pnl != null ? ` ${e.trigger_pnl >= 0 ? '+' : ''}${e.trigger_pnl.toFixed(2)}%` : '';
+      triggerCell = `<td style="font-size:10px">
+        <span style="font-weight:600">${esc(e.trigger_ticker)}</span>
+        <span style="color:${e.trigger_dir==='BUY'?'var(--green)':'var(--red)'}">${e.trigger_dir||''}</span>
+        <span style="color:${tCol}">${tStatus}${pnlStr}</span>
+      </td>`;
+    }
+
+    // Latency
+    const latCell = e.trigger_ms != null
+      ? `<td style="font-size:10px;color:${e.trigger_ms<500?'var(--green)':'var(--yellow)'}">${e.trigger_ms}ms</td>`
+      : '<td style="color:var(--muted)">—</td>';
+
+    // Post-tune outcome
+    let postCell = '<td style="color:var(--muted);font-size:10px">No trades yet</td>';
+    if (e.post_total > 0) {
+      const wrCol = e.post_win_rate >= 55 ? 'var(--green)' : e.post_win_rate >= 40 ? 'var(--yellow)' : 'var(--red)';
+      postCell = `<td style="font-size:10px">
+        <span style="color:var(--green)">${e.post_wins}W</span>
+        <span style="color:var(--muted)"> / </span>
+        <span style="color:var(--red)">${e.post_losses}L</span>
+        <span style="color:${wrCol};margin-left:4px;font-weight:600">${e.post_win_rate}%</span>
+      </td>`;
+    }
+
+    const srcBadge = e.source === 'manual'
+      ? `<span style="font-size:9px;background:var(--accent);color:#fff;padding:1px 4px;border-radius:3px;margin-left:4px">manual</span>`
+      : e.source === 'feedback'
+      ? `<span style="font-size:9px;background:#6b46c1;color:#fff;padding:1px 4px;border-radius:3px;margin-left:4px">feedback</span>`
+      : '';
+
+    html += `<tr>
+      <td style="font-size:10px;color:var(--muted);white-space:nowrap">${tm}</td>
+      <td style="font-weight:600;font-size:11px">${esc(e.family)}${srcBadge}</td>
+      <td style="font-size:11px;color:var(--accent)">${pLabel}</td>
+      ${changeCell}
+      ${reasonCell}
+      ${triggerCell}
+      ${latCell}
+      ${postCell}
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+  buildPagination('tune-log', total, _tunePage, 50, loadTuneLog);
 }
 
 // ── Pagination helper ─────────────────────────────────────────────────────────
