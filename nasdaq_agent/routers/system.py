@@ -9,7 +9,9 @@ System / infrastructure routes:
   GET  /admin.html
 """
 
+import json
 import os
+import time
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse, FileResponse
@@ -57,11 +59,99 @@ async def health():
     }
 
 
+def _container_health(valkey_connected: bool) -> dict:
+    """
+    Derive container liveness from uniform service heartbeats.
+
+    Each container writes service:{name}:heartbeat to PostgreSQL + Valkey every
+    30 s with a 120 s TTL, so key expiry == container down.
+
+    web-api is always "up" because this process is answering the request.
+    """
+    now = time.time()
+    result: dict = {
+        "web-api": {"up": True, "last_seen_ago_s": 0.0, "detail": "serving this response"},
+    }
+
+    def _pg_age(key: str) -> float | None:
+        try:
+            from agent.service_state import get_age_s as _ss_age
+            return _ss_age(key)
+        except Exception:
+            return None
+
+    def _vk_age(key: str) -> float | None:
+        if not valkey_connected:
+            return None
+        try:
+            from agent.valkey_client import _get_client as _vk_c
+            client = _vk_c()
+            if not client:
+                return None
+            raw = client.get(key)
+            if not raw:
+                return None
+            data = json.loads(raw)
+            ts = float(data.get("ts") or 0.0)
+            return max(0.0, now - ts) if ts else None
+        except Exception:
+            return None
+
+    def _age_for(key: str) -> float | None:
+        age = _pg_age(key)
+        return age if age is not None else _vk_age(key)
+
+    def _entry(age: float | None, ttl_s: int, missing_detail: str, label: str) -> dict:
+        if age is None:
+            return {"up": False, "last_seen_ago_s": None, "detail": missing_detail}
+        rounded = round(age, 1)
+        return {
+            "up": rounded < ttl_s,
+            "last_seen_ago_s": rounded,
+            "detail": f"{label} {rounded}s ago",
+        }
+
+    def _legacy_key(key: str, ttl_s: int, label: str) -> dict:
+        return _entry(_age_for(key), ttl_s, f"no {key} state", label)
+
+    def _heartbeat(service_name: str, ttl_s: int = 120, fallback: dict | None = None) -> dict:
+        age = _age_for(f"service:{service_name}:heartbeat")
+        if age is not None:
+            return _entry(age, ttl_s, f"no service:{service_name}:heartbeat state", "heartbeat")
+        if fallback is not None:
+            return fallback
+        return {"up": False, "last_seen_ago_s": None, "detail": f"no service:{service_name}:heartbeat state"}
+
+    result["market-data"] = _heartbeat(
+        "market-data", 120,
+        fallback=_legacy_key("scanner:streamer", 90, "streamer status"),
+    )
+    result["scanner"] = _heartbeat(
+        "scanner", 120,
+        fallback=_legacy_key("scan:latest", 660, "last scan"),
+    )
+    result["learner"] = _heartbeat(
+        "learner", 180,
+        fallback=_legacy_key("learner:status", 300, "learner status"),
+    )
+    result["scheduler"] = _heartbeat(
+        "scheduler", 120,
+        fallback=_legacy_key("scheduler:heartbeat", 120, "scheduler heartbeat"),
+    )
+    result["context-intel"] = _heartbeat(
+        "context-intel", 120,
+        fallback=_legacy_key("ctx:intel:heartbeat", 120, "context heartbeat"),
+    )
+    result["watchdog"] = _heartbeat("watchdog", 120)
+    return result
+
+
 @router.get("/api/services")
 async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     """
     Aggregate health of all infrastructure services for the dashboard panel.
-    Returns connectivity status for: Scanner, MD Poller, Valkey, RDS (PostgreSQL).
+    Returns connectivity status for: Scanner, MD Poller, Valkey, RDS (PostgreSQL),
+    and per-container liveness via service heartbeats.
     """
     from agent.valkey_client import health_status as vk_health
     from agent.broker.schwab_streamer import get_streamer_status
@@ -69,8 +159,29 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     from routers._deps import manager
     from agent.scanner import scanner
 
-    streamer = get_streamer_status()
     vk = vk_health()
+    streamer = get_streamer_status()
+
+    # When market-data runs in its own container, read streamer/poller status
+    # from service_state (PostgreSQL first, Valkey fallback).
+    if not streamer.get("ws_streamer", {}).get("running"):
+        try:
+            from agent.service_state import get_state as _ss_get
+            _sd = _ss_get("scanner:streamer")
+            if _sd:
+                streamer = _sd
+        except Exception:
+            pass
+        if not streamer.get("ws_streamer", {}).get("running") and vk.get("connected"):
+            try:
+                from agent.valkey_client import _get_client as _vk_c
+                _vc = _vk_c()
+                if _vc:
+                    raw = _vc.get("scanner:streamer")
+                    if raw:
+                        streamer = json.loads(raw)
+            except Exception:
+                pass
 
     # RDS check — lightweight: just try to get a connection from the pool
     rds_ok = False
@@ -90,8 +201,8 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     except Exception as _re:
         rds_error = str(_re)
 
-    ws_st  = streamer.get("ws_streamer", {})
-    md_st  = streamer.get("md_poller", {})
+    ws_st = streamer.get("ws_streamer", {})
+    md_st = streamer.get("md_poller", {})
     sigs, last_scan, from_cache = _current_signal_snapshot()
 
     return {
@@ -121,6 +232,7 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
             "connected": rds_ok,
             "error":     rds_error,
         },
+        "containers": _container_health(bool(vk.get("connected"))),
     }
 
 
