@@ -176,3 +176,57 @@ def cache_stats() -> dict:
 def older_window_end_dates(weeks_back: int = 16, step_weeks: int = 8) -> list[str]:
     """Stub — Schwab does not support end_date on /pricehistory."""
     return []
+
+
+def fill_history_gaps(
+    tickers:   list[str],
+    interval:  str  = "1min",
+    min_bars:  int  = 200,
+    outputsize: int = 3900,
+) -> dict[str, int]:
+    """
+    Fetch and store bars for every ticker that has fewer than min_bars rows
+    in ohlcv_bars.  Runs in batches of 50 so the Schwab background rate
+    (1 req/s) stays well inside the 120 req/min hard cap.
+
+    Returns {ticker: bars_stored} for every ticker that was refreshed.
+    Call this at startup and once per day after market close to ensure all
+    tickers in the training universe have enough history for ML training.
+    """
+    from agent.data_fetcher import fetch_batch_interval
+
+    needing: list[str] = []
+    for t in tickers:
+        df = get_bars(t, interval, min_bars=min_bars)
+        if df is None or len(df) < min_bars:
+            needing.append(t)
+
+    if not needing:
+        logger.info(
+            "[HistCache] fill_history_gaps(%s): all %d tickers already have ≥%d bars",
+            interval, len(tickers), min_bars,
+        )
+        return {}
+
+    logger.info(
+        "[HistCache] fill_history_gaps(%s): %d/%d tickers need data — fetching in batches…",
+        interval, len(needing), len(tickers),
+    )
+
+    _BATCH = 50   # safe for 1 req/s background throttle with 120s async timeout
+    stored: dict[str, int] = {}
+    for i in range(0, len(needing), _BATCH):
+        batch = needing[i : i + _BATCH]
+        # ttl=0 forces a fresh Schwab fetch (bypasses stale cache).
+        # extended_hours=False ensures bars are written to ohlcv_bars.
+        fetched = fetch_batch_interval(
+            batch, interval, outputsize, ttl=0, background=True, extended_hours=False
+        )
+        for t, df in fetched.items():
+            stored[t] = len(df)
+
+    logger.info(
+        "[HistCache] fill_history_gaps(%s): refreshed %d tickers",
+        interval, len(stored),
+    )
+    return stored

@@ -1027,6 +1027,37 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).info(
             "Schwab disabled (SCHWAB_ENABLED not set) — running on Twelve Data only."
         )
+
+    # ── Background bar-history accumulator ────────────────────────────────────
+    # Fills ohlcv_bars for any ticker that has fewer than 200 bars so the ML
+    # retrain always finds training data in PostgreSQL instead of calling the
+    # Schwab REST API cold.  Runs once at startup (after a warm-up delay so the
+    # scanner and streamer initialise first) then repeats every 24 hours.
+    def _bar_accumulator_loop() -> None:
+        import time as _t
+        from agent.historical_cache import fill_history_gaps
+        from config import TRAINING_TICKERS
+
+        _log = logging.getLogger(__name__)
+        _log.info("[BarAccumulator] Starting — will fill 1-min/15-min/daily gaps for %d tickers", len(TRAINING_TICKERS))
+
+        # Wait for scanner + streamer to warm up before consuming rate budget
+        _t.sleep(120)
+
+        while True:
+            try:
+                _log.info("[BarAccumulator] Running fill_history_gaps for all intervals…")
+                for _iv, _out, _min in [("1min", 3900, 200), ("15min", 5000, 200), ("1day", 500, 100)]:
+                    fill_history_gaps(TRAINING_TICKERS, interval=_iv, min_bars=_min, outputsize=_out)
+            except Exception as _e:
+                _log.warning("[BarAccumulator] error: %s", _e)
+            # Re-run once per day (86400 s).  This keeps non-streamed tickers fresh
+            # even on days when no manual retrain is triggered.
+            _t.sleep(86400)
+
+    import threading as _threading
+    _threading.Thread(target=_bar_accumulator_loop, daemon=True, name="BarAccumulator").start()
+
     yield
     scanner.stop()
     learning_engine.stop()

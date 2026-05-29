@@ -57,6 +57,13 @@ import queue as _q
 _bar_close_queue: _q.Queue = _q.Queue(maxsize=20000)
 _bar_close_callbacks: list = []
 
+# ── CHART_EQUITY → PostgreSQL persistence queue ───────────────────────────────
+# Non-blocking: WebSocket handler puts completed bars here; a daemon worker
+# drains and batch-writes them to ohlcv_bars.  Sized for a full trading day
+# of 1-min bars for 300 tickers (300 × 390 = 117,000) with headroom.
+_bar_persist_queue: _q.Queue = _q.Queue(maxsize=200_000)
+_bar_persist_worker_started: bool = False
+
 # ── WebSocket streamer lifecycle ───────────────────────────────────────────────
 _streamer_thread:  Optional[threading.Thread] = None   # WS streamer thread
 _event_loop:       Optional[asyncio.AbstractEventLoop] = None
@@ -304,6 +311,74 @@ def _process_chart_equity(content: list) -> None:
                 fn(sym, candle)
             except Exception:
                 pass
+        # Enqueue for async PostgreSQL persistence (non-blocking)
+        try:
+            _bar_persist_queue.put_nowait((sym, candle))
+        except _q.Full:
+            pass
+
+
+def _bar_persist_worker() -> None:
+    """
+    Daemon thread: drain _bar_persist_queue → batch-write to ohlcv_bars.
+
+    Collects bars for up to 2 seconds (or up to 500 at once) before
+    flushing, so a burst of 300 simultaneous minute-closes is written
+    in one executemany rather than 300 individual inserts.
+    """
+    import pandas as pd
+    from agent.historical_cache import _upsert_bars
+
+    buf: list[tuple[str, dict]] = []
+    while True:
+        # Block for up to 2 s waiting for the first item, then drain quickly
+        try:
+            item = _bar_persist_queue.get(timeout=2.0)
+            buf.append(item)
+        except _q.Empty:
+            pass
+
+        while buf and len(buf) < 500:
+            try:
+                buf.append(_bar_persist_queue.get_nowait())
+            except _q.Empty:
+                break
+
+        if not buf:
+            continue
+
+        # Group candles by ticker so we do one DataFrame per ticker
+        by_ticker: dict[str, list] = {}
+        for sym, candle in buf:
+            by_ticker.setdefault(sym, []).append(candle)
+        buf.clear()
+
+        for sym, candles in by_ticker.items():
+            try:
+                df = pd.DataFrame(candles)
+                # candle keys: open, high, low, close, volume, time_ms
+                if "time_ms" not in df.columns:
+                    continue
+                df.index = pd.to_datetime(df["time_ms"], unit="ms", utc=True)
+                df = df.drop(columns=["time_ms"], errors="ignore")
+                df = df.rename(columns={
+                    "open": "Open", "high": "High", "low": "Low",
+                    "close": "Close", "volume": "Volume",
+                })
+                _upsert_bars(sym, "1min", df)
+            except Exception:
+                pass
+
+
+def _ensure_bar_persist_worker() -> None:
+    """Start the bar-persist daemon thread once (idempotent)."""
+    global _bar_persist_worker_started
+    if _bar_persist_worker_started:
+        return
+    _bar_persist_worker_started = True
+    t = threading.Thread(target=_bar_persist_worker, daemon=True, name="BarPersist")
+    t.start()
+    logger.info("[Streamer] CHART_EQUITY persistence worker started → ohlcv_bars")
 
     # Publish candles to Valkey so the scanner container can read them
     # even when market-data runs in a separate container.
@@ -979,6 +1054,7 @@ def start_streamer(tickers: list[str]) -> None:
         return
 
     _subscribed_tickers = list(tickers)
+    _ensure_bar_persist_worker()
 
     def _run():
         global _event_loop
