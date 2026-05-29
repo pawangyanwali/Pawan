@@ -42,9 +42,8 @@ STRONG_SELL_THRESHOLD = -0.60
 
 from agent.ticker_universe import TIER1, TIER2, TIER3, FULL_UNIVERSE  # noqa: E402
 
-# ML training uses Tier 1 only — 100 liquid NASDAQ-100 tickers.
-# Avoids fetching history for all 477 tickers during retrain (~10 min → ~2 min).
-TRAINING_TICKERS: list[str] = list(TIER1)
+# ML training uses the full 477-ticker universe so all tiers get per-ticker models.
+TRAINING_TICKERS: list[str] = list(FULL_UNIVERSE)
 
 # Cluster A = Tier 1 (NASDAQ-100 core, always scanned)
 CLUSTER_A_TICKERS: list[str] = list(TIER1)
