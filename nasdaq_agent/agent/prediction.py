@@ -721,6 +721,7 @@ def generate_prediction(
     ensemble_prob:       float = 0.5,
     ensemble_agreement:  float = 0.0,
     df_daily:            "pd.DataFrame | None" = None,
+    eps_surprise_pct:    float = 0.0,
 ) -> dict:
     """
     Generate a complete, actionable scalping prediction for ``ticker``.
@@ -790,6 +791,11 @@ def generate_prediction(
     trend_signal = 1.0 if trend == "UPTREND" else (-1.0 if trend == "DOWNTREND" else 0.0)
     trend_bias   = 0.10 * trend_signal * trend_prob
 
+    # EPS surprise bias: fundamental signal, treated as a small additive nudge.
+    # Normalize ±20% surprise → ±1; weight 0.04 so a 20% beat adds ~0.04 to composite.
+    eps_score = float(np.clip(float(eps_surprise_pct) / 20.0, -1.0, 1.0))
+    eps_bias  = 0.04 * eps_score if abs(eps_score) > 0.25 else 0.0   # ignore tiny surprises
+
     mtf_score_f  = float(np.clip(float(mtf_score),  -1.0, 1.0))
     vwap_score_f = float(np.clip(float(vwap_score), -1.0, 1.0))
 
@@ -802,7 +808,8 @@ def generate_prediction(
         w_pat * pattern_score      +
         w_s   * float(sent_score)  +
         w_vw  * vwap_score_f       +
-        trend_bias
+        trend_bias                 +
+        eps_bias
     )
     composite = round(float(np.clip(composite, -1.0, 1.0)), 4)
 
@@ -971,6 +978,17 @@ def generate_prediction(
     vol_reasons  = _build_volume_reasons(last_row)
     ml_reasons   = _build_ml_reasons(float(ml_prob), ml_trained)
 
+    eps_reasons: list[str] = []
+    if abs(eps_bias) > 0.0:
+        if eps_surprise_pct > 0:
+            eps_reasons.append(
+                f"EPS beat +{eps_surprise_pct:.1f}% vs estimate — fundamental tailwind baked into composite"
+            )
+        else:
+            eps_reasons.append(
+                f"EPS miss {eps_surprise_pct:.1f}% vs estimate — fundamental headwind baked into composite"
+            )
+
     # R:R quality reason — always shown so trader knows if setup is worth taking
     if rr_qualifies:
         rr_reason = f"R:R {rr_ratio:.1f}:1 ({rr_quality}) — risk/reward qualifies ≥ {_MIN_RR}:1 threshold"
@@ -994,6 +1012,7 @@ def generate_prediction(
         bounce["bounce_signals"]       +   # bounce signals
         [rr_reason]                    +   # R:R quality always visible
         momentum_reasons               +   # momentum confirmation
+        eps_reasons                    +   # EPS surprise fundamental signal
         trend_reasons + pa_reasons + pattern_reasons + tech_reasons + vol_reasons + ml_reasons
     )
 

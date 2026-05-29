@@ -3032,7 +3032,7 @@ function renderTable() {
             : `<span style="font-size:10px;color:var(--muted)">—</span>`
         }
         ${s.earnings_phase === 'blackout' || s.earnings_phase === 'cooldown'
-          ? `<span class="earnings-badge" title="${s.earnings_reason}">⚠ ERN ${s.earnings_days_away}d</span>`
+          ? `<span class="earnings-badge" title="${s.earnings_reason}${s.earnings_hour ? ' [' + s.earnings_hour.toUpperCase() + ']' : ''}${s.eps_surprise_pct ? ' EPS ' + (s.eps_surprise_pct > 0 ? '+' : '') + parseFloat(s.eps_surprise_pct).toFixed(1) + '%' : ''}">⚠ ERN ${s.earnings_days_away}d${s.earnings_hour ? ' ' + s.earnings_hour.toUpperCase() : ''}</span>`
           : s.earnings_phase === 'caution'
             ? `<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700;background:rgba(245,158,11,.15);color:#f59e0b;border:1px solid #f59e0b" title="${s.earnings_reason}">📅 ERN ${s.earnings_days_away}d</span>`
             : ''}
@@ -3345,9 +3345,18 @@ function openDetail(ticker) {
     ewEl.style.display = '';
     const ico = s.earnings_blocked ? '⛔' : '⚠';
     const clr = s.earnings_blocked ? '#ef4444' : '#fbbf24';
+    const hourLabel = s.earnings_hour === 'bmo' ? 'Before Market Open'
+                    : s.earnings_hour === 'amc' ? 'After Market Close'
+                    : s.earnings_hour === 'dmh' ? 'During Market Hours'
+                    : '';
+    const epsVal = parseFloat(s.eps_surprise_pct || 0);
+    const epsColor = epsVal > 5 ? 'var(--green)' : epsVal < -5 ? 'var(--red)' : 'var(--muted)';
+    const epsLabel = epsVal !== 0 ? `EPS ${epsVal > 0 ? '+' : ''}${epsVal.toFixed(1)}%` : '';
     ewEl.innerHTML = `<div class="earnings-warn" style="border-color:${clr}">
       <span style="color:${clr};font-weight:700">${ico} ${s.earnings_reason || 'Earnings event nearby'}</span>
       ${s.earnings_date ? `<span style="color:var(--muted);margin-left:8px">Next: ${s.earnings_date} (${s.earnings_days_away}d)</span>` : ''}
+      ${hourLabel ? `<span style="display:inline-block;margin-left:8px;padding:1px 6px;border-radius:3px;font-size:9px;background:rgba(148,163,184,.15);color:var(--muted)">${hourLabel}</span>` : ''}
+      ${epsLabel ? `<span style="display:inline-block;margin-left:6px;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700;color:${epsColor}">${epsLabel} surprise</span>` : ''}
     </div>`;
   } else {
     ewEl.style.display = 'none';

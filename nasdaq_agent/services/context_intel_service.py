@@ -318,12 +318,18 @@ def _run_feature_compute() -> None:
     tickers = list(dict.fromkeys(TIER1 + event_tickers))   # TIER1 first, then others, deduped
 
     updated = 0
+    _mkt_sentiments: list[float] = []   # for market-wide aggregate
+    _mkt_shocks: list[bool] = []
     for ticker in tickers:
         if _runner.stopped:
             break
         try:
             features = compute_features_for_ticker(ticker)
             upsert_features(features)
+
+            # Accumulate for market-wide sentiment
+            _mkt_sentiments.append(float(features.get("sentiment_30m", 0.0)))
+            _mkt_shocks.append(bool(features.get("news_shock", False)))
 
             # Build earnings fields for the Valkey payload
             earnings_phase     = ""
@@ -368,6 +374,29 @@ def _run_feature_compute() -> None:
             updated += 1
         except Exception as exc:
             _log.debug("[feature_compute] %s error: %s", ticker, exc)
+
+    # ── Publish market-wide sentiment aggregate to ctx:market ─────────────────
+    if _mkt_sentiments:
+        try:
+            import json
+            from agent.valkey_client import _get_client
+            import time as _time
+            _mkt_sent  = round(sum(_mkt_sentiments) / len(_mkt_sentiments), 4)
+            _mkt_shock = any(_mkt_shocks)
+            _c = _get_client()
+            if _c:
+                _c.setex(
+                    "ctx:market",
+                    600,
+                    json.dumps({
+                        "market_sentiment": _mkt_sent,
+                        "market_shock":     _mkt_shock,
+                        "ticker_count":     len(_mkt_sentiments),
+                        "asof_ts":          _time.time(),
+                    }, separators=(",", ":")),
+                )
+        except Exception as _me:
+            _log.debug("[feature_compute] ctx:market publish error: %s", _me)
 
     if updated:
         _log.debug("[feature_compute] Updated %d tickers", updated)

@@ -781,6 +781,7 @@ def analyse_ticker(
             ensemble_prob=ml_ensemble_p,
             ensemble_agreement=ml_agree,
             df_daily=df_1d,
+            eps_surprise_pct=_eps_surp,
         )
 
         # Blend ORB signal into composite score (15% weight when OR is established)
@@ -1001,33 +1002,6 @@ def analyse_ticker(
                         "⚠ AMC earnings closing window (15:45–16:00 ET) — confidence reduced")
             except Exception:
                 pass
-
-        # ── EPS surprise adjustment ───────────────────────────────────────────
-        # Post-earnings fundamental signal: large beat boosts LONG conviction;
-        # large miss boosts SHORT conviction.  |surprise| < 5% → no adjustment.
-        if _eps_surp != 0.0 and pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
-            _is_long = pred["direction"] in ("BUY", "STRONG BUY")
-            if _eps_surp > 10.0:
-                _eps_adj = +3.0 if _is_long else -3.0
-                pred["reasons"].append(
-                    f"EPS beat +{_eps_surp:.1f}% — fundamental tailwind for longs")
-            elif _eps_surp > 5.0:
-                _eps_adj = +1.5 if _is_long else -1.5
-                pred["reasons"].append(
-                    f"EPS beat +{_eps_surp:.1f}% — modest fundamental support")
-            elif _eps_surp < -10.0:
-                _eps_adj = -3.0 if _is_long else +3.0
-                pred["reasons"].append(
-                    f"EPS miss {_eps_surp:.1f}% — fundamental headwind for longs")
-            elif _eps_surp < -5.0:
-                _eps_adj = -1.5 if _is_long else +1.5
-                pred["reasons"].append(
-                    f"EPS miss {_eps_surp:.1f}% — modest fundamental drag")
-            else:
-                _eps_adj = 0.0
-            if _eps_adj != 0.0:
-                pred["confidence"] = round(float(
-                    min(max(pred["confidence"] + _eps_adj, 25.0), 95.0)), 1)
 
         # ── Market-wide sentiment gate ────────────────────────────────────────
         # Penalty: bearish market hurts LONG signals; bullish market hurts SHORTs.
