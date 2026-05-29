@@ -191,8 +191,13 @@ _FUTURES_FIELDS = {
 }
 
 _CHART_FIELDS = {
-    "1": "open", "2": "high", "3": "low", "4": "close",
-    "5": "volume", "7": "time_ms",
+    # Schwab CHART_EQUITY field mapping (empirically verified):
+    #   "1" = sequence / chart-day counter — NOT the open price, omit it
+    #   "2" = open, "3" = high, "4" = low, "5" = close, "7" = epoch-ms timestamp
+    # Share volume is not reliably present in the streaming CHART_EQUITY response;
+    # BarAccumulator fills ohlcv_bars with correct volume via REST API daily.
+    "2": "open", "3": "high", "4": "low", "5": "close",
+    "7": "time_ms",
 }
 
 
@@ -650,7 +655,7 @@ async def _streamer_main(tickers: list[str]) -> None:
                     chart_msg = {"requests": [_req(
                         "CHART_EQUITY", cmd, 200 + i, {
                             "keys":   ",".join(batch),
-                            "fields": "0,1,2,3,4,5,7",
+                            "fields": "0,2,3,4,5,7",
                         }, customer_id, correl_id,
                     )]}
                     await ws.send(json.dumps(chart_msg))
