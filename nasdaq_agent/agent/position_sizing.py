@@ -59,15 +59,24 @@ def calculate(
         ps.description = "Invalid entry or stop price."
         return ps
 
-    # Confidence-based multiplier
-    if confidence >= 75:
-        conf_mult = 1.25
-    elif confidence >= 60:
-        conf_mult = 1.0
-    elif confidence < 50:
-        conf_mult = 0.5
+    # Confidence-based multiplier — thresholds and multipliers are configurable
+    from agent.config_manager import config as _cfg_sz
+    _conf_high_thr  = float(_cfg_sz.get("sizing.conf_high_threshold",  75.0))
+    _conf_high_mult = float(_cfg_sz.get("sizing.conf_high_mult",       1.25))
+    _conf_med_thr   = float(_cfg_sz.get("sizing.conf_medium_threshold", 60.0))
+    _conf_med_mult  = float(_cfg_sz.get("sizing.conf_medium_mult",      1.0))
+    _conf_low_thr   = float(_cfg_sz.get("sizing.conf_low_threshold",    50.0))
+    _conf_low_mult  = float(_cfg_sz.get("sizing.conf_low_mult",         0.5))
+    _conf_def_mult  = float(_cfg_sz.get("sizing.conf_default_mult",     0.75))
+
+    if confidence >= _conf_high_thr:
+        conf_mult = _conf_high_mult
+    elif confidence >= _conf_med_thr:
+        conf_mult = _conf_med_mult
+    elif confidence < _conf_low_thr:
+        conf_mult = _conf_low_mult
     else:
-        conf_mult = 0.75
+        conf_mult = _conf_def_mult
 
     dollar_risk    = account_size * (risk_pct / 100) * conf_mult
     shares         = math.floor(dollar_risk / risk_per_share)

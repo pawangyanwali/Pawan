@@ -33,6 +33,23 @@ _DEFAULTS: dict[str, Any] = {
     "paper.max_allocated_pct":             lambda: float(os.getenv("PAPER_MAX_ALLOCATED_PCT", "40.0")),
     "paper.max_open_trades":               lambda: int(os.getenv("PAPER_MAX_OPEN_TRADES", "10")),
     "paper.min_confidence":                lambda: float(os.getenv("PAPER_TRADE_MIN_CONFIDENCE", "25.0")),
+    # Extended-hours gates
+    "paper.ext_hours_high_min_conf":       lambda: 70.0,   # min confidence for HIGH-tier in PM/AH
+    "paper.ext_hours_moderate_min_conf":   lambda: 60.0,   # min confidence for MODERATE-tier in PM/AH
+    "paper.pre_market_stop_mult":          lambda: 1.5,    # widen stops 1.5× in pre-market
+    "paper.after_hours_stop_mult":         lambda: 2.0,    # widen stops 2× in after-hours
+    # Position sizing
+    "paper.rr_size_mult_min":              lambda: 0.20,   # minimum size multiplier from R:R calculation
+    "paper.rr_denominator":                lambda: 2.0,    # divisor in rr_ratio / N → size_mult
+    "paper.breakeven_stop_offset":         lambda: 0.02,   # $ offset above entry for T1 breakeven stop
+    # EOD management
+    "paper.eod_trail_stop_pct":            lambda: 0.003,  # 0.3% trailing stop for EOD winners
+    "paper.eod_recovery_stop_pct":         lambda: 0.002,  # 0.2% recovery stop for EOD losers with momentum
+    "paper.eod_strong_winner_pct":         lambda: 0.5,    # P&L% threshold for "strong winner" EOD path
+    "paper.eod_small_winner_pct":          lambda: 0.1,    # P&L% threshold for "small winner" EOD path
+    "paper.eod_loss_threshold_pct":        lambda: -0.3,   # P&L% below which position is a "meaningful loss"
+    # Adaptive filter feedback
+    "paper.filter_feedback_min_trades":    lambda: 5,      # min closed trades before feeding back to filter
     # ── Trading / account sizing ───────────────────────────────────────────────
     # Seeded from env on first deploy; live-editable via /api/config thereafter.
     "trading.account_size":                lambda: float(os.getenv("TRADING_ACCOUNT_SIZE", "50000")),
@@ -57,6 +74,13 @@ _DEFAULTS: dict[str, Any] = {
     "risk.max_consecutive_losses":         lambda: int(os.getenv("MAX_CONSECUTIVE_LOSSES", "5")),
     "risk.cooldown_after_losses":          lambda: int(os.getenv("COOLDOWN_LOSSES", "3")),
     "risk.max_daily_trades":               lambda: int(os.getenv("MAX_DAILY_TRADES", "30")),
+    "risk.max_per_sector":                 lambda: 2,      # max concurrent positions in same sector
+    "risk.volatility_halt_size_mult":      lambda: 0.50,   # size reduction when ATR volatility is elevated
+    # Extended-hours position size caps by tier
+    "risk.pre_market_high_size_mult":      lambda: 0.40,   # 40% full size for HIGH tier in pre-market
+    "risk.pre_market_moderate_size_mult":  lambda: 0.25,   # 25% full size for MODERATE tier in pre-market
+    "risk.after_hours_high_size_mult":     lambda: 0.50,   # 50% full size for HIGH tier in after-hours
+    "risk.after_hours_moderate_size_mult": lambda: 0.30,   # 30% full size for MODERATE tier in after-hours
     # ── Profit Protect Mode ────────────────────────────────────────────────────
     "risk.profit_protect_min_conf":        lambda: float(os.getenv("PROFIT_PROTECT_CONF", "80.0")),
     "risk.profit_protect_size_mult":       lambda: float(os.getenv("PROFIT_PROTECT_SIZE", "0.60")),
@@ -65,6 +89,14 @@ _DEFAULTS: dict[str, Any] = {
     "risk.volatility_halt_atr_mult":       lambda: float(os.getenv("VOLATILITY_HALT_ATR_MULT", "2.5")),
     "risk.drawdown_throttle_1_pct":        lambda: float(os.getenv("DRAWDOWN_THROTTLE_1_PCT", "0.5")),
     "risk.drawdown_throttle_2_pct":        lambda: float(os.getenv("DRAWDOWN_THROTTLE_2_PCT", "1.0")),
+    # ── Position sizing — confidence multipliers ───────────────────────────────
+    "sizing.conf_high_threshold":          lambda: 75.0,   # confidence ≥ this → high multiplier
+    "sizing.conf_high_mult":               lambda: 1.25,   # size multiplier when confidence is high
+    "sizing.conf_medium_threshold":        lambda: 60.0,   # confidence ≥ this → medium multiplier
+    "sizing.conf_medium_mult":             lambda: 1.0,    # size multiplier when confidence is medium
+    "sizing.conf_low_threshold":           lambda: 50.0,   # confidence < this → low multiplier
+    "sizing.conf_low_mult":                lambda: 0.5,    # size multiplier when confidence is low
+    "sizing.conf_default_mult":            lambda: 0.75,   # size multiplier between low and medium thresholds
     # ── Learner ────────────────────────────────────────────────────────────────
     "learner.deep_enabled":                lambda: os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes"),
     "learner.deep_interval_s":             lambda: max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600"))),

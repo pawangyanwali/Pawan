@@ -408,19 +408,23 @@ def maybe_open_trade(
         except Exception:
             pass
 
-    # Confidence floors for PRE_MARKET / AFTER_HOURS: HIGH tier → 70.0%, MODERATE → 60.0%.
-    # Hoisted here so both session names and the floor values appear early for static analysis.
-    _EXT_CONF_FLOOR: dict[str, float] = {"HIGH": 70.0, "MODERATE": 60.0}
+    # Confidence floors for PRE_MARKET / AFTER_HOURS by tier — read from config.
+    from agent.config_manager import config as _cfg_pt
+    _EXT_CONF_FLOOR: dict[str, float] = {
+        "HIGH":     float(_cfg_pt.get("paper.ext_hours_high_min_conf",     70.0)),
+        "MODERATE": float(_cfg_pt.get("paper.ext_hours_moderate_min_conf", 60.0)),
+    }
 
     if _live_session == "CLOSED":
         logger.debug(f"[PAPER] {ticker} skip: market CLOSED — no trades on weekends/overnight")
         return None
 
     # Extended-hours stop widening: wider stop = smaller shares, less capital at risk
-    # on thin ECN spreads (1.5× in pre-market, 2× in after-hours).
+    # on thin ECN spreads (configurable, default 1.5× pre-market, 2× after-hours).
+    from agent.config_manager import config as _cfg_pt
     _stop_mult = (
-        2.0 if _live_session == "AFTER_HOURS" else
-        1.5 if _live_session == "PRE_MARKET"  else
+        float(_cfg_pt.get("paper.after_hours_stop_mult", 2.0)) if _live_session == "AFTER_HOURS" else
+        float(_cfg_pt.get("paper.pre_market_stop_mult",  1.5)) if _live_session == "PRE_MARKET"  else
         1.0
     )
     if _stop_mult != 1.0:
@@ -445,10 +449,13 @@ def maybe_open_trade(
             )
             return None
 
-    rr_mult = round(min(1.0, max(0.20, rr_ratio / 2.0)), 2) if rr_ratio > 0 else 0.20
+    from agent.config_manager import config as _cfg_pt
+    _rr_mult_min  = float(_cfg_pt.get("paper.rr_size_mult_min", 0.20))
+    _rr_denom     = float(_cfg_pt.get("paper.rr_denominator",   2.0))
+    rr_mult = round(min(1.0, max(_rr_mult_min, rr_ratio / _rr_denom)), 2) if rr_ratio > 0 else _rr_mult_min
     effective_size_mult = round(size_mult * rr_mult, 2)
     if effective_size_mult <= 0:
-        effective_size_mult = 0.20   # minimum 20% rather than skipping entirely
+        effective_size_mult = _rr_mult_min
 
     # ── Risk-based position sizing ─────────────────────────────────────────
     from agent.position_sizing import calculate as _calc_pos
@@ -662,12 +669,18 @@ def update_open_trades(ticker: str, df, current_price: float,
                 # ── 1.5. Smart EOD pre-close during CLOSING_CAUTION (3:30–3:44) ─
                 elif is_closing_caution():
                     momentum_ok = _eod_momentum_favors(df, direction)
-                    if pnl_pct_now >= 0.5:
+                    from agent.config_manager import config as _cfg_eod
+                    _eod_strong  = float(_cfg_eod.get("paper.eod_strong_winner_pct",  0.5))
+                    _eod_small   = float(_cfg_eod.get("paper.eod_small_winner_pct",   0.1))
+                    _eod_loss    = float(_cfg_eod.get("paper.eod_loss_threshold_pct", -0.3))
+                    _eod_trail   = float(_cfg_eod.get("paper.eod_trail_stop_pct",     0.003))
+                    _eod_recov   = float(_cfg_eod.get("paper.eod_recovery_stop_pct",  0.002))
+                    if pnl_pct_now >= _eod_strong:
                         if momentum_ok:
                             # Strong winner, momentum still in our favor — trail stop
                             tight_stop = (
-                                round(ep * (1 - 0.003), 4) if direction == "BUY"
-                                else round(ep * (1 + 0.003), 4)
+                                round(ep * (1 - _eod_trail), 4) if direction == "BUY"
+                                else round(ep * (1 + _eod_trail), 4)
                             )
                             improves = (
                                 (direction == "BUY"  and tight_stop > stop_current) or
@@ -686,11 +699,11 @@ def update_open_trades(ticker: str, df, current_price: float,
                             # Momentum reversing — lock the gain now
                             exit_reason  = "EOD_LOCK_PROFIT_REVERSAL"
                             close_shares = shares_rem
-                    elif pnl_pct_now >= 0.1:
+                    elif pnl_pct_now >= _eod_small:
                         # Small winner — take it, not worth the risk so close to EOD
                         exit_reason  = "EOD_LOCK_PROFIT"
                         close_shares = shares_rem
-                    elif pnl_pct_now >= -0.3:
+                    elif pnl_pct_now >= _eod_loss:
                         # Breakeven zone — exit
                         exit_reason  = "EOD_BREAKEVEN_EXIT"
                         close_shares = shares_rem
@@ -699,8 +712,8 @@ def update_open_trades(ticker: str, df, current_price: float,
                         if momentum_ok:
                             # Still moving in our direction — tighten stop, hope for recovery
                             tight_stop = (
-                                round(ep * (1 - 0.002), 4) if direction == "BUY"
-                                else round(ep * (1 + 0.002), 4)
+                                round(ep * (1 - _eod_recov), 4) if direction == "BUY"
+                                else round(ep * (1 + _eod_recov), 4)
                             )
                             improves = (
                                 (direction == "BUY"  and tight_stop > stop_current) or
@@ -738,7 +751,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                         new_partial_pnl = partial_pnl + t1_pnl
                         new_shares_rem  = shares_rem - partial_shares
                         # Breakeven stop: above entry for BUY, below for SELL (locks in ~breakeven)
-                        be_stop = round(entry + 0.02, 4) if direction == "BUY" else round(entry - 0.02, 4)
+                        from agent.config_manager import config as _cfg_be
+                        _be_offset = float(_cfg_be.get("paper.breakeven_stop_offset", 0.02))
+                        be_stop = round(entry + _be_offset, 4) if direction == "BUY" else round(entry - _be_offset, 4)
                         c.execute("""
                             UPDATE paper_trades
                             SET t1_hit=1, breakeven_set=1, stop=?,
@@ -1017,13 +1032,19 @@ def _apply_eod_action(
       pnl < -0.3% + momentum BAD → exit immediately (cut the loss)
     """
     acted = False
+    from agent.config_manager import config as _cfg_eod2
+    _eod_strong = float(_cfg_eod2.get("paper.eod_strong_winner_pct",  0.5))
+    _eod_small  = float(_cfg_eod2.get("paper.eod_small_winner_pct",   0.1))
+    _eod_loss   = float(_cfg_eod2.get("paper.eod_loss_threshold_pct", -0.3))
+    _eod_trail  = float(_cfg_eod2.get("paper.eod_trail_stop_pct",     0.003))
+    _eod_recov  = float(_cfg_eod2.get("paper.eod_recovery_stop_pct",  0.002))
 
-    if pnl_pct >= 0.5:
+    if pnl_pct >= _eod_strong:
         if momentum_ok:
             # Strong winner with momentum — trail stop to lock in most of the gain
             tight_stop = (
-                round(ep * (1 - 0.003), 4) if direction == "BUY"
-                else round(ep * (1 + 0.003), 4)
+                round(ep * (1 - _eod_trail), 4) if direction == "BUY"
+                else round(ep * (1 + _eod_trail), 4)
             )
             improves = (
                 (direction == "BUY"  and tight_stop > stop_curr) or
@@ -1046,7 +1067,7 @@ def _apply_eod_action(
             )
             acted = True
 
-    elif pnl_pct >= 0.1:
+    elif pnl_pct >= _eod_small:
         # Small winner — lock it in regardless of momentum (not worth overnight risk)
         _record_close(c, row_id, ep, "EOD_LOCK_PROFIT",
                       entry, direction, shares_rem, partial, shares_tot, ticker=ticker)
@@ -1055,7 +1076,7 @@ def _apply_eod_action(
         )
         acted = True
 
-    elif pnl_pct >= -0.3:
+    elif pnl_pct >= _eod_loss:
         # Breakeven zone — exit, no edge left this close to market end
         _record_close(c, row_id, ep, "EOD_BREAKEVEN_EXIT",
                       entry, direction, shares_rem, partial, shares_tot, ticker=ticker)
@@ -1069,8 +1090,8 @@ def _apply_eod_action(
         if momentum_ok:
             # Price still moving in our favor — tighten stop very close and hope for recovery
             tight_stop = (
-                round(ep * (1 - 0.002), 4) if direction == "BUY"
-                else round(ep * (1 + 0.002), 4)
+                round(ep * (1 - _eod_recov), 4) if direction == "BUY"
+                else round(ep * (1 + _eod_recov), 4)
             )
             improves = (
                 (direction == "BUY"  and tight_stop > stop_curr) or
@@ -1180,8 +1201,10 @@ def smart_eod_review() -> int:
 def _trigger_paper_feedback() -> None:
     try:
         from agent.adaptive_filter import update_from_paper_trades
+        from agent.config_manager import config as _cfg
         stats = _build_paper_stats()
-        if stats["overall"]["total"] >= 5:
+        _min_trades = int(_cfg.get("paper.filter_feedback_min_trades", 5))
+        if stats["overall"]["total"] >= _min_trades:
             update_from_paper_trades(stats)
     except Exception as e:
         logger.debug(f"[PAPER] Filter feedback skipped: {e}")
@@ -1378,7 +1401,9 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
                         t1_pnl      = ((t1 - entry) if d == "BUY" else (entry - t1)) * partial_sh
                         new_partial = partial + t1_pnl
                         new_rem     = shares_r - partial_sh
-                        be_stop     = round(entry + 0.02, 4) if d == "BUY" else round(entry - 0.02, 4)
+                        from agent.config_manager import config as _cfg_be2
+                        _be_off2    = float(_cfg_be2.get("paper.breakeven_stop_offset", 0.02))
+                        be_stop     = round(entry + _be_off2, 4) if d == "BUY" else round(entry - _be_off2, 4)
                         c.execute("""
                             UPDATE paper_trades
                             SET t1_hit=1, breakeven_set=1, stop=?,

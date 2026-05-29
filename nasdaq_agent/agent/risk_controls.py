@@ -363,8 +363,6 @@ def get_portfolio_heat() -> dict:
         return {"heat_pct": 0.0, "blocked": False, "open_count": 0}
 
 
-_PAPER_MAX_CONCURRENT = 20   # paper trading cap — high so all signals get outcomes
-
 def check_portfolio_heat() -> tuple[bool, str]:
     """Returns (blocked, reason). Blocks when combined open risk >= 1.5%."""
     heat = get_portfolio_heat()
@@ -375,9 +373,10 @@ def check_portfolio_heat() -> tuple[bool, str]:
         )
         return True, reason
     open_count = heat.get("open_count", 0)
-    if open_count >= _PAPER_MAX_CONCURRENT:
+    _paper_max = int(_rcfg().get("paper.max_open_trades", 20))
+    if open_count >= _paper_max:
         reason = (
-            f"Max concurrent trades reached ({open_count}/{_PAPER_MAX_CONCURRENT}). "
+            f"Max concurrent trades reached ({open_count}/{_paper_max}). "
             "Wait for an existing trade to close."
         )
         return True, reason
@@ -404,10 +403,11 @@ def check_sector_concentration(ticker: str, direction: str) -> tuple[bool, str]:
             if get_sector(t.get("ticker", "")) == sector
             and t.get("direction", "") == direction
         )
-        if sector_count >= 2:
+        _max_sector = int(_rcfg().get("risk.max_per_sector", 2))
+        if sector_count >= _max_sector:
             reason = (
                 f"Sector concentration: {sector_count} open {direction} positions "
-                f"in {sector} sector (max 2). Skipping {ticker}."
+                f"in {sector} sector (max {_max_sector}). Skipping {ticker}."
             )
             logger.debug(f"[RiskControls] {reason}")
             return True, reason
@@ -433,18 +433,19 @@ def check_session_block(trading_tier: str = "REGULAR") -> tuple[bool, str, float
     from agent.market_hours import get_session, get_block_reason, no_new_entries
     session = get_session()
 
+    _cfg = _rcfg()
     if session == "AFTER_HOURS":
         if trading_tier == "HIGH":
-            return False, "", 0.50
+            return False, "", float(_cfg.get("risk.after_hours_high_size_mult",     0.50))
         if trading_tier == "MODERATE":
-            return False, "", 0.30
+            return False, "", float(_cfg.get("risk.after_hours_moderate_size_mult", 0.30))
         return True, "After-hours — REGULAR-tier: thin ECN spreads, no edge outside regular hours.", 0.0
 
     if session == "PRE_MARKET":
         if trading_tier == "HIGH":
-            return False, "", 0.40
+            return False, "", float(_cfg.get("risk.pre_market_high_size_mult",     0.40))
         if trading_tier == "MODERATE":
-            return False, "", 0.25
+            return False, "", float(_cfg.get("risk.pre_market_moderate_size_mult", 0.25))
         return True, "Pre-market — REGULAR-tier: insufficient pre-market liquidity.", 0.0
 
     if no_new_entries():
@@ -622,7 +623,8 @@ def can_open_trade(
     # 7. Volatility throttle (2.3) — reduce size during ATR spikes, don't block
     vhalt, _ = check_volatility_halt()
     if vhalt:
-        final_size = round(final_size * 0.50, 2)
+        _vol_mult = float(_rcfg().get("risk.volatility_halt_size_mult", 0.50))
+        final_size = round(final_size * _vol_mult, 2)
 
     # 8. Drawdown throttle (2.6) — progressive size reduction on losing days
     dthrottle = get_drawdown_throttle()
