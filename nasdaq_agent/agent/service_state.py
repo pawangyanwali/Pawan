@@ -123,7 +123,7 @@ def set_state(key: str, value: dict[str, Any], ttl_s: Optional[int] = None) -> b
             conn.execute(sql, (key, json.dumps(value, default=str)))
         return True
     except Exception as exc:
-        logger.debug("[service_state] set_state(%s) error: %s", key, exc)
+        logger.warning("[service_state] set_state(%s) error: %s", key, exc)
         return False
 
 

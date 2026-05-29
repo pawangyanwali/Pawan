@@ -59,8 +59,10 @@ def write_latest(
     try:
         from agent.service_state import set_state
         pg_ok = set_state(_PG_KEY, snapshot, ttl_s=None)
+        if not pg_ok:
+            logger.warning("[signal_snapshot] PostgreSQL write returned False for scan:latest")
     except Exception as exc:
-        logger.debug("[signal_snapshot] PostgreSQL write error: %s", exc)
+        logger.warning("[signal_snapshot] PostgreSQL write error for scan:latest: %s", exc)
 
     # ── 2. Valkey — fast cache + pub/sub trigger ──────────────────────────────
     try:

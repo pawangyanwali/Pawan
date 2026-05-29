@@ -107,6 +107,23 @@ def main() -> int:
             )
             scan_ts = None
 
+    # When PG key was stale (prev-deploy remnant), also try Valkey in case the
+    # scanner has already written a fresh cycle there but the PG write failed.
+    # This prevents the healthcheck from perpetually seeing "absent" if the
+    # set_state() call is silently failing while Valkey writes succeed.
+    if scan_ts is None:
+        try:
+            raw = client.get("scan:latest")
+            if raw:
+                d = json.loads(raw)
+                vk_ts = float(d.get("ts") or 0) or None
+                if vk_ts and (_proc_start is None or vk_ts >= _proc_start):
+                    scan_ts = vk_ts
+                    print(f"INFO: scan:latest from Valkey fallback ts={vk_ts:.0f} "
+                          f"age={time.time()-vk_ts:.0f}s (PG key was stale/absent)")
+        except Exception as _vk_exc:
+            print(f"WARN: Valkey fallback lookup error: {_vk_exc}")
+
     # scan_ts being None is acceptable during start_period (cold start).
     # We only hard-fail on stale data during active market sessions (tier 3).
 
