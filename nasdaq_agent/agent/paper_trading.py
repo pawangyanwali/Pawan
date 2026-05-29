@@ -243,6 +243,10 @@ def init_db() -> None:
                    "paper_trades_exit_price_check", "paper_trades_pnl_pct_check",
                    "paper_trades_pnl_dollar_check", "paper_trades_rr_ratio_check",
                ]]
+            + [f"ALTER TABLE algo_signal_log ADD COLUMN IF NOT EXISTS {col} {defn}"
+               for col, defn in _ALGO_SIGNAL_LOG_ADDITIONS]
+            + [f"ALTER TABLE param_tune_log ADD COLUMN IF NOT EXISTS {col} {defn}"
+               for col, defn in _PARAM_TUNE_LOG_ADDITIONS]
         )
         _run_ddl_autocommit(_ddl)
         # Ensure account_config default row (DML — can run in normal transaction)
@@ -311,6 +315,28 @@ _COLUMN_ADDITIONS = [
     ("size_mult",          "REAL DEFAULT 1.0"),
     ("cost_basis",         "REAL DEFAULT 0"),   # entry_price × shares (allocated capital)
     ("algo_name",          "TEXT DEFAULT ''"),  # algo that triggered the trade ('' = ML)
+    # ML model scores (added for Algo Intel dashboard)
+    ("ml_scalp_prob",          "DOUBLE PRECISION"),
+    ("ml_daily_prob",          "DOUBLE PRECISION"),
+    ("ml_swing_prob",          "DOUBLE PRECISION"),
+    ("ml_deep_prob",           "DOUBLE PRECISION"),
+    ("ml_ensemble_score",      "INTEGER"),
+    ("feedback_triggered_at",  "TEXT"),
+]
+
+# Additional columns for algo_signal_log (applied separately)
+_ALGO_SIGNAL_LOG_ADDITIONS = [
+    ("ml_scalp_prob",  "DOUBLE PRECISION"),
+    ("ml_daily_prob",  "DOUBLE PRECISION"),
+    ("ml_swing_prob",  "DOUBLE PRECISION"),
+    ("ml_deep_prob",   "DOUBLE PRECISION"),
+    ("filter_reason",  "TEXT"),
+]
+
+# Additional columns for param_tune_log (applied separately)
+_PARAM_TUNE_LOG_ADDITIONS = [
+    ("trigger_trade_id", "INTEGER"),
+    ("trigger_ms",       "INTEGER"),
 ]
 
 
@@ -888,6 +914,29 @@ def _record_close(
     )
     if ticker:
         _fire_trade_event("close", ticker)
+    # Publish immediate trade-close event for algo feedback loop
+    try:
+        import json as _json, time as _time
+        from agent.valkey_client import _get_client as _vk_c
+        _vc = _vk_c()
+        if _vc:
+            _row_extra = c.execute(
+                "SELECT algo_name, session, regime FROM paper_trades WHERE id=?",
+                (trade_id,),
+            ).fetchone()
+            _vc.publish("trade:closed", _json.dumps({
+                "trade_id":   trade_id,
+                "ticker":     ticker,
+                "algo":       (_row_extra["algo_name"] if _row_extra else "") or "",
+                "direction":  direction,
+                "pnl_pct":    round(pnl_pct, 4),
+                "exit_reason": exit_reason,
+                "session":    (_row_extra["session"]  if _row_extra else "") or "",
+                "regime":     (_row_extra["regime"]   if _row_extra else "") or "",
+                "ts":         _time.time(),
+            }))
+    except Exception:
+        pass
 
 
 def close_all_positions_eod(reason: str = "EOD_HARD_CLOSE_3:45PM", extended_hours: bool = False) -> int:

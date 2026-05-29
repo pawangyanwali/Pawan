@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Algorithm Intelligence Center</title>
+  <script>
+    (function() {
+      var at = sessionStorage.getItem('access_token');
+      var rt = localStorage.getItem('refresh_token');
+      if (!at && !rt) { window.location.replace('/login?next=/algo'); return; }
+      if (!at && rt) {
+        document.documentElement.style.visibility = 'hidden';
+        fetch('/auth/refresh', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({refresh_token:rt})
+        }).then(function(r){ if(!r.ok) throw new Error('fail'); return r.json(); })
+          .then(function(d){ sessionStorage.setItem('access_token',d.access_token); document.documentElement.style.visibility=''; })
+          .catch(function(){ localStorage.removeItem('refresh_token'); window.location.replace('/login?next=/algo'); });
+      }
+    })();
+  </script>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#0d0f14; --surface:#151820; --surface2:#1a1d27; --border:#252a35;
+      --text:#e2e8f0; --muted:#64748b; --green:#22c55e; --red:#ef4444;
+      --yellow:#f59e0b; --blue:#3b82f6; --purple:#a855f7; --accent:#6366f1;
+      --green-s:#00ff88; --red-s:#ff3366;
+    }
+    body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',monospace;font-size:13px;min-height:100vh}
+    header{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+    .logo{font-size:15px;font-weight:700;color:var(--green-s)}
+    .hdr-right{display:flex;align-items:center;gap:10px}
+    .role-badge{font-size:10px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);color:var(--muted)}
+    .role-ADMIN{color:#f97316;border-color:#f97316}
+    .role-TRADER{color:var(--blue);border-color:var(--blue)}
+    .role-ANALYST{color:var(--purple);border-color:var(--purple)}
+    .hdr-btn{background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:4px 12px;cursor:pointer;font-family:inherit;font-size:11px}
+    .hdr-btn:hover{color:var(--text);border-color:var(--accent)}
+    select.range-sel{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 8px;font-family:inherit;font-size:11px;cursor:pointer}
+    main{padding:16px;max-width:1600px;margin:0 auto}
+    h2{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:12px}
+    .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+    .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px}
+    .grid-kpi{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px}
+    .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px}
+    .panel-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+    .panel-title{font-size:12px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px}
+    .kpi-card{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}
+    .kpi-val{font-size:22px;font-weight:700;color:var(--green-s)}
+    .kpi-lbl{font-size:10px;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:.5px}
+    table{width:100%;border-collapse:collapse}
+    th{padding:7px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:1px solid var(--border);cursor:pointer}
+    th:hover{color:var(--text)}
+    td{padding:7px 10px;font-size:11px;border-bottom:1px solid var(--border)}
+    tr:hover td{background:rgba(255,255,255,.02)}
+    .badge{font-size:9px;padding:2px 7px;border-radius:4px;font-weight:700;letter-spacing:.3px}
+    .badge-ACTIVE{background:rgba(34,197,94,.12);color:var(--green);border:1px solid rgba(34,197,94,.3)}
+    .badge-TUNED{background:rgba(163,85,247,.12);color:var(--purple);border:1px solid rgba(163,85,247,.3)}
+    .badge-UNDERPERFORMING{background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+    .badge-PAUSED{background:rgba(100,116,139,.12);color:var(--muted);border:1px solid var(--border)}
+    .badge-IDLE{background:rgba(100,116,139,.08);color:var(--muted);border:1px solid var(--border)}
+    .badge-WIN{background:rgba(34,197,94,.12);color:var(--green);border:1px solid rgba(34,197,94,.3)}
+    .badge-LOSS{background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+    .pos{color:var(--green)}.neg{color:var(--red)}
+    .win-bar-track{height:5px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:4px}
+    .win-bar-fill{height:100%;border-radius:3px;background:var(--green);transition:width .3s}
+    .pagination{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:11px;color:var(--muted)}
+    .page-btn{background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:11px}
+    .page-btn:hover{color:var(--text);border-color:var(--accent)}
+    .page-btn:disabled{opacity:.4;cursor:not-allowed}
+    .pulse{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse-anim 1.2s ease-in-out infinite}
+    @keyframes pulse-anim{0%,100%{opacity:1}50%{opacity:.3}}
+    .tab-bar{display:flex;gap:4px;margin-bottom:12px}
+    .tab-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:4px 12px;cursor:pointer;font-family:inherit;font-size:11px}
+    .tab-btn.active{background:var(--accent);border-color:var(--accent);color:white}
+    .heatmap-table td{transition:background .2s;cursor:default}
+    .filter-row{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+    .filter-input{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 10px;font-family:inherit;font-size:11px;outline:none;width:120px}
+    .filter-input:focus{border-color:var(--accent)}
+    .inline-edit{background:var(--surface2);border:1px solid var(--accent);color:var(--text);border-radius:3px;padding:2px 6px;font-family:inherit;font-size:11px;width:70px}
+    .bar-chart{display:flex;flex-direction:column;gap:4px}
+    .bar-row{display:flex;align-items:center;gap:8px;font-size:11px}
+    .bar-label{width:120px;text-align:right;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px}
+    .bar-track{flex:1;height:14px;background:var(--border);border-radius:3px;overflow:hidden;position:relative}
+    .bar-fill{height:100%;border-radius:3px;background:var(--accent);transition:width .4s}
+    .bar-val{font-size:10px;color:var(--muted);min-width:40px}
+    .model-bars{display:flex;gap:4px;align-items:center}
+    .model-bar-w{text-align:center;font-size:9px}
+    .model-bar-track{width:20px;height:50px;background:var(--border);border-radius:3px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;margin:0 auto}
+    .model-bar-fill{border-radius:3px;width:100%;background:var(--accent);transition:height .3s}
+    .param-changed{font-weight:700;color:var(--yellow)}
+    .param-up::after{content:'↑';color:var(--green);margin-left:3px;font-size:10px}
+    .param-down::after{content:'↓';color:var(--red);margin-left:3px;font-size:10px}
+    .timeline-trade{border-left:2px solid var(--accent);padding:6px 10px;margin-bottom:4px}
+    .timeline-learn{border-left:2px solid var(--purple);padding:4px 10px 4px 20px;margin-bottom:2px;font-size:11px;color:var(--purple)}
+    .export-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px}
+    .export-btn:hover{border-color:var(--accent);color:var(--text)}
+    [data-role]{display:none}
+    .loading{color:var(--muted);font-size:11px;padding:20px;text-align:center}
+    .error-msg{color:var(--red);font-size:11px;padding:10px}
+    .gate-bar-track{height:8px;background:var(--border);border-radius:4px;margin:6px 0;position:relative}
+    .gate-bar-fill{height:100%;border-radius:4px;background:var(--accent);position:absolute;top:0;left:0;transition:width .4s}
+    .gate-marker{position:absolute;top:-3px;width:2px;height:14px;background:var(--yellow);border-radius:1px}
+    @media(max-width:900px){.grid-2,.grid-3,.grid-kpi{grid-template-columns:1fr}}
+    @media print{header{display:none}.hdr-btn,.export-btn,.pagination,.tab-bar{display:none}body{background:white;color:black}.panel{border:1px solid #ccc}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="logo">⚡ Algorithm Intelligence Center</div>
+  <div class="hdr-right">
+    <select class="range-sel" id="range-sel" onchange="onRangeChange()">
+      <option value="today">Today</option>
+      <option value="24h">Last 24h</option>
+      <option value="7d">Last 7 days</option>
+      <option value="30d">Last 30 days</option>
+    </select>
+    <span class="role-badge" id="role-badge">—</span>
+    <button class="export-btn" data-role="analyst" onclick="exportCSV('trades')">⬇ Trades CSV</button>
+    <button class="export-btn" data-role="analyst" onclick="exportCSV('signals')">⬇ Signals CSV</button>
+    <button class="export-btn" data-role="analyst" onclick="window.print()">🖨 PDF</button>
+    <button class="hdr-btn" onclick="window.close()">✕ Close</button>
+  </div>
+</header>
+
+<main>
+  <!-- Panel 1: KPI Strip -->
+  <div id="panel-overview" class="panel" style="margin-bottom:14px">
+    <div class="panel-hdr">
+      <div class="panel-title">Live Algorithm Overview
+        <div class="pulse" id="pulse-dot" style="display:none"></div>
+      </div>
+      <span style="font-size:10px;color:var(--muted)" id="overview-updated"></span>
+    </div>
+    <div class="grid-kpi" id="kpi-strip">
+      <div class="kpi-card"><div class="kpi-val" id="kpi-fires">—</div><div class="kpi-lbl">Signals Today</div></div>
+      <div class="kpi-card"><div class="kpi-val" id="kpi-trades">—</div><div class="kpi-lbl">Trades Today</div></div>
+      <div class="kpi-card"><div class="kpi-val" id="kpi-fire-rate">—</div><div class="kpi-lbl">Fire→Trade Rate</div></div>
+      <div class="kpi-card"><div class="kpi-val" id="kpi-tunes">—</div><div class="kpi-lbl">Tune Events</div></div>
+      <div class="kpi-card"><div class="kpi-val" id="kpi-gate">—</div><div class="kpi-lbl">Confidence Gate</div></div>
+      <div class="kpi-card"><div class="kpi-val" id="kpi-cycle">—</div><div class="kpi-lbl">Last Cycle</div></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Panel 2: Leaderboard -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <div class="panel-title">Algo Leaderboard</div>
+      </div>
+      <div id="leaderboard-body"><div class="loading">Loading…</div></div>
+    </div>
+
+    <!-- Panel 3: Trade→Learning Timeline -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <div class="panel-title">
+          Trade Feedback Loop — Live
+          <div class="pulse" id="feedback-dot" style="display:none"></div>
+        </div>
+      </div>
+      <div id="timeline-body"><div class="loading">Loading…</div></div>
+      <div class="pagination" id="timeline-pagination"></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Panel 4: Loss Heatmap -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <div class="panel-title">Loss Root Cause Heatmap</div>
+      </div>
+      <div id="heatmap-body" style="overflow-x:auto"><div class="loading">Loading…</div></div>
+    </div>
+
+    <!-- Panel 5: Parameter State -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <div class="panel-title">Algorithm Parameter State</div>
+        <button class="hdr-btn" data-role="admin" onclick="loadParams(true)">↺ Refresh</button>
+      </div>
+      <div id="params-body"><div class="loading">Loading…</div></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Panel 6: Trade Attribution -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <div class="panel-title">Trade Attribution</div>
+      </div>
+      <div class="tab-bar" id="attribution-tabs">
+        <button class="tab-btn active" onclick="setAttrTab('algo')">By Algo</button>
+        <button class="tab-btn" onclick="setAttrTab('entry_type')">By Entry Type</button>
+        <button class="tab-btn" onclick="setAttrTab('session')">By Session</button>
+        <button class="tab-btn" onclick="setAttrTab('regime')">By Regime</button>
+      </div>
+      <div id="attribution-body"><div class="loading">Loading…</div></div>
+    </div>
+
+    <!-- Panel 7: Adaptive Filter -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <div class="panel-title">Adaptive Filter State</div>
+      </div>
+      <div id="filter-body"><div class="loading">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- Panel 8: Live Signal Feed -->
+  <div class="panel" style="margin-bottom:14px">
+    <div class="panel-hdr">
+      <div class="panel-title">Live Signal Feed</div>
+    </div>
+    <div class="filter-row">
+      <input class="filter-input" id="feed-algo" placeholder="Filter: Algo" oninput="loadSignalFeed(1)">
+      <input class="filter-input" id="feed-ticker" placeholder="Filter: Ticker" oninput="loadSignalFeed(1)">
+      <select class="range-sel" id="feed-result" onchange="loadSignalFeed(1)">
+        <option value="">All</option>
+        <option value="opened">Trade Opened</option>
+        <option value="filtered">Filtered</option>
+      </select>
+    </div>
+    <div id="signal-feed-body" style="overflow-x:auto"><div class="loading">Loading…</div></div>
+    <div class="pagination" id="signal-pagination"></div>
+  </div>
+
+  <!-- Panel 9: ML Model Influence -->
+  <div class="panel" style="margin-bottom:14px">
+    <div class="panel-hdr">
+      <div class="panel-title">ML Model Influence</div>
+    </div>
+    <div id="ml-body" style="overflow-x:auto"><div class="loading">Loading…</div></div>
+    <div class="pagination" id="ml-pagination"></div>
+  </div>
+</main>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let _userRole = 'VIEWER';
+let _range    = 'today';
+let _attrTab  = 'algo';
+let _timelinePage = 1;
+let _signalPage   = 1;
+let _mlPage       = 1;
+let _refreshTimer = null;
+
+// ── Auth helpers ──────────────────────────────────────────────────────────────
+function _token() { return sessionStorage.getItem('access_token') || ''; }
+function _authHdr(extra) {
+  const t = _token();
+  return Object.assign({'Authorization': t ? 'Bearer ' + t : ''}, extra||{});
+}
+
+async function _apiFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = _authHdr(opts.headers);
+  let res = await fetch(url, opts);
+  if (res.status === 401) {
+    const rt = localStorage.getItem('refresh_token');
+    if (rt) {
+      const rr = await fetch('/auth/refresh', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({refresh_token:rt})
+      });
+      if (rr.ok) {
+        const rd = await rr.json();
+        sessionStorage.setItem('access_token', rd.access_token);
+        opts.headers = _authHdr(opts.headers);
+        res = await fetch(url, opts);
+      } else {
+        window.location.replace('/login?next=/algo');
+        return null;
+      }
+    } else {
+      window.location.replace('/login?next=/algo');
+      return null;
+    }
+  }
+  if (!res.ok) { console.warn(url, res.status); return null; }
+  return res.json();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  // Auth check + role
+  try {
+    const me = await _apiFetch('/auth/me');
+    if (!me) return;
+    _userRole = me.role || 'VIEWER';
+    const badge = document.getElementById('role-badge');
+    badge.textContent = _userRole;
+    badge.className = 'role-badge role-' + _userRole;
+    // Show role-gated elements
+    const rank = {ADMIN:4,TRADER:3,ANALYST:2,VIEWER:1};
+    const roleMap = {admin:4,trader:3,analyst:2,viewer:1};
+    document.querySelectorAll('[data-role]').forEach(el => {
+      const minRole = el.dataset.role;
+      if ((rank[_userRole]||1) >= (roleMap[minRole]||99)) el.style.display='';
+    });
+  } catch(e) { console.warn('auth check failed', e); }
+
+  // Load all panels
+  loadAll();
+  // Auto-refresh every 10s
+  _refreshTimer = setInterval(loadAll, 10000);
+}
+
+function loadAll() {
+  _range = document.getElementById('range-sel').value;
+  loadOverview();
+  loadLeaderboard();
+  loadTimeline(1);
+  loadHeatmap();
+  loadParams(false);
+  loadAttribution();
+  loadFilter();
+  loadSignalFeed(_signalPage);
+  loadML(_mlPage);
+}
+
+function onRangeChange() {
+  _range = document.getElementById('range-sel').value;
+  loadLeaderboard();
+  loadTimeline(1);
+  loadHeatmap();
+  loadAttribution();
+  loadSignalFeed(1);
+  loadML(1);
+}
+
+// ── Panel 1: Overview ─────────────────────────────────────────────────────────
+async function loadOverview() {
+  const d = await _apiFetch('/api/algo/overview');
+  if (!d) return;
+
+  document.getElementById('kpi-fires').textContent = fmtNum(d.fires_today);
+  document.getElementById('kpi-trades').textContent = fmtNum(d.trades_today);
+  document.getElementById('kpi-fire-rate').textContent = (d.fire_rate_pct||0).toFixed(1)+'%';
+  document.getElementById('kpi-tunes').textContent = fmtNum(d.tune_events_today);
+  document.getElementById('kpi-gate').textContent = (d.confidence_gate||55).toFixed(1)+'%';
+
+  const cycleEl = document.getElementById('kpi-cycle');
+  if (d.last_cycle_ago_s != null) {
+    cycleEl.textContent = fmtAgo(d.last_cycle_ago_s);
+  } else {
+    cycleEl.textContent = '—';
+  }
+
+  const pdot = document.getElementById('pulse-dot');
+  const fdot = document.getElementById('feedback-dot');
+  pdot.style.display = d.feedback_loop_active ? 'block' : 'none';
+  fdot.style.display = d.feedback_loop_active ? 'block' : 'none';
+
+  document.getElementById('overview-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+// ── Panel 2: Leaderboard ──────────────────────────────────────────────────────
+async function loadLeaderboard() {
+  const el = document.getElementById('leaderboard-body');
+  const data = await _apiFetch('/api/algo/leaderboard?range=' + _range);
+  if (!data || !data.length) { el.innerHTML = '<div class="loading">No algo data yet</div>'; return; }
+
+  let html = `<table>
+    <thead><tr>
+      <th>Algo</th><th>Family</th><th>Fires</th><th>Trades</th>
+      <th>W/L</th><th>Win%</th><th>Avg P&L</th><th>Status</th><th>Last Tune</th>
+      ${_userRole==='ADMIN'?'<th>Edit</th>':''}
+    </tr></thead><tbody>`;
+
+  for (const a of data) {
+    const wr = a.win_rate||0;
+    const pnlCls = (a.avg_pnl_pct||0) >= 0 ? 'pos' : 'neg';
+    const tune = a.last_tune ? new Date(a.last_tune).toLocaleDateString() : '—';
+    html += `<tr>
+      <td style="font-weight:600">${esc(a.algo)}</td>
+      <td style="color:var(--muted)">${esc(a.family||'?')}</td>
+      <td>${fmtNum(a.fires)}</td>
+      <td>${fmtNum(a.trades)}</td>
+      <td>${a.wins||0}/${a.losses||0}</td>
+      <td>
+        <span class="${wr>=50?'pos':'neg'}">${wr.toFixed(1)}%</span>
+        <div class="win-bar-track"><div class="win-bar-fill" style="width:${Math.min(100,wr)}%"></div></div>
+      </td>
+      <td class="${pnlCls}">${(a.avg_pnl_pct||0).toFixed(2)}%</td>
+      <td><span class="badge badge-${a.status}">${a.status}</span></td>
+      <td style="color:var(--muted);font-size:10px">${tune}</td>
+      ${_userRole==='ADMIN' ? `<td><button class="export-btn" onclick="openParamEdit('${esc(a.family)}')">Edit</button></td>` : ''}
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+// ── Panel 3: Trade→Learning Timeline ─────────────────────────────────────────
+async function loadTimeline(page) {
+  _timelinePage = page||1;
+  const el = document.getElementById('timeline-body');
+  const data = await _apiFetch(`/api/algo/trade-learning-timeline?range=${_range}&page=${_timelinePage}&per_page=20`);
+  if (!data) { el.innerHTML = '<div class="error-msg">Failed to load</div>'; return; }
+
+  if (!data.items || !data.items.length) { el.innerHTML = '<div class="loading">No trades in range</div>'; buildPagination('timeline',0,_timelinePage,20); return; }
+
+  let html = '';
+  for (const item of data.items) {
+    const t = item.trade;
+    const pnlCls = (t.pnl_pct||0) >= 0 ? 'pos' : 'neg';
+    const pnlTxt = ((t.pnl_pct||0)>=0?'+':'') + (t.pnl_pct||0).toFixed(2)+'%';
+    const outcome = (t.pnl_pct||0) >= 0 ? 'WIN' : 'LOSS';
+    const closeTime = t.closed_at ? new Date(t.closed_at).toLocaleTimeString() : '—';
+
+    html += `<div class="timeline-trade">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:10px;color:var(--muted)">${closeTime}</span>
+        <span style="font-weight:600">${esc(t.ticker||'?')}</span>
+        <span style="color:var(--muted)">${esc(t.algo_name||'—')}</span>
+        <span style="color:${t.direction==='BUY'?'var(--green)':'var(--red)'}">${t.direction||'?'}</span>
+        <span class="badge badge-${outcome}">${outcome}</span>
+        <span class="${pnlCls}">${pnlTxt}</span>
+        <span style="color:var(--muted);font-size:10px">${esc(t.exit_reason||'')}</span>
+      </div>`;
+
+    if (item.learning_events && item.learning_events.length) {
+      for (const le of item.learning_events) {
+        const dir = le.new_val > le.old_val ? '↑' : '↓';
+        const col = le.new_val > le.old_val ? 'var(--green)' : 'var(--red)';
+        html += `<div class="timeline-learn">
+          → <b>${esc(le.param)}</b>: ${le.old_val.toFixed(3)} <span style="color:${col}">${dir}</span> ${le.new_val.toFixed(3)}
+          <span style="color:var(--muted)"> (${esc(le.reason||'')}) · ${Math.round(le.latency_ms||0)}ms</span>
+        </div>`;
+      }
+    } else {
+      html += `<div class="timeline-learn" style="color:var(--muted)">→ no param changes this trade</div>`;
+    }
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+  buildPagination('timeline', data.total, _timelinePage, 20, loadTimeline);
+}
+
+// ── Panel 4: Loss Heatmap ─────────────────────────────────────────────────────
+async function loadHeatmap() {
+  const el = document.getElementById('heatmap-body');
+  const data = await _apiFetch('/api/algo/loss-heatmap?range=' + _range);
+  if (!data || !data.families) { el.innerHTML = '<div class="loading">No heatmap data</div>'; return; }
+
+  const causes = data.causes || [];
+  const families = data.families || [];
+  const matrix = data.matrix || {};
+
+  let html = `<table class="heatmap-table">
+    <thead><tr><th>Family</th>`;
+  for (const c of causes) html += `<th title="${c}" style="font-size:9px">${c.replace(/_/g,' ')}</th>`;
+  html += '</tr></thead><tbody>';
+
+  for (const fam of families) {
+    html += `<tr><td style="font-size:10px;font-weight:600;color:var(--muted)">${fam}</td>`;
+    const row = matrix[fam] || {};
+    for (const c of causes) {
+      const v = row[c] || 0;
+      const pct = Math.min(1, v);
+      const r = Math.round(239 * pct);
+      const bg = pct > 0.05 ? `rgba(${r},68,68,${Math.min(0.7, pct * 0.8 + 0.05)})` : 'transparent';
+      html += `<td style="background:${bg};text-align:center;font-size:10px" title="${fam}: ${c} = ${(v*100).toFixed(1)}%">
+        ${pct > 0.01 ? (v*100).toFixed(0)+'%' : ''}
+      </td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+// ── Panel 5: Parameter State ──────────────────────────────────────────────────
+let _paramsCache = null;
+
+async function loadParams(force) {
+  const el = document.getElementById('params-body');
+  const data = await _apiFetch('/api/algo/params-full');
+  if (!data) { el.innerHTML = '<div class="error-msg">Failed to load params</div>'; return; }
+  _paramsCache = data;
+  renderParams(data);
+}
+
+function renderParams(data) {
+  const el = document.getElementById('params-body');
+  const params = ['target_mult','stop_mult','rvol_gate','conf_gate','entry_window_bars'];
+  const defaults = {target_mult:1.5,stop_mult:1.0,rvol_gate:1.5,conf_gate:55.0,entry_window_bars:3};
+  const isAdmin = _userRole === 'ADMIN';
+
+  let html = `<div style="overflow-x:auto"><table>
+    <thead><tr><th>Family</th>`;
+  for (const p of params) html += `<th>${p.replace(/_/g,' ')}</th>`;
+  html += `<th>Tunes Today</th>${isAdmin?'<th>Reset</th>':''}</tr></thead><tbody>`;
+
+  for (const fam of data) {
+    const parMap = {};
+    for (const p of fam.params) parMap[p.param] = p;
+    html += `<tr><td style="font-weight:600;font-size:10px">${esc(fam.family)}</td>`;
+    for (const pname of params) {
+      const p = parMap[pname];
+      if (!p) { html += '<td style="color:var(--muted)">—</td>'; continue; }
+      const changed = Math.abs(p.current_val - p.default_val) > 0.001;
+      const dir = p.current_val > p.default_val ? 'up' : 'down';
+      const cls = changed ? `param-changed param-${dir}` : '';
+      if (isAdmin) {
+        html += `<td class="${cls}"><input class="inline-edit"
+          value="${p.current_val.toFixed(3)}"
+          data-family="${esc(fam.family)}" data-param="${pname}"
+          title="Default: ${p.default_val} | Prev: ${p.previous_val.toFixed(3)}"
+          onblur="saveParam(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>`;
+      } else {
+        html += `<td class="${cls}" title="Default: ${p.default_val} | Reason: ${esc(p.last_reason||'')}">${p.current_val.toFixed(3)}</td>`;
+      }
+    }
+    html += `<td style="color:${fam.tune_count>0?'var(--yellow)':'var(--muted)'}">${fam.tune_count}</td>`;
+    if (isAdmin) {
+      html += `<td><button class="export-btn" onclick="resetParams('${esc(fam.family)}')">Reset</button></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+async function saveParam(input) {
+  if (_userRole !== 'ADMIN') return;
+  const family = input.dataset.family;
+  const param  = input.dataset.param;
+  const value  = parseFloat(input.value);
+  if (isNaN(value)) { input.style.borderColor='var(--red)'; return; }
+  const result = await _apiFetch('/api/algo/params/set', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({family, param, value})
+  });
+  if (result && result.success) {
+    input.style.borderColor='var(--green)';
+    setTimeout(()=>{ input.style.borderColor=''; loadParams(true); }, 1000);
+  } else {
+    input.style.borderColor='var(--red)';
+    alert('Error: ' + (result&&result.error||'unknown'));
+  }
+}
+
+async function resetParams(family) {
+  if (_userRole !== 'ADMIN') return;
+  if (!confirm(`Reset all params for ${family} to defaults?`)) return;
+  const result = await _apiFetch('/api/algo/params/reset/'+encodeURIComponent(family), {method:'POST'});
+  if (result && result.success) {
+    loadParams(true);
+  } else {
+    alert('Reset failed: ' + (result&&result.error||'unknown'));
+  }
+}
+
+// ── Panel 6: Trade Attribution ────────────────────────────────────────────────
+let _attrData = null;
+
+async function loadAttribution() {
+  const data = await _apiFetch(`/api/algo/trade-attribution?range=${_range}&group_by=${_attrTab}`);
+  if (!data) return;
+  _attrData = data;
+  renderAttribution(data);
+}
+
+function setAttrTab(tab) {
+  _attrTab = tab;
+  document.querySelectorAll('#attribution-tabs .tab-btn').forEach((b,i) => {
+    b.classList.toggle('active', ['algo','entry_type','session','regime'][i] === tab);
+  });
+  loadAttribution();
+}
+
+function renderAttribution(data) {
+  const el = document.getElementById('attribution-body');
+  const items = data.items || [];
+  if (!items.length) { el.innerHTML = '<div class="loading">No data</div>'; return; }
+
+  const maxTrades = Math.max(1, ...items.map(x=>x.trades));
+  let html = '<div class="bar-chart" style="margin-bottom:12px">';
+  for (const item of items.slice(0,15)) {
+    const pct = item.trades / maxTrades * 100;
+    html += `<div class="bar-row">
+      <div class="bar-label">${esc(item.label)}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <div class="bar-val">${item.trades} <span class="${item.win_rate>=50?'pos':'neg'}">${item.win_rate.toFixed(0)}%</span></div>
+    </div>`;
+  }
+  html += '</div>';
+
+  html += `<table><thead><tr>
+    <th>${_attrTab}</th><th>Fires</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Timeouts</th><th>Win%</th><th>Avg P&L</th>
+  </tr></thead><tbody>`;
+  for (const item of items) {
+    const pnlCls = item.avg_pnl_pct >= 0 ? 'pos' : 'neg';
+    html += `<tr>
+      <td style="font-weight:600">${esc(item.label)}</td>
+      <td>${item.fires||0}</td>
+      <td>${item.trades}</td>
+      <td class="pos">${item.wins}</td>
+      <td class="neg">${item.losses}</td>
+      <td style="color:var(--muted)">${item.timeouts||0}</td>
+      <td class="${item.win_rate>=50?'pos':'neg'}">${item.win_rate.toFixed(1)}%</td>
+      <td class="${pnlCls}">${(item.avg_pnl_pct||0).toFixed(2)}%</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+// ── Panel 7: Adaptive Filter ──────────────────────────────────────────────────
+async function loadFilter() {
+  const el = document.getElementById('filter-body');
+  const d = await _apiFetch('/api/algo/adaptive-filter');
+  if (!d) { el.innerHTML = '<div class="error-msg">Failed to load</div>'; return; }
+
+  const gate = (d.confidence_gate||d.dynamic_threshold||55).toFixed(1);
+  const wr   = (d.win_rate_pct||d.current_win_rate||0).toFixed(1);
+  const twr  = (d.target_win_rate_pct||d.target_win_rate||55).toFixed(1);
+  const total = d.total_resolved||0;
+  const isLearning = d.is_learning ? '<span class="pos">Learning</span>' : '<span style="color:var(--muted)">Warmup</span>';
+  const mode = d.enforcement_mode||'AUTO';
+  const stuck = d.stuck_cycles||0;
+  const minGate = 45, maxGate = 75;
+  const gatePct = ((parseFloat(gate)-minGate)/(maxGate-minGate)*100).toFixed(1);
+  const wrPct   = Math.min(100,(parseFloat(wr)/100*100)).toFixed(1);
+
+  let html = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div>
+        <div style="font-size:10px;color:var(--muted)">Confidence Gate</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent)">${gate}%</div>
+        <div class="gate-bar-track">
+          <div class="gate-bar-fill" style="width:${gatePct}%"></div>
+          <div class="gate-marker" style="left:calc(${((55-45)/(75-45)*100).toFixed(1)}% - 1px)" title="Default: 55%"></div>
+        </div>
+        <div style="font-size:9px;color:var(--muted);display:flex;justify-content:space-between">
+          <span>45%</span><span>Default: 55%</span><span>75%</span>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted)">Win Rate</div>
+        <div style="font-size:24px;font-weight:700;color:${parseFloat(wr)>=50?'var(--green)':'var(--red)'}">${wr}%</div>
+        <div class="gate-bar-track">
+          <div class="gate-bar-fill" style="width:${wrPct}%;background:${parseFloat(wr)>=50?'var(--green)':'var(--red)'}"></div>
+          <div class="gate-marker" style="left:calc(${parseFloat(twr).toFixed(1)}% - 1px)" title="Target: ${twr}%"></div>
+        </div>
+        <div style="font-size:9px;color:var(--muted)">Target: ${twr}%</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+      <div class="kpi-card"><div class="kpi-val" style="font-size:16px">${total}</div><div class="kpi-lbl">Resolved Trades</div></div>
+      <div class="kpi-card"><div class="kpi-val" style="font-size:16px">${isLearning}</div><div class="kpi-lbl">Status</div></div>
+      <div class="kpi-card"><div class="kpi-val" style="font-size:16px;color:var(--muted)">${stuck>0?stuck+' stuck cycles':'OK'}</div><div class="kpi-lbl">Mode: ${mode}</div></div>
+    </div>`;
+
+  // Threshold history sparkline (pure canvas)
+  const history = (d.threshold_history||[]).slice(-24);
+  if (history.length > 1) {
+    html += `<div style="margin-top:12px"><canvas id="gate-spark" width="100%" height="40" style="width:100%;height:40px"></canvas></div>`;
+  }
+
+  el.innerHTML = html;
+
+  // Draw sparkline
+  if (history.length > 1) {
+    setTimeout(()=>{
+      const cv = document.getElementById('gate-spark');
+      if (!cv) return;
+      cv.width = cv.parentElement.offsetWidth;
+      const ctx = cv.getContext('2d');
+      const vals = history.map(h => parseFloat(h.threshold||h||55));
+      const mn = Math.min(...vals)-1, mx = Math.max(...vals)+1;
+      const W=cv.width, H=40;
+      ctx.strokeStyle='#6366f1'; ctx.lineWidth=1.5; ctx.beginPath();
+      vals.forEach((v,i)=>{
+        const x=i/(vals.length-1)*(W-4)+2;
+        const y=H-((v-mn)/(mx-mn))*(H-4)-2;
+        i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+    }, 50);
+  }
+}
+
+// ── Panel 8: Signal Feed ──────────────────────────────────────────────────────
+async function loadSignalFeed(page) {
+  _signalPage = page||1;
+  const el = document.getElementById('signal-feed-body');
+  const algo   = document.getElementById('feed-algo').value||'';
+  const ticker = document.getElementById('feed-ticker').value||'';
+  const result = document.getElementById('feed-result').value||'';
+  const url = `/api/algo/signal-feed?page=${_signalPage}&per_page=50&algo=${encodeURIComponent(algo)}&ticker=${encodeURIComponent(ticker)}&result=${result}`;
+
+  const data = await _apiFetch(url);
+  if (!data) { el.innerHTML = '<div class="error-msg">Failed to load</div>'; return; }
+
+  const items = data.items||[];
+  if (!items.length) { el.innerHTML = '<div class="loading">No signals in range</div>'; buildPagination('signal',0,_signalPage,50,loadSignalFeed); return; }
+
+  let html = `<table>
+    <thead><tr>
+      <th>Time</th><th>Ticker</th><th>Algo</th><th>Dir</th>
+      <th>Conf</th><th>R:R</th><th>Trade</th><th>Filter Reason</th>
+    </tr></thead><tbody>`;
+
+  for (const s of items) {
+    const opened = s.trade_opened;
+    const rowBg  = opened ? 'rgba(34,197,94,.04)' : 'rgba(239,68,68,.03)';
+    const dot    = opened ? '<span class="pos">●</span>' : '<span class="neg">○</span>';
+    const tm     = s.logged_at ? new Date(s.logged_at).toLocaleTimeString() : '—';
+    html += `<tr style="background:${rowBg}">
+      <td style="font-size:10px;color:var(--muted)">${tm}</td>
+      <td style="font-weight:600">${esc(s.ticker)}</td>
+      <td style="font-size:10px">${esc(s.algo)}</td>
+      <td style="color:${s.direction==='BUY'?'var(--green)':'var(--red)'}">${s.direction||'?'}</td>
+      <td>${((s.confidence||0)*100 > 1 ? (s.confidence||0).toFixed(1) : ((s.confidence||0)*100).toFixed(1))}%</td>
+      <td>${(s.rr||0).toFixed(2)}</td>
+      <td>${dot}</td>
+      <td style="font-size:10px;color:var(--muted)">${esc(s.filter_reason||'')}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+  buildPagination('signal', data.total, _signalPage, 50, loadSignalFeed);
+}
+
+// ── Panel 9: ML Influence ─────────────────────────────────────────────────────
+const _MODEL_NAMES = ['Scalp','Daily','Swing','Deep'];
+
+async function loadML(page) {
+  _mlPage = page||1;
+  const el = document.getElementById('ml-body');
+  const data = await _apiFetch(`/api/algo/ml-influence?range=${_range}&page=${_mlPage}&per_page=50`);
+  if (!data) { el.innerHTML = '<div class="error-msg">Failed to load</div>'; return; }
+
+  const items = data.items||[];
+  if (!items.length) { el.innerHTML = '<div class="loading">No ML data yet — scores populate as trades close with ML models enabled.</div>'; buildPagination('ml',0,_mlPage,50,loadML); return; }
+
+  let html = `<table>
+    <thead><tr>
+      <th>Time</th><th>Ticker</th><th>Algo</th><th>Dir</th>
+      <th>P&amp;L</th><th>Scalp</th><th>Daily</th><th>Swing</th><th>Deep</th><th>Ensemble</th><th>Conviction</th>
+    </tr></thead><tbody>`;
+
+  for (const t of items) {
+    const pnlCls  = (t.pnl_pct||0) >= 0 ? 'pos' : 'neg';
+    const pnlTxt  = ((t.pnl_pct||0)>=0?'+':'') + (t.pnl_pct||0).toFixed(2)+'%';
+    const tm      = t.closed_at ? new Date(t.closed_at).toLocaleTimeString() : '—';
+    const scores  = [t.ml_scalp_prob, t.ml_daily_prob, t.ml_swing_prob, t.ml_deep_prob];
+    const ens     = t.ml_ensemble_score;
+    const scoreCells = scores.map(s => s != null
+      ? `<td style="color:${s>=0.5?'var(--green)':'var(--muted)'}">${(s*100).toFixed(0)}%</td>`
+      : '<td style="color:var(--muted)">—</td>'
+    ).join('');
+    const conviction = ens != null ? (ens>=4?'<span class="pos">HIGH</span>':ens>=2?'<span style="color:var(--yellow)">MED</span>':'<span class="neg">LOW</span>') : '—';
+    html += `<tr>
+      <td style="font-size:10px;color:var(--muted)">${tm}</td>
+      <td style="font-weight:600">${esc(t.ticker||'?')}</td>
+      <td style="font-size:10px">${esc(t.algo_name||'—')}</td>
+      <td style="color:${t.direction==='BUY'?'var(--green)':'var(--red)'}">${t.direction||'?'}</td>
+      <td class="${pnlCls}">${pnlTxt}</td>
+      ${scoreCells}
+      <td>${ens!=null?ens:'—'}/5</td>
+      <td>${conviction}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+  buildPagination('ml', data.total, _mlPage, 50, loadML);
+}
+
+// ── Pagination helper ─────────────────────────────────────────────────────────
+const _paginationFns = {};
+function buildPagination(id, total, page, perPage, loadFn) {
+  const el = document.getElementById(id + '-pagination');
+  if (!el) return;
+  if (total <= perPage) { el.innerHTML = ''; return; }
+  _paginationFns[id] = loadFn;
+  const totalPages = Math.ceil(total / perPage);
+  el.innerHTML = `
+    <button class="page-btn" onclick="_paginationFns['${id}'](${page-1})" ${page<=1?'disabled':''}>‹ Prev</button>
+    <span>Page ${page} of ${totalPages} (${total} total)</span>
+    <button class="page-btn" onclick="_paginationFns['${id}'](${page+1})" ${page>=totalPages?'disabled':''}>Next ›</button>`;
+}
+
+// ── Export CSV ────────────────────────────────────────────────────────────────
+function exportCSV(type) {
+  const url = `/api/algo/export/csv?range=${_range}&type=${type}`;
+  fetch(url, {headers:_authHdr()})
+    .then(r => { if(!r.ok) throw new Error('export failed: ' + r.status); return r.blob(); })
+    .then(blob => {
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = u; a.download = `algo_${type}_${_range}.csv`; a.click();
+      URL.revokeObjectURL(u);
+    })
+    .catch(e => alert('Export failed: ' + e.message));
+}
+
+// ── Param edit modal ──────────────────────────────────────────────────────────
+function openParamEdit(family) {
+  // Scroll to params panel and highlight
+  document.getElementById('params-body').scrollIntoView({behavior:'smooth'});
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function fmtNum(n) { return n != null ? Number(n).toLocaleString() : '—'; }
+function fmtAgo(s) {
+  if (s == null) return '—';
+  s = Math.round(s);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.round(s/60) + 'm ago';
+  return Math.round(s/3600) + 'h ago';
+}
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

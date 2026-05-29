@@ -39,6 +39,12 @@ async def admin_page():
     return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
 
 
+@router.get("/algo", response_class=HTMLResponse)
+@router.get("/algo.html", response_class=HTMLResponse)
+async def algo_page():
+    return FileResponse(os.path.join(STATIC_DIR, "algo.html"))
+
+
 @router.get("/api/health")
 async def health():
     from agent.data_fetcher import get_credit_usage

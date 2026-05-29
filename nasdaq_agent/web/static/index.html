@@ -533,6 +533,7 @@
     <button onclick="openAfterHours()" id="ah-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🌙 After-Hours</button>
     <button onclick="openPaperTrading()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🧪 Paper</button>
     <button onclick="openAlgoPerf()" id="algo-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Algorithm signal performance">⚙️ Algos</button>
+    <button onclick="window.open('/algo','_blank')" id="algo-intel-nav-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Algorithm Intelligence Center — live performance &amp; auto-tuning dashboard">⚡ Algo Intel</button>
     <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Schwab connections &amp; data sources">🏦 Schwab <span id="schwab-hdr-dot" style="font-size:9px;transition:color .3s">○</span></button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="openAlertModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Alert settings">🔔 Alerts</button>
@@ -550,6 +551,7 @@
   <button onclick="openLearning();toggleMobileNav()">🧠 Self-Learning</button>
   <button onclick="openAfterHours();toggleMobileNav()">🌙 After-Hours</button>
   <button onclick="openPaperTrading();toggleMobileNav()">🧪 Paper Trading</button>
+  <button onclick="window.open('/algo','_blank');toggleMobileNav()">⚡ Algo Intelligence</button>
   <button onclick="openBroker();toggleMobileNav()">🏦 TOS Broker</button>
   <button onclick="openWatchlist();toggleMobileNav()">📋 Watchlist</button>
   <button onclick="openAlertModal();toggleMobileNav()" id="alert-toggle-mobile">🔔 Alerts</button>

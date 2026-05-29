@@ -143,6 +143,8 @@ class LearningEngine:
         self._last_win_rate:    float = 0.0
         self._last_threshold:   float = 65.0
         self._last_blocked_n:   int   = 0     # track to only log NEW blocked contexts
+        self._last_feedback_at: Optional[float] = None  # epoch of last trade-close feedback
+        self._feedback_count:   int   = 0
         self._restore_state_from_db()
 
     def _restore_state_from_db(self) -> None:
@@ -211,8 +213,78 @@ class LearningEngine:
             target=self._loop, name="LearningEngine", daemon=True
         )
         self._thread.start()
+        threading.Thread(
+            target=self._trade_feedback_loop, name="LearningFeedback", daemon=True
+        ).start()
         _log("Learning engine started — running every "
              f"{LEARN_INTERVAL_SECS}s, 24/7 including after-hours", significant=True)
+
+    def _trade_feedback_loop(self) -> None:
+        """
+        Subscribe to Valkey trade:closed pub/sub channel.
+        On each trade close, immediately run a mini learning cycle for that algo's family.
+        Target latency: < 5 seconds from trade close to param update.
+        """
+        import json as _json
+        while self._running:
+            try:
+                from agent.valkey_client import _get_client
+                client = _get_client()
+                if client is None:
+                    time.sleep(30)
+                    continue
+                pubsub = client.pubsub()
+                pubsub.subscribe("trade:closed")
+                _log("Trade feedback loop subscribed to trade:closed channel")
+                for message in pubsub.listen():
+                    if not self._running:
+                        break
+                    if not (message and message.get("type") == "message"):
+                        continue
+                    try:
+                        data = _json.loads(message["data"])
+                        self._run_trade_feedback(data)
+                    except Exception as _msg_err:
+                        _log(f"[Feedback] message parse error: {_msg_err}", level="DEBUG")
+            except Exception as exc:
+                _log(f"[Feedback] pub/sub error: {exc} — retrying in 15s", level="DEBUG")
+                time.sleep(15)
+
+    def _run_trade_feedback(self, trade_data: dict) -> None:
+        """Run a mini learning cycle for the algo family of a just-closed trade."""
+        try:
+            import pandas as pd
+            algo  = trade_data.get("algo", "") or ""
+            if not algo:
+                return
+
+            from agent.algo_learning_engine import get_engine as _get_ale, _ALGO_FAMILY_MAP
+            family = _ALGO_FAMILY_MAP.get(algo, "")
+            if not family:
+                return
+
+            # Build a single-row outcomes dataframe for this trade
+            row = {
+                "pnl_pct":     trade_data.get("pnl_pct", 0.0),
+                "exit_reason": trade_data.get("exit_reason", ""),
+                "status":      "CLOSED",
+                "algo_name":   algo,
+                "regime":      trade_data.get("regime", ""),
+                "session":     trade_data.get("session", ""),
+                "vwap_event":  "",
+            }
+            df = pd.DataFrame([row])
+            self._cycle_count += 1
+            _get_ale().run_cycle(df, self._cycle_count)
+            self._last_feedback_at = time.time()
+            self._feedback_count  += 1
+            _log(
+                f"[Feedback] Mini-cycle for {family} ({algo}) — "
+                f"trade #{trade_data.get('trade_id','?')} pnl={trade_data.get('pnl_pct',0):+.2f}%",
+                level="DEBUG",
+            )
+        except Exception as exc:
+            _log(f"[Feedback] run_trade_feedback error: {exc}", level="DEBUG")
 
     def stop(self) -> None:
         self._running = False
@@ -230,6 +302,9 @@ class LearningEngine:
             "retrain_min_new": RETRAIN_MIN_NEW,
             "active_session_retrain_enabled": RETRAIN_ACTIVE_SESSIONS,
             "deep_retrain_enabled": RETRAIN_INCLUDE_DEEP,
+            "feedback_loop_active": self._running,
+            "last_feedback_at": self._last_feedback_at,
+            "feedback_count":   self._feedback_count,
         }
 
     # ── Main loop ─────────────────────────────────────────────────────────────
