@@ -26,8 +26,24 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from typing import Any, Optional
+
+
+def _sanitize_for_jsonb(obj: Any) -> Any:
+    """Recursively replace NaN/Infinity with None so PostgreSQL JSONB accepts the payload.
+
+    Python's json.dumps serialises float('nan') as NaN and float('inf') as Infinity
+    (JS syntax), which PostgreSQL JSONB rejects as invalid JSON.
+    """
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_jsonb(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_jsonb(v) for v in obj]
+    return obj
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +136,7 @@ def set_state(key: str, value: dict[str, Any], ttl_s: Optional[int] = None) -> b
                     expires_at = EXCLUDED.expires_at
         """
         with get_conn() as conn:
-            conn.execute(sql, (key, json.dumps(value, default=str)))
+            conn.execute(sql, (key, json.dumps(_sanitize_for_jsonb(value), default=str)))
         return True
     except Exception as exc:
         logger.warning("[service_state] set_state(%s) error: %s", key, exc)
