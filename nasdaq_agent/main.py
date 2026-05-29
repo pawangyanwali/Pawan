@@ -838,6 +838,13 @@ async def lifespan(app: FastAPI):
     _hist_init_tables()
     _ctx_init_db()  # context intel tables (context_events, ticker_context_features, earnings_calendar)
 
+    # Load persisted runtime config from DB so saved settings survive container restarts.
+    # seed_defaults() only writes keys that aren't already in the DB (no overwrites).
+    from agent.config_manager import config as _cfg
+    _cfg.load()
+    _cfg.seed_defaults()
+    _cfg.start_listener()
+
     # Warm the market-hours cache before the first scan so get_market_session()
     # doesn't block on its first call mid-scan.  This runs in the background
     # executor so it doesn't delay startup if Schwab is temporarily unreachable.
