@@ -177,6 +177,14 @@ def main() -> None:
     from agent.scanner import scanner
     from agent.market_hours import refresh_market_hours_cache
     from agent.service_heartbeat import start_service_heartbeat
+    from agent.config_manager import config as _cfg
+
+    # Load persisted runtime config so paper trading limits, algo params, etc.
+    # reflect what the user set in the dashboard, not hardcoded defaults.
+    _cfg.load()
+    _cfg.seed_defaults()
+    _cfg.start_listener(_runner)
+    _log.info("Runtime config loaded (%d keys)", len(_cfg.all()))
 
     start_service_heartbeat("scanner", _runner)
 
