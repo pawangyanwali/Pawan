@@ -1704,8 +1704,9 @@ class Scanner:
             is_ah_eod_close_window, is_after_hours,
         )
 
-        # ── After-hours EOD hard close at 7:55 PM ET ─────────────────────────
+        # ── Session-driven position management (mutually exclusive branches) ───
         if is_ah_eod_close_window():
+            # 7:55 PM ET: hard close all remaining AH positions
             try:
                 from agent.paper_trading import close_all_positions_eod
                 closed_n = close_all_positions_eod(reason="AH_EOD_19:55", extended_hours=True)
@@ -1714,7 +1715,8 @@ class Scanner:
             except Exception as _ahc_e:
                 logger.warning(f"[Scanner] AH EOD 7:55pm close failed: {_ahc_e}")
 
-        if is_hard_close_window():
+        elif is_hard_close_window():
+            # 3:45 PM ET: hard close all positions — non-overridable PRD rule
             try:
                 from agent.paper_trading import close_all_positions_eod
                 closed_n = close_all_positions_eod()

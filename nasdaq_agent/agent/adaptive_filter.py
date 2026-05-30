@@ -358,7 +358,8 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
     logger.debug(
         f"[AdaptiveFilter:{source}] trade_WR={smoothed_wr*100:.1f}% (raw={current_wr*100:.1f}%)  "
         f"threshold={new_threshold:.1f}%  "
-        f"blocked={len(new_blocked)}  boosted={len(new_boosted)}  total={total}"
+        f"blocked={len(_state.get('blocked_contexts', {}))}  "
+        f"boosted={len(_state.get('boosted_contexts', {}))}  total={total}"
     )
 
 

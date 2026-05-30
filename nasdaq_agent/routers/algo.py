@@ -67,7 +67,7 @@ _ROOT_CAUSES = [
 ]
 
 # Algo name → family mapping (abbreviated; covers the 15 listed families)
-_ALGO_FAMILY_MAP: dict[str, str] = {
+_ALGO_FAMILY_MAP: dict[str, str] = {  # noqa: E501
     "ORB5_BULL": "ORB", "ORB5_BEAR": "ORB",
     "ORB15_BULL": "ORB", "ORB15_BEAR": "ORB",
     "GAP_AND_GO_BULL": "GAP_TREND", "GAP_AND_GO_BEAR": "GAP_TREND",
@@ -89,7 +89,13 @@ _ALGO_FAMILY_MAP: dict[str, str] = {
     "VWAP_TREND_BRK_BULL": "VWAP_TREND", "VWAP_TREND_BRK_BEAR": "VWAP_TREND",
     "DONCHIAN_BRK_BULL": "DONCHIAN", "DONCHIAN_BRK_BEAR": "DONCHIAN",
     "ORB_VWAP_ZV_BULL": "ORB_ZV", "ORB_VWAP_ZV_BEAR": "ORB_ZV",
+    "BB_MEAN_REV_BULL": "BB_MEAN_REV", "BB_MEAN_REV_BEAR": "BB_MEAN_REV",
 }
+
+# Reverse mapping: family → list of algo_names that belong to it
+_FAMILY_TO_ALGOS: dict[str, list[str]] = {}
+for _a, _f in _ALGO_FAMILY_MAP.items():
+    _FAMILY_TO_ALGOS.setdefault(_f, []).append(_a)
 
 
 def _algo_to_family(algo_name: str) -> str:
@@ -183,7 +189,8 @@ async def algo_overview(
                     COALESCE(SUM(CASE WHEN trade_opened = 1 THEN 1 ELSE 0 END), 0) AS fires,
                     COALESCE(SUM(CASE WHEN trade_opened = 0 THEN 1 ELSE 0 END), 0) AS filtered
                 FROM algo_signal_log
-                WHERE logged_at::TIMESTAMPTZ::DATE = CURRENT_DATE
+                WHERE logged_at IS NOT NULL AND logged_at != ''
+                  AND logged_at::TIMESTAMPTZ::DATE = CURRENT_DATE
                 """
             ).fetchone()
         if row:
@@ -201,7 +208,9 @@ async def algo_overview(
     try:
         with get_conn() as c:
             row = c.execute(
-                "SELECT COUNT(*) AS cnt FROM param_tune_log WHERE tuned_at::TIMESTAMPTZ::DATE = CURRENT_DATE"
+                "SELECT COUNT(*) AS cnt FROM param_tune_log "
+                "WHERE tuned_at IS NOT NULL AND tuned_at != '' "
+                "AND tuned_at::TIMESTAMPTZ::DATE = CURRENT_DATE"
             ).fetchone()
         if row:
             tune_events_today = _safe_int(row["cnt"])
@@ -629,7 +638,9 @@ async def algo_params_full(
     try:
         with get_conn() as c:
             rows = c.execute(
-                "SELECT family, COUNT(*) AS cnt FROM param_tune_log WHERE tuned_at::TIMESTAMPTZ::DATE = CURRENT_DATE GROUP BY family"
+                "SELECT family, COUNT(*) AS cnt FROM param_tune_log "
+                "WHERE tuned_at IS NOT NULL AND tuned_at != '' "
+                "AND tuned_at::TIMESTAMPTZ::DATE = CURRENT_DATE GROUP BY family"
             ).fetchall()
         for row in rows:
             tune_count_by_family[row["family"]] = _safe_int(row["cnt"])
@@ -736,30 +747,43 @@ def _build_tune_log(range_val: str, page: int, per_page: int, family_filter: str
     post_tune_map: dict[int, dict] = {}
     if rows:
         try:
-            # Collect unique (id, family, tuned_at) combos from this page
-            tune_ids = [(r["id"], r["family"], r["tuned_at"]) for r in rows]
-            # Build a VALUES list so we can do one query instead of N
-            val_rows = ", ".join(
-                f"({tid}, '{fam}', '{tat}'::TIMESTAMPTZ)"
-                for tid, fam, tat in tune_ids
-            )
+            # Expand each (id, family, tuned_at) into (id, algo_name, tuned_at) rows
+            # using the reverse _FAMILY_TO_ALGOS map so the join matches actual algo_name
+            # values in paper_trades (e.g. family "ORB" → ["ORB5_BULL","ORB5_BEAR",...])
+            cte_rows: list[tuple] = []
+            for r in rows:
+                tid, fam, tat = r["id"], r["family"], r["tuned_at"]
+                if not tat:
+                    continue
+                algos = _FAMILY_TO_ALGOS.get(str(fam).upper(), [str(fam)])
+                for algo in algos:
+                    cte_rows.append((tid, algo, tat))
+
+            if not cte_rows:
+                raise ValueError("no valid cte_rows")
+
+            # Parameterized VALUES list — no f-string interpolation of user data
+            val_placeholders = ", ".join("(%s, %s, %s::TIMESTAMPTZ)" for _ in cte_rows)
+            val_params = [v for tid, algo, tat in cte_rows for v in (tid, algo, tat)]
+
             with get_conn() as c:
                 post_rows = c.execute(
                     f"""
-                    WITH tune_windows(tid, family, tuned_at) AS (VALUES {val_rows})
+                    WITH tune_windows(tid, algo_name, tuned_at) AS (VALUES {val_placeholders})
                     SELECT
                         tw.tid,
                         COUNT(pt.id)                               AS post_total,
                         SUM(CASE WHEN pt.pnl_pct > 0 THEN 1 ELSE 0 END) AS post_wins
                     FROM tune_windows tw
                     LEFT JOIN paper_trades pt
-                        ON  pt.algo_name = tw.family
+                        ON  pt.algo_name = tw.algo_name
                         AND pt.status = 'CLOSED'
                         AND pt.closed_at IS NOT NULL AND pt.closed_at != ''
                         AND pt.closed_at::TIMESTAMPTZ > tw.tuned_at
                         AND pt.closed_at::TIMESTAMPTZ < tw.tuned_at + INTERVAL '2 hours'
                     GROUP BY tw.tid
-                    """
+                    """,
+                    val_params,
                 ).fetchall()
             for pr in post_rows:
                 pt_total = _safe_int(pr["post_total"])

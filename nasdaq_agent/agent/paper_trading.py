@@ -1050,7 +1050,8 @@ def close_stale_positions() -> int:
                 count_row = c.execute(
                     "SELECT COUNT(*) AS n FROM paper_trades WHERE status='OPEN'"
                 ).fetchone()
-                stale_ids = list(range(count_row["n"])) if count_row["n"] else []
+                stale_count = int(count_row["n"]) if count_row else 0
+                stale_ids = list(range(stale_count))  # used only for len() guard below
 
     if not stale_ids and _is_ah:
         return 0
@@ -1438,7 +1439,9 @@ def get_today_pnl() -> dict:
                 ROUND(MAX(pnl_dollar), 2) as best_trade,
                 ROUND(MIN(pnl_dollar), 2) as worst_trade
             FROM paper_trades
-            WHERE status='CLOSED' AND closed_at::date = CURRENT_DATE
+            WHERE status='CLOSED'
+              AND closed_at IS NOT NULL AND closed_at != ''
+              AND closed_at::date = CURRENT_DATE
         """).fetchone()
 
     from agent.config_manager import config as _cfg
@@ -1487,7 +1490,7 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
                 if (d == "BUY" and last_price <= stp) or (d == "SELL" and last_price >= stp):
                     exit_reason = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"
                     _record_close(c, row["id"], last_price, exit_reason, entry, d,
-                                  int(row["shares"]), partial, shares_r, ticker=ticker)
+                                  shares_r, partial, int(row["shares"]), ticker=ticker)
                     actions.append(exit_reason)
                     logger.info(
                         f"[PAPER-RT] {exit_reason} {d} {ticker} @ ${last_price:.2f} "
@@ -1499,7 +1502,7 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
                 if t1_hit and t2 > 0:
                     if (d == "BUY" and last_price >= t2) or (d == "SELL" and last_price <= t2):
                         _record_close(c, row["id"], t2, "TARGET_T2", entry, d,
-                                      int(row["shares"]), partial, shares_r, ticker=ticker)
+                                      shares_r, partial, int(row["shares"]), ticker=ticker)
                         actions.append("TARGET_T2")
                         logger.info(
                             f"[PAPER-RT] TARGET_T2 {d} {ticker} @ ${t2:.2f} (real-time)"
@@ -1645,7 +1648,9 @@ def get_account_state(open_prices: dict | None = None) -> dict:
         today_row = c.execute("""
             SELECT ROUND(SUM(COALESCE(pnl_dollar,0)),2) as today_pnl
             FROM paper_trades
-            WHERE status='CLOSED' AND closed_at::date = CURRENT_DATE
+            WHERE status='CLOSED'
+              AND closed_at IS NOT NULL AND closed_at != ''
+              AND closed_at::date = CURRENT_DATE
         """).fetchone()
 
     from agent.config_manager import config as _cfg

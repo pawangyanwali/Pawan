@@ -134,6 +134,7 @@ class LearningEngine:
 
     def __init__(self):
         self._thread:           Optional[threading.Thread] = None
+        self._feedback_thread:  Optional[threading.Thread] = None
         self._running:          bool  = False
         self._cycle_count:      int   = 0
         self._last_retrain_t:   float = 0.0
@@ -213,9 +214,10 @@ class LearningEngine:
             target=self._loop, name="LearningEngine", daemon=True
         )
         self._thread.start()
-        threading.Thread(
+        self._feedback_thread = threading.Thread(
             target=self._trade_feedback_loop, name="LearningFeedback", daemon=True
-        ).start()
+        )
+        self._feedback_thread.start()
         _log("Learning engine started — running every "
              f"{LEARN_INTERVAL_SECS}s, 24/7 including after-hours", significant=True)
 
@@ -302,7 +304,9 @@ class LearningEngine:
             "retrain_min_new": RETRAIN_MIN_NEW,
             "active_session_retrain_enabled": RETRAIN_ACTIVE_SESSIONS,
             "deep_retrain_enabled": RETRAIN_INCLUDE_DEEP,
-            "feedback_loop_active": self._running,
+            "feedback_loop_active": (
+                self._feedback_thread is not None and self._feedback_thread.is_alive()
+            ),
             "last_feedback_at": self._last_feedback_at,
             "feedback_count":   self._feedback_count,
         }
