@@ -6642,7 +6642,8 @@ function renderNeuralPanel(d) {
       what:  'Bidirectional LSTM with attention trained across ALL 477 tickers simultaneously. 20-bar 15-min sequences, 34 features. Fine-tunes every hour during market.',
       train: 'Train BiLSTM (anytime)',
       total: 1, trained: d.deep_trained ? 1 : 0, active: bilstmActive,
-      queued: rp.is_running && !bilstmActive && !d.deep_trained },
+      queued: rp.is_running && !bilstmActive && !d.deep_trained,
+      last_error: d.deep_last_error || null },
   ];
 
   document.getElementById('nn-model-grid').innerHTML = modelDefs.map(m => {
@@ -6668,6 +6669,8 @@ function renderNeuralPanel(d) {
       ? `<span style="font-size:10px;color:#a78bfa;font-weight:700;animation:pulse 1.5s infinite">Training…</span>`
       : m.queued
       ? `<span style="font-size:10px;color:#f59e0b;font-weight:700">⏳ Queued — trains after XGBoost</span>`
+      : m.last_error
+      ? `<span style="font-size:10px;color:#f87171" title="${m.last_error}">⚠ ${m.last_error.length > 55 ? m.last_error.slice(0,52)+'…' : m.last_error}</span>`
       : needsRetrain
       ? `<span style="font-size:10px;color:var(--muted)">Not trained · ${m.train}</span>`
       : `<span style="font-size:10px;color:${color}">${pct}% trained${lastTrainedStr ? ' · ' + lastTrainedStr : ''}</span>`;

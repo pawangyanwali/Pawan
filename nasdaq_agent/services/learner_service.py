@@ -241,6 +241,16 @@ def _run_deep_cycle() -> None:
     )
     _publish_deep_state_now()   # immediately show "Training in progress" on dashboard
     try:
+        # Ensure Schwab tokens are current before attempting a live data fetch.
+        # Tokens expire every 30 min; refresh them if needed so _is_authorised() is True.
+        try:
+            from agent.broker.schwab_auth import load_stored_md_tokens, load_stored_tokens, _market_data as _sm
+            if not _sm.get_access_token():
+                load_stored_md_tokens()
+                load_stored_tokens()
+        except Exception:
+            pass
+
         from agent.data_fetcher import fetch_batch_interval
         from agent.deep_model import retrain_deep_all
         from config import TRAINING_TICKERS
@@ -414,6 +424,23 @@ def main() -> None:
     _cfg.seed_defaults()
     _cfg.start_listener(_runner)
     _log.info("Runtime config loaded (%d keys)", len(_cfg.all()))
+
+    # Load Schwab tokens from disk so fetch_batch_interval can authenticate.
+    # Every other service (scanner, market-data, web-api) does this at startup.
+    # Without it, _market_data._tokens stays empty, _is_authorised() is always
+    # False, and all 15-min data fetches silently return {}.
+    try:
+        from agent.broker.schwab_auth import load_stored_md_tokens, load_stored_tokens
+        ok_md = load_stored_md_tokens()
+        ok_tr = load_stored_tokens()
+        _log.info("Schwab tokens loaded — md=%s trader=%s", ok_md, ok_tr)
+        if not ok_md and not ok_tr:
+            _log.warning(
+                "Schwab tokens NOT loaded — BiLSTM training will only work from "
+                "PostgreSQL cache. Re-authenticate at /schwab/auth/md to fix."
+            )
+    except Exception as exc:
+        _log.warning("Schwab token load failed: %s", exc)
 
     _run_learning_engine()
     _run_weekend_learner()

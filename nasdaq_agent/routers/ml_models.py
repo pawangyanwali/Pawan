@@ -84,6 +84,8 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
     # Read live training state from the learner container via shared Valkey key.
     # Fallback: in-process flag (always False in web-api — only used in single-process mode).
     is_now = is_training_active()
+    deep_last_error = None
+    deep_last_tickers = 0
     try:
         import json as _json
         from agent.valkey_client import _get_client as _vk
@@ -91,7 +93,10 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
         if _vk_raw:
             _ls_raw = _vk_raw.get("learner:status")
             if _ls_raw:
-                is_now = bool(_json.loads(_ls_raw).get("deep", {}).get("running", False))
+                _deep = _json.loads(_ls_raw).get("deep", {})
+                is_now = bool(_deep.get("running", False))
+                deep_last_error = _deep.get("last_error")
+                deep_last_tickers = _deep.get("last_tickers", 0)
     except Exception:
         pass
 
@@ -99,6 +104,8 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
         "deep_model":        get_model_info(),
         "deep_trained":      deep_is_trained(),
         "is_training_now":   is_now,
+        "deep_last_error":   deep_last_error,
+        "deep_last_tickers": deep_last_tickers,
         "training_history":  get_training_history(),
         "scalp_models":      _count(_model_registry,          "scalp"),
         "daily_models":      _count(_daily_model_registry,    "daily"),
