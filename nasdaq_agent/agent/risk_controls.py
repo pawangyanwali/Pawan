@@ -28,6 +28,7 @@ from config import (
     DAILY_PROFIT_MAX_USD,
     DAILY_LOSS_WARNING_PCT,
     DAILY_LOSS_HALT_PCT,
+    DAILY_LOSS_LIQUIDATE_PCT,
     MAX_CONCURRENT_TRADES,
     MAX_PORTFOLIO_HEAT_PCT,
     MAX_CONSECUTIVE_LOSSES,
@@ -45,14 +46,23 @@ from config import (
 _lock = threading.Lock()
 
 
-def _rcfg(key: str, fallback):
-    """Read a runtime-configurable risk param from config_store, falling back to the
-    module-level constant so the engine keeps working even before config is loaded."""
+def _rcfg(key: str = None, fallback=None):
+    """Read a runtime-configurable risk param from config_store.
+
+    Called with (key, fallback): returns the value for that key, or fallback if absent.
+    Called with no args: returns the ConfigManager object (for .get(key, default) chaining).
+    """
     try:
         from agent.config_manager import config as _cfg
+        if key is None:
+            return _cfg
         val = _cfg.get(key)
         return val if val is not None else fallback
     except Exception:
+        if key is None:
+            class _NullCfg:
+                def get(self, k, d=None): return d
+            return _NullCfg()
         return fallback
 
 
@@ -73,6 +83,7 @@ _warning_issued:      bool  = False  # 1.5% warning has been shown this session
 _cooldown_until:      float = 0.0    # epoch — blocked until this time
 _consecutive_losses:  int   = 0
 _peak_daily_pnl:      float = 0.0    # tracks day's peak to measure drawdown in PPM
+_liquidation_triggered: bool = False # True once the 4% force-close has fired today
 
 # ── Phase 2 state ─────────────────────────────────────────────────────────────
 _volatility_halted:   bool  = False  # 2.3 — set True when ATR spike detected
@@ -84,6 +95,7 @@ def _reset_if_new_day() -> None:
     global _circuit_open, _circuit_reason, _circuit_date, _circuit_pnl_based
     global _warning_issued, _cooldown_until, _consecutive_losses, _peak_daily_pnl
     global _volatility_halted, _volatility_reason, _volatility_atr_ratio
+    global _liquidation_triggered
     today = date.today()
     with _lock:
         if _circuit_date != today:
@@ -98,6 +110,7 @@ def _reset_if_new_day() -> None:
             _volatility_halted     = False
             _volatility_reason     = ""
             _volatility_atr_ratio  = 0.0
+            _liquidation_triggered = False
 
 
 # ── Sector map ────────────────────────────────────────────────────────────────
@@ -210,6 +223,66 @@ def _get_trade_count() -> int:
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
 
+def _maybe_trigger_liquidation() -> None:
+    """
+    Tier 2 daily-loss protection: force-close ALL open positions when the account
+    loss exceeds risk.daily_loss_liquidate_pct (default 4%).
+
+    Design rationale:
+      - Tier 1 (halt at 2.5%): blocks new entries; existing positions keep their
+        individual stops — winners can still reach their targets.
+      - Tier 2 (liquidate at 4%): the account is in genuine distress. Force-close
+        everything to protect the remaining 96% of capital. A 4% loss with 6 open
+        longs in a one-directional move can become 8%+ before individual stops fire.
+
+    Runs at most once per day (guarded by _liquidation_triggered). Called from
+    check_circuit_breaker() BEFORE the early-return for circuit-open so the
+    force-close fires even when the halt (2.5%) already tripped earlier.
+    """
+    global _liquidation_triggered, _circuit_open, _circuit_reason
+    global _circuit_pnl_based, _circuit_date
+
+    with _lock:
+        if _liquidation_triggered:
+            return
+
+    pnl_dollar, _ = _get_today_pnl()
+    _acct = _account_size()
+    if _acct <= 0:
+        return
+    acct_loss_pct = pnl_dollar / _acct * 100  # negative on losing day
+
+    _liq_pct = float(_rcfg("risk.daily_loss_liquidate_pct", DAILY_LOSS_LIQUIDATE_PCT))
+    if acct_loss_pct > -_liq_pct:
+        return  # below liquidation threshold
+
+    with _lock:
+        if _liquidation_triggered:
+            return  # another thread beat us here
+        _liquidation_triggered = True
+        _circuit_open      = True
+        _circuit_pnl_based = True
+        _circuit_reason    = (
+            f"🚨 Daily loss liquidation: {acct_loss_pct:+.2f}% account loss "
+            f"(liquidation threshold -{_liq_pct:.1f}%). "
+            f"All positions force-closed to protect remaining capital."
+        )
+        _circuit_date = date.today()
+
+    logger.warning(f"[RiskControls] {_circuit_reason}")
+
+    # Force-close in a daemon thread — don't block this risk-check call
+    import threading as _t
+    def _do_close():
+        try:
+            from agent.paper_trading import close_all_positions_eod
+            n = close_all_positions_eod("DAILY_LOSS_LIQUIDATE")
+            logger.warning(f"[RiskControls] Liquidation complete — {n} position(s) force-closed")
+        except Exception as exc:
+            logger.error(f"[RiskControls] Liquidation close_all failed: {exc}")
+    _t.Thread(target=_do_close, daemon=True, name="DailyLossLiquidate").start()
+
+
 def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
     """
     Returns (blocked, reason).
@@ -221,6 +294,10 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
     global _circuit_open, _circuit_reason, _circuit_date, _warning_issued
     global _cooldown_until, _peak_daily_pnl, _circuit_pnl_based, _consecutive_losses
     _reset_if_new_day()
+
+    # Check liquidation threshold BEFORE the circuit-open early return so the
+    # force-close fires even when the 2.5% halt already tripped earlier today.
+    _maybe_trigger_liquidation()
 
     with _lock:
         if session == "AFTER_HOURS":
@@ -684,8 +761,10 @@ def get_risk_status() -> dict:
         "daily_max":              _rcfg("risk.daily_profit_max_usd",    DAILY_PROFIT_MAX_USD),
         "progress_to_target_pct": round(min(pnl_dollar / max(_rcfg("risk.daily_profit_target_usd", DAILY_PROFIT_TARGET_USD), 1) * 100, 100), 1) if pnl_dollar > 0 else 0.0,
         # Loss limits
-        "daily_loss_warning_pct": _rcfg("risk.daily_loss_warning_pct", DAILY_LOSS_WARNING_PCT),
-        "daily_loss_halt_pct":    _rcfg("risk.daily_loss_halt_pct",    DAILY_LOSS_HALT_PCT),
+        "daily_loss_warning_pct":    _rcfg("risk.daily_loss_warning_pct",    DAILY_LOSS_WARNING_PCT),
+        "daily_loss_halt_pct":       _rcfg("risk.daily_loss_halt_pct",       DAILY_LOSS_HALT_PCT),
+        "daily_loss_liquidate_pct":  _rcfg("risk.daily_loss_liquidate_pct",  DAILY_LOSS_LIQUIDATE_PCT),
+        "liquidation_triggered":     _liquidation_triggered,
         # Consecutive losses
         "consecutive_losses":     consec,
         "max_consecutive":        _rcfg("risk.max_consecutive_losses", MAX_CONSECUTIVE_LOSSES),

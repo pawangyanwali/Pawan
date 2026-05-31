@@ -71,6 +71,10 @@ _DEFAULTS: dict[str, Any] = {
     "risk.account_size":                   lambda: float(os.getenv("TRADING_ACCOUNT_SIZE", "50000")),
     "risk.daily_loss_warning_pct":         lambda: float(os.getenv("DAILY_LOSS_WARNING_PCT", "1.5")),
     "risk.daily_loss_halt_pct":            lambda: float(os.getenv("DAILY_LOSS_HALT_PCT", "2.5")),
+    # Tier 2 loss circuit: force-close ALL open positions at this loss %.
+    # Separate from halt (2.5%) so winners can run to their stops while the
+    # halt blocks new entries. At this level the account is in genuine distress.
+    "risk.daily_loss_liquidate_pct":       lambda: float(os.getenv("DAILY_LOSS_LIQUIDATE_PCT", "4.0")),
     "risk.daily_profit_target_usd":        lambda: float(os.getenv("DAILY_PROFIT_TARGET", "1000")),
     "risk.daily_profit_max_usd":           lambda: float(os.getenv("DAILY_PROFIT_MAX", "1500")),
     "risk.max_concurrent_trades":          lambda: int(os.getenv("MAX_CONCURRENT_TRADES", "3")),

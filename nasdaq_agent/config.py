@@ -206,8 +206,9 @@ PAPER_MAX_OPEN_TRADES    = int(os.getenv(  "PAPER_MAX_OPEN_TRADES",  "10"))
 
 DAILY_PROFIT_TARGET_USD  = float(os.getenv("DAILY_PROFIT_TARGET",        "1000"))
 DAILY_PROFIT_MAX_USD     = float(os.getenv("DAILY_PROFIT_MAX",           "1500"))
-DAILY_LOSS_WARNING_PCT   = float(os.getenv("DAILY_LOSS_WARNING_PCT",     "1.5"))
-DAILY_LOSS_HALT_PCT      = float(os.getenv("DAILY_LOSS_HALT_PCT",        "2.5"))
+DAILY_LOSS_WARNING_PCT     = float(os.getenv("DAILY_LOSS_WARNING_PCT",     "1.5"))
+DAILY_LOSS_HALT_PCT        = float(os.getenv("DAILY_LOSS_HALT_PCT",        "2.5"))
+DAILY_LOSS_LIQUIDATE_PCT   = float(os.getenv("DAILY_LOSS_LIQUIDATE_PCT",   "4.0"))  # force-close all at 4%
 MAX_CONCURRENT_TRADES    = int(os.getenv(  "MAX_CONCURRENT_TRADES",      "3"))
 MAX_PORTFOLIO_HEAT_PCT   = float(os.getenv("MAX_PORTFOLIO_HEAT_PCT",     "1.5"))
 MAX_CONSECUTIVE_LOSSES   = int(os.getenv(  "MAX_CONSECUTIVE_LOSSES",     "5"))
