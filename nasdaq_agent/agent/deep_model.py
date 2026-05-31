@@ -341,6 +341,11 @@ def _prepare_df(df: pd.DataFrame, ticker: str = "") -> pd.DataFrame:
             from agent.ml_model import add_live_features
             df = compute_indicators(df.copy())
             df = add_live_features(df)
+        # Replace ±inf with NaN before dropping — vol_ratio and similar indicators
+        # can produce +inf when the rolling denominator is zero, which survives a
+        # plain dropna() and later makes StandardScaler emit NaN mean/std, causing
+        # all training losses to be NaN and best_val_loss to stay at float("inf").
+        df = df.replace([np.inf, -np.inf], np.nan)
         df = df.dropna(subset=FEATURE_COLS)
         return df
     except Exception as e:
@@ -546,7 +551,15 @@ def _train_one_cluster(
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            epoch_loss += loss.item()
+            batch_loss = loss.item()
+            if not np.isfinite(batch_loss):
+                logger.warning(
+                    f"[DeepModel] Cluster {cluster_name} epoch {epoch+1}: "
+                    f"non-finite batch loss ({batch_loss}) — possible NaN features; "
+                    "check vol_ratio / bb_pct for zero-denominator rows"
+                )
+                return False
+            epoch_loss += batch_loss
             n_batches  += 1
         scheduler.step()
         avg_train_loss = epoch_loss / max(n_batches, 1)

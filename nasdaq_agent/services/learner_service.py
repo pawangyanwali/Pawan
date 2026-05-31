@@ -382,7 +382,10 @@ def _run_deep_cycle() -> None:
             last_duration_s=round(finished - start, 1),
             last_success_at=finished if ok else _deep_state_snapshot().get("last_success_at"),
             last_tickers=len(hist_15m),
-            last_error=None if ok else "deep retrain returned false",
+            last_error=None if ok else (
+                f"retrain returned false — {len(hist_15m)} tickers fetched; "
+                "check learner logs for NaN loss (inf in features) or < 500 train sequences"
+            ),
             history=_hist,
             trained_clusters=_trained_clusters,
             trained=bool(_trained_clusters),
