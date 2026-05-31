@@ -450,6 +450,22 @@ def maybe_open_trade(
         logger.debug(f"[PAPER] {ticker} skip: market CLOSED — no trades on weekends/overnight")
         return None
 
+    # ── Circuit breaker — HARD gate enforced at the execution layer ──────────
+    # The scanner checks this before calling us, but a daily-loss / profit-ceiling
+    # halt can trip between that check and this open (e.g. a concurrent close in
+    # the same scan batch, or a different caller entirely). Re-checking here closes
+    # that race so a halt can NEVER be bypassed regardless of caller. check_circuit
+    # _breaker is thread-safe and idempotent. Pass the live session only for HIGH/
+    # MODERATE after-hours trades so the AH consecutive-loss reset applies (matching
+    # can_open_trade); P&L-based halts persist across all sessions.
+    from agent.risk_controls import check_circuit_breaker
+    _cb_session = _live_session if (_live_session == "AFTER_HOURS"
+                                    and trading_tier in ("HIGH", "MODERATE")) else ""
+    _cb_blocked, _cb_reason = check_circuit_breaker(_cb_session)
+    if _cb_blocked:
+        logger.info(f"[PAPER] {ticker} BLOCKED at execution by circuit breaker: {_cb_reason}")
+        return None
+
     # Extended-hours stop widening: wider stop = smaller shares, less capital at risk
     # on thin ECN spreads (configurable, default 1.5× pre-market, 2× after-hours).
     from agent.config_manager import config as _cfg_pt

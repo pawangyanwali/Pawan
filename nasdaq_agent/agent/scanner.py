@@ -1158,8 +1158,9 @@ def analyse_ticker(
                 entry_type   = pred.get("entry_type", "IMMEDIATE"),
                 mtf_alignment = mtf["alignment"],
             )
-            # Paper trade execution — can_open_trade() inside applies all
-            # session / risk / circuit-breaker rules at the execution layer.
+            # Paper trade execution — maybe_open_trade() re-enforces the session
+            # gate and circuit breaker at the execution layer (defense-in-depth)
+            # so a mid-scan halt can never be bypassed.
             # Extended-hours size caps: AH HIGH=50%, AH MODERATE=30%, PM HIGH=40%, PM MODERATE=25%.
             maybe_open_trade(
                 ticker            = ticker,
