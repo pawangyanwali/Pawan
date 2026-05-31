@@ -239,6 +239,12 @@ class _TokenManager:
             self._store(data)
             self._schedule_refresh(data.get("expires_in", 1800))
             logger.info(f"[Schwab/{self.name}] Access token refreshed.")
+            # Clear any outstanding auth alert now that refresh succeeded.
+            try:
+                from agent.system_alerts import resolve_alert
+                resolve_alert(alert_key=f"SCHWAB_AUTH:{self.name.lower()}")
+            except Exception:
+                pass
             # Notify market-data's _token_reload_loop so it can (re)start the streamer
             # if the initial startup was skipped because tokens were expired then.
             try:
@@ -258,6 +264,24 @@ class _TokenManager:
                     f"[Schwab/{self.name}] Refresh token rejected (400) — "
                     f"tokens cleared. Re-authenticate via /schwab/auth"
                 )
+                # CRITICAL: re-auth required — surface to dashboard, not just logs.
+                # This blocks live quotes/trading until an operator re-authenticates.
+                try:
+                    from agent.system_alerts import raise_alert
+                    raise_alert(
+                        alert_type="SCHWAB_AUTH",
+                        severity="CRITICAL",
+                        source=self.name.lower(),
+                        title=f"Schwab {self.name} re-authentication required",
+                        message=(
+                            "Refresh token was rejected (HTTP 400 invalid_grant). "
+                            "Tokens cleared — re-authenticate via /schwab/auth to "
+                            "restore live market data and trading."
+                        ),
+                        metadata={"http_code": 400, "app": self.name.lower()},
+                    )
+                except Exception:
+                    pass
                 with self._lock:
                     self._tokens.clear()
                 if self._token_path.exists():
@@ -273,6 +297,27 @@ class _TokenManager:
                     f"[Schwab/{self.name}] Token refresh HTTP {e.code} — "
                     f"retry #{_retry + 1} in {backoff}s"
                 )
+                # WARNING after repeated transient failures — auto-resolves once a
+                # retry succeeds. Dedup collapses the retry loop into one banner
+                # with a rising occurrence count.
+                if _retry >= 2:
+                    try:
+                        from agent.system_alerts import raise_alert
+                        raise_alert(
+                            alert_type="SCHWAB_AUTH",
+                            severity="WARNING",
+                            source=self.name.lower(),
+                            title=f"Schwab {self.name} token refresh failing",
+                            message=(
+                                f"Token refresh returned HTTP {e.code} on retry "
+                                f"#{_retry + 1}; retrying in {backoff}s. Live data "
+                                f"may be degraded until it recovers."
+                            ),
+                            metadata={"http_code": e.code, "retry": _retry + 1,
+                                      "app": self.name.lower()},
+                        )
+                    except Exception:
+                        pass
                 with self._lock:
                     if self._refresh_timer:
                         self._refresh_timer.cancel()
@@ -286,6 +331,23 @@ class _TokenManager:
             logger.warning(
                 f"[Schwab/{self.name}] Token refresh error — retry #{_retry + 1} in {backoff}s: {e}"
             )
+            if _retry >= 2:
+                try:
+                    from agent.system_alerts import raise_alert
+                    raise_alert(
+                        alert_type="SCHWAB_AUTH",
+                        severity="WARNING",
+                        source=self.name.lower(),
+                        title=f"Schwab {self.name} token refresh erroring",
+                        message=(
+                            f"Token refresh raised an error on retry #{_retry + 1}; "
+                            f"retrying in {backoff}s. Live data may be degraded: {e}"
+                        ),
+                        metadata={"error": str(e), "retry": _retry + 1,
+                                  "app": self.name.lower()},
+                    )
+                except Exception:
+                    pass
             with self._lock:
                 if self._refresh_timer:
                     self._refresh_timer.cancel()

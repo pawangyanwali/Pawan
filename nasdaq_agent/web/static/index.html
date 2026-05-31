@@ -581,6 +581,13 @@
   🔴 <strong id="market-closed-title">Market Closed</strong> — <span id="market-closed-detail">U.S. stock markets are closed on weekends.</span> &nbsp;·&nbsp; Scanner continues data collection. No paper trades will open.
 </div>
 
+<!-- System Alerts Banner — surfaces operational errors (Schwab auth, etc.) -->
+<div id="system-alerts-banner" style="display:none;padding:7px 20px;font-size:11.5px;text-align:left;border-bottom:1px solid transparent">
+  <span id="system-alerts-icon" style="margin-right:6px">⚠</span>
+  <strong id="system-alerts-summary"></strong>
+  <span id="system-alerts-detail" style="opacity:.85"></span>
+</div>
+
 <div class="summary-bar">
   <div class="pill" title="Total NASDAQ universe tracked. Active scan = tickers analyzed this cycle."><div class="pill-label">Tracked</div><div class="pill-value" style="color:var(--blue)" id="s-total">—</div></div>
   <div class="pill"><div class="pill-label">Strong Buy</div><div class="pill-value" style="color:var(--green-s)" id="s-sbuy">—</div></div>
@@ -2710,6 +2717,51 @@ async function checkHealth() {
   } catch {}
 }
 setInterval(checkHealth, 5000);
+
+// ─── System alerts banner (Schwab auth failures, infra errors) ─────────────────
+async function pollSystemAlerts() {
+  try {
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/alerts`)).json();
+    const banner  = document.getElementById('system-alerts-banner');
+    const icon    = document.getElementById('system-alerts-icon');
+    const summary = document.getElementById('system-alerts-summary');
+    const detail  = document.getElementById('system-alerts-detail');
+    if (!banner) return;
+    const total = d.total || 0;
+    if (total === 0) { banner.style.display = 'none'; return; }
+
+    const sev = d.top_severity || 'WARNING';
+    const palette = {
+      CRITICAL: { bg: 'rgba(239,68,68,.12)',  border: 'rgba(239,68,68,.45)',  color: '#f87171', icon: '🚨' },
+      WARNING:  { bg: 'rgba(245,158,11,.12)',  border: 'rgba(245,158,11,.4)',  color: '#fbbf24', icon: '⚠' },
+      INFO:     { bg: 'rgba(59,130,246,.12)',  border: 'rgba(59,130,246,.4)',  color: '#60a5fa', icon: 'ℹ' },
+    };
+    const p = palette[sev] || palette.WARNING;
+    banner.style.background   = p.bg;
+    banner.style.borderBottom = `1px solid ${p.border}`;
+    banner.style.color        = p.color;
+    icon.textContent          = p.icon;
+
+    const c = d.counts || {};
+    const parts = [];
+    if (c.CRITICAL) parts.push(`${c.CRITICAL} critical`);
+    if (c.WARNING)  parts.push(`${c.WARNING} warning`);
+    if (c.INFO)     parts.push(`${c.INFO} info`);
+    summary.textContent = `${total} system alert${total > 1 ? 's' : ''} (${parts.join(', ')}):`;
+
+    const top = (d.alerts || [])[0];
+    if (top) {
+      const occ = top.occurrences > 1 ? ` ×${top.occurrences}` : '';
+      detail.textContent = ` ${top.title}${occ} — ${top.message}`;
+    } else {
+      detail.textContent = '';
+    }
+    banner.style.display = 'block';
+  } catch {}
+}
+pollSystemAlerts();
+setInterval(pollSystemAlerts, 20000);
+
 async function pollPipelineMetrics() {
   try {
     const d = await (await _authFetch(`${BACKEND_HTTP}/api/pipeline-metrics`)).json();
