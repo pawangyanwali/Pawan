@@ -217,7 +217,17 @@ def _continuous_deep_loop() -> None:
             interval = int(_cfg.get("learner.deep_interval_s", _DEEP_INTERVAL_S))
         except Exception:
             interval = _DEEP_INTERVAL_S
-        _runner._stop.wait(interval)
+        # Sleep in 30s slices so a manual training request is noticed within 30s
+        # even when the learner is cooling down after a successful off-hours cycle.
+        slept = 0
+        while slept < interval and not _runner.stopped:
+            if _runner._stop.wait(_MARKET_HOURS_CHECK_INTERVAL_S):
+                return
+            slept += _MARKET_HOURS_CHECK_INTERVAL_S
+            if _check_and_clear_manual_request():
+                _log.info("Manual BiLSTM training request received during cooldown — running now")
+                _run_deep_cycle()
+                break
 
 
 def _run_deep_cycle() -> None:
