@@ -54,6 +54,7 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
         pass
 
     cluster_status = {}
+    disk_deep_trained = False
     try:
         from agent.deep_model import _cluster_trained, _CLUSTER_CONFIGS
         from config import CLUSTER_A_TICKERS, CLUSTER_B_TICKERS, CLUSTER_C_TICKERS
@@ -62,13 +63,15 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
             cfg = _CLUSTER_CONFIGS.get(cname.upper(), {})
             model_path = cfg.get("path", "")
             mtime = None
-            if model_path and os.path.exists(str(model_path)):
+            _is_trained = bool(model_path and os.path.exists(str(model_path)))
+            if _is_trained:
                 mtime = os.path.getmtime(str(model_path))
+                disk_deep_trained = True
             cluster_status[cname] = {
                 # Read trained state from disk (shared EBS mount) not in-process dict.
                 # web-api and learner containers have separate _cluster_trained copies,
                 # so the in-process dict is always False in web-api.
-                "trained": bool(model_path and os.path.exists(str(model_path))),
+                "trained": _is_trained,
                 "last_trained": mtime,
                 "n_tickers": len(cluster_tickers.get(cname, [])),
             }
@@ -86,6 +89,7 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
     is_now = is_training_active()
     deep_last_error = None
     deep_last_tickers = 0
+    valkey_history: list = []
     try:
         import json as _json
         from agent.valkey_client import _get_client as _vk
@@ -97,16 +101,37 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
                 is_now = bool(_deep.get("running", False))
                 deep_last_error = _deep.get("last_error")
                 deep_last_tickers = _deep.get("last_tickers", 0)
+                valkey_history = _deep.get("history", []) or []
     except Exception:
         pass
 
+    # deep_trained: prefer the disk check (shared across containers) over the
+    # in-process flag, which is always False in web-api.
+    _deep_trained = disk_deep_trained or deep_is_trained()
+
+    # Loss-curve history: web-api never runs training, so read it from shared state.
+    # Source-of-truth order: PostgreSQL (durable) → Valkey (live mirror) → in-process.
+    _history = []
+    try:
+        from agent.service_state import get_state
+        _row = get_state("deep:history", ignore_expiry=True)
+        if _row and _row.get("history"):
+            _history = _row["history"]
+    except Exception:
+        pass
+    if not _history:
+        _history = valkey_history or get_training_history()
+
+    _model_info = get_model_info()
+    _model_info["trained"] = _deep_trained
+
     return {
-        "deep_model":        get_model_info(),
-        "deep_trained":      deep_is_trained(),
+        "deep_model":        _model_info,
+        "deep_trained":      _deep_trained,
         "is_training_now":   is_now,
         "deep_last_error":   deep_last_error,
         "deep_last_tickers": deep_last_tickers,
-        "training_history":  get_training_history(),
+        "training_history":  _history,
         "scalp_models":      _count(_model_registry,          "scalp"),
         "daily_models":      _count(_daily_model_registry,    "daily"),
         "reversal_models":   _count(_reversal_model_registry, "reversal"),

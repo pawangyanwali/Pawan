@@ -152,6 +152,70 @@ def _publish_deep_state_now() -> None:
         _log.debug("_publish_deep_state_now failed: %s", exc)
 
 
+# ── Durable training-history persistence (PostgreSQL source of truth + Valkey) ──
+#
+# Architecture: the loss-curve history must survive learner restarts, so it is
+# persisted to PostgreSQL service_state under "deep:history" with NO TTL (durable).
+# Valkey holds a live mirror for fast reads and per-epoch pub/sub updates. The
+# in-process deep_model._training_history is just a working copy, reloaded from
+# PostgreSQL on startup so no data is ever lost.
+
+_DEEP_HISTORY_KEY = "deep:history"
+
+
+def _persist_deep_history(history: list[dict]) -> None:
+    """Write training history durably to PostgreSQL (no TTL) and mirror to Valkey."""
+    if not history:
+        return
+    payload = {"history": history[-200:], "updated_at": time.time()}
+    try:
+        from agent.service_state import set_state
+        set_state(_DEEP_HISTORY_KEY, payload, ttl_s=None)   # ttl_s=None → durable, never expires
+    except Exception as exc:
+        _log.debug("persist deep:history to PG failed: %s", exc)
+    try:
+        from agent.valkey_client import _get_client
+        import json as _json
+        client = _get_client()
+        if client:
+            client.set(_DEEP_HISTORY_KEY, _json.dumps(payload, default=str))
+            client.publish("deep:history:updated", _json.dumps(payload, default=str))
+    except Exception as exc:
+        _log.debug("mirror deep:history to Valkey failed: %s", exc)
+
+
+def _load_deep_history() -> None:
+    """Restore training history from PostgreSQL into deep_model on startup."""
+    try:
+        from agent.service_state import get_state
+        from agent.deep_model import set_history
+        row = get_state(_DEEP_HISTORY_KEY, ignore_expiry=True)
+        hist = (row or {}).get("history", []) if row else []
+        if hist:
+            set_history(hist)
+            _log.info("Restored %d deep training-history points from PostgreSQL", len(hist))
+    except Exception as exc:
+        _log.debug("load deep:history failed: %s", exc)
+
+
+_last_epoch_publish = 0.0
+
+
+def _on_epoch(entry: dict, full_history: list[dict]) -> None:
+    """Live per-epoch hook (registered into deep_model). Streams the growing loss
+    curve to Valkey on every epoch and checkpoints to PostgreSQL at most every 10s."""
+    global _last_epoch_publish
+    # Always update the live deep state so the dashboard loss curve grows in real time
+    _set_deep_state(running=True, history=full_history[-120:],
+                    last_epoch=entry.get("epoch"), last_loss=entry.get("loss"))
+    _publish_deep_state_now()
+    # Durable PostgreSQL checkpoint, rate-limited to avoid hammering the DB per epoch
+    now = time.time()
+    if now - _last_epoch_publish >= 10.0:
+        _last_epoch_publish = now
+        _persist_deep_history(full_history)
+
+
 _MANUAL_REQUEST_KEY = "deep:train:requested"
 _MARKET_HOURS_CHECK_INTERVAL_S = 30   # poll for manual requests every 30s during market hours
 
@@ -298,6 +362,20 @@ def _run_deep_cycle() -> None:
             return
         ok = retrain_deep_all(hist_15m)
         finished = time.time()
+
+        # Capture training history (loss curve) and trained-cluster list from the
+        # deep_model module — these live in THIS process's memory after training.
+        # We publish them into learner:status so the web-api container (which has
+        # its own empty copy of deep_model state) can render the loss curve and
+        # trained badges without re-training.
+        try:
+            from agent.deep_model import get_training_history, get_model_info
+            _hist = get_training_history()[-120:]   # last ~120 epoch points
+            _info = get_model_info()
+            _trained_clusters = _info.get("trained_clusters", [])
+        except Exception:
+            _hist, _trained_clusters = [], []
+
         _set_deep_state(
             running=False,
             last_finished_at=finished,
@@ -305,9 +383,14 @@ def _run_deep_cycle() -> None:
             last_success_at=finished if ok else _deep_state_snapshot().get("last_success_at"),
             last_tickers=len(hist_15m),
             last_error=None if ok else "deep retrain returned false",
+            history=_hist,
+            trained_clusters=_trained_clusters,
+            trained=bool(_trained_clusters),
         )
-        _log.info("Continuous deep cycle finished ok=%s tickers=%d", ok, len(hist_15m))
-        _publish_deep_state_now()   # immediately clear "Training in progress" banner
+        _log.info("Continuous deep cycle finished ok=%s tickers=%d clusters=%s history=%d",
+                  ok, len(hist_15m), _trained_clusters, len(_hist))
+        _persist_deep_history(_hist)   # final durable checkpoint to PostgreSQL + Valkey
+        _publish_deep_state_now()      # immediately clear "Training in progress" banner
     except Exception as exc:
         finished = time.time()
         _set_deep_state(
@@ -441,6 +524,16 @@ def main() -> None:
             )
     except Exception as exc:
         _log.warning("Schwab token load failed: %s", exc)
+
+    # Restore durable training history from PostgreSQL and register the live
+    # per-epoch hook so the loss curve streams to Valkey + PostgreSQL during training.
+    _load_deep_history()
+    try:
+        from agent.deep_model import set_epoch_hook
+        set_epoch_hook(_on_epoch)
+        _log.info("Registered live per-epoch training hook")
+    except Exception as exc:
+        _log.debug("epoch hook registration failed: %s", exc)
 
     _run_learning_engine()
     _run_weekend_learner()

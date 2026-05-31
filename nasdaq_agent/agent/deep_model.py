@@ -106,6 +106,26 @@ _trained = False
 _training_history: list[dict] = []   # [{epoch, total_epochs, loss, ts, tickers, cluster}]
 _is_training_now:  bool       = False
 _MAX_HISTORY       = 500
+
+# Optional hook invoked after each epoch with the latest history entry.
+# The learner service registers this to stream live loss-curve updates to Valkey
+# (pub/sub) so the dashboard updates per-epoch and PostgreSQL holds the durable copy.
+_epoch_hook = None  # type: Optional[callable]
+
+
+def set_epoch_hook(fn) -> None:
+    """Register a callback(entry: dict, full_history: list[dict]) fired each epoch."""
+    global _epoch_hook
+    _epoch_hook = fn
+
+
+def set_history(history: list[dict]) -> None:
+    """Restore training history from durable storage (called on learner startup)."""
+    global _training_history
+    if not history:
+        return
+    with _lock:
+        _training_history = list(history)[-_MAX_HISTORY:]
 _torch_runtime_configured = False
 
 # ── Ticker → cluster-local index mapping ──────────────────────────────────────
@@ -552,7 +572,7 @@ def _train_one_cluster(
             f"Epoch {epoch+1}/{n_epochs} — {loss_label}"
         )
         with _lock:
-            _training_history.append({
+            _entry = {
                 "epoch":        epoch + 1,
                 "total_epochs": n_epochs,
                 "loss":         round(avg_train_loss, 6),
@@ -561,9 +581,17 @@ def _train_one_cluster(
                 "tickers":      len(cluster_dfs),
                 "mode":         "full" if is_first_train else "finetune",
                 "cluster":      cluster_name,
-            })
+            }
+            _training_history.append(_entry)
             if len(_training_history) > _MAX_HISTORY:
                 del _training_history[:-_MAX_HISTORY]
+            _hist_snapshot = list(_training_history)
+        # Fire live-update hook OUTSIDE the lock so a slow publish never stalls training
+        if _epoch_hook is not None:
+            try:
+                _epoch_hook(_entry, _hist_snapshot)
+            except Exception:
+                pass
 
     # ── Restore best checkpoint (chosen by val loss, not train loss) ──────────
     if best_state:
