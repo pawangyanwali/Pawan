@@ -100,6 +100,12 @@ _DEFAULTS: dict[str, Any] = {
     # ── Learner ────────────────────────────────────────────────────────────────
     "learner.deep_enabled":                lambda: os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes"),
     "learner.deep_interval_s":             lambda: max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600"))),
+    # Market-hours fine-tune cadence. During REGULAR/PRE_MARKET/AFTER_HOURS the
+    # learner runs a lightweight 3-epoch fine-tune every N seconds so the BiLSTM
+    # keeps learning intraday. 0 disables market-hours training (CLOSED-only).
+    # Isolation: the learner container is capped at 1.5 CPU so this never starves
+    # the scanner (2.5 CPU) on the 4-vCPU host.
+    "learner.deep_market_interval_s":      lambda: max(0, int(os.getenv("LEARNER_DEEP_MARKET_INTERVAL_S", "1800"))),
     "learner.deep_ticker_limit":           lambda: max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100"))),
     # ── Adaptive filter ────────────────────────────────────────────────────────
     "filter.throttle_start_wr":            lambda: 0.50,

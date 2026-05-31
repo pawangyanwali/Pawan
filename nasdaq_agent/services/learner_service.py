@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-learner_service — off-hours ML training and adaptive filter.
+learner_service — continuous ML training and adaptive filter.
 
 Responsibilities:
-  1. Run the adaptive learning engine (win-rate tracking, threshold calibration).
-  2. Run the weekend deep-learner when market is closed.
-  3. Gate ALL activity behind market-hours checks — never train during market hours.
-     Exception: manual training requests via Valkey key "deep:train:requested" bypass
-     this gate, allowing on-demand BiLSTM training at any time.
-  4. Publish adaptive-filter + engine state to Valkey every 60s so that web-api
+  1. Run the adaptive learning engine (win-rate tracking, threshold calibration)
+     continuously, every 90s, in all sessions.
+  2. Continuously fine-tune the Deep BiLSTM:
+       - market hours : lightweight 3-epoch fine-tune every
+                        learner.deep_market_interval_s (default 30min) on fresh
+                        intraday bars, so the model keeps learning during the day.
+       - CLOSED       : full cycle every learner.deep_interval_s (default 1h).
+     A manual request via Valkey key "deep:train:requested" runs immediately in
+     any session. All training stays inside the learner container's 1.5-CPU limit
+     so it never starves the scanner.
+  3. Publish adaptive-filter + engine state to Valkey every 60s so that web-api
      can serve fresh /api/learning-status without a local learner.
 
 Interface contract:
@@ -44,7 +49,22 @@ _runner = ServiceRunner("learner")
 _POLL_INTERVAL_S = int(os.getenv("LEARNER_POLL_INTERVAL_S", "30"))
 _DEEP_ENABLED = os.getenv("LEARNER_DEEP_ENABLED", "1").lower() in ("1", "true", "yes")
 _DEEP_INTERVAL_S = max(300, int(os.getenv("LEARNER_DEEP_INTERVAL_S", "3600")))
+# Market-hours fine-tune cadence (0 = disabled). The learner keeps the BiLSTM
+# learning intraday with lightweight 3-epoch fine-tunes; isolation is guaranteed
+# by the learner container's 1.5-CPU cgroup limit so the scanner is never starved.
+_DEEP_MARKET_INTERVAL_S = max(0, int(os.getenv("LEARNER_DEEP_MARKET_INTERVAL_S", "1800")))
 _DEEP_STARTUP_DELAY_S = max(0, int(os.getenv("LEARNER_DEEP_STARTUP_DELAY_S", "300")))
+
+# 15-min bar cache TTL by session, passed to fetch_batch_interval.
+#   CLOSED      : 24h — data isn't changing; large TTL survives Schwab token gaps
+#                 (regular-session bars stay served from the PostgreSQL cache).
+#   market hrs  : 120s — fetch_batch_interval marks a 15-min row stale once the
+#                 newest bar is older than ttl × 16 (the 15min interval multiplier
+#                 in data_fetcher), so 120 × 16 ≈ 32 min forces fresh intraday bars
+#                 on each ~30 min fine-tune cycle. Fetched bars are still persisted
+#                 to PostgreSQL (ttl > 0), so durability is preserved.
+_DEEP_DATA_TTL_CLOSED_S = 86400
+_DEEP_DATA_TTL_MARKET_S = 120
 _DEEP_TICKER_LIMIT = max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100")))
 _DEEP_STATE: dict = {
     "enabled": _DEEP_ENABLED,
@@ -232,14 +252,63 @@ def _check_and_clear_manual_request() -> bool:
     return False
 
 
+def _deep_interval_for_session(session: str) -> int:
+    """
+    Cadence between deep-training cycles, by market session.
+
+    CLOSED        → learner.deep_interval_s         (default 3600s) — full cycle
+    market hours  → learner.deep_market_interval_s  (default 1800s) — fine-tune
+
+    During market hours the model files already exist, so _train_one_cluster
+    automatically runs a lightweight FINE_TUNE_EPOCHS (3) pass rather than a full
+    10-epoch retrain — keeping the BiLSTM learning intraday without starving the
+    scanner (the learner container is capped at 1.5 CPU). Returning 0 for market
+    hours disables intraday training (CLOSED-only behaviour).
+    """
+    try:
+        from agent.config_manager import config as _cfg
+        if session == "CLOSED":
+            return max(300, int(_cfg.get("learner.deep_interval_s", _DEEP_INTERVAL_S)))
+        return max(0, int(_cfg.get("learner.deep_market_interval_s", _DEEP_MARKET_INTERVAL_S)))
+    except Exception:
+        return _DEEP_INTERVAL_S if session == "CLOSED" else _DEEP_MARKET_INTERVAL_S
+
+
+def _wait_for_next_cycle(interval_s: int) -> bool:
+    """
+    Sleep up to interval_s in _MARKET_HOURS_CHECK_INTERVAL_S slices so a manual
+    "Train BiLSTM" request is picked up within ~30s. Returns True if a manual
+    request was consumed (caller should run a cycle immediately) or the service
+    is stopping; False when the interval simply elapsed.
+    """
+    slept = 0
+    while slept < interval_s and not _runner.stopped:
+        if _runner._stop.wait(_MARKET_HOURS_CHECK_INTERVAL_S):
+            return True
+        slept += _MARKET_HOURS_CHECK_INTERVAL_S
+        if _check_and_clear_manual_request():
+            _log.info("Manual BiLSTM training request received — running now")
+            _run_deep_cycle()
+            return True
+    return False
+
+
 def _continuous_deep_loop() -> None:
     """
-    Keep Deep BiLSTM learning alive in the learner container.
+    Keep the Deep BiLSTM continuously learning — during BOTH market hours and the
+    CLOSED window.
 
-    Normally skips during market hours to avoid CPU contention with the scanner.
-    Exception: if the web-api writes "deep:train:requested" to Valkey (via the
-    "Train BiLSTM" button), that key is detected here within 30s and training
-    runs immediately regardless of market session.
+    - CLOSED        : full cycle every learner.deep_interval_s (default 1h).
+    - market hours  : lightweight 3-epoch fine-tune every
+                      learner.deep_market_interval_s (default 30min). Set that key
+                      to 0 to revert to CLOSED-only training.
+
+    A manual "deep:train:requested" key (the "Train BiLSTM" button) is detected
+    within ~30s and runs immediately regardless of session.
+
+    Isolation: all training runs inside the learner container, which is capped at
+    1.5 CPU by docker-compose, so intraday fine-tuning never starves the scanner
+    (2.5 CPU) or web-api on the 4-vCPU host.
     """
     if _DEEP_STARTUP_DELAY_S:
         _log.info("Continuous deep learner waiting %ss before first cycle", _DEEP_STARTUP_DELAY_S)
@@ -257,41 +326,30 @@ def _continuous_deep_loop() -> None:
             _runner._stop.wait(60)
             continue
 
-        # Check for a manual training request from web-api BEFORE the market-hours gate
+        # Manual request always wins, regardless of session.
         if _check_and_clear_manual_request():
-            _log.info("Manual BiLSTM training request received — running now (market-hours gate bypassed)")
+            _log.info("Manual BiLSTM training request received — running now")
             _run_deep_cycle()
             continue
 
-        if _is_market_hours():
-            # Sleep in short intervals so we wake up quickly on a manual request
-            _log.debug("Deep learner idle — market is open; checking for manual requests every %ss",
-                       _MARKET_HOURS_CHECK_INTERVAL_S)
-            for _ in range(300 // _MARKET_HOURS_CHECK_INTERVAL_S):
-                if _runner._stop.wait(_MARKET_HOURS_CHECK_INTERVAL_S):
-                    return
-                if _check_and_clear_manual_request():
-                    _log.info("Manual BiLSTM training request received mid-wait — running now")
-                    _run_deep_cycle()
-                    break
+        session = _current_session()
+        interval = _deep_interval_for_session(session)
+
+        if interval <= 0:
+            # Intraday training disabled (market hours + deep_market_interval_s=0).
+            # Idle, but still poll for manual requests every 30s.
+            _log.debug("Deep intraday training disabled (session=%s); idling", session)
+            if _wait_for_next_cycle(300):
+                continue
             continue
+
+        _mode = "fine-tune" if session != "CLOSED" else "full"
+        _log.info("Deep cycle starting (session=%s, mode=%s, next in %ss)",
+                  session, _mode, interval)
         _run_deep_cycle()
-        try:
-            from agent.config_manager import config as _cfg
-            interval = int(_cfg.get("learner.deep_interval_s", _DEEP_INTERVAL_S))
-        except Exception:
-            interval = _DEEP_INTERVAL_S
-        # Sleep in 30s slices so a manual training request is noticed within 30s
-        # even when the learner is cooling down after a successful off-hours cycle.
-        slept = 0
-        while slept < interval and not _runner.stopped:
-            if _runner._stop.wait(_MARKET_HOURS_CHECK_INTERVAL_S):
-                return
-            slept += _MARKET_HOURS_CHECK_INTERVAL_S
-            if _check_and_clear_manual_request():
-                _log.info("Manual BiLSTM training request received during cooldown — running now")
-                _run_deep_cycle()
-                break
+
+        # Cool down for `interval`, waking early on a manual request.
+        _wait_for_next_cycle(interval)
 
 
 def _run_deep_cycle() -> None:
@@ -335,13 +393,18 @@ def _run_deep_cycle() -> None:
             + list(CLUSTER_B_TICKERS)[:_per_cluster]
             + list(CLUSTER_C_TICKERS)[:(_ticker_limit - 2 * _per_cluster)]
         )
-        _log.info("Continuous deep cycle starting (%d tickers: A=%d B=%d C=%d)",
-                  len(tickers), _per_cluster, _per_cluster, len(tickers) - 2 * _per_cluster)
+        # Fresh intraday bars during market hours (small TTL), resilient cache when
+        # CLOSED (large TTL). Either way ttl > 0 so bars persist to PostgreSQL.
+        _session = _current_session()
+        _data_ttl = _DEEP_DATA_TTL_CLOSED_S if _session == "CLOSED" else _DEEP_DATA_TTL_MARKET_S
+        _log.info("Continuous deep cycle starting (session=%s, %d tickers: A=%d B=%d C=%d, data_ttl=%ds)",
+                  _session, len(tickers), _per_cluster, _per_cluster,
+                  len(tickers) - 2 * _per_cluster, _data_ttl)
         hist_15m = fetch_batch_interval(
             tickers,
             "15min",
             5000,
-            ttl=86400,
+            ttl=_data_ttl,
             background=True,
             # extended_hours=False (default) — regular-session bars are sufficient
             # for directional BiLSTM training AND this enables the PostgreSQL cache,

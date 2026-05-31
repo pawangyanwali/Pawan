@@ -579,8 +579,14 @@ class LearningEngine:
                     _log_attribution(outcomes_df)
                     _update_confidence_calibration(outcomes_df)
 
-                retrain_all(TRAINING_TICKERS, skip_deep=not RETRAIN_INCLUDE_DEEP)
-                _log("ML retrain complete", significant=True)
+                # During market hours the learner's continuous_deep_loop owns deep
+                # BiLSTM fine-tuning (dashboard-visible, persistence-aware). Skip
+                # deep here in active sessions so we never run two competing deep
+                # passes that would just contend on deep_model._is_training_now.
+                _skip_deep = (not RETRAIN_INCLUDE_DEEP) or (_actual_session != "CLOSED")
+                retrain_all(TRAINING_TICKERS, skip_deep=_skip_deep)
+                _log(f"ML retrain complete (deep={'skipped' if _skip_deep else 'included'})",
+                     significant=True)
             except Exception as e:
                 _log(f"ML retrain failed: {e}", level="ERROR", significant=True)
 
