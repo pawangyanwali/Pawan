@@ -6,6 +6,8 @@ Responsibilities:
   1. Run the adaptive learning engine (win-rate tracking, threshold calibration).
   2. Run the weekend deep-learner when market is closed.
   3. Gate ALL activity behind market-hours checks — never train during market hours.
+     Exception: manual training requests via Valkey key "deep:train:requested" bypass
+     this gate, allowing on-demand BiLSTM training at any time.
   4. Publish adaptive-filter + engine state to Valkey every 60s so that web-api
      can serve fresh /api/learning-status without a local learner.
 
@@ -114,14 +116,30 @@ def _set_deep_state(**updates) -> None:
         _DEEP_STATE.update(updates)
 
 
+_MANUAL_REQUEST_KEY = "deep:train:requested"
+_MARKET_HOURS_CHECK_INTERVAL_S = 30   # poll for manual requests every 30s during market hours
+
+
+def _check_and_clear_manual_request() -> bool:
+    """Return True and consume the manual training request from Valkey if one exists."""
+    try:
+        from agent.valkey_client import _get_client
+        client = _get_client()
+        if client and client.delete(_MANUAL_REQUEST_KEY):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _continuous_deep_loop() -> None:
     """
     Keep Deep BiLSTM learning alive in the learner container.
 
-    The scanner never runs this work. Docker CPU and memory limits keep this
-    background learner from starving the market-data and scanner containers.
-    Training is skipped while the market is open to avoid CPU contention with
-    the live scanner — consistent with the module's market-hours contract.
+    Normally skips during market hours to avoid CPU contention with the scanner.
+    Exception: if the web-api writes "deep:train:requested" to Valkey (via the
+    "Train BiLSTM" button), that key is detected here within 30s and training
+    runs immediately regardless of market session.
     """
     if _DEEP_STARTUP_DELAY_S:
         _log.info("Continuous deep learner waiting %ss before first cycle", _DEEP_STARTUP_DELAY_S)
@@ -138,9 +156,24 @@ def _continuous_deep_loop() -> None:
             _log.debug("Deep learner disabled via config; rechecking in 60s")
             _runner._stop.wait(60)
             continue
+
+        # Check for a manual training request from web-api BEFORE the market-hours gate
+        if _check_and_clear_manual_request():
+            _log.info("Manual BiLSTM training request received — running now (market-hours gate bypassed)")
+            _run_deep_cycle()
+            continue
+
         if _is_market_hours():
-            _log.debug("Skipping deep cycle — market is open; rechecking in 5 min")
-            _runner._stop.wait(300)
+            # Sleep in short intervals so we wake up quickly on a manual request
+            _log.debug("Deep learner idle — market is open; checking for manual requests every %ss",
+                       _MARKET_HOURS_CHECK_INTERVAL_S)
+            for _ in range(300 // _MARKET_HOURS_CHECK_INTERVAL_S):
+                if _runner._stop.wait(_MARKET_HOURS_CHECK_INTERVAL_S):
+                    return
+                if _check_and_clear_manual_request():
+                    _log.info("Manual BiLSTM training request received mid-wait — running now")
+                    _run_deep_cycle()
+                    break
             continue
         _run_deep_cycle()
         try:

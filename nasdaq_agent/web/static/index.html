@@ -6416,8 +6416,9 @@ function openNeural() {
   loadNeuralStatus();
   if (_nnPollTimer) { clearInterval(_nnPollTimer); _nnPollTimer = null; }
   _nnPollTimer = setInterval(() => {
-    const _rp = _nnData?.retrain_progress || {};
-    if (_nnData && (_nnData.is_training_now || _rp.is_running)) loadNeuralStatus();
+    // Always poll — is_training_now comes from the learner container via Valkey,
+    // so we must refresh to detect training that started after the modal opened.
+    loadNeuralStatus();
   }, 3000);
 }
 
@@ -6946,16 +6947,19 @@ async function triggerDeepTrain(btn) {
       const sessionText = document.getElementById('nn-session-text');
       if (sessionText) sessionText.textContent = r.message || 'BiLSTM training deferred.';
     } else {
-      btn.textContent = '✓ Started';
+      btn.textContent = '✓ Queued';
       btn.style.background = '#16a34a';
-      if (!_nnPollTimer) {
-        _nnPollTimer = setInterval(() => {
-          if (_nnData && _nnData.is_training_now) loadNeuralStatus();
-        }, 2000);
-      }
-      setTimeout(() => { loadNeuralStatus(); }, 1500);
+      // Poll every 4s for 90s after clicking — learner picks up the request within ~30s.
+      // The poll runs unconditionally (no is_training_now guard) because that flag
+      // comes from the learner container via Valkey and needs a fresh fetch to appear.
+      let _postTrainPolls = 0;
+      const _postTrainTimer = setInterval(() => {
+        loadNeuralStatus();
+        if (++_postTrainPolls >= 22) clearInterval(_postTrainTimer);  // 22 × 4s = 88s
+      }, 4000);
+      setTimeout(() => { loadNeuralStatus(); }, 2000);  // immediate first refresh
     }
-    setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.background = '#7c3aed'; }, 8000);
+    setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.background = '#7c3aed'; }, 10000);
   } catch(e) {
     btn.textContent = '✕ Error';
     btn.style.background = '#dc2626';

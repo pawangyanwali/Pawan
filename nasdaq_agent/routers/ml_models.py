@@ -78,10 +78,24 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
         _sess = "UNKNOWN"
     _can_retrain = (_sess == "CLOSED")
 
+    # Read live training state from the learner container via shared Valkey key.
+    # Fallback: in-process flag (always False in web-api — only used in single-process mode).
+    is_now = is_training_active()
+    try:
+        import json as _json
+        from agent.valkey_client import _get_client as _vk
+        _vk_raw = _vk()
+        if _vk_raw:
+            _ls_raw = _vk_raw.get("learner:status")
+            if _ls_raw:
+                is_now = bool(_json.loads(_ls_raw).get("deep", {}).get("running", False))
+    except Exception:
+        pass
+
     return {
         "deep_model":        get_model_info(),
         "deep_trained":      deep_is_trained(),
-        "is_training_now":   is_training_active(),
+        "is_training_now":   is_now,
         "training_history":  get_training_history(),
         "scalp_models":      _count(_model_registry,          "scalp"),
         "daily_models":      _count(_daily_model_registry,    "daily"),
@@ -139,31 +153,54 @@ async def trigger_retrain(
 
 @router.post("/api/deep-model/train")
 async def trigger_deep_train(
-    background_tasks: BackgroundTasks,
     _current: AuthenticatedUser = Depends(require_admin),
 ):
     """
-    Manually trigger Deep BiLSTM training only (faster than full retrain).
-    Uses cached 15-min data when available.
-    """
-    from agent.deep_model import is_training_active, retrain_deep_all
-    from agent.data_fetcher import fetch_batch_interval
-    from config import TRAINING_TICKERS
+    Manually trigger Deep BiLSTM training.
 
-    if is_training_active():
+    Writes a training request to Valkey ("deep:train:requested").  The learner
+    container's _continuous_deep_loop() polls for this key every 30 s and picks
+    it up regardless of market session, running the full training cycle with its
+    own authenticated Schwab data fetcher.  This avoids the web-api running data
+    fetching or training in its own (resource-limited, no-auth) process.
+    """
+    # Check whether the learner is already training via shared Valkey state
+    already_running = False
+    try:
+        import json as _json
+        from agent.valkey_client import _get_client as _vk
+        _client = _vk()
+        if _client:
+            _ls_raw = _client.get("learner:status")
+            if _ls_raw:
+                already_running = bool(_json.loads(_ls_raw).get("deep", {}).get("running", False))
+    except Exception:
+        pass
+
+    if already_running:
         return {"status": "already_running", "message": "Deep model training already in progress."}
 
-    def _run():
-        try:
-            logger.info(f"[manual deep train] Fetching 15-min data ({len(TRAINING_TICKERS)} Tier-1)…")
-            hist_15m = fetch_batch_interval(TRAINING_TICKERS, "15min", 5000, ttl=3600)
-            logger.info(f"[manual deep train] Got {len(hist_15m)} tickers — starting training…")
-            retrain_deep_all(hist_15m)
-        except Exception as e:
-            logger.warning(f"[manual deep train] failed: {e}")
+    # Write the training request so the learner container picks it up
+    try:
+        from agent.valkey_client import _get_client as _vk
+        _client = _vk()
+        if _client:
+            _client.setex("deep:train:requested", 600, "1")
+            logger.info("[deep-model/train] Training request written to Valkey; learner will pick up within 30s")
+        else:
+            logger.warning("[deep-model/train] Valkey unavailable — training request not queued")
+            return {"status": "error", "message": "Valkey unavailable — cannot queue training request."}
+    except Exception as exc:
+        logger.warning(f"[deep-model/train] Failed to write training request: {exc}")
+        return {"status": "error", "message": f"Failed to queue training request: {exc}"}
 
-    background_tasks.add_task(_run)
-    return {"status": "started", "message": "Deep BiLSTM training started. Check /api/ml-status for epoch progress."}
+    return {
+        "status": "started",
+        "message": (
+            "Training request queued. The learner container will begin within ~30 s. "
+            "Check /api/ml-status → is_training_now for live progress."
+        ),
+    }
 
 
 @router.get("/api/deep-model/status")
