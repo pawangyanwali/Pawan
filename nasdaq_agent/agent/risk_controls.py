@@ -55,6 +55,15 @@ def _rcfg(key: str, fallback):
     except Exception:
         return fallback
 
+
+def _account_size() -> float:
+    """Account size for all risk-% math — sourced from PostgreSQL (risk.account_size),
+    falling back to the DEFAULT_ACCOUNT_SIZE env constant only if config is unreachable."""
+    try:
+        return float(_rcfg("risk.account_size", DEFAULT_ACCOUNT_SIZE))
+    except Exception:
+        return float(DEFAULT_ACCOUNT_SIZE)
+
 # ── State — resets each trading day ──────────────────────────────────────────
 _circuit_open:        bool  = False
 _circuit_reason:      str   = ""
@@ -236,7 +245,8 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
 
     pnl_dollar, pnl_pct = _get_today_pnl()
 
-    acct_loss_pct = (pnl_dollar / DEFAULT_ACCOUNT_SIZE * 100) if DEFAULT_ACCOUNT_SIZE > 0 else 0.0
+    _acct = _account_size()
+    acct_loss_pct = (pnl_dollar / _acct * 100) if _acct > 0 else 0.0
 
     with _lock:
         # Re-check _circuit_open here — another thread may have tripped it
@@ -279,7 +289,7 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
         _profit_target = _rcfg("risk.daily_profit_target_usd", DAILY_PROFIT_TARGET_USD)
         if pnl_dollar >= _profit_target:
             peak_drawdown = _peak_daily_pnl - pnl_dollar
-            if peak_drawdown >= PROFIT_PROTECT_DRAWDOWN:
+            if peak_drawdown >= _rcfg("risk.profit_protect_drawdown", PROFIT_PROTECT_DRAWDOWN):
                 reason = (
                     f"⚠ Profit protect drawdown: pulled back ${peak_drawdown:.0f} "
                     f"from peak ${_peak_daily_pnl:.0f}. Protecting gains."
@@ -312,17 +322,20 @@ def get_profit_protect_state() -> dict:
     """
     pnl_dollar, _ = _get_today_pnl()
     _profit_target = _rcfg("risk.daily_profit_target_usd", DAILY_PROFIT_TARGET_USD)
+    _min_conf  = float(_rcfg("risk.profit_protect_min_conf",  PROFIT_PROTECT_MIN_CONF))
+    _size_mult = float(_rcfg("risk.profit_protect_size_mult", PROFIT_PROTECT_SIZE_MULT))
+    _drawdown  = float(_rcfg("risk.profit_protect_drawdown",  PROFIT_PROTECT_DRAWDOWN))
     active = pnl_dollar >= _profit_target
     return {
         "active":       active,
         "pnl_today":    round(pnl_dollar, 2),
         "target":       _profit_target,
-        "min_conf":     PROFIT_PROTECT_MIN_CONF if active else 0.0,
-        "size_mult":    PROFIT_PROTECT_SIZE_MULT if active else 1.0,
-        "drawdown_cap": PROFIT_PROTECT_DRAWDOWN,
+        "min_conf":     _min_conf if active else 0.0,
+        "size_mult":    _size_mult if active else 1.0,
+        "drawdown_cap": _drawdown,
         "description":  (
-            f"Profit Protect Mode ON — size {PROFIT_PROTECT_SIZE_MULT*100:.0f}%, "
-            f"min confidence {PROFIT_PROTECT_MIN_CONF:.0f}%"
+            f"Profit Protect Mode ON — size {_size_mult*100:.0f}%, "
+            f"min confidence {_min_conf:.0f}%"
             if active else "Profit Protect Mode inactive"
         ),
     }
@@ -347,7 +360,8 @@ def get_portfolio_heat() -> dict:
             if entry > 0 and stop > 0 and shares > 0:
                 risk_per_share = abs(entry - stop)
                 total_risk += risk_per_share * shares
-        heat_pct = total_risk / DEFAULT_ACCOUNT_SIZE * 100 if DEFAULT_ACCOUNT_SIZE > 0 else 0.0
+        _acct = _account_size()
+        heat_pct = total_risk / _acct * 100 if _acct > 0 else 0.0
         _heat_limit   = _rcfg("risk.max_portfolio_heat_pct", MAX_PORTFOLIO_HEAT_PCT)
         _max_conc     = _rcfg("risk.max_concurrent_trades",  MAX_CONCURRENT_TRADES)
         return {
@@ -468,9 +482,10 @@ def update_volatility_state(session_range_pct: float, avg_atr_pct: float) -> Non
     if avg_atr_pct <= 0:
         return
     ratio = session_range_pct / avg_atr_pct
+    _vol_mult = float(_rcfg("risk.volatility_halt_atr_mult", VOLATILITY_HALT_ATR_MULT))
     with _lock:
         _volatility_atr_ratio = round(ratio, 2)
-        if ratio >= VOLATILITY_HALT_ATR_MULT:
+        if ratio >= _vol_mult:
             _volatility_halted = True
             _volatility_reason = (
                 f"Volatility halt: session range {session_range_pct:.2f}% is "
@@ -527,17 +542,20 @@ def get_drawdown_throttle() -> dict:
         from agent.paper_trading import get_today_pnl
         today = get_today_pnl()
         pnl_dollar = float(today.get("total_pnl_dollar", 0) or 0)
-        if pnl_dollar >= 0 or DEFAULT_ACCOUNT_SIZE <= 0:
+        _acct = _account_size()
+        if pnl_dollar >= 0 or _acct <= 0:
             return {"active": False, "size_mult": 1.0, "drawdown_pct": 0.0, "tier": "NONE"}
-        drawdown_pct = abs(pnl_dollar) / DEFAULT_ACCOUNT_SIZE * 100
-        if drawdown_pct >= DRAWDOWN_THROTTLE_2_PCT:
+        drawdown_pct = abs(pnl_dollar) / _acct * 100
+        _thr2 = float(_rcfg("risk.drawdown_throttle_2_pct", DRAWDOWN_THROTTLE_2_PCT))
+        _thr1 = float(_rcfg("risk.drawdown_throttle_1_pct", DRAWDOWN_THROTTLE_1_PCT))
+        if drawdown_pct >= _thr2:
             return {
                 "active": True, "size_mult": 0.25,
                 "drawdown_pct": round(drawdown_pct, 3),
                 "tier": "SEVERE",
                 "description": f"Drawdown {drawdown_pct:.2f}% — size reduced to 25%",
             }
-        if drawdown_pct >= DRAWDOWN_THROTTLE_1_PCT:
+        if drawdown_pct >= _thr1:
             return {
                 "active": True, "size_mult": 0.50,
                 "drawdown_pct": round(drawdown_pct, 3),
@@ -676,7 +694,7 @@ def get_risk_status() -> dict:
         "volatility_halted":      vol_halted,
         "volatility_reason":      vol_reason,
         "volatility_atr_ratio":   round(vol_atr_ratio, 2),
-        "volatility_halt_mult":   VOLATILITY_HALT_ATR_MULT,
+        "volatility_halt_mult":   _rcfg("risk.volatility_halt_atr_mult", VOLATILITY_HALT_ATR_MULT),
         # Phase 2.4: Max daily trades
         "daily_trade_count":      daily_cnt,
         "max_daily_trades":       _rcfg("risk.max_daily_trades", MAX_DAILY_TRADES),

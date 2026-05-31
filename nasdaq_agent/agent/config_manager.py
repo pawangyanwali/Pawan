@@ -65,6 +65,10 @@ _DEFAULTS: dict[str, Any] = {
     "scanner.pre_earnings_blackout_days":  lambda: 3,
     "scanner.post_earnings_cooldown_days": lambda: 1,
     # ── Risk controls ──────────────────────────────────────────────────────────
+    # Account size used for all risk-% math (daily-loss halt, portfolio heat,
+    # drawdown throttle). Lives in PostgreSQL so it can be changed live and stays
+    # the single source of truth for risk percentages.
+    "risk.account_size":                   lambda: float(os.getenv("TRADING_ACCOUNT_SIZE", "50000")),
     "risk.daily_loss_warning_pct":         lambda: float(os.getenv("DAILY_LOSS_WARNING_PCT", "1.5")),
     "risk.daily_loss_halt_pct":            lambda: float(os.getenv("DAILY_LOSS_HALT_PCT", "2.5")),
     "risk.daily_profit_target_usd":        lambda: float(os.getenv("DAILY_PROFIT_TARGET", "1000")),
