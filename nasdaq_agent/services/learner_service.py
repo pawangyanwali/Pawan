@@ -103,7 +103,6 @@ def _run_weekend_learner() -> None:
     except Exception as exc:
         _log.warning("Weekend learner error: %s", exc)
 
-
 # ── Valkey status publisher ───────────────────────────────────────────────────
 
 def _deep_state_snapshot() -> dict:
@@ -114,6 +113,43 @@ def _deep_state_snapshot() -> dict:
 def _set_deep_state(**updates) -> None:
     with _DEEP_LOCK:
         _DEEP_STATE.update(updates)
+
+
+def _publish_deep_state_now() -> None:
+    """Immediately push current deep state into learner:status in Valkey + PostgreSQL.
+    Called after significant state transitions (start, end, error) so the dashboard
+    clears the "Training in progress" banner within seconds rather than waiting for
+    the 60s background publisher tick."""
+    try:
+        from agent.valkey_client import _get_client
+        from agent.service_state import set_state
+        import json as _json
+
+        deep_snap = _deep_state_snapshot()
+        # Merge into existing learner:status so we don't clobber other fields
+        existing: dict = {}
+        try:
+            client = _get_client()
+            if client:
+                raw = client.get("learner:status")
+                if raw:
+                    existing = _json.loads(raw)
+        except Exception:
+            pass
+        existing["deep"] = deep_snap
+        existing["ts"] = time.time()
+        try:
+            set_state("learner:status", existing, ttl_s=300)
+        except Exception:
+            pass
+        try:
+            client = _get_client()
+            if client:
+                client.setex("learner:status", 300, _json.dumps(existing, default=str))
+        except Exception:
+            pass
+    except Exception as exc:
+        _log.debug("_publish_deep_state_now failed: %s", exc)
 
 
 _MANUAL_REQUEST_KEY = "deep:train:requested"
@@ -193,6 +229,7 @@ def _run_deep_cycle() -> None:
         last_finished_at=None,
         last_error=None,
     )
+    _publish_deep_state_now()   # immediately show "Training in progress" on dashboard
     try:
         from agent.data_fetcher import fetch_batch_interval
         from agent.deep_model import retrain_deep_all
@@ -203,16 +240,42 @@ def _run_deep_cycle() -> None:
             _ticker_limit = int(_cfg.get("learner.deep_ticker_limit", _DEEP_TICKER_LIMIT))
         except Exception:
             _ticker_limit = _DEEP_TICKER_LIMIT
-        tickers = list(TRAINING_TICKERS)[:_ticker_limit]
-        _log.info("Continuous deep cycle starting (%d tickers)", len(tickers))
+
+        # Sample tickers proportionally across all three clusters so that every
+        # cluster gets training data.  TRAINING_TICKERS is ordered TIER1→TIER2→TIER3
+        # so a plain [:limit] slice only ever hits Cluster A (all of TIER1=100).
+        from config import CLUSTER_A_TICKERS, CLUSTER_B_TICKERS, CLUSTER_C_TICKERS
+        _per_cluster = max(1, _ticker_limit // 3)
+        tickers = (
+            list(CLUSTER_A_TICKERS)[:_per_cluster]
+            + list(CLUSTER_B_TICKERS)[:_per_cluster]
+            + list(CLUSTER_C_TICKERS)[:(_ticker_limit - 2 * _per_cluster)]
+        )
+        _log.info("Continuous deep cycle starting (%d tickers: A=%d B=%d C=%d)",
+                  len(tickers), _per_cluster, _per_cluster, len(tickers) - 2 * _per_cluster)
         hist_15m = fetch_batch_interval(
             tickers,
             "15min",
             5000,
             ttl=86400,
             background=True,
-            extended_hours=True,
+            # extended_hours=False (default) — regular-session bars are sufficient
+            # for directional BiLSTM training AND this enables the PostgreSQL cache,
+            # so data survives Schwab token expiry across training cycles.
         )
+        if not hist_15m:
+            _log.warning(
+                "[deep-cycle] fetch_batch_interval returned 0 tickers — "
+                "Schwab may be unauthorized or tokens expired. Training skipped."
+            )
+            _set_deep_state(
+                running=False,
+                last_finished_at=time.time(),
+                last_duration_s=round(time.time() - start, 1),
+                last_error="fetch returned 0 tickers — check Schwab auth",
+            )
+            _publish_deep_state_now()
+            return
         ok = retrain_deep_all(hist_15m)
         finished = time.time()
         _set_deep_state(
@@ -224,6 +287,7 @@ def _run_deep_cycle() -> None:
             last_error=None if ok else "deep retrain returned false",
         )
         _log.info("Continuous deep cycle finished ok=%s tickers=%d", ok, len(hist_15m))
+        _publish_deep_state_now()   # immediately clear "Training in progress" banner
     except Exception as exc:
         finished = time.time()
         _set_deep_state(
@@ -233,6 +297,7 @@ def _run_deep_cycle() -> None:
             last_error=str(exc),
         )
         _log.warning("Continuous deep cycle failed: %s", exc, exc_info=True)
+        _publish_deep_state_now()   # immediately reflect failure on dashboard
 
 
 def _publish_status_loop() -> None:

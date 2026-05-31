@@ -65,7 +65,10 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
             if model_path and os.path.exists(str(model_path)):
                 mtime = os.path.getmtime(str(model_path))
             cluster_status[cname] = {
-                "trained": bool(_cluster_trained.get(cname.upper(), False)),
+                # Read trained state from disk (shared EBS mount) not in-process dict.
+                # web-api and learner containers have separate _cluster_trained copies,
+                # so the in-process dict is always False in web-api.
+                "trained": bool(model_path and os.path.exists(str(model_path))),
                 "last_trained": mtime,
                 "n_tickers": len(cluster_tickers.get(cname, [])),
             }

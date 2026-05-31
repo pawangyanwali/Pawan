@@ -676,9 +676,9 @@ def fetch_price_history_batch_async(
     blocks until complete.  All requests fire concurrently (no pre-throttle);
     Schwab production has no documented REST rate limit.
     """
-    # All tickers fire concurrently — timeout is just HTTP round-trip overhead.
-    # 60s per ticker × 15s per HTTP call; 120s is generous for any batch size.
-    timeout = 120.0
+    # Tickers fire at _BG_GAP (1s) intervals in background mode, so last ticker
+    # fires at ~len(tickers)s. Add 30s margin for HTTP round-trip + scheduling slack.
+    timeout = len(tickers) * _BG_GAP + 30.0 if background else 120.0
     return _run_async(
         _fetch_batch_async_coro(tickers, interval, outputsize, extended_hours, background),
         timeout=timeout,
