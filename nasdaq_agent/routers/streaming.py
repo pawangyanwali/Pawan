@@ -89,8 +89,10 @@ async def websocket_endpoint(ws: WebSocket):
     if _qtoken:
         _authed = _verify_token(_qtoken)
 
-    # Slow path: wait for first-message auth (covers clients that omit the query param)
-    if not _authed:
+    # Slow path: wait for first-message auth only when no query token was given.
+    # If a query token was provided but was invalid, reject immediately — don't
+    # wait for a second auth message (that would deadlock the client).
+    if not _authed and not _qtoken:
         try:
             raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
             msg = json.loads(raw)

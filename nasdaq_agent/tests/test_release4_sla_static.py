@@ -9,9 +9,10 @@ def _src(path: str) -> str:
 
 
 def test_runtime_health_exposes_release4_sla_snapshot():
-    src = _src("main.py")
+    # Endpoint moved from main.py to routers/system.py
+    src = _src("routers/system.py")
 
-    assert '@app.get("/api/runtime-health")' in src
+    assert '@router.get("/api/runtime-health")' in src
     assert "from agent.runtime_sla import evaluate_runtime_sla" in src
     assert "sla = evaluate_runtime_sla(" in src
     assert '"sla": sla' in src

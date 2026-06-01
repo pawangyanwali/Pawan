@@ -255,6 +255,51 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     }
 
 
+@router.get("/api/runtime-health")
+async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
+    """SLA snapshot: overall status + actionable alerts for the ops chip."""
+    from agent.runtime_sla import evaluate_runtime_sla
+    from agent.valkey_client import health_status as vk_health, price_bus_health
+    from agent.market_hours import get_market_session
+
+    try:
+        vk = vk_health()
+        session = get_market_session()
+        price_2s = price_bus_health(max_age_s=2.0)
+        price_5s = price_bus_health(max_age_s=5.0)
+
+        # Scanner freshness from service state
+        scan_age_s = None
+        try:
+            from agent.service_state import get_age_s as _ss_age
+            scan_age_s = _ss_age("service:scanner:heartbeat")
+        except Exception:
+            pass
+
+        scanner_info = {"scan_age_s": scan_age_s if scan_age_s is not None else -1.0}
+        containers = _container_health(bool(vk.get("connected")))
+
+        sla = evaluate_runtime_sla(
+            session=session,
+            price_2s=price_2s,
+            price_5s=price_5s,
+            scanner=scanner_info,
+            containers=containers,
+            valkey=vk,
+        )
+        return {"sla": sla, "valkey": vk}
+    except Exception as exc:
+        return {
+            "sla": {
+                "status": "CRITICAL",
+                "alert_count": 1,
+                "alerts": [{"severity": "CRITICAL", "component": "web-api",
+                             "message": "Runtime health evaluation failed",
+                             "detail": str(exc), "action": ""}],
+            }
+        }
+
+
 @router.get("/api/universe")
 async def universe_status():
     """Ticker universe status: total tracked, active this cycle, tier breakdown."""

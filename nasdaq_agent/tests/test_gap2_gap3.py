@@ -244,13 +244,10 @@ class TestPhase2ApiEndpoints:
     """
 
     def _get_main_source(self) -> str:
-        import pathlib, importlib.util
-        spec = importlib.util.find_spec("main") or importlib.util.find_spec("nasdaq_agent.main")
-        if spec is None:
-            # Try path directly
-            p = pathlib.Path("/home/user/Pawan/nasdaq_agent/main.py")
-            return p.read_text()
-        return pathlib.Path(spec.origin).read_text()
+        # Phase 2 endpoints moved from main.py to routers/learning.py
+        import pathlib
+        p = pathlib.Path("/home/user/Pawan/nasdaq_agent/routers/learning.py")
+        return p.read_text()
 
     def test_phase2_endpoint_defined(self):
         """main.py must define /api/learning/phase2 endpoint."""

@@ -30,7 +30,7 @@ def test_learning_engine_can_retrain_during_active_sessions_inside_learner():
     assert "LEARNING_RETRAIN_ACTIVE_SESSIONS" in src
     assert "RETRAIN_ACTIVE_SESSIONS and _session != \"CLOSED\"" in src
     assert "inside learner container" in src
-    assert "skip_deep=not RETRAIN_INCLUDE_DEEP" in src
+    assert "skip_deep=_skip_deep" in src
     assert '"active_session_retrain_enabled": RETRAIN_ACTIVE_SESSIONS' in src
 
 

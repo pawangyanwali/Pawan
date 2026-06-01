@@ -617,14 +617,14 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
             b5m = {t: hist_5m[t] for t in batch if t in hist_5m}
         else:
             b5m = fetch_batch_interval(
-                batch, "1min", 3900, ttl=86400, background=True, extended_hours=False
+                batch, "1min", 3900, ttl=86400, background=True, extended_hours=True
             )
 
         if hist_15m is not None:
             b15m = {t: hist_15m[t] for t in batch if t in hist_15m}
         else:
             b15m = fetch_batch_interval(
-                batch, "15min", 5000, ttl=86400, background=True, extended_hours=False
+                batch, "15min", 5000, ttl=86400, background=True, extended_hours=True
             )
 
         if daily_data is not None:

@@ -161,13 +161,13 @@ class TestAdaptiveFilterWRThreshold:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# A2 – Context blocking and boosting
+# A2 – Context stats are tracked but no context blocking or boosting
 # ═════════════════════════════════════════════════════════════════════════════
 
 class TestAdaptiveFilterContexts:
 
-    def test_low_wr_session_gets_blocked(self):
-        """A session with win rate < SUPPRESS_BELOW over MIN_SAMPLE trades → blocked."""
+    def test_context_stats_are_recorded(self):
+        """update_filter records per-session stats in context_stats even without blocking."""
         stats = make_stats(
             total=50, win_rate=0.50,
             by_session={
@@ -179,25 +179,26 @@ class TestAdaptiveFilterContexts:
         )
         AF.update_filter(stats, source="backtest")
         st = AF.get_status()
-        assert "session:AVOID_ZONE" in st["blocked_contexts"]
+        # blocked_contexts is always empty — context blocking was removed
+        assert st["blocked_contexts"] == {}
 
-    def test_high_wr_session_gets_boosted(self):
-        """A session with win rate >= BOOST_ABOVE over MIN_SAMPLE trades → boosted."""
+    def test_no_context_boosting(self):
+        """update_filter never populates boosted_contexts (feature removed)."""
         stats = make_stats(
             total=50, win_rate=0.65,
             by_session={
                 "POWER_HOUR": {
                     "total": AF.MIN_SAMPLE + 2,
-                    "win_rate": AF.BOOST_ABOVE + 0.05,
+                    "win_rate": 0.80,
                 }
             }
         )
         AF.update_filter(stats, source="backtest")
         st = AF.get_status()
-        assert "session:POWER_HOUR" in st["boosted_contexts"]
+        assert st["boosted_contexts"] == {}
 
     def test_low_sample_count_not_blocked(self):
-        """Only MIN_SAMPLE - 1 trades in context → should NOT block."""
+        """blocked_contexts is always empty regardless of sample size."""
         stats = make_stats(
             total=50, win_rate=0.50,
             by_session={
@@ -211,7 +212,8 @@ class TestAdaptiveFilterContexts:
         st = AF.get_status()
         assert "session:SMALL_SESSION" not in st["blocked_contexts"]
 
-    def test_regime_can_be_blocked(self):
+    def test_regime_not_blocked(self):
+        """Regime context does not populate blocked_contexts (context blocking removed)."""
         stats = make_stats(
             total=50, win_rate=0.50,
             by_regime={
@@ -223,9 +225,10 @@ class TestAdaptiveFilterContexts:
         )
         AF.update_filter(stats, source="backtest")
         st = AF.get_status()
-        assert "regime:CHOPPY" in st["blocked_contexts"]
+        assert st["blocked_contexts"] == {}
 
-    def test_direction_can_be_blocked(self):
+    def test_direction_not_blocked(self):
+        """Direction context does not populate blocked_contexts (context blocking removed)."""
         stats = make_stats(
             total=50, win_rate=0.50,
             by_direction={
@@ -237,11 +240,10 @@ class TestAdaptiveFilterContexts:
         )
         AF.update_filter(stats, source="backtest")
         st = AF.get_status()
-        assert "direction:SELL" in st["blocked_contexts"]
+        assert st["blocked_contexts"] == {}
 
-    def test_observation_source_can_block_context(self):
-        """Observation source should still block contexts (with tighter threshold)."""
-        # Observation requires 3× MIN_SAMPLE and lower than obs_suppress_below=0.20
+    def test_observation_source_never_blocks_context(self):
+        """Observation source must never block contexts."""
         obs_min = max(AF.MIN_SAMPLE * 3, 25)
         stats = make_stats(
             total=50, win_rate=0.30,
@@ -254,7 +256,7 @@ class TestAdaptiveFilterContexts:
         )
         AF.update_filter(stats, source="observation")
         st = AF.get_status()
-        assert "session:OBS_SESSION" in st["blocked_contexts"]
+        assert st["blocked_contexts"] == {}
 
     def test_observation_source_does_not_boost_contexts(self):
         """Observation source must never add boosted contexts."""
@@ -278,8 +280,9 @@ class TestAdaptiveFilterContexts:
 
 class TestAdaptiveFilterSuppression:
 
-    def test_suppress_when_below_threshold(self):
-        """Confidence below dynamic_threshold → suppressed."""
+    def test_suppress_when_below_threshold(self, monkeypatch):
+        """Confidence below dynamic_threshold → suppressed in enforce mode."""
+        monkeypatch.setattr(AF, "_ENFORCEMENT_MODE", "enforce")
         threshold = AF.get_status()["dynamic_threshold"]
         suppressed, reason = AF.should_suppress(confidence=threshold - 5.0)
         assert suppressed is True
@@ -292,8 +295,8 @@ class TestAdaptiveFilterSuppression:
         assert suppressed is False
         assert reason == ""
 
-    def test_suppress_when_session_blocked(self):
-        """Blocked session context → suppressed regardless of confidence."""
+    def test_no_suppress_when_session_bad_but_above_threshold(self):
+        """Context blocking removed — bad session does not suppress above-threshold signals."""
         stats = make_stats(
             total=50, win_rate=0.50,
             by_session={"BAD_SESSION": {"total": 20, "win_rate": 0.10}}
@@ -302,9 +305,11 @@ class TestAdaptiveFilterSuppression:
         threshold = AF.get_status()["dynamic_threshold"]
         suppressed, _ = AF.should_suppress(session="BAD_SESSION",
                                             confidence=threshold + 20.0)
-        assert suppressed is True
+        # Context blocking removed — only threshold matters
+        assert suppressed is False
 
-    def test_suppress_when_regime_blocked(self):
+    def test_no_suppress_when_regime_bad_but_above_threshold(self):
+        """Context blocking removed — bad regime does not suppress above-threshold signals."""
         stats = make_stats(
             total=50, win_rate=0.50,
             by_regime={"BEAR_TREND": {"total": 20, "win_rate": 0.05}}
@@ -313,21 +318,21 @@ class TestAdaptiveFilterSuppression:
         threshold = AF.get_status()["dynamic_threshold"]
         suppressed, _ = AF.should_suppress(regime="BEAR_TREND",
                                             confidence=threshold + 20.0)
-        assert suppressed is True
+        assert suppressed is False
 
     def test_no_boost_when_no_boosted_contexts(self):
         boost = AF.get_confidence_boost(session="POWER_HOUR")
         assert boost == 0.0
 
-    def test_boost_positive_when_session_boosted(self):
-        """After boosting POWER_HOUR, get_confidence_boost should return > 0."""
+    def test_boost_always_zero(self):
+        """get_confidence_boost always returns 0.0 — context boosting removed."""
         stats = make_stats(
             total=50, win_rate=0.75,
-            by_session={"POWER_HOUR": {"total": 15, "win_rate": AF.BOOST_ABOVE + 0.10}}
+            by_session={"POWER_HOUR": {"total": 15, "win_rate": 0.90}}
         )
         AF.update_filter(stats, source="backtest")
         boost = AF.get_confidence_boost(session="POWER_HOUR")
-        assert boost > 0.0
+        assert boost == 0.0
 
     def test_boost_zero_for_unknown_context(self):
         boost = AF.get_confidence_boost(session="UNKNOWN_SESSION")

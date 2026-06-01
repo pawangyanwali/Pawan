@@ -56,6 +56,7 @@ def _sqlite_to_test_sql(sql: str) -> str:
     sql = re.sub(r'\bDOUBLE PRECISION\b', 'REAL', sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bTIMESTAMPTZ\b', 'TEXT', sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bJSONB\b', 'TEXT', sql, flags=re.IGNORECASE)
+    sql = re.sub(r'\bNOW\s*\(\s*\)', "CURRENT_TIMESTAMP", sql, flags=re.IGNORECASE)
     sql = re.sub(r'::\w+', '', sql)
     sql = re.sub(r'\bSAVEPOINT\s+\w+\b', '', sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bRELEASE\s+SAVEPOINT\s+\w+\b', '', sql, flags=re.IGNORECASE)
@@ -155,6 +156,13 @@ _TEST_DB: sqlite3.Connection | None = None
 def _reset_test_db():
     global _TEST_DB
     _TEST_DB = sqlite3.connect(":memory:", check_same_thread=False)
+    _TEST_DB.execute("""
+        CREATE TABLE IF NOT EXISTS system_kv (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
 
 def _get_test_db() -> sqlite3.Connection:

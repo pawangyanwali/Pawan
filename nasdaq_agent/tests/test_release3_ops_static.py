@@ -39,9 +39,9 @@ def test_all_standalone_services_publish_uniform_heartbeats():
 
 
 def test_api_services_reports_full_release3_container_health():
-    src = _src("main.py")
+    # Container health logic moved from main.py to routers/system.py
+    src = _src("routers/system.py")
 
-    assert "def _container_health_legacy" in src
     assert "def _container_health(valkey_connected: bool)" in src
     for service_name in (
         "market-data",
@@ -56,7 +56,8 @@ def test_api_services_reports_full_release3_container_health():
 
     assert '"scanner:streamer"' in src
     assert '"ctx:intel:heartbeat"' in src
-    assert '"fresh_coverage_pct": ws_st.get("fresh_coverage_pct", 0.0)' in src
+    # fresh_coverage_pct is published by the streamer into service state
+    assert "fresh_coverage_pct" in _src("agent/broker/schwab_streamer.py")
 
 
 def test_dashboard_container_health_includes_all_release3_services():

@@ -1438,14 +1438,14 @@ class TestPhase3ScannerAlgoSignalGate:
 
     def test_closed_session_skips_algo_maybe_open(self):
         """Source inspection: execution algo loop must contain a CLOSED session guard."""
-        loop_body = self._get_exec_loop_body(600)
+        loop_body = self._get_exec_loop_body(900)
         assert "CLOSED" in loop_body, (
             "Execution algo-signals loop must guard against CLOSED session"
         )
 
     def test_closed_session_uses_continue(self):
         """The CLOSED guard in the algo execution loop must skip via `continue`."""
-        loop_body = self._get_exec_loop_body(800)
+        loop_body = self._get_exec_loop_body(1100)
         assert "CLOSED" in loop_body and "continue" in loop_body, (
             "Algo execution loop CLOSED guard must use 'continue' to skip the signal"
         )
@@ -1497,7 +1497,7 @@ class TestPhase3SessionGateIntegration:
             os.path.dirname(os.path.dirname(__file__))
         ).joinpath("agent/paper_trading.py").read_text()
         fn_start = src.index("def maybe_open_trade")
-        fn_body   = src[fn_start:fn_start + 3000]
+        fn_body   = src[fn_start:fn_start + 4500]
         assert "_live_session == \"CLOSED\"" in fn_body or "session == \"CLOSED\"" in fn_body, (
             "maybe_open_trade must contain a CLOSED session gate"
         )

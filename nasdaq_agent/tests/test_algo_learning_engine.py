@@ -19,13 +19,14 @@ import pytest
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _fresh_registry(tmp_path):
-    """Return a ParameterControlRegistry that writes to tmp_path."""
-    from agent.algo_learning_engine import ParameterControlRegistry, _DATA_DIR
+    """Return a ParameterControlRegistry backed by the in-memory test DB."""
+    from agent.algo_learning_engine import ParameterControlRegistry
     reg = ParameterControlRegistry.__new__(ParameterControlRegistry)
     reg._lock = threading.Lock()
     reg._state = {}
     ParameterControlRegistry._load_defaults(reg)
-    reg._PATH = tmp_path / "algo_params.json"
+    reg._PATH = tmp_path / "algo_params.json"  # legacy path (unused by DB-backed save/load)
+    reg._ensure_tables()  # create algo_params table in the in-memory test DB
     return reg
 
 

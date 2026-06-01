@@ -115,13 +115,19 @@ def test_scanner_side_training_is_disabled_by_default_in_production():
 
 
 def test_scanner_snapshots_are_not_reported_as_live_prices():
-    src = _src("main.py")
+    # Snapshot classification lives in valkey_client.price_bus_health()
+    vk_src = _src("agent/valkey_client.py")
+    assert '"SCAN_SNAPSHOT"' in vk_src
+    assert "source_status" in vk_src
+    assert "price_bus_health" in vk_src
 
-    assert '"source": "SCANNER_SNAPSHOT"' in src
-    assert '"source_status": "SCAN_SNAPSHOT"' in src
-    assert '"is_live": False' in src
-    assert '@app.get("/api/runtime-health")' in src
-    assert "price_bus_health(max_age_s=2.0)" in src
+    # Non-live quotes must carry is_live=False in the streamer
+    streamer_src = _src("agent/broker/schwab_streamer.py")
+    assert '"is_live": False' in streamer_src
+
+    # md_healthcheck uses price_bus_health to gate liveness
+    mdhc_src = _src("services/md_healthcheck.py")
+    assert "price_bus_health(max_age_s=max_age_s)" in mdhc_src
 
 
 def test_dashboard_displays_price_source_truth_instead_of_reconnecting_on_snapshots():

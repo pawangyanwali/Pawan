@@ -199,15 +199,16 @@ class TestStartupChecks:
         from agent.startup_checks import _check_confidence_scale
         from agent.db import get_conn
 
-        # Seed signals on the wrong 0-1 scale
+        # Seed signals on the wrong 0-1 scale (ts required by schema)
         with get_conn() as c:
-            c.execute(
-                "CREATE TABLE IF NOT EXISTS signals "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, confidence REAL)"
-            )
             c.executemany(
-                "INSERT INTO signals (confidence) VALUES (?)",
-                [(0.73,), (0.85,), (0.60,), (75.0,)]   # 3 bad, 1 good
+                "INSERT INTO signals (ts, ticker, direction, confidence) VALUES (?, ?, ?, ?)",
+                [
+                    ("2025-01-10T09:30:00", "AAPL", "LONG", 0.73),
+                    ("2025-01-10T09:31:00", "MSFT", "LONG", 0.85),
+                    ("2025-01-10T09:32:00", "NVDA", "LONG", 0.60),
+                    ("2025-01-10T09:33:00", "TSLA", "LONG", 75.0),
+                ]
             )
 
         result = _check_confidence_scale()
