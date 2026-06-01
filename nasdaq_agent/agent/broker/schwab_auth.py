@@ -229,6 +229,29 @@ class _TokenManager:
     # ── Refresh ───────────────────────────────────────────────────────────────
 
     def refresh(self, _retry: int = 0) -> bool:
+        # Credentials must be present to refresh — fail fast rather than looping forever.
+        if not self.is_configured():
+            logger.warning(
+                f"[Schwab/{self.name}] {self._id_env} not set — token refresh skipped. "
+                f"Set the environment variable and restart to re-enable live data."
+            )
+            try:
+                from agent.system_alerts import raise_alert
+                raise_alert(
+                    alert_type="SCHWAB_AUTH",
+                    severity="CRITICAL",
+                    source=self.name.lower(),
+                    title=f"Schwab {self.name} credentials not configured",
+                    message=(
+                        f"{self._id_env} is not set in the environment. "
+                        f"Token refresh is disabled — live market data and trading are "
+                        f"unavailable until credentials are configured and the server restarted."
+                    ),
+                    metadata={"missing_env": self._id_env, "app": self.name.lower()},
+                )
+            except Exception:
+                pass
+            return False
         with self._lock:
             rt = self._tokens.get("refresh_token")
         if not rt:
@@ -373,6 +396,14 @@ class _TokenManager:
             return False
         with self._lock:
             self._tokens.update(data)
+        # If credentials are absent, token is read-only (no refresh possible).
+        # Tokens may still be valid for the remaining TTL, but we can't renew them.
+        if not self.is_configured():
+            logger.warning(
+                f"[Schwab/{self.name}] Tokens loaded from disk but {self._id_env} is not set "
+                f"— refresh scheduling disabled. Live data will stop when the access token expires."
+            )
+            return True
         stored_at  = data.get("stored_at", 0)
         expires_in = data.get("expires_in", 1800)
         remaining  = expires_in - (time.time() - stored_at)
