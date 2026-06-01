@@ -525,6 +525,7 @@
     <span style="white-space:nowrap">Last scan: <span id="last-scan">—</span></span>
     <span id="api-credit-chip" title="Twelve Data API credits used in rolling 60s window" style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;display:none">API —/377</span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
+    <button onclick="openAudit()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Audit trail — suppression & threshold decisions">📋 Audit</button>
     <button onclick="openPnl()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">💰 P&amp;L</button>
     <button onclick="openBacktest()" id="bt-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📈 Backtest</button>
     <button onclick="openNeural()" id="neural-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">🤖 Neural</button>
@@ -1514,6 +1515,23 @@ TRADING_MAX_POSITION_PCT=10
     </div>
     <div id="hist-stats" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px"></div>
     <div id="hist-table" style="overflow-x:auto"></div>
+  </div>
+</div>
+
+<!-- Audit Trail Modal — decision log (suppressions, threshold changes) -->
+<div class="history-modal" id="audit-modal">
+  <div class="history-modal-inner">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:14px;font-weight:700;color:var(--text)">📋 Audit Trail — Decision Log</div>
+      <button onclick="closeAudit()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="filter-btn active" id="audit-f-all"  onclick="setAuditFilter('')">All</button>
+      <button class="filter-btn"        id="audit-f-supp" onclick="setAuditFilter('SIGNAL_SUPPRESSED')">Suppressions</button>
+      <button class="filter-btn"        id="audit-f-thr"  onclick="setAuditFilter('THRESHOLD_CHANGED')">Threshold Changes</button>
+      <span style="margin-left:auto;color:var(--muted);font-size:11px" id="audit-count">—</span>
+    </div>
+    <div id="audit-table" style="overflow-x:auto"></div>
   </div>
 </div>
 
@@ -2761,6 +2779,62 @@ async function pollSystemAlerts() {
 }
 pollSystemAlerts();
 setInterval(pollSystemAlerts, 20000);
+
+// ─── Audit trail modal ─────────────────────────────────────────────────────────
+let _auditFilter = '';
+function openAudit()  { document.getElementById('audit-modal').classList.add('open'); loadAudit(); }
+function closeAudit() { document.getElementById('audit-modal').classList.remove('open'); }
+function setAuditFilter(t) {
+  _auditFilter = t;
+  for (const [id, val] of [['audit-f-all',''],['audit-f-supp','SIGNAL_SUPPRESSED'],['audit-f-thr','THRESHOLD_CHANGED']]) {
+    const b = document.getElementById(id);
+    if (b) b.classList.toggle('active', val === t);
+  }
+  loadAudit();
+}
+function _auditAgo(epoch) {
+  if (!epoch) return '—';
+  const s = Math.max(0, Math.floor(Date.now()/1000 - epoch));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+async function loadAudit() {
+  const tbl = document.getElementById('audit-table');
+  tbl.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">Loading…</div>';
+  try {
+    const qs = _auditFilter ? `?event_type=${encodeURIComponent(_auditFilter)}&limit=200` : '?limit=200';
+    const d = await (await _authFetch(`${BACKEND_HTTP}/api/audit${qs}`)).json();
+    document.getElementById('audit-count').textContent = `${d.count} event${d.count===1?'':'s'}`;
+    if (!d.events || !d.events.length) {
+      tbl.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">No audit events recorded yet.</div>';
+      return;
+    }
+    const rows = d.events.map(e => {
+      const det = e.detail || {};
+      const isThr = e.event_type === 'THRESHOLD_CHANGED';
+      const badge = isThr
+        ? '<span style="color:#a855f7;border:1px solid #a855f7;border-radius:4px;padding:1px 6px;font-size:9px">THRESHOLD</span>'
+        : '<span style="color:#fbbf24;border:1px solid #fbbf24;border-radius:4px;padding:1px 6px;font-size:9px">SUPPRESSED</span>';
+      const ml = (det.ml_scalp != null)
+        ? `S:${det.ml_scalp} D:${det.ml_daily} Sw:${det.ml_swing} Dp:${det.ml_deep}`
+        : (isThr ? `${det.old_threshold}%→${det.new_threshold}% (WR ${det.win_rate}%)` : '');
+      return `<tr>
+        <td style="white-space:nowrap;color:var(--muted)">${_auditAgo(e.created_at)}</td>
+        <td>${badge}</td>
+        <td style="font-weight:600">${e.ticker || '—'}</td>
+        <td style="color:var(--text)">${(e.summary||'').replace(/</g,'&lt;')}</td>
+        <td style="color:var(--muted);font-size:10px;white-space:nowrap">${ml}</td>
+      </tr>`;
+    }).join('');
+    tbl.innerHTML = `<table style="width:100%"><thead><tr>
+      <th>When</th><th>Type</th><th>Ticker</th><th>Decision</th><th>ML / Detail</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    tbl.innerHTML = '<div style="color:var(--red);padding:20px;text-align:center">Failed to load audit log.</div>';
+  }
+}
 
 async function pollPipelineMetrics() {
   try {

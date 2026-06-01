@@ -124,6 +124,10 @@ _DEFAULTS: dict[str, Any] = {
     # ── Adaptive filter ────────────────────────────────────────────────────────
     "filter.throttle_start_wr":            lambda: 0.50,
     "filter.max_penalty_pts":              lambda: 35,
+    # ── Audit log (decision trail) ──────────────────────────────────────────────
+    # Append-only PostgreSQL audit_log: suppression decisions, threshold changes.
+    "audit.enabled":                       lambda: os.getenv("AUDIT_ENABLED", "1").lower() in ("1", "true", "yes"),
+    "audit.retention_days":                lambda: max(0, int(os.getenv("AUDIT_RETENTION_DAYS", "14"))),
     # ── Quant strategy reference — Phase 5 configurable defaults ───────────────
     # Each value is the reference-document default; the learning engine will tune
     # these automatically from live trade outcomes (target_mult, stop_mult, etc.)

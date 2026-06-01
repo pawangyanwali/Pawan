@@ -1115,8 +1115,36 @@ def analyse_ticker(
                 confidence   = pred["confidence"],
             )
             if _is_suppressed:
+                _suppressed_dir = pred["direction"]   # capture before NEUTRAL overwrite
                 pred["direction"] = "NEUTRAL"
                 pred["reasons"]   = [f"⛔ AF: {_suppress_reason}"] + pred.get("reasons", [])
+                # Audit the suppression decision with the ML scores behind the
+                # rejected signal (durable decision trail — requirement 6).
+                try:
+                    from agent.audit_log import audit as _audit
+                    _audit(
+                        "SIGNAL_SUPPRESSED",
+                        f"{ticker} {pred.get('entry_type','')} {_suppressed_dir} "
+                        f"suppressed: {_suppress_reason}",
+                        ticker=ticker, source="scanner",
+                        detail={
+                            "path":        "ml_prediction",
+                            "confidence":  round(float(pred["confidence"]), 2),
+                            "reason":      _suppress_reason,
+                            "session":     sess_info.get("session", ""),
+                            "regime":      regime.regime,
+                            "vwap_event":  vwap_sig.get("event", ""),
+                            "rsi_zone":    pred.get("rsi_zone", ""),
+                            "ml_scalp":    round(float(ml_scalp), 4),
+                            "ml_daily":    round(float(ml_daily_p), 4),
+                            "ml_reversal": round(float(ml_reversal_p), 4),
+                            "ml_ensemble": round(float(ml_ensemble_p), 4),
+                            "ml_swing":    round(float(ml_swing_p), 4),
+                            "ml_deep":     round(float(ml_deep_p), 4),
+                        },
+                    )
+                except Exception:
+                    pass
 
         # Normalise STRONG BUY → BUY and STRONG SELL → SELL for storage.
         # These are the highest-conviction signals and must not be silently dropped.
@@ -1442,6 +1470,13 @@ def analyse_ticker(
 
             _algo_trade_opened = False
             for _asig in _sig.algo_signals:
+                # Attach the ML scores behind this signal so algo_signal_log
+                # persists the full ML decision for EVERY signal (accepted,
+                # rejected, or shadow) — completes the ML decision trail.
+                _asig["ml_scalp_prob"] = round(float(ml_scalp), 4)
+                _asig["ml_daily_prob"] = round(float(ml_daily_p), 4)
+                _asig["ml_swing_prob"] = round(float(ml_swing_p), 4)
+                _asig["ml_deep_prob"]  = round(float(ml_deep_p), 4)
                 # ── Session gate for algo signals: never open when CLOSED ───────────
                 # The primary prediction path neutralises pred["direction"] for CLOSED
                 # sessions, but algo signals carry their own raw direction and bypass
@@ -1538,10 +1573,34 @@ def analyse_ticker(
                         confidence   = float(_asig["confidence"]),
                     )
                     if _algo_suppressed:
+                        _asig["filter_reason"] = _algo_suppress_reason
                         logger.debug(
                             "[%s] %s suppressed by adaptive filter: %s",
                             ticker, _asig["algo"], _algo_suppress_reason,
                         )
+                        try:
+                            from agent.audit_log import audit as _audit
+                            _audit(
+                                "SIGNAL_SUPPRESSED",
+                                f"{ticker} {_asig['algo']} {_asig['direction']} "
+                                f"suppressed: {_algo_suppress_reason}",
+                                ticker=ticker, source="scanner",
+                                detail={
+                                    "path":       "algo",
+                                    "algo":       _asig["algo"],
+                                    "direction":  _asig["direction"],
+                                    "confidence": round(float(_asig["confidence"]), 2),
+                                    "reason":     _algo_suppress_reason,
+                                    "session":    sess_info.get("session", ""),
+                                    "regime":     regime.regime,
+                                    "ml_scalp":   round(float(ml_scalp), 4),
+                                    "ml_daily":   round(float(ml_daily_p), 4),
+                                    "ml_swing":   round(float(ml_swing_p), 4),
+                                    "ml_deep":    round(float(ml_deep_p), 4),
+                                },
+                            )
+                        except Exception:
+                            pass
                     else:
                         _trade_id = maybe_open_trade(
                             ticker            = ticker,

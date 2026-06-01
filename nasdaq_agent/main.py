@@ -831,6 +831,7 @@ async def lifespan(app: FastAPI):
     from historical.store import init_tables as _hist_init_tables
     from agent.context_store import init_db as _ctx_init_db
     from agent.system_alerts import init_db as _alerts_init_db
+    from agent.audit_log import init_db as _audit_init_db
     _auth_init_tables()
     seed_admin()
     _ah_init_db()
@@ -839,6 +840,7 @@ async def lifespan(app: FastAPI):
     _hist_init_tables()
     _ctx_init_db()  # context intel tables (context_events, ticker_context_features, earnings_calendar)
     _alerts_init_db()  # system_alerts table for dashboard alert banner
+    _audit_init_db()   # audit_log table for the decision trail
 
     # Load persisted runtime config from DB so saved settings survive container restarts.
     # seed_defaults() only writes keys that aren't already in the DB (no overwrites).
@@ -1086,6 +1088,7 @@ from routers.config_router import router as config_router
 from routers.streaming     import router as streaming_router
 from routers.algo          import router as algo_router
 from routers.alerts        import router as alerts_router
+from routers.audit         import router as audit_router
 
 # Re-export helpers for backward compatibility with test suite and other tooling
 from routers.streaming import _safe_ws_close  # noqa: F401  (tests import this from main)
@@ -1103,6 +1106,7 @@ app.include_router(config_router)
 app.include_router(streaming_router)
 app.include_router(algo_router)
 app.include_router(alerts_router)
+app.include_router(audit_router)
 
 
 

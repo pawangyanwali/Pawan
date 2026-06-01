@@ -1857,11 +1857,19 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
     try:
         with _conn() as c:
             for sig in algo_signals:
+                # ML scores + filter_reason persist the full ML decision behind
+                # every signal (the columns existed but were previously unwritten).
+                _ml_scalp = sig.get("ml_scalp_prob")
+                _ml_daily = sig.get("ml_daily_prob")
+                _ml_swing = sig.get("ml_swing_prob")
+                _ml_deep  = sig.get("ml_deep_prob")
                 c.execute(
                     """INSERT INTO algo_signal_log
                          (logged_at, ticker, algo, direction, confidence,
-                          entry, stop, target, rr, trade_opened)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                          entry, stop, target, rr, trade_opened,
+                          ml_scalp_prob, ml_daily_prob, ml_swing_prob, ml_deep_prob,
+                          filter_reason)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         now, ticker,
                         sig.get("algo", ""),
@@ -1872,6 +1880,11 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
                         float(sig.get("target", 0)),
                         float(sig.get("rr", 0)),
                         int(trade_opened),
+                        float(_ml_scalp) if _ml_scalp is not None else None,
+                        float(_ml_daily) if _ml_daily is not None else None,
+                        float(_ml_swing) if _ml_swing is not None else None,
+                        float(_ml_deep)  if _ml_deep  is not None else None,
+                        sig.get("filter_reason", ""),
                     ),
                 )
             c.commit()

@@ -329,13 +329,16 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
 
+    _reset_reason = ""
     with _lock:
+        old_threshold = float(_state["dynamic_threshold"])
         # Anti-deadlock: if stuck at max threshold with very low WR → relax
         if (new_threshold >= MAX_THRESHOLD - 0.5 and smoothed_wr < 0.35):
             _state["_stuck_cycles"] = _state.get("_stuck_cycles", 0) + 1
             if _state["_stuck_cycles"] >= MAX_STUCK_CYCLES:
                 new_threshold = DEFAULT_THRESHOLD
                 _state["_stuck_cycles"] = 0
+                _reset_reason = f"anti-deadlock reset after {MAX_STUCK_CYCLES} stuck cycles"
                 logger.warning(
                     f"[AdaptiveFilter] ANTI-DEADLOCK: threshold reset to "
                     f"{DEFAULT_THRESHOLD}% after {MAX_STUCK_CYCLES} stuck cycles "
@@ -354,6 +357,28 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
         _state["threshold_history"] = history[-10:]
 
     _save()
+
+    # Audit a real threshold move (durable decision trail — requirement 6).
+    # Written synchronously: these are rare and must survive an abrupt shutdown.
+    if abs(new_threshold - old_threshold) >= 0.05:
+        try:
+            from agent.audit_log import audit as _audit
+            _audit(
+                "THRESHOLD_CHANGED",
+                f"Adaptive filter threshold {old_threshold:.1f}% → {new_threshold:.1f}% "
+                f"(WR={smoothed_wr*100:.1f}%)",
+                source="adaptive_filter", category="decision", sync=True,
+                detail={
+                    "old_threshold":  round(old_threshold, 2),
+                    "new_threshold":  round(new_threshold, 2),
+                    "win_rate":       round(smoothed_wr * 100, 2),
+                    "total_resolved": total_resolved,
+                    "trigger":        source,
+                    "reset_reason":   _reset_reason,
+                },
+            )
+        except Exception:
+            pass
 
     logger.debug(
         f"[AdaptiveFilter:{source}] trade_WR={smoothed_wr*100:.1f}% (raw={current_wr*100:.1f}%)  "
