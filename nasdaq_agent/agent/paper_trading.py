@@ -402,12 +402,19 @@ def maybe_open_trade(
     if direction not in ("BUY", "SELL"):
         return None
 
-    if not rr_qualifies:
-        logger.debug(
-            f"[PAPER] {ticker} skip: R:R {rr_ratio:.2f}:1 does not qualify "
-            f"(rr_qualifies=False — check Trade Rules min R:R setting)"
-        )
-        return None
+    # Gate on actual R:R ratio, not the boolean flag.
+    # rr_qualifies=False in ATR mode means the path has blocking resistance but
+    # R:R is still 2:1 — those trades should open. rr_qualifies=False in structural
+    # mode means R:R < min_rr (genuine failure). Check the ratio directly.
+    if rr_ratio > 0:
+        from agent.config_manager import config as _cfg_rr_gate
+        _min_rr_gate = float(_cfg_rr_gate.get("prediction.min_rr", 1.5))
+        if rr_ratio < _min_rr_gate:
+            logger.debug(
+                f"[PAPER] {ticker} skip: R:R {rr_ratio:.2f}:1 < min {_min_rr_gate:.1f}:1 "
+                f"(check Trade Rules min R:R setting)"
+            )
+            return None
 
     if price <= 0 or stop <= 0:
         logger.debug(f"[PAPER] {ticker} skip: invalid price ({price}) or stop ({stop})")
