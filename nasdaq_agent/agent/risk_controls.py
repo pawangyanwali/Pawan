@@ -162,7 +162,7 @@ def record_trade_outcome(won: bool) -> None:
             _consecutive_losses += 1
             logger.info(f"[RiskControls] Consecutive losses: {_consecutive_losses}")
 
-            if IS_PAPER_TRADING:
+            if _rcfg("trading.is_paper", IS_PAPER_TRADING):
                 # Paper mode: log streaks for observability but never block trading.
                 # Blocking reduces training data volume without protecting real capital.
                 if _consecutive_losses >= _rcfg("risk.max_consecutive_losses", MAX_CONSECUTIVE_LOSSES):
@@ -316,7 +316,7 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
                 return True, _circuit_reason
 
             # Active cooldown from consecutive losses (live trading only)
-            if not IS_PAPER_TRADING and _cooldown_until > 0 and _time.time() < _cooldown_until:
+            if not _rcfg("trading.is_paper", IS_PAPER_TRADING) and _cooldown_until > 0 and _time.time() < _cooldown_until:
                 remaining = int((_cooldown_until - _time.time()) / 60) + 1
                 return True, f"Cooldown active ({remaining} min remaining after consecutive losses)"
 
@@ -589,7 +589,7 @@ def check_max_daily_trades() -> tuple[bool, str]:
     In paper-trading mode this check is skipped entirely — paper mode maximises
     training-data volume the same way consecutive-loss cooldowns are skipped.
     """
-    if IS_PAPER_TRADING:
+    if _rcfg("trading.is_paper", IS_PAPER_TRADING):
         return False, ""
     try:
         from agent.paper_trading import get_today_pnl

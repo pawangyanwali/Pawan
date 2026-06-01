@@ -108,7 +108,7 @@ _DEFAULTS: dict[str, Any] = {
     "risk.max_portfolio_heat_pct":         lambda: float(os.getenv("MAX_PORTFOLIO_HEAT_PCT", "1.5")),
     "risk.max_consecutive_losses":         lambda: int(os.getenv("MAX_CONSECUTIVE_LOSSES", "5")),
     "risk.cooldown_after_losses":          lambda: int(os.getenv("COOLDOWN_LOSSES", "3")),
-    "risk.max_daily_trades":               lambda: int(os.getenv("MAX_DAILY_TRADES", "30")),
+    "risk.max_daily_trades":               lambda: int(os.getenv("MAX_DAILY_TRADES", "500")),
     "risk.max_per_sector":                 lambda: 2,      # max concurrent positions in same sector
     "risk.volatility_halt_size_mult":      lambda: 0.50,   # size reduction when ATR volatility is elevated
     # Extended-hours position size caps by tier
