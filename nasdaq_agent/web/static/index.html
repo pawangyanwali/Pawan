@@ -4986,8 +4986,13 @@ async function stLoadPaperTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const resp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`, {signal: AbortSignal.timeout(12000)});
-    const pc = (await resp.json()).config || {};
+    const [paperResp, tradingResp] = await Promise.all([
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`,   {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=trading.`, {signal: AbortSignal.timeout(12000)}),
+    ]);
+    const pc = (await paperResp.json()).config   || {};
+    const tc = (await tradingResp.json()).config || {};
+    const isPaper = tc["trading.is_paper"] ?? true;
     const budget   = pc["paper.budget"]            ?? 50000;
     const maxTrade = pc["paper.max_trade_pct"]     ?? 5;
     const maxAlloc = pc["paper.max_allocated_pct"] ?? 40;
@@ -4996,6 +5001,23 @@ async function stLoadPaperTab() {
 
     el.innerHTML = `
     <div style="max-width:520px">
+      <div style="margin-bottom:20px;padding:14px 16px;background:${isPaper ? '#10b98111' : '#ef444411'};border:1px solid ${isPaper ? '#10b98133' : '#ef444433'};border-radius:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div>
+            <div style="font-size:12px;font-weight:700;color:var(--text)">Trading Mode</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">
+              ${isPaper ? 'Paper trading — simulated trades only, no real orders.' : '⚠️ LIVE TRADING — real orders will be submitted to your broker.'}
+            </div>
+          </div>
+          <label style="position:relative;display:inline-block;width:48px;height:26px;cursor:pointer;flex-shrink:0">
+            <input type="checkbox" id="st-cfg-is-paper" ${isPaper ? 'checked' : ''} style="opacity:0;width:0;height:0">
+            <span style="position:absolute;inset:0;background:${isPaper ? 'var(--accent)' : 'var(--red)'};border-radius:26px;transition:.2s">
+              <span style="position:absolute;height:20px;width:20px;left:${isPaper ? '23px' : '3px'};bottom:3px;background:white;border-radius:50%;transition:.2s"></span>
+            </span>
+          </label>
+        </div>
+        <div style="font-size:9px;color:var(--muted)">Changes take effect immediately — no restart required. Switch to Live only when your strategy is validated with 200+ paper trades.</div>
+      </div>
       <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Paper Trading Budget</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
         Capital allocation settings for paper trading simulation. Changes apply immediately to future trade sizing.
@@ -5059,12 +5081,31 @@ async function stLoadPaperTab() {
     if (budgetEl)   budgetEl.oninput   = _updateHint;
     if (tradePctEl) tradePctEl.oninput = _updateHint;
 
+    const modeToggle = document.getElementById('st-cfg-is-paper');
+    if (modeToggle) {
+      modeToggle.onchange = () => {
+        const p = modeToggle.checked;
+        const panel = modeToggle.closest('[style*="border-radius:8px"]');
+        if (panel) {
+          panel.style.background = p ? '#10b98111' : '#ef444411';
+          panel.style.borderColor = p ? '#10b98133' : '#ef444433';
+          const desc = panel.querySelector('div > div:last-child');
+          if (desc) desc.textContent = p ? 'Paper trading — simulated trades only, no real orders.' : '⚠️ LIVE TRADING — real orders will be submitted to your broker.';
+          const knob = panel.querySelector('span span');
+          const track = panel.querySelector('span');
+          if (track) track.style.background = p ? 'var(--accent)' : 'var(--red)';
+          if (knob)  knob.style.left = p ? '23px' : '3px';
+        }
+      };
+    }
+
   } catch(e) {
     el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px 0">Error loading config: ${e.message}</div>`;
   }
 }
 
 async function stSavePaperConfig(btn) {
+  const isPaper  = document.getElementById('st-cfg-is-paper')?.checked ?? true;
   const budget   = parseFloat(document.getElementById('st-cfg-budget')?.value)      || null;
   const tradePct = parseFloat(document.getElementById('st-cfg-trade-pct')?.value)   || null;
   const allocPct = parseFloat(document.getElementById('st-cfg-alloc-pct')?.value)   || null;
@@ -5080,6 +5121,7 @@ async function stSavePaperConfig(btn) {
     const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
+        "trading.is_paper": isPaper,
         "paper.budget": budget, "paper.max_trade_pct": tradePct,
         "paper.max_allocated_pct": allocPct, "paper.max_open_trades": maxOpen,
         "paper.min_confidence": minConf,
