@@ -61,14 +61,17 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
 
     # today_db comes directly from a COUNT(*) SQL query — always accurate regardless
     # of how many trades exist. Do not derive today's count from the display list.
-    _today_total  = int(today_db.get("total")  or 0)
-    _today_wins   = int(today_db.get("wins")   or 0)
-    _today_losses = _today_total - _today_wins
-    _today_dollar = float(today_db.get("total_pnl_dollar") or 0)
-    _today_wr     = round(_today_wins / _today_total * 100, 1) if _today_total else 0.0
+    _today_total     = int(today_db.get("total")  or 0)
+    _today_wins      = int(today_db.get("wins")   or 0)
+    _today_losses    = _today_total - _today_wins
+    _today_dollar    = float(today_db.get("total_pnl_dollar") or 0)
+    _today_wr        = round(_today_wins / _today_total * 100, 1) if _today_total else 0.0
+    # avg_pnl_pct is the mean of individual pnl_pct values from SQL AVG() — not derived from budget
+    _avg_pnl_pct     = round(float(today_db.get("avg_pnl_pct") or 0), 3)
+    _avg_win_dollar  = round(float(today_db.get("avg_win_dollar") or 0), 2)
+    _avg_loss_dollar = round(float(today_db.get("avg_loss_dollar") or 0), 2)
     # Budget from get_summary() which reads ConfigManager — never use account_config default
-    _budget       = float(summary.get("starting_balance") or 50000)
-    _avg_pnl_pct  = round(_today_dollar / _budget * 100 / _today_total, 3) if _today_total else 0.0
+    _budget          = float(summary.get("starting_balance") or 50000)
 
     # All-time stats from pt_summary() which queries ALL closed trades (no LIMIT cap)
     _all_time_dollar  = round(float(summary.get("total_dollar_pnl") or 0.0), 2)
@@ -93,6 +96,8 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
         ),
         "total_pnl":            _avg_pnl_pct,
         "total_dollar_pnl":     _today_dollar,
+        "avg_win_dollar":       _avg_win_dollar,
+        "avg_loss_dollar":      _avg_loss_dollar,
         "all_time_dollar":      _all_time_dollar,
         "all_time_closed":      _all_time_closed,
         "all_time_wins":        _all_time_wins,

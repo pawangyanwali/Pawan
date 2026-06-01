@@ -641,6 +641,7 @@
       <div id="pt-pnl-overall" style="font-size:13px;font-weight:700;color:var(--muted)">—</div>
     </div>
     <div id="pt-pnl-pct" style="font-size:9px;color:var(--muted);margin-top:3px">—</div>
+    <div id="pt-rr-ratio" style="font-size:8px;color:var(--muted);margin-top:1px">—</div>
   </div>
   <div class="pill" id="streak-pill" onclick="openPaperTrading()" style="cursor:pointer;min-width:110px" title="Win/loss breakdown">
     <div class="pill-label">🎯 W / L</div>
@@ -7320,6 +7321,7 @@ function updatePtPills(s, openTradesMap) {
   const elPnlVal     = document.getElementById('pt-pnl-val');
   const elPnlOverall = document.getElementById('pt-pnl-overall');
   const elPnlPct     = document.getElementById('pt-pnl-pct');
+  const elRrRatio    = document.getElementById('pt-rr-ratio');
 
   if (elPnlVal) {
     const pos = (todayPnl ?? 0) >= 0;
@@ -7338,6 +7340,16 @@ function updatePtPills(s, openTradesMap) {
       elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
     } else {
       elPnlPct.textContent = '—';
+    }
+  }
+  if (elRrRatio) {
+    const avgW = s.avg_win_dollar  ?? null;
+    const avgL = s.avg_loss_dollar ?? null;
+    if (avgW !== null && avgL !== null && (avgW !== 0 || avgL !== 0)) {
+      elRrRatio.textContent = `▲$${Math.abs(avgW).toFixed(2)} ▼$${Math.abs(avgL).toFixed(2)}`;
+      elRrRatio.style.color = 'var(--muted)';
+    } else {
+      elRrRatio.textContent = '—';
     }
   }
 
