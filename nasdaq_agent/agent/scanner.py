@@ -98,6 +98,21 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _pipeline_workers() -> int:
+    """Scan concurrency cap — the de-facto ML-inference CPU bound.
+
+    Read from PostgreSQL (scanner.pipeline_workers) so it can be dialed down
+    live on a smaller host without a redeploy; falls back to the PIPELINE_WORKERS
+    constant if config is unreachable. Clamped 1–32 as a safety rail.
+    """
+    try:
+        from agent.config_manager import config as _cfg
+        n = int(_cfg.get("scanner.pipeline_workers", PIPELINE_WORKERS))
+        return max(1, min(32, n))
+    except Exception:
+        return PIPELINE_WORKERS
+
+
 def _scanner_training_enabled() -> bool:
     """
     Heavy model training must not compete with the scanner in production.
@@ -1858,7 +1873,7 @@ class Scanner:
         # across all tickers. 8× faster than the old sequential for-loop.
         from agent.pipeline import get_pipeline
         _n_total = len(active_tickers)
-        results = get_pipeline(n_workers=PIPELINE_WORKERS).scan(
+        results = get_pipeline(n_workers=_pipeline_workers()).scan(
             active_tickers, batch_1m, batch_5m, batch_1h, batch_1d,
             on_ticker_done=lambda sig, n, t: self._notify_ticker(sig, n, _n_total),
         )
@@ -2213,7 +2228,7 @@ class Scanner:
 
         from agent.pipeline import get_pipeline
         n_total = len(tickers)
-        new_results = get_pipeline(n_workers=min(PIPELINE_WORKERS, n_total)).scan(
+        new_results = get_pipeline(n_workers=min(_pipeline_workers(), n_total)).scan(
             tickers, batch_1m, batch_5m, batch_1h, batch_1d,
             on_ticker_done=lambda sig, n, t: self._notify_ticker(sig, n, n_total),
         )
@@ -2251,7 +2266,7 @@ class Scanner:
         rt_thread = threading.Thread(target=self._rt_monitor_loop, daemon=True, name="rt-monitor")
         rt_thread.start()
 
-        logger.info(f"Scanner started. {len(NASDAQ_TICKERS)} tickers · {PIPELINE_WORKERS} workers · streaming+polling modes.")
+        logger.info(f"Scanner started. {len(NASDAQ_TICKERS)} tickers · {_pipeline_workers()} workers · streaming+polling modes.")
 
     def stop(self) -> None:
         self.is_running = False

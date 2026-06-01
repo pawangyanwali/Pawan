@@ -62,6 +62,12 @@ _DEFAULTS: dict[str, Any] = {
     # ── Scanner cadence ────────────────────────────────────────────────────────
     # scan_interval_s can be reduced from 60→30 during REGULAR session without restart.
     "scanner.scan_interval_s":             lambda: int(os.getenv("SCAN_INTERVAL_SECONDS", "60")),
+    # Concurrency cap for the parallel scan ThreadPoolExecutor. This is the de-facto
+    # ML-inference CPU bound: at most N tickers are analysed at once, and each runs
+    # its 6 models single-threaded (XGBoost nthread=1, torch 1+1 threads). Lives in
+    # PostgreSQL so it can be dialed down live on a smaller host without a redeploy.
+    # Clamped 1–32 to prevent a typo from oversubscribing the scanner's 2.5 vCPU.
+    "scanner.pipeline_workers":            lambda: max(1, min(32, int(os.getenv("PIPELINE_WORKERS", "8")))),
     "scanner.pre_earnings_blackout_days":  lambda: 3,
     "scanner.post_earnings_cooldown_days": lambda: 1,
     # ── Risk controls ──────────────────────────────────────────────────────────

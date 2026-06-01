@@ -278,4 +278,9 @@ def get_pipeline(n_workers: int = 8) -> ScanPipeline:
         with _pipeline_lock:
             if _pipeline is None:
                 _pipeline = ScanPipeline(n_workers)
+    elif n_workers != _pipeline.n_workers:
+        # Live worker-count change (PG config edit). The executor is recreated
+        # per scan from self.n_workers, so updating the attribute is enough —
+        # the next scan picks up the new concurrency cap without a restart.
+        _pipeline.n_workers = n_workers
     return _pipeline
