@@ -4847,12 +4847,14 @@ async function stLoadTradeRulesTab() {
         _row('st-tr-max-risk',    'MAX RISK PER TRADE (% of price)', (pc['prediction.max_risk_pct']      ?? 0.020)*100, 0.1, 10, 0.1, 'Hard cap on stop distance as % of stock price. Prevents oversized stops on volatile stocks. Default: 2%.') +
         _row('st-tr-min-target',  'MIN TARGET DISTANCE (% of price)', (pc['prediction.min_target_pct']    ?? 0.003)*100, 0.05, 5, 0.05, 'Target must be at least this far from entry. Prevents degenerate micro-targets. Default: 0.3%.')
       )}
-      ${_section('T1 / T2 Execution Rules', 'Controls how partial exits and stop management work after a trade is open.',
-        _row('st-tr-be-offset',   'BREAKEVEN STOP OFFSET ($)',  pp['paper.breakeven_stop_offset']   ?? 0.02,  0,    2,    0.01, 'After T1 hit: stop moves to entry + this offset. $0.02 locks in a tiny profit but allows normal intraday noise.') +
-        _row('st-tr-rr-denom',    'R:R SIZE DENOMINATOR',       pp['paper.rr_denominator']          ?? 2.0,   0.5,  5,    0.5,  'Position size = rr_ratio ÷ this. At 2.0: a 2:1 trade gets full size; a 1.5:1 trade gets 75%. Lower = bigger sizing for marginal setups.') +
+      ${_section('T1 / T2 Execution Rules', 'Controls where partial exits fire and how stop management works. T1 and T2 are expressed as multiples of the initial risk distance (1R = stop distance from entry). Set T2 equal to your Min R:R Ratio above to eliminate the gap between filter and exit.',
+        _row('st-tr-t1-mult',     'T1 EXIT LEVEL (× risk)',     pp['paper.t1_r_multiple']           ?? 1.0,   0.5,  3,    0.1,  'Partial exit (50% of position) fires when price reaches entry + T1 × risk. At 1.0: exits half at exactly 1R profit. Stop then moves to breakeven.') +
+        _row('st-tr-t2-mult',     'T2 EXIT LEVEL (× risk)',     pp['paper.t2_r_multiple']           ?? 2.0,   1.0,  5,    0.1,  'Full exit fires when price reaches entry + T2 × risk. Set this equal to Min R:R Ratio to make T2 = target. Example: Min R:R = 2.0 → set T2 = 2.0.') +
+        _row('st-tr-be-offset',   'BREAKEVEN STOP OFFSET ($)',  pp['paper.breakeven_stop_offset']   ?? 0.02,  0,    2,    0.01, 'After T1 hit: stop moves to entry + this offset to lock in a small gain while the remainder runs to T2.') +
+        _row('st-tr-rr-denom',    'R:R SIZE DENOMINATOR',       pp['paper.rr_denominator']          ?? 2.0,   0.5,  5,    0.5,  'Position size = rr_ratio ÷ this. At 2.0: a 2:1 trade gets full size; a 1.5:1 trade gets 75%.') +
         _row('st-tr-rr-min-mult', 'MIN SIZE MULTIPLIER (R:R)',  pp['paper.rr_size_mult_min']        ?? 0.20,  0.05, 1,    0.05, 'Floor on R:R-based size reduction. 0.20 = never go below 20% of normal size regardless of R:R.') +
-        _row('st-tr-scalp-bars',  'SCALP TIME STOP (bars)',     pp['paper.max_bars_scalp']          ?? 20,    5,    120,  1,    'Force-close IMMEDIATE/SCALP trades after this many 1-min bars. 20 bars = 20 minutes max hold.') +
-        _row('st-tr-intra-bars',  'INTRADAY TIME STOP (bars)',  pp['paper.max_bars_intraday']       ?? 90,    10,   390,  5,    'Force-close WAIT_RETEST / intraday trades after this many bars. 90 bars = 90 minutes max hold.')
+        _row('st-tr-scalp-bars',  'SCALP TIME STOP (bars)',     pp['paper.max_bars_scalp']          ?? 20,    5,    120,  1,    'Force-close IMMEDIATE/SCALP trades after this many 1-min bars.') +
+        _row('st-tr-intra-bars',  'INTRADAY TIME STOP (bars)',  pp['paper.max_bars_intraday']       ?? 90,    10,   390,  5,    'Force-close WAIT_RETEST / intraday trades after this many bars.')
       )}
       ${_section('Position Sizing — Confidence Multipliers', 'Scale position size up or down based on signal confidence. Applied on top of R:R sizing.',
         _row('st-tr-conf-high-thr',  'HIGH CONFIDENCE THRESHOLD (%)',  ps['sizing.conf_high_threshold']  ?? 75, 50, 99, 1, 'Signals with confidence ≥ this get the high size multiplier.') +
@@ -4889,6 +4891,8 @@ async function stSaveTradeRules(btn) {
     "prediction.min_stop_dist_pct":   _v('st-tr-min-stop')   / 100,
     "prediction.max_risk_pct":        _v('st-tr-max-risk')    / 100,
     "prediction.min_target_pct":      _v('st-tr-min-target')  / 100,
+    "paper.t1_r_multiple":            _v('st-tr-t1-mult'),
+    "paper.t2_r_multiple":            _v('st-tr-t2-mult'),
     "paper.breakeven_stop_offset":    _v('st-tr-be-offset'),
     "paper.rr_denominator":           _v('st-tr-rr-denom'),
     "paper.rr_size_mult_min":         _v('st-tr-rr-min-mult'),

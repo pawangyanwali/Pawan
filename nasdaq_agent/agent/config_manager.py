@@ -56,6 +56,12 @@ _DEFAULTS: dict[str, Any] = {
     "prediction.min_stop_dist_pct":        lambda: 0.004,  # stop must be ≥ this % from entry (avoids noise stops)
     "prediction.max_risk_pct":             lambda: 0.020,  # cap risk at this % of stock price per scalp
     "prediction.min_target_pct":           lambda: 0.003,  # target must be ≥ this % from entry
+    # T1/T2 exit multipliers — both expressed as multiples of the initial risk distance.
+    # T1 is the partial-exit level (take 50% off, move stop to breakeven).
+    # T2 is the full-exit target. Setting t2_r_multiple = prediction.min_rr makes
+    # T2 exactly equal to the minimum R:R target — no gap between filter and exit.
+    "paper.t1_r_multiple":                 lambda: 1.0,    # T1 = entry + 1× risk_dist
+    "paper.t2_r_multiple":                 lambda: 2.0,    # T2 = entry + 2× risk_dist (the actual target)
     # Time stops: hard-close positions after N bars if still open
     "paper.max_bars_scalp":                lambda: 20,     # 20-min hard close for scalp trades
     "paper.max_bars_intraday":             lambda: 90,     # 90-min hard close for intraday trades

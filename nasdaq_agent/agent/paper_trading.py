@@ -518,14 +518,17 @@ def maybe_open_trade(
     )
     shares = max(1, int(_ps.shares * effective_size_mult))
 
-    # ── T1 and T2 price levels ─────────────────────────────────────────────
+    # ── T1 and T2 price levels (multiples read from config_store) ─────────────
+    from agent.config_manager import config as _cfg_t
+    _t1_mult  = float(_cfg_t.get("paper.t1_r_multiple", 1.0))
+    _t2_mult  = float(_cfg_t.get("paper.t2_r_multiple", 2.0))
     risk_dist = abs(price - stop)
     if direction == "BUY":
-        t1_price = round(price + risk_dist, 4)       # 1R
-        t2_price = round(price + 2 * risk_dist, 4)  # 2R
+        t1_price = round(price + _t1_mult * risk_dist, 4)
+        t2_price = round(price + _t2_mult * risk_dist, 4)
     else:
-        t1_price = round(price - risk_dist, 4)
-        t2_price = round(price - 2 * risk_dist, 4)
+        t1_price = round(price - _t1_mult * risk_dist, 4)
+        t2_price = round(price - _t2_mult * risk_dist, 4)
 
     with _lock:
         with _conn() as c:
