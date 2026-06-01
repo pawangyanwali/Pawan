@@ -2631,15 +2631,32 @@ setInterval(() => {
     el.style.borderColor = 'var(--border)';
     el.title = 'Market is closed; dashboard may show latest known prices';
   } else {
-    el.textContent = `STALE ${age}s`;
-    el.style.color = 'var(--red, #e74c3c)';
-    el.style.borderColor = 'var(--red, #e74c3c)';
-    el.title = `Price source stale (${_lastPriceSource || 'unknown'})`;
-    // Stale prices are not the same as a dead WebSocket: closed market hours,
-    // token gaps, or provider outages can all pause prices while server pings
-    // still prove the socket is healthy. Reconnect only if the socket itself
-    // has also gone silent.
+    // Distinguish between a genuinely degraded feed and a normal quiet period.
+    // Schwab CHART_EQUITY streaming pushes 1-min candles — in quiet midday
+    // stretches there may be no new bar for 90–120s while the socket is healthy.
+    // Only escalate to red "STALE" when coverage is also degraded (>25% stale tickers).
+    const cov = _lastPriceCoverage || {};
+    const staleTickers = Number(cov.stale || 0);
+    const totalTickers = Number(cov.total || 0);
+    const coverageDegraded = totalTickers > 0 && staleTickers >= Math.ceil(totalTickers * 0.25);
     const wsSilent = !_wsLastMsgAt || (Date.now() - _wsLastMsgAt > _WS_WATCHDOG_MS);
+
+    if (coverageDegraded || age > 180) {
+      // Genuinely stale: either lots of tickers have stale prices, or no update for 3+ min
+      el.textContent = `STALE ${age}s`;
+      el.style.color = 'var(--red, #e74c3c)';
+      el.style.borderColor = 'var(--red, #e74c3c)';
+      el.title = coverageDegraded
+        ? `Price coverage degraded: ${staleTickers}/${totalTickers} tickers stale (>${age}s) — check data feed`
+        : `No price update received for ${age}s — data feed may be interrupted`;
+    } else {
+      // Normal quiet period: coverage is fine, just waiting for the next candle close
+      el.textContent = `LAST ${age}s`;
+      el.style.color = age > 90 ? '#f5a623' : 'var(--muted)';
+      el.style.borderColor = age > 90 ? '#f5a623' : 'var(--border)';
+      el.title = `Last price update was ${age}s ago · ${staleTickers} of ${totalTickers} tickers stale · 1-min candle feed — normal inter-candle gap`;
+    }
+
     if (age > 45 && ws && ws.readyState === WebSocket.OPEN && wsSilent) {
       console.warn(`[WS] Price stale ${age}s and socket silent - forcing reconnect`);
       try { ws.close(); } catch(_) {}
