@@ -3049,24 +3049,44 @@ function renderTable() {
       </div>`;
     }
 
-    // ── Trade LEVELS cell — Entry / TP / SL ───────────────────────────────
-    const entryPrice = trade ? trade.entry_price : s.price;
-    const tpPct  = entryPrice > 0 ? ((s.target_price - entryPrice) / entryPrice * 100) : 0;
-    const slPct  = entryPrice > 0 ? ((s.stop_loss    - entryPrice) / entryPrice * 100) : 0;
-    const levelsCell = `<div style="font-size:10px;line-height:1.7;min-width:130px">
-      <div style="display:flex;justify-content:space-between;gap:8px">
-        <span style="color:var(--muted)">Entry</span>
-        <strong style="color:var(--text)">$${fmt(entryPrice)}</strong>
-      </div>
-      <div style="display:flex;justify-content:space-between;gap:8px">
-        <span style="color:var(--muted)">TP</span>
-        <span style="color:var(--green);font-weight:700">$${fmt(s.target_price)} <span style="font-size:9px;opacity:.7">${tpPct>=0?'+':''}${tpPct.toFixed(1)}%</span></span>
-      </div>
-      <div style="display:flex;justify-content:space-between;gap:8px">
-        <span style="color:var(--muted)">SL</span>
-        <span style="color:var(--red);font-weight:700">$${fmt(s.stop_loss)} <span style="font-size:9px;opacity:.7">${slPct.toFixed(1)}%</span></span>
-      </div>
-    </div>`;
+    // ── Trade LEVELS cell — Entry / TP / SL — only shown for open trades ─────
+    let levelsCell;
+    if (trade) {
+      const entryPrice = trade.entry_price;
+      const tpPct = entryPrice > 0 ? ((trade.target - entryPrice) / entryPrice * 100) : 0;
+      const slPct = entryPrice > 0 ? ((trade.stop   - entryPrice) / entryPrice * 100) : 0;
+      levelsCell = `<div style="font-size:10px;line-height:1.7;min-width:130px">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <span style="color:var(--muted)">Entry</span>
+          <strong style="color:var(--text)">$${fmt(entryPrice)}</strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <span style="color:var(--muted)">TP</span>
+          <span style="color:var(--green);font-weight:700">$${fmt(trade.target)} <span style="font-size:9px;opacity:.7">${tpPct>=0?'+':''}${tpPct.toFixed(1)}%</span></span>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <span style="color:var(--muted)">SL</span>
+          <span style="color:var(--red);font-weight:700">$${fmt(trade.stop)} <span style="font-size:9px;opacity:.7">${slPct.toFixed(1)}%</span></span>
+        </div>
+      </div>`;
+    } else {
+      // No open trade — show the model's predicted target/stop so trader can evaluate the setup
+      const tpPct = s.price > 0 && s.target_price > 0 ? ((s.target_price - s.price) / s.price * 100) : 0;
+      const slPct = s.price > 0 && s.stop_loss    > 0 ? ((s.stop_loss    - s.price) / s.price * 100) : 0;
+      const hasLevels = s.target_price > 0 && s.stop_loss > 0 && s.prediction !== 'NEUTRAL';
+      levelsCell = hasLevels
+        ? `<div style="font-size:10px;line-height:1.7;min-width:130px;opacity:0.6">
+            <div style="display:flex;justify-content:space-between;gap:8px">
+              <span style="color:var(--muted)">TP</span>
+              <span style="color:var(--green)">${fmt(tpPct>=0?'+':'')}${tpPct.toFixed(1)}%</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;gap:8px">
+              <span style="color:var(--muted)">SL</span>
+              <span style="color:var(--red)">${slPct.toFixed(1)}%</span>
+            </div>
+           </div>`
+        : `<span style="color:var(--muted);font-size:10px">—</span>`;
+    }
 
     const supInlineTag = s.is_suppressed
       ? `<span style="display:block;margin-top:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.4)">🚫 FILTERED</span>` : '';
@@ -3174,19 +3194,22 @@ function renderTable() {
         ${(() => { const ma=s.mtf_alignment||'MIXED'; const mc=ma==='BULLISH'?'var(--green)':ma==='BEARISH'?'var(--red)':'var(--muted)'; return `<span style="color:${mc};font-weight:600">${ma}</span><span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt(s.mtf_score||0,2)}</span>`; })()}
       </td>
       <td style="font-size:12px;font-weight:700;color:${(s.score||0)>=0.3?'var(--green)':(s.score||0)<=-0.3?'var(--red)':'var(--muted)'}">
-        ${fmt((s.score||0)*100,0)}
+        ${Math.abs(s.score||0)*100 < 1 ? `<span style="color:var(--muted);font-size:10px" title="Score near zero — low conviction or dead zone">–</span>` : fmt((s.score||0)*100,0)}
       </td>
       <td style="font-size:11px">
         ${(() => {
           const pScalp = s.ml_trained    ? s.ml_prob       : null;
           const pSwing = s.ml_swing_trained ? s.ml_swing_prob : null;
           const pDeep  = s.ml_deep_trained  ? s.ml_deep_prob  : null;
+          const anyTrained = s.ml_trained || s.ml_swing_trained || s.ml_deep_trained;
           const dot = (p, title) => {
-            if (p === null) return `<span title="${title}: training…" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#334155;margin:0 1px;vertical-align:middle"></span>`;
+            if (p === null) return `<span title="${title}: accumulating training data…" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#334155;margin:0 1px;vertical-align:middle"></span>`;
             const c = p>=.58?'#22c55e':p<=.42?'#ef4444':'#94a3b8';
             return `<span title="${title}: ${Math.round(p*100)}%" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${c};margin:0 1px;vertical-align:middle"></span>`;
           };
-          const mainPct = pScalp !== null ? `<span style="color:${pScalp>=.58?'var(--green)':pScalp<=.42?'var(--red)':'var(--muted)'};font-weight:600">${Math.round(pScalp*100)}%</span>` : `<span style="color:var(--muted);font-size:10px">…</span>`;
+          const mainPct = pScalp !== null
+            ? `<span style="color:${pScalp>=.58?'var(--green)':pScalp<=.42?'var(--red)':'var(--muted)'};font-weight:600">${Math.round(pScalp*100)}%</span>`
+            : `<span style="color:var(--muted);font-size:9px" title="ML needs ≥30 closed trades to train">training</span>`;
           return `${mainPct}<div style="margin-top:3px">${dot(pScalp,'Scalp 5m')}${dot(pSwing,'Swing 15m')}${dot(pDeep,'Deep BiLSTM')}</div>`;
         })()}
       </td>
@@ -3237,7 +3260,7 @@ function renderTable() {
       <td>
         <span class="exit-badge exit-${s.exit_recommendation||'HOLD'}">${s.exit_recommendation||'HOLD'}</span>
       </td>
-      <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':'var(--muted)'}">${fmt(s.rel_volume,1)}x</td>
+      <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':s.rel_volume>0?'var(--muted)':'var(--muted)'}" title="${s.rel_volume<=0?'Volume data unavailable':'Relative volume vs. 20-day baseline'}">${s.rel_volume > 0 ? fmt(s.rel_volume,1)+'x' : '—'}</td>
     </tr>`;
   }).join('');
 
