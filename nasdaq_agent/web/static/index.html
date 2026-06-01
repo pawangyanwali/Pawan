@@ -4372,7 +4372,7 @@ async function openPaperTrading() {
     const periodLabel = s.display_period === 'today' ? 'Today' : 'All-time';
     // today_closed = COUNT(*) from DB (never capped), daily_trades_allowed = config limit
     const todayClosed   = s.today_closed          ?? s.closed ?? 0;
-    const dailyAllowed  = s.daily_trades_allowed  ?? 30;
+    const dailyAllowed  = s.daily_trades_allowed  ?? 500;
     const dailyColor    = todayClosed > dailyAllowed ? 'var(--red)' : todayClosed >= dailyAllowed * 0.8 ? 'var(--yellow)' : 'var(--green)';
     document.getElementById('paper-stats').innerHTML = [
       ['Open',            (s.open ?? 0),                                                          'var(--blue)'],
@@ -5256,7 +5256,7 @@ async function stLoadRiskTab() {
         ${field('MAX PORTFOLIO HEAT (%)',   'st-rc-heat',           rc['risk.max_portfolio_heat_pct']  ?? 1.5,  'Max combined open risk as % of account. Blocks new trades above this.', 'min="0" max="20" step="0.1"')}
         ${field('MAX CONSECUTIVE LOSSES',   'st-rc-consec-losses',  rc['risk.max_consecutive_losses']  ?? 5,    'Triggers full halt after N consecutive losses.', 'min="1" max="20" step="1"')}
         ${field('COOLDOWN AFTER LOSSES',    'st-rc-cooldown-losses',rc['risk.cooldown_after_losses']   ?? 3,    '30-min cooldown triggered after N consecutive losses.', 'min="1" max="10" step="1"')}
-        ${field('MAX DAILY TRADES',         'st-rc-max-daily',      rc['risk.max_daily_trades']        ?? 30,   'Hard cap on total trades per day.', 'min="1" max="200" step="1"')}
+        ${field('MAX DAILY TRADES',         'st-rc-max-daily',      rc['risk.max_daily_trades']        ?? 500,  'Hard cap on total trades per day. Scale with max_open_trades × expected daily turnover (e.g. 75 positions × 7 turns = 525).', 'min="1" max="9999" step="1"')}
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <button onclick="stSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Risk Config</button>
@@ -7189,10 +7189,10 @@ async function loadRiskStatus() {
           </div>
           <div style="display:flex;justify-content:space-between;margin-bottom:4px">
             <span style="font-size:10px;color:var(--muted)">Trades today</span>
-            <span style="font-size:11px;color:var(--text)">${d.daily_trade_count||0} / ${d.max_daily_trades||30}</span>
+            <span style="font-size:11px;color:var(--text)">${d.daily_trade_count||0} / ${d.max_daily_trades||500}</span>
           </div>
           <div class="nn-bar-track" style="margin-top:6px">
-            <div class="nn-bar-fill" style="width:${Math.min(((d.daily_trade_count||0)/(d.max_daily_trades||30))*100,100)}%;background:${(d.daily_trade_count||0)>=(d.max_daily_trades||30)?'var(--red)':'var(--accent)'}"></div>
+            <div class="nn-bar-fill" style="width:${Math.min(((d.daily_trade_count||0)/(d.max_daily_trades||500))*100,100)}%;background:${(d.daily_trade_count||0)>=(d.max_daily_trades||500)?'var(--red)':'var(--accent)'}"></div>
           </div>
           ${d.circuit_reason ? `<div style="font-size:10px;color:var(--red);margin-top:6px">${d.circuit_reason}</div>` : ''}
         </div>

@@ -584,7 +584,13 @@ def check_volatility_halt() -> tuple[bool, str]:
 # ── 2.4 Max trades per day ────────────────────────────────────────────────────
 
 def check_max_daily_trades() -> tuple[bool, str]:
-    """Returns (blocked, reason) when total closed+open trades today >= MAX_DAILY_TRADES."""
+    """Returns (blocked, reason) when total closed+open trades today >= MAX_DAILY_TRADES.
+
+    In paper-trading mode this check is skipped entirely — paper mode maximises
+    training-data volume the same way consecutive-loss cooldowns are skipped.
+    """
+    if IS_PAPER_TRADING:
+        return False, ""
     try:
         from agent.paper_trading import get_today_pnl
         today_stats = get_today_pnl()
