@@ -402,6 +402,13 @@ def maybe_open_trade(
     if direction not in ("BUY", "SELL"):
         return None
 
+    if not rr_qualifies:
+        logger.debug(
+            f"[PAPER] {ticker} skip: R:R {rr_ratio:.2f}:1 does not qualify "
+            f"(rr_qualifies=False — check Trade Rules min R:R setting)"
+        )
+        return None
+
     if price <= 0 or stop <= 0:
         logger.debug(f"[PAPER] {ticker} skip: invalid price ({price}) or stop ({stop})")
         return None

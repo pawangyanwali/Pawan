@@ -531,12 +531,13 @@ def _evaluate_rr(
         risk = max(risk, price * 0.001)
 
         min_target = price + risk * _MIN_RR_RT
-        blocking   = [r for r in resistances if price < r < min_target]
-        if blocking:
-            target = round(min(blocking), 4)
-        else:
-            beyond = [r for r in resistances if r >= min_target]
-            target = round(min(beyond), 4) if beyond else round(min_target, 4)
+        # Target = first resistance that satisfies min R:R.
+        # Intermediate resistances are noted for quality assessment but don't
+        # define the target — setting target to the nearest blocker gives 0.1R:R
+        # and no trade ever qualifies in a dense S/R environment.
+        beyond   = [r for r in resistances if r >= min_target]
+        target   = round(min(beyond), 4) if beyond else round(min_target, 4)
+        blocking = [r for r in resistances if price < r < target * 0.97]
 
     else:
         structural = next(
@@ -556,12 +557,9 @@ def _evaluate_rr(
         risk = max(risk, price * 0.001)
 
         min_target = price - risk * _MIN_RR_RT
-        blocking   = [s for s in supports if min_target < s < price]
-        if blocking:
-            target = round(max(blocking), 4)
-        else:
-            below  = [s for s in supports if s <= min_target]
-            target = round(max(below), 4) if below else round(min_target, 4)
+        below    = [s for s in supports if s <= min_target]
+        target   = round(max(below), 4) if below else round(min_target, 4)
+        blocking = [s for s in supports if target * 1.03 < s < price]
 
     if is_bull and target - price < price * _TGT_PCT_RT:
         target = round(price + price * _TGT_PCT_RT, 4)
@@ -573,6 +571,10 @@ def _evaluate_rr(
     elif rr >= 3.0: quality = "GOOD"
     elif rr >= _MIN_RR_RT: quality = "OK"
     else:           quality = "LOW"
+
+    # Downgrade quality one tier when intermediate levels block the path
+    if blocking and quality in ("EXCELLENT", "GOOD", "OK"):
+        quality = {"EXCELLENT": "GOOD", "GOOD": "OK", "OK": "OK"}.get(quality, quality)
 
     return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR_RT
 
@@ -972,7 +974,8 @@ def generate_prediction(
         "EXCELLENT": +4.0,   # ≥4:1 R:R — extra conviction
         "GOOD":      +2.0,   # ≥3:1 R:R — solid geometry
         "OK":         0.0,   # ≥1.5:1 R:R — acceptable, no change
-        "LOW":       -4.0,   # <1.5:1 R:R — reduce size but still show signal
+        "LOW":       -2.0,   # <1.5:1 R:R — mild reduction, still show signal
+        "BLOCKED":   -1.0,   # ATR mode: path blocked by resistance, small caution
     }.get(rr_quality, 0.0)
     if _rr_adj != 0.0:
         confidence = round(float(np.clip(confidence + _rr_adj, 25.0, 95.0)), 1)
