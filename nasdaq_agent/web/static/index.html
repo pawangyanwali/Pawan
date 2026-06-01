@@ -4841,11 +4841,26 @@ async function stLoadTradeRulesTab() {
       </div>`;
 
     el.innerHTML = `<div style="max-width:560px">
-      ${_section('Risk : Reward Rules', 'Define the minimum acceptable trade quality. Changes apply to all new signals immediately — no restart required.',
-        _row('st-tr-min-rr',      'MINIMUM R:R RATIO',         pc['prediction.min_rr']            ?? 1.5,   0.5,  10,   0.1, 'Trades with R:R below this are rejected. 1.5 = risk $1 to make $1.50. Expert scalpers use 1.5–2.0.') +
-        _row('st-tr-min-stop',    'MIN STOP DISTANCE (% of price)', (pc['prediction.min_stop_dist_pct'] ?? 0.004)*100, 0.1, 5, 0.05, 'Stop must be at least this far from entry to avoid being triggered by normal noise. Default: 0.4%.') +
-        _row('st-tr-max-risk',    'MAX RISK PER TRADE (% of price)', (pc['prediction.max_risk_pct']      ?? 0.020)*100, 0.1, 10, 0.1, 'Hard cap on stop distance as % of stock price. Prevents oversized stops on volatile stocks. Default: 2%.') +
-        _row('st-tr-min-target',  'MIN TARGET DISTANCE (% of price)', (pc['prediction.min_target_pct']    ?? 0.003)*100, 0.05, 5, 0.05, 'Target must be at least this far from entry. Prevents degenerate micro-targets. Default: 0.3%.')
+      ${_section('Risk : Reward Rules', 'Define the stop/target calculation method and minimum trade quality. Changes apply to all new signals immediately — no restart required.',
+        `<div>
+          <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">STOP / TARGET MODE</label>
+          <div style="display:flex;gap:8px">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;flex:1">
+              <input type="radio" name="st-tr-mode" id="st-tr-mode-atr" value="atr" ${(pc['prediction.use_atr_stops']??true)?'checked':''}>
+              <span><strong>ATR-based (recommended)</strong><br><span style="font-size:9px;color:var(--muted)">Stop = N×ATR · Target = T2×risk · Structure = filter only. T2 always equals target — no gap.</span></span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;flex:1">
+              <input type="radio" name="st-tr-mode" id="st-tr-mode-struct" value="struct" ${!(pc['prediction.use_atr_stops']??true)?'checked':''}>
+              <span><strong>Structure-based (legacy)</strong><br><span style="font-size:9px;color:var(--muted)">Stop at support · Target at resistance. R:R varies per trade; T2 may not align with target.</span></span>
+            </label>
+          </div>
+          <div style="font-size:9px;color:var(--muted);margin-top:4px">37.7% of trades that hit T1 reached T2 in structure mode. ATR mode eliminates this gap by making T2 = target.</div>
+        </div>` +
+        _row('st-tr-atr-mult',    'ATR STOP MULTIPLE',         pc['prediction.stop_atr_multiple']  ?? 1.0,   0.2,  3,    0.1, 'Stop distance = this × ATR(14). 1.0 = standard scalp stop. Increase for wider stops on volatile stocks.') +
+        _row('st-tr-min-rr',      'MINIMUM R:R RATIO',         pc['prediction.min_rr']            ?? 1.5,   0.5,  10,   0.1, 'In ATR mode: trades where structure blocks the T2 path are rejected. In structural mode: R:R must be ≥ this.') +
+        _row('st-tr-min-stop',    'MIN STOP DISTANCE (% of price)', (pc['prediction.min_stop_dist_pct'] ?? 0.004)*100, 0.1, 5, 0.05, 'Floor on stop distance. Prevents stops too close to entry that trigger on normal noise.') +
+        _row('st-tr-max-risk',    'MAX RISK PER TRADE (% of price)', (pc['prediction.max_risk_pct']      ?? 0.020)*100, 0.1, 10, 0.1, 'Cap on stop distance. Prevents oversized risk on volatile stocks.') +
+        _row('st-tr-min-target',  'MIN TARGET DISTANCE (% of price)', (pc['prediction.min_target_pct']    ?? 0.003)*100, 0.05, 5, 0.05, 'Target must be at least this far from entry. Prevents degenerate micro-targets.')
       )}
       ${_section('T1 / T2 Execution Rules', 'Controls where partial exits fire and how stop management works. T1 and T2 are expressed as multiples of the initial risk distance (1R = stop distance from entry). Set T2 equal to your Min R:R Ratio above to eliminate the gap between filter and exit.',
         _row('st-tr-t1-mult',     'T1 EXIT LEVEL (× risk)',     pp['paper.t1_r_multiple']           ?? 1.0,   0.5,  3,    0.1,  'Partial exit (50% of position) fires when price reaches entry + T1 × risk. At 1.0: exits half at exactly 1R profit. Stop then moves to breakeven.') +
@@ -4887,6 +4902,8 @@ async function stSaveTradeRules(btn) {
   const _i = id => parseInt(document.getElementById(id)?.value, 10);
   const status = document.getElementById('st-tr-status');
   const payload = {
+    "prediction.use_atr_stops":        document.getElementById('st-tr-mode-atr')?.checked ?? true,
+    "prediction.stop_atr_multiple":   _v('st-tr-atr-mult'),
     "prediction.min_rr":              _v('st-tr-min-rr'),
     "prediction.min_stop_dist_pct":   _v('st-tr-min-stop')   / 100,
     "prediction.max_risk_pct":        _v('st-tr-max-risk')    / 100,

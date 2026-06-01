@@ -56,6 +56,12 @@ _DEFAULTS: dict[str, Any] = {
     "prediction.min_stop_dist_pct":        lambda: 0.004,  # stop must be ≥ this % from entry (avoids noise stops)
     "prediction.max_risk_pct":             lambda: 0.020,  # cap risk at this % of stock price per scalp
     "prediction.min_target_pct":           lambda: 0.003,  # target must be ≥ this % from entry
+    # ATR-based stop mode (recommended for automated scalping — eliminates T2/target gap)
+    # When true: stop = ATR × stop_atr_multiple, target = entry + t2_r_multiple × risk,
+    #            structure used only as filter (trade rejected if resistance blocks path).
+    # When false: legacy structural mode (stop at support, target at resistance).
+    "prediction.use_atr_stops":            lambda: True,   # true = fixed R:R (recommended); false = structure-based
+    "prediction.stop_atr_multiple":        lambda: 1.0,    # stop distance = N × ATR(14). 1.0 = 1×ATR is standard scalp stop
     # T1/T2 exit multipliers — both expressed as multiples of the initial risk distance.
     # T1 is the partial-exit level (take 50% off, move stop to breakeven).
     # T2 is the full-exit target. Setting t2_r_multiple = prediction.min_rr makes

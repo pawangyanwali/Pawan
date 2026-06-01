@@ -455,24 +455,27 @@ def _evaluate_rr(
     price:     float,
     sr:        dict,
     direction: str,
+    atr:       float = 0.0,
 ) -> tuple[float, float, float, str, bool]:
     """
-    Professional R:R engine — enforces minimum 1.5:1 discipline.
+    R:R engine — two modes, both fully driven by config_store (Settings → Trade Rules).
 
-    A 30-year trader's logic:
-      1.  Stop = just below the nearest STRUCTURAL support (or above resistance
-          for shorts) that is at least MIN_STOP_DIST away from entry.
-          Never risk more than MAX_RISK_PCT of the stock price.
-      2.  Target = find the first resistance BEYOND the MIN_RR level.
-          • If resistance exists between entry and the MIN_RR level, price will
-            stall there → use that as target (R:R will be LOW → trader decides
-            whether to skip or size down).
-          • If the path is CLEAR to MIN_RR, project the 1.5:1 level as target.
-            Clear air = runway = higher-probability trade.
-      3.  Never pick a target that is less than MIN_TARGET_PCT from entry.
+    ATR mode (prediction.use_atr_stops = true, default):
+      Stop  = price ± N×ATR  (N = prediction.stop_atr_multiple, default 1.0)
+      Target= price ± T2×risk (T2 = paper.t2_r_multiple, default 2.0)
+      Structure = FILTER only — trade rejected if resistance blocks path to target.
+      Result: T2 always equals the target → the gap that caused 62% of T1 winners
+              to reverse before T2 is eliminated.
+
+    Structural mode (prediction.use_atr_stops = false):
+      Stop at nearest structural support/resistance.
+      Target at first resistance beyond min_rr level.
+      Legacy behaviour — R:R varies per trade, target may not align with T2.
     """
-    # Read live values from config_store — all four are hot-reload (Settings tab)
     from agent.config_manager import config as _cfg_rr
+    _use_atr      = bool(_cfg_rr.get("prediction.use_atr_stops",     True))
+    _atr_mult     = float(_cfg_rr.get("prediction.stop_atr_multiple", 1.0))
+    _t2_mult      = float(_cfg_rr.get("paper.t2_r_multiple",          2.0))
     _MIN_RR_RT    = float(_cfg_rr.get("prediction.min_rr",            _MIN_RR))
     _TGT_PCT_RT   = float(_cfg_rr.get("prediction.min_target_pct",    _MIN_TARGET_PCT))
     MIN_STOP_DIST = float(_cfg_rr.get("prediction.min_stop_dist_pct", 0.004))
@@ -485,41 +488,57 @@ def _evaluate_rr(
     resistances = sorted(
         [float(r) for r in sr.get("resistances", []) if isinstance(r, (int, float)) and r > 0],
     )
-
     is_bull = direction in ("BUY", "STRONG BUY")
 
+    # ── ATR mode: fixed R:R, structure as filter ──────────────────────────────
+    if _use_atr and atr and atr > 0:
+        risk = float(atr) * _atr_mult
+        risk = max(risk, price * MIN_STOP_DIST)   # floor: never tighter than noise floor
+        risk = min(risk, price * MAX_RISK_PCT)    # cap: never wider than max scalp risk
+
+        if is_bull:
+            stop_loss = round(price - risk, 4)
+            target    = round(price + _t2_mult * risk, 4)
+            # Filter: reject if any resistance sits between entry and 97% of target
+            blocking  = [r for r in resistances if price < r < target * 0.97]
+        else:
+            stop_loss = round(price + risk, 4)
+            target    = round(price - _t2_mult * risk, 4)
+            blocking  = [s for s in supports if target * 1.03 < s < price]
+
+        rr           = _t2_mult   # always exactly T2:1 (e.g. 2.0:1)
+        quality      = "BLOCKED" if blocking else "CLEAR"
+        rr_qualifies = not blocking   # only trade when path is clear
+
+        return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr_qualifies
+
+    # ── Structural mode (legacy fallback when ATR unavailable or disabled) ─────
     if is_bull:
-        # ── Stop: nearest structural support ≥ MIN_STOP_DIST below entry ────────
         structural = next(
             (s for s in supports if (price - s) / price >= MIN_STOP_DIST),
             None,
         )
         if structural is None:
-            structural = price * (1.0 - 2 * MIN_STOP_DIST)   # synthetic floor
+            structural = price * (1.0 - 2 * MIN_STOP_DIST)
 
-        stop_loss = round(structural * 0.995, 4)   # 0.5% buffer below support
+        stop_loss = round(structural * 0.995, 4)
         risk      = price - stop_loss
 
-        # Cap: never risk more than 2% on a scalp
         if risk > price * MAX_RISK_PCT:
             stop_loss = round(price * (1.0 - MAX_RISK_PCT), 4)
             risk      = price - stop_loss
 
-        risk = max(risk, price * 0.001)   # floor to prevent division by zero
+        risk = max(risk, price * 0.001)
 
-        # ── Target: find clear runway to min R:R level ──────────────────────────
         min_target = price + risk * _MIN_RR_RT
-
-        blocking = [r for r in resistances if price < r < min_target]
-
+        blocking   = [r for r in resistances if price < r < min_target]
         if blocking:
             target = round(min(blocking), 4)
         else:
             beyond = [r for r in resistances if r >= min_target]
             target = round(min(beyond), 4) if beyond else round(min_target, 4)
 
-    else:   # SELL / STRONG SELL
-        # ── Stop: nearest structural resistance ≥ MIN_STOP_DIST above entry ─────
+    else:
         structural = next(
             (r for r in resistances if (r - price) / price >= MIN_STOP_DIST),
             None,
@@ -536,33 +555,24 @@ def _evaluate_rr(
 
         risk = max(risk, price * 0.001)
 
-        # ── Target: find clear runway down to min R:R level ─────────────────────
         min_target = price - risk * _MIN_RR_RT
-
-        blocking = [s for s in supports if min_target < s < price]
-
+        blocking   = [s for s in supports if min_target < s < price]
         if blocking:
             target = round(max(blocking), 4)
         else:
             below  = [s for s in supports if s <= min_target]
             target = round(max(below), 4) if below else round(min_target, 4)
 
-    # Enforce absolute minimum target move
     if is_bull and target - price < price * _TGT_PCT_RT:
         target = round(price + price * _TGT_PCT_RT, 4)
     elif not is_bull and price - target < price * _TGT_PCT_RT:
         target = round(price - price * _TGT_PCT_RT, 4)
 
     rr = _compute_rr(price, target, stop_loss)
-
-    if rr >= 4.0:
-        quality = "EXCELLENT"
-    elif rr >= 3.0:
-        quality = "GOOD"
-    elif rr >= _MIN_RR_RT:
-        quality = "OK"
-    else:
-        quality = "LOW"
+    if rr >= 4.0:   quality = "EXCELLENT"
+    elif rr >= 3.0: quality = "GOOD"
+    elif rr >= _MIN_RR_RT: quality = "OK"
+    else:           quality = "LOW"
 
     return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR_RT
 
@@ -848,8 +858,15 @@ def generate_prediction(
         confidence = round(float(np.clip(confidence * 0.75, 25.0, 95.0)), 1)
 
     # ── 7. Optimised stops, targets and R:R ──────────────────────────────────
+    # Pass ATR so ATR-mode can use it for consistent stop sizing.
+    # last_row["atr_14"] is always populated by compute_indicators() in scanner.py.
+    _atr = 0.0
+    try:
+        _atr = float(last_row["atr_14"]) if last_row is not None and "atr_14" in last_row.index else 0.0
+    except Exception:
+        pass
     stop_loss, target, rr_ratio, rr_quality, rr_qualifies = _evaluate_rr(
-        price, sr, direction
+        price, sr, direction, atr=_atr
     )
 
     # ── 7b. Exhaustion / retest check ─────────────────────────────────────────
@@ -861,7 +878,7 @@ def generate_prediction(
         retest_entry = exhaustion["entry_zone_high"]
         if retest_entry > 0:
             adj_stop, adj_target, adj_rr, rr_quality, rr_qualifies = _evaluate_rr(
-                retest_entry, sr, direction
+                retest_entry, sr, direction, atr=_atr
             )
             if adj_rr > 0:
                 rr_ratio  = adj_rr
