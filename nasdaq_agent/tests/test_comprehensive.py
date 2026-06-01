@@ -1345,7 +1345,6 @@ class TestEdgeCases:
     def test_double_close_idempotent(self, tmp_path, monkeypatch):
         """Closing an already-closed trade should be a no-op, not raise."""
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "dc_test.db")
         pt.init_db()
         tid = pt.maybe_open_trade("DC_TEST", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         assert tid is not None
@@ -1377,7 +1376,6 @@ class TestPnLAccuracy:
 
     def test_paper_trade_pnl_matches_formula(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pnl_test.db")
         pt.init_db()
         pt.maybe_open_trade("PNL_CHK", "BUY", 100.0, 115.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=116.0)
@@ -1395,7 +1393,6 @@ class TestPnLAccuracy:
         """Critical fix: EOD close must use cached price, not $0."""
         import agent.paper_trading as pt
         from agent.data_fetcher import _cache_set
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "stale_test.db")
         pt.init_db()
 
         # Pre-load price in cache

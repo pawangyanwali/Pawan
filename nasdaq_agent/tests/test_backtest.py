@@ -79,7 +79,8 @@ class TestLiveBacktest:
 
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(LB, "_DB_PATH", tmp_path / "lb_test.db")
+        # DB routes through the autouse get_conn() patch (shared in-memory SQLite);
+        # init_db() creates the schema there.
         LB.init_db()
 
     def test_record_signal_returns_str(self):
@@ -90,8 +91,7 @@ class TestLiveBacktest:
     def test_record_signal_initial_status_tracking(self):
         sid = LB.record_signal("MSFT", "BUY", entry_price=300.0,
                                target=315.0, stop=295.0)
-        conn = sqlite3.connect(str(LB._DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = LB.get_conn()
         row = conn.execute("SELECT status FROM bt_signals WHERE signal_id=?",
                            (sid,)).fetchone()
         conn.close()
@@ -188,8 +188,7 @@ class TestLiveBacktest:
 
     def test_record_signal_with_confidence(self):
         sid = LB.record_signal("CONF1", "BUY", 100.0, 110.0, 95.0, confidence=75.0)
-        conn = sqlite3.connect(str(LB._DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = LB.get_conn()
         row = conn.execute("SELECT confidence FROM bt_signals WHERE signal_id=?",
                            (sid,)).fetchone()
         conn.close()
@@ -465,8 +464,8 @@ class TestWalkForwardBacktester:
 
     @pytest.fixture(autouse=True)
     def _tmp_bt(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(LB, "_DB_PATH", tmp_path / "lb_bt.db")
-        monkeypatch.setattr(BT, "_DB_PATH", tmp_path / "lb_bt.db")
+        # DB routes through the autouse get_conn() patch; only the JSON report
+        # path still needs redirecting to a temp file.
         monkeypatch.setattr(BT, "_PERSIST_PATH", tmp_path / "bt_report.json")
         LB.init_db()
 
@@ -532,12 +531,10 @@ class TestLiveBacktestPnL:
 
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(LB, "_DB_PATH", tmp_path / "pnl_test.db")
         LB.init_db()
 
     def _get_resolved(self, ticker: str) -> list[dict]:
-        conn = sqlite3.connect(str(LB._DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = LB.get_conn()
         rows = conn.execute(
             "SELECT status, pnl_pct FROM bt_signals WHERE ticker=? AND status != 'TRACKING'",
             (ticker,)
@@ -585,8 +582,7 @@ class TestLiveBacktestPnL:
         """R-multiple and pnl_pct should have the same sign."""
         LB.record_signal("RSIGN", "BUY", 100.0, 110.0, 95.0)
         resolved = LB.update_tracking("RSIGN", current_price=111.0, vwap=100.0)
-        conn = sqlite3.connect(str(LB._DB_PATH))
-        conn.row_factory = sqlite3.Row
+        conn = LB.get_conn()
         row = conn.execute(
             "SELECT r_multiple, pnl_pct FROM bt_signals WHERE ticker='RSIGN'"
         ).fetchone()

@@ -261,11 +261,10 @@ def tmp_db_paths(tmp_path, monkeypatch):
     import agent.paper_trading as pt
     import agent.signal_tracker as st
 
-    # Redirect DB paths to per-test temp files so tests are fully isolated
-    monkeypatch.setattr(lb, "_DB_PATH", tmp_path / "live_backtest.db")
-    monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "paper_trades.db")
-    monkeypatch.setattr(st, "_DB_PATH", tmp_path / "signal_history.db")
-
+    # NOTE: these modules migrated from per-file SQLite (_DB_PATH) to the shared
+    # get_conn() pool, which is already redirected to in-memory SQLite above — so
+    # there is no _DB_PATH to patch any more. init_db() creates the schema in the
+    # patched test DB; that is the only setup still required.
     lb.init_db()
     pt.init_db()
     st.init_db()

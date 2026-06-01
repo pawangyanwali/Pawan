@@ -65,8 +65,12 @@ def make_stats(
 
 @pytest.fixture(autouse=True)
 def reset_af(tmp_path, monkeypatch):
-    """Give each test a fresh, isolated adaptive filter state."""
-    monkeypatch.setattr(AF, "_FILTER_PATH", tmp_path / "af_test.json")
+    """Give each test a fresh, isolated adaptive filter state.
+
+    Filter state now persists to the DB (routed to the shared in-memory test DB
+    by the autouse tmp_db_paths fixture, reset per test); reset_filter() clears
+    the in-memory _state, so no file-path patch is needed any more.
+    """
     AF.reset_filter("test setup")
     yield
     AF.reset_filter("test teardown")
@@ -452,7 +456,6 @@ class TestSignalTracker:
 
     @pytest.fixture(autouse=True)
     def _setup_db(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(ST, "_DB_PATH", tmp_path / "st_test.db")
         ST.init_db()
 
     def test_record_signal_returns_int(self):
@@ -496,8 +499,7 @@ class TestSignalTracker:
         ST.record_signal("PNLBW", "BUY", 100.0, 110.0, 95.0, confidence=70.0)
         ST.resolve_pending("PNLBW", current_price=111.0)
         import sqlite3
-        with sqlite3.connect(str(ST._DB_PATH)) as c:
-            c.row_factory = sqlite3.Row
+        with ST.get_conn() as c:
             row = c.execute(
                 "SELECT pnl_pct FROM signals WHERE ticker='PNLBW' AND outcome='WIN'"
             ).fetchone()
@@ -508,8 +510,7 @@ class TestSignalTracker:
         ST.record_signal("PNLBL", "BUY", 100.0, 110.0, 95.0, confidence=70.0)
         ST.resolve_pending("PNLBL", current_price=94.0)
         import sqlite3
-        with sqlite3.connect(str(ST._DB_PATH)) as c:
-            c.row_factory = sqlite3.Row
+        with ST.get_conn() as c:
             row = c.execute(
                 "SELECT pnl_pct FROM signals WHERE ticker='PNLBL' AND outcome='LOSS'"
             ).fetchone()
@@ -544,8 +545,7 @@ class TestSignalTracker:
             "SUPP1", "BUY", 100.0, confidence=40.0,
             suppress_reason="below threshold"
         )
-        with sqlite3.connect(str(ST._DB_PATH)) as c:
-            c.row_factory = sqlite3.Row
+        with ST.get_conn() as c:
             # Column is 'is_suppressed' not 'suppressed'
             row = c.execute(
                 "SELECT is_suppressed FROM signals WHERE ticker='SUPP1'"

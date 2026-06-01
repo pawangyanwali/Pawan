@@ -347,14 +347,15 @@ from agent.paper_trading import (
 class TestPaperTradeDBIntegrity:
     """Integrity rules against the SQLite paper_trades table."""
 
-    def _get_conn(self, db_path):
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _get_conn(self, db_path=None):
+        # paper_trading now writes through the shared get_conn() pool (routed to
+        # the in-memory test DB by the autouse fixture). Read from that same DB,
+        # not a standalone file — db_path is kept for call-site compatibility.
+        import agent.paper_trading as pt
+        return pt.get_conn()
 
     def test_no_zero_exit_price_on_closed_trades(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt.db")
         pt.init_db()
         # Open and close a trade at target
         maybe_open_trade("INTG_A", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -370,7 +371,6 @@ class TestPaperTradeDBIntegrity:
 
     def test_no_null_pnl_on_closed_trades(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt2.db")
         pt.init_db()
         maybe_open_trade("INTG_B", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=112.0)
@@ -384,7 +384,6 @@ class TestPaperTradeDBIntegrity:
 
     def test_at_most_one_open_per_ticker(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt3.db")
         pt.init_db()
         maybe_open_trade("INTG_C", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         maybe_open_trade("INTG_C", "BUY", 101.0, 111.0, 96.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -397,7 +396,6 @@ class TestPaperTradeDBIntegrity:
 
     def test_entry_price_always_positive(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt4.db")
         pt.init_db()
         for ticker, price in [("T1", 50.0), ("T2", 200.0), ("T3", 1500.0)]:
             maybe_open_trade(ticker, "BUY", price, price * 1.05, price * 0.97, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -410,7 +408,6 @@ class TestPaperTradeDBIntegrity:
 
     def test_buy_pnl_positive_when_win(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt5.db")
         pt.init_db()
         # Open BUY at 100, target 110
         maybe_open_trade("INTG_WIN", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -427,7 +424,6 @@ class TestPaperTradeDBIntegrity:
 
     def test_buy_pnl_negative_when_loss(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt6.db")
         pt.init_db()
         maybe_open_trade("INTG_LOSS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=93.0)
@@ -446,7 +442,6 @@ class TestPaperTradeDBIntegrity:
         The system uses T1/T2 partial exits so blended P&L differs from a simple
         (exit−entry)/entry formula — we verify sign and magnitude direction only."""
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt7.db")
         pt.init_db()
         entry = 100.0
         maybe_open_trade("INTG_FORM", "BUY", entry, 108.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -464,7 +459,6 @@ class TestPaperTradeDBIntegrity:
 
     def test_closed_at_timestamp_present(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt8.db")
         pt.init_db()
         maybe_open_trade("INTG_TS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=112.0)
@@ -480,7 +474,6 @@ class TestPaperTradeDBIntegrity:
     def test_no_double_close_in_db(self, tmp_path, monkeypatch):
         """Closing an already-closed trade must be idempotent — only 1 row in DB."""
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "pt9.db")
         pt.init_db()
         maybe_open_trade("INTG_DC", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
         df = make_ohlcv(start_price=112.0)
@@ -495,7 +488,6 @@ class TestPaperTradeDBIntegrity:
 
     def test_db_schema_has_required_columns(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "schema_test.db")
         pt.init_db()
         conn = self._get_conn(tmp_path / "schema_test.db")
         cols = [r[1] for r in conn.execute("PRAGMA table_info(paper_trades)").fetchall()]
@@ -840,8 +832,6 @@ class TestEndToEndIntegrity:
     def test_full_pipeline_buy_win(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
         import agent.live_backtest as lb
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "e2e_pt.db")
-        monkeypatch.setattr(lb, "_DB_PATH", tmp_path / "e2e_lb.db")
         pt.init_db(); lb.init_db()
 
         entry, target, stop = 100.0, 110.0, 95.0
@@ -873,8 +863,6 @@ class TestEndToEndIntegrity:
     def test_full_pipeline_sell_loss(self, tmp_path, monkeypatch):
         import agent.paper_trading as pt
         import agent.live_backtest as lb
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "e2e_pt2.db")
-        monkeypatch.setattr(lb, "_DB_PATH", tmp_path / "e2e_lb2.db")
         pt.init_db(); lb.init_db()
 
         entry, target, stop = 200.0, 190.0, 205.0
@@ -902,8 +890,6 @@ class TestEndToEndIntegrity:
         """Paper trade P&L and live backtest R must be consistent in direction."""
         import agent.paper_trading as pt
         import agent.live_backtest as lb
-        monkeypatch.setattr(pt, "_DB_PATH", tmp_path / "e2e_cc.db")
-        monkeypatch.setattr(lb, "_DB_PATH", tmp_path / "e2e_cclb.db")
         pt.init_db(); lb.init_db()
 
         entry, target, stop = 100.0, 110.0, 95.0
