@@ -7287,7 +7287,8 @@ function updatePtPills(s, openTradesMap) {
   // P&L
   const todayPnl     = s.total_dollar_pnl ?? null;
   const overallPnl   = s.all_time_dollar  ?? null;
-  const pnlPct       = s.total_pnl        ?? null;
+  const pnlPct       = s.total_pnl        ?? null;   // real %: total_dollar / budget * 100
+  const avgTradePct  = s.avg_pnl_pct      ?? null;   // avg per-trade %: AVG(pnl_pct)
 
   // ── Trades Today pill ──────────────────────────────────────────────────────
   const elOpen     = document.getElementById('pt-open-count');
@@ -7336,7 +7337,7 @@ function updatePtPills(s, openTradesMap) {
   if (elPnlPct) {
     if (pnlPct !== null) {
       const pos = pnlPct >= 0;
-      elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% avg/trade';
+      elPnlPct.textContent = (pos ? '+' : '') + pnlPct.toFixed(2) + '% of budget';
       elPnlPct.style.color = pos ? 'var(--green)' : 'var(--red)';
     } else {
       elPnlPct.textContent = '—';
@@ -7345,9 +7346,15 @@ function updatePtPills(s, openTradesMap) {
   if (elRrRatio) {
     const avgW = s.avg_win_dollar  ?? null;
     const avgL = s.avg_loss_dollar ?? null;
-    if (avgW !== null && avgL !== null && (avgW !== 0 || avgL !== 0)) {
-      elRrRatio.textContent = `▲$${Math.abs(avgW).toFixed(2)} ▼$${Math.abs(avgL).toFixed(2)}`;
-      elRrRatio.style.color = 'var(--muted)';
+    const hasAvgTrade = avgTradePct !== null;
+    const hasRr = avgW !== null && avgL !== null && (avgW !== 0 || avgL !== 0);
+    if (hasAvgTrade) {
+      const pos = avgTradePct >= 0;
+      const rrPart = hasRr
+        ? ` · ▲$${Math.abs(avgW).toFixed(2)} ▼$${Math.abs(avgL).toFixed(2)}`
+        : '';
+      elRrRatio.textContent = `avg/trade: ${pos ? '+' : ''}${avgTradePct.toFixed(2)}%${rrPart}`;
+      elRrRatio.style.color = pos ? 'var(--green-s)' : 'var(--red)';
     } else {
       elRrRatio.textContent = '—';
     }

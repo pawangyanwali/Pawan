@@ -66,7 +66,9 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
     _today_losses    = _today_total - _today_wins
     _today_dollar    = float(today_db.get("total_pnl_dollar") or 0)
     _today_wr        = round(_today_wins / _today_total * 100, 1) if _today_total else 0.0
-    # avg_pnl_pct is the mean of individual pnl_pct values from SQL AVG() — not derived from budget
+    # Real portfolio % return: total P&L dollars / starting budget
+    _total_pnl_pct   = round(float(today_db.get("total_pnl_pct") or 0), 3)
+    # Avg per-trade % from SQL AVG(pnl_pct) across individual closed trades
     _avg_pnl_pct     = round(float(today_db.get("avg_pnl_pct") or 0), 3)
     _avg_win_dollar  = round(float(today_db.get("avg_win_dollar") or 0), 2)
     _avg_loss_dollar = round(float(today_db.get("avg_loss_dollar") or 0), 2)
@@ -94,7 +96,11 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
         "avg_pnl":              _avg_pnl_pct if use_today else (
             round(sum(t.get("pnl_pct", 0) or 0 for t in closed) / len(closed), 3) if closed else 0.0
         ),
-        "total_pnl":            _avg_pnl_pct,
+        # total_pnl = real portfolio % return (total_dollar / budget * 100), NOT avg per trade
+        "total_pnl":            _total_pnl_pct if use_today else (
+            round((_all_time_dollar / _budget * 100), 3) if _budget else 0.0
+        ),
+        "avg_pnl_pct":          _avg_pnl_pct,
         "total_dollar_pnl":     _today_dollar,
         "avg_win_dollar":       _avg_win_dollar,
         "avg_loss_dollar":      _avg_loss_dollar,
