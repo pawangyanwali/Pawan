@@ -50,6 +50,15 @@ _DEFAULTS: dict[str, Any] = {
     "paper.eod_loss_threshold_pct":        lambda: -0.3,   # P&L% below which position is a "meaningful loss"
     # Adaptive filter feedback
     "paper.filter_feedback_min_trades":    lambda: 5,      # min closed trades before feeding back to filter
+    # ── Prediction / R:R engine ────────────────────────────────────────────────
+    # These control the trade-entry quality filter. All hot-reload — no restart needed.
+    "prediction.min_rr":                   lambda: 1.5,    # minimum R:R ratio to qualify a trade (e.g. 1.5 = 1.5:1)
+    "prediction.min_stop_dist_pct":        lambda: 0.004,  # stop must be ≥ this % from entry (avoids noise stops)
+    "prediction.max_risk_pct":             lambda: 0.020,  # cap risk at this % of stock price per scalp
+    "prediction.min_target_pct":           lambda: 0.003,  # target must be ≥ this % from entry
+    # Time stops: hard-close positions after N bars if still open
+    "paper.max_bars_scalp":                lambda: 20,     # 20-min hard close for scalp trades
+    "paper.max_bars_intraday":             lambda: 90,     # 90-min hard close for intraday trades
     # ── Trading / account sizing ───────────────────────────────────────────────
     # Seeded from env on first deploy; live-editable via /api/config thereafter.
     "trading.account_size":                lambda: float(os.getenv("TRADING_ACCOUNT_SIZE", "50000")),

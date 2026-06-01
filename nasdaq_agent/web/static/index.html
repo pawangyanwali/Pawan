@@ -1493,14 +1493,16 @@ TRADING_MAX_POSITION_PCT=10
     </div>
     <!-- Tab bar -->
     <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap">
-      <button id="st-tab-paper"   onclick="settingsTab('paper')"   class="pt-tab pt-tab-active">Paper Trading</button>
+      <button id="st-tab-paper"      onclick="settingsTab('paper')"      class="pt-tab pt-tab-active">Paper Trading</button>
+      <button id="st-tab-traderules" onclick="settingsTab('traderules')" class="pt-tab">Trade Rules</button>
       <button id="st-tab-signal"  onclick="settingsTab('signal')"  class="pt-tab">Signal Config</button>
       <button id="st-tab-risk"    onclick="settingsTab('risk')"    class="pt-tab">Risk Controls</button>
       <button id="st-tab-learner" onclick="settingsTab('learner')" class="pt-tab">Learner</button>
       <button id="st-tab-algos"   onclick="settingsTab('algos')"   class="pt-tab">⚙️ Algo Params</button>
     </div>
-    <div id="st-panel-paper"   style="display:block;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-signal"  style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-paper"      style="display:block;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-traderules" style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-signal"     style="display:none;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-risk"    style="display:none;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-learner" style="display:none;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-algos"   style="display:none;max-height:72vh;overflow-y:auto"></div>
@@ -4796,15 +4798,126 @@ function closeSettings() {
   document.getElementById('settings-modal').classList.remove('open');
 }
 function settingsTab(name) {
-  ['paper','signal','risk','learner','algos'].forEach(t => {
+  ['paper','traderules','signal','risk','learner','algos'].forEach(t => {
     document.getElementById('st-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('st-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
-  if (name === 'paper')   stLoadPaperTab();
-  if (name === 'signal')  stLoadSignalTab();
-  if (name === 'risk')    stLoadRiskTab();
-  if (name === 'learner') stLoadLearnerTab();
-  if (name === 'algos')   stLoadAlgosTab();
+  if (name === 'paper')      stLoadPaperTab();
+  if (name === 'traderules') stLoadTradeRulesTab();
+  if (name === 'signal')     stLoadSignalTab();
+  if (name === 'risk')       stLoadRiskTab();
+  if (name === 'learner')    stLoadLearnerTab();
+  if (name === 'algos')      stLoadAlgosTab();
+}
+
+// ── Trade Rules tab ────────────────────────────────────────────────────────────
+async function stLoadTradeRulesTab() {
+  const el = document.getElementById('st-panel-traderules');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
+  try {
+    const [predResp, paperResp, sizingResp] = await Promise.all([
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=prediction.`, {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`,      {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=sizing.`,     {signal: AbortSignal.timeout(12000)}),
+    ]);
+    const pc = (await predResp.json()).config  || {};
+    const pp = (await paperResp.json()).config || {};
+    const ps = (await sizingResp.json()).config || {};
+
+    const _row = (id, label, val, min, max, step, hint) => `
+      <div>
+        <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">${label}</label>
+        <input id="${id}" type="number" min="${min}" max="${max}" step="${step}" value="${val}"
+          style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+        <div style="font-size:9px;color:var(--muted);margin-top:3px">${hint}</div>
+      </div>`;
+
+    const _section = (title, desc, content) => `
+      <div style="margin-bottom:22px;padding:14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px">
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:3px">${title}</div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:14px">${desc}</div>
+        <div style="display:flex;flex-direction:column;gap:12px">${content}</div>
+      </div>`;
+
+    el.innerHTML = `<div style="max-width:560px">
+      ${_section('Risk : Reward Rules', 'Define the minimum acceptable trade quality. Changes apply to all new signals immediately — no restart required.',
+        _row('st-tr-min-rr',      'MINIMUM R:R RATIO',         pc['prediction.min_rr']            ?? 1.5,   0.5,  10,   0.1, 'Trades with R:R below this are rejected. 1.5 = risk $1 to make $1.50. Expert scalpers use 1.5–2.0.') +
+        _row('st-tr-min-stop',    'MIN STOP DISTANCE (% of price)', (pc['prediction.min_stop_dist_pct'] ?? 0.004)*100, 0.1, 5, 0.05, 'Stop must be at least this far from entry to avoid being triggered by normal noise. Default: 0.4%.') +
+        _row('st-tr-max-risk',    'MAX RISK PER TRADE (% of price)', (pc['prediction.max_risk_pct']      ?? 0.020)*100, 0.1, 10, 0.1, 'Hard cap on stop distance as % of stock price. Prevents oversized stops on volatile stocks. Default: 2%.') +
+        _row('st-tr-min-target',  'MIN TARGET DISTANCE (% of price)', (pc['prediction.min_target_pct']    ?? 0.003)*100, 0.05, 5, 0.05, 'Target must be at least this far from entry. Prevents degenerate micro-targets. Default: 0.3%.')
+      )}
+      ${_section('T1 / T2 Execution Rules', 'Controls how partial exits and stop management work after a trade is open.',
+        _row('st-tr-be-offset',   'BREAKEVEN STOP OFFSET ($)',  pp['paper.breakeven_stop_offset']   ?? 0.02,  0,    2,    0.01, 'After T1 hit: stop moves to entry + this offset. $0.02 locks in a tiny profit but allows normal intraday noise.') +
+        _row('st-tr-rr-denom',    'R:R SIZE DENOMINATOR',       pp['paper.rr_denominator']          ?? 2.0,   0.5,  5,    0.5,  'Position size = rr_ratio ÷ this. At 2.0: a 2:1 trade gets full size; a 1.5:1 trade gets 75%. Lower = bigger sizing for marginal setups.') +
+        _row('st-tr-rr-min-mult', 'MIN SIZE MULTIPLIER (R:R)',  pp['paper.rr_size_mult_min']        ?? 0.20,  0.05, 1,    0.05, 'Floor on R:R-based size reduction. 0.20 = never go below 20% of normal size regardless of R:R.') +
+        _row('st-tr-scalp-bars',  'SCALP TIME STOP (bars)',     pp['paper.max_bars_scalp']          ?? 20,    5,    120,  1,    'Force-close IMMEDIATE/SCALP trades after this many 1-min bars. 20 bars = 20 minutes max hold.') +
+        _row('st-tr-intra-bars',  'INTRADAY TIME STOP (bars)',  pp['paper.max_bars_intraday']       ?? 90,    10,   390,  5,    'Force-close WAIT_RETEST / intraday trades after this many bars. 90 bars = 90 minutes max hold.')
+      )}
+      ${_section('Position Sizing — Confidence Multipliers', 'Scale position size up or down based on signal confidence. Applied on top of R:R sizing.',
+        _row('st-tr-conf-high-thr',  'HIGH CONFIDENCE THRESHOLD (%)',  ps['sizing.conf_high_threshold']  ?? 75, 50, 99, 1, 'Signals with confidence ≥ this get the high size multiplier.') +
+        _row('st-tr-conf-high-mult', 'HIGH CONFIDENCE MULTIPLIER',     ps['sizing.conf_high_mult']       ?? 1.25, 0.5, 3, 0.05, 'Size multiplier when confidence is high. 1.25 = 25% larger than baseline.') +
+        _row('st-tr-conf-med-thr',   'MEDIUM CONFIDENCE THRESHOLD (%)', ps['sizing.conf_medium_threshold'] ?? 60, 40, 90, 1, 'Signals between medium and high thresholds get the medium multiplier.') +
+        _row('st-tr-conf-med-mult',  'MEDIUM CONFIDENCE MULTIPLIER',   ps['sizing.conf_medium_mult']     ?? 1.0, 0.25, 2, 0.05, 'Size multiplier for medium confidence signals. 1.0 = baseline.') +
+        _row('st-tr-conf-low-thr',   'LOW CONFIDENCE THRESHOLD (%)',   ps['sizing.conf_low_threshold']   ?? 50, 20, 80, 1, 'Signals below this get the low multiplier (reduced size).') +
+        _row('st-tr-conf-low-mult',  'LOW CONFIDENCE MULTIPLIER',      ps['sizing.conf_low_mult']        ?? 0.5, 0.1, 1, 0.05, 'Size multiplier for low confidence signals. 0.5 = half baseline size.') +
+        _row('st-tr-conf-def-mult',  'DEFAULT MULTIPLIER',             ps['sizing.conf_default_mult']    ?? 0.75, 0.1, 2, 0.05, 'Size multiplier when confidence falls between low and medium thresholds.')
+      )}
+      <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+        <button onclick="stSaveTradeRules(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save All Trade Rules</button>
+        <span id="st-tr-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div style="margin-top:14px;padding:10px 12px;background:#3b82f611;border:1px solid #3b82f633;border-radius:6px">
+        <div style="font-size:10px;font-weight:700;color:#3b82f6;margin-bottom:4px">All changes are hot-reload</div>
+        <div style="font-size:10px;color:var(--muted)">
+          R:R rules apply to the <em>next</em> scan cycle (~60s). Open trades are not affected retroactively.
+          Sizing multipliers apply to the next trade opened. No server restart needed.
+        </div>
+      </div>
+    </div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px 0">Error loading config: ${e.message}</div>`;
+  }
+}
+
+async function stSaveTradeRules(btn) {
+  const _v = id => parseFloat(document.getElementById(id)?.value);
+  const _i = id => parseInt(document.getElementById(id)?.value, 10);
+  const status = document.getElementById('st-tr-status');
+  const payload = {
+    "prediction.min_rr":              _v('st-tr-min-rr'),
+    "prediction.min_stop_dist_pct":   _v('st-tr-min-stop')   / 100,
+    "prediction.max_risk_pct":        _v('st-tr-max-risk')    / 100,
+    "prediction.min_target_pct":      _v('st-tr-min-target')  / 100,
+    "paper.breakeven_stop_offset":    _v('st-tr-be-offset'),
+    "paper.rr_denominator":           _v('st-tr-rr-denom'),
+    "paper.rr_size_mult_min":         _v('st-tr-rr-min-mult'),
+    "paper.max_bars_scalp":           _i('st-tr-scalp-bars'),
+    "paper.max_bars_intraday":        _i('st-tr-intra-bars'),
+    "sizing.conf_high_threshold":     _v('st-tr-conf-high-thr'),
+    "sizing.conf_high_mult":          _v('st-tr-conf-high-mult'),
+    "sizing.conf_medium_threshold":   _v('st-tr-conf-med-thr'),
+    "sizing.conf_medium_mult":        _v('st-tr-conf-med-mult'),
+    "sizing.conf_low_threshold":      _v('st-tr-conf-low-thr'),
+    "sizing.conf_low_mult":           _v('st-tr-conf-low-mult'),
+    "sizing.conf_default_mult":       _v('st-tr-conf-def-mult'),
+  };
+  if (Object.values(payload).some(v => v === null || isNaN(v))) {
+    if (status) { status.textContent = 'All fields must be valid numbers.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (status) { status.textContent = `Saved ${data.updated ?? Object.keys(payload).length} settings.`; status.style.color = 'var(--green)'; }
+    setTimeout(() => { if (status) status.textContent = ''; }, 3000);
+  } catch(e) {
+    if (status) { status.textContent = `Error: ${e.message}`; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
 }
 
 async function stLoadPaperTab() {

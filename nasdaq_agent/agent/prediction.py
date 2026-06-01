@@ -50,9 +50,9 @@ _BOUNCE_BB_LOW    = 0.15   # near lower Bollinger Band
 _BOUNCE_SUP_PCT   = 0.006  # within 0.6% of key support = "at support"
 _VOL_DRY_FACTOR   = 0.65   # last bar < 65% of avg = sellers drying up
 
-# ── R:R gate ─────────────────────────────────────────────────────────────────
-_MIN_RR           = 1.5    # minimum acceptable R:R for scalping (was 2.0; 1.5:1 is profitable at 60%+ WR)
-_MIN_TARGET_PCT   = 0.003  # target must be at least 0.3% from entry (avoids degenerate targets)
+# ── R:R gate (fallback defaults — live values come from config_store / Settings tab) ──
+_MIN_RR           = 1.5    # overridden at runtime by prediction.min_rr
+_MIN_TARGET_PCT   = 0.003  # overridden at runtime by prediction.min_target_pct
 
 # ── Pattern classification ────────────────────────────────────────────────────
 
@@ -471,8 +471,12 @@ def _evaluate_rr(
             Clear air = runway = higher-probability trade.
       3.  Never pick a target that is less than MIN_TARGET_PCT from entry.
     """
-    MIN_STOP_DIST = 0.004   # stop must be ≥ 0.4% from entry to avoid noise
-    MAX_RISK_PCT  = 0.020   # cap scalp risk at 2% of stock price
+    # Read live values from config_store — all four are hot-reload (Settings tab)
+    from agent.config_manager import config as _cfg_rr
+    _MIN_RR_RT    = float(_cfg_rr.get("prediction.min_rr",            _MIN_RR))
+    _TGT_PCT_RT   = float(_cfg_rr.get("prediction.min_target_pct",    _MIN_TARGET_PCT))
+    MIN_STOP_DIST = float(_cfg_rr.get("prediction.min_stop_dist_pct", 0.004))
+    MAX_RISK_PCT  = float(_cfg_rr.get("prediction.max_risk_pct",      0.020))
 
     supports    = sorted(
         [float(s) for s in sr.get("supports",    []) if isinstance(s, (int, float)) and s > 0],
@@ -503,19 +507,14 @@ def _evaluate_rr(
 
         risk = max(risk, price * 0.001)   # floor to prevent division by zero
 
-        # ── Target: find clear runway to MIN_RR ─────────────────────────────────
-        min_target = price + risk * _MIN_RR   # the 1.5:1 level we need to reach
+        # ── Target: find clear runway to min R:R level ──────────────────────────
+        min_target = price + risk * _MIN_RR_RT
 
-        # Is there overhead resistance BLOCKING the path before the 1.5:1 level?
         blocking = [r for r in resistances if price < r < min_target]
 
         if blocking:
-            # Nearest blocker is the realistic ceiling — R:R will likely be LOW
-            # Show the trade anyway; trader decides to skip or wait for breakout
             target = round(min(blocking), 4)
         else:
-            # Clear runway — use first resistance at-or-beyond the 1.5:1 level
-            # (adds a structural anchor; if none exists, project the 1.5:1 level)
             beyond = [r for r in resistances if r >= min_target]
             target = round(min(beyond), 4) if beyond else round(min_target, 4)
 
@@ -537,8 +536,8 @@ def _evaluate_rr(
 
         risk = max(risk, price * 0.001)
 
-        # ── Target: find clear runway down to MIN_RR ─────────────────────────────
-        min_target = price - risk * _MIN_RR
+        # ── Target: find clear runway down to min R:R level ─────────────────────
+        min_target = price - risk * _MIN_RR_RT
 
         blocking = [s for s in supports if min_target < s < price]
 
@@ -549,10 +548,10 @@ def _evaluate_rr(
             target = round(max(below), 4) if below else round(min_target, 4)
 
     # Enforce absolute minimum target move
-    if is_bull and target - price < price * _MIN_TARGET_PCT:
-        target = round(price + price * _MIN_TARGET_PCT, 4)
-    elif not is_bull and price - target < price * _MIN_TARGET_PCT:
-        target = round(price - price * _MIN_TARGET_PCT, 4)
+    if is_bull and target - price < price * _TGT_PCT_RT:
+        target = round(price + price * _TGT_PCT_RT, 4)
+    elif not is_bull and price - target < price * _TGT_PCT_RT:
+        target = round(price - price * _TGT_PCT_RT, 4)
 
     rr = _compute_rr(price, target, stop_loss)
 
@@ -560,12 +559,12 @@ def _evaluate_rr(
         quality = "EXCELLENT"
     elif rr >= 3.0:
         quality = "GOOD"
-    elif rr >= _MIN_RR:
+    elif rr >= _MIN_RR_RT:
         quality = "OK"
     else:
         quality = "LOW"
 
-    return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR
+    return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR_RT
 
 
 def _detect_exhaustion(

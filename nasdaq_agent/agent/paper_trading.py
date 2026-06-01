@@ -26,8 +26,9 @@ _lock    = threading.Lock()
 
 _PAPER_MIN_CONF          = 25.0  # floor confidence for paper trade data collection
 _FALLBACK_MIN_CONFIDENCE = 25.0  # used if adaptive filter is unavailable
-_MAX_BARS_HELD_SCALP     = 20   # 20-min hard close for scalps (PRD 6.3)
-_MAX_BARS_HELD_INTRADAY  = 90   # 90-min hard close for intraday (PRD 6.3)
+# Time stops — live-editable via Settings → Trade Rules (paper.max_bars_scalp / paper.max_bars_intraday)
+_MAX_BARS_HELD_SCALP     = 20   # fallback default; runtime value from config_store
+_MAX_BARS_HELD_INTRADAY  = 90   # fallback default; runtime value from config_store
 # Loaded from config at runtime so .env changes take effect without code edits
 def _max_concurrent() -> int:
     from config import PAPER_MAX_OPEN_TRADES
@@ -695,7 +696,10 @@ def update_open_trades(ticker: str, df, current_price: float,
                 # is_scalp is based solely on entry_type — not bar count, to avoid
                 # misclassifying WAIT_RETEST trades that happen to be <20 bars old
                 is_scalp = entry_type in ("IMMEDIATE", "SCALP")
-                max_bars = _MAX_BARS_HELD_SCALP if is_scalp else _MAX_BARS_HELD_INTRADAY
+                from agent.config_manager import config as _cfg_bars
+                _scalp_bars   = int(_cfg_bars.get("paper.max_bars_scalp",    _MAX_BARS_HELD_SCALP))
+                _intra_bars   = int(_cfg_bars.get("paper.max_bars_intraday", _MAX_BARS_HELD_INTRADAY))
+                max_bars = _scalp_bars if is_scalp else _intra_bars
 
                 ep           = current_price
                 exit_reason  = None
