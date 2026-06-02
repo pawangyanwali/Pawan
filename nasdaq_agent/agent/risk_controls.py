@@ -67,9 +67,16 @@ def _rcfg(key: str = None, fallback=None):
 
 
 def _account_size() -> float:
-    """Account size for all risk-% math — sourced from PostgreSQL (risk.account_size),
-    falling back to the DEFAULT_ACCOUNT_SIZE env constant only if config is unreachable."""
+    """Account size for all risk-% math.
+
+    In paper mode returns paper.budget so the circuit-breaker percentages
+    (daily-loss halt, portfolio heat, drawdown throttle) are calculated
+    against the same capital base the UI displays.  In live mode uses
+    risk.account_size, which is the real brokerage account balance.
+    """
     try:
+        if _rcfg("trading.is_paper", IS_PAPER_TRADING):
+            return float(_rcfg("paper.budget", DEFAULT_ACCOUNT_SIZE))
         return float(_rcfg("risk.account_size", DEFAULT_ACCOUNT_SIZE))
     except Exception:
         return float(DEFAULT_ACCOUNT_SIZE)

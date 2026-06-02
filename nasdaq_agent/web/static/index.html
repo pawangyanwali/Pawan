@@ -4737,7 +4737,7 @@ async function ptLoadAccountTab() {
     const exp      = a.expectancy        ?? 0;
     const dd$      = a.max_drawdown_dollar ?? 0;
     const ddPct    = a.max_drawdown_pct    ?? 0;
-    const wr       = (a.win_rate ?? 0) * 100;
+    const wr       = a.win_rate ?? 0;
     const wins     = a.wins   ?? 0;
     const losses   = a.losses ?? 0;
     const total    = a.total_trades ?? 0;

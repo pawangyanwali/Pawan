@@ -86,7 +86,7 @@ def _enabled() -> bool:
 
 
 _DDL = """
-CREATE TABLE IF NOT EXISTS audit_log (
+CREATE TABLE IF NOT EXISTS trade_audit_log (
     id          BIGSERIAL   PRIMARY KEY,
     event_type  TEXT        NOT NULL,
     category    TEXT        NOT NULL DEFAULT 'decision',
@@ -96,18 +96,18 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail      JSONB       NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_audit_log_created
-    ON audit_log (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_log_type
-    ON audit_log (event_type, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_log_ticker
-    ON audit_log (ticker, created_at DESC)
+CREATE INDEX IF NOT EXISTS idx_trade_audit_log_created
+    ON trade_audit_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trade_audit_log_type
+    ON trade_audit_log (event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trade_audit_log_ticker
+    ON trade_audit_log (ticker, created_at DESC)
     WHERE ticker IS NOT NULL;
 """
 
 
 def init_db() -> bool:
-    """Create the audit_log table (idempotent). Returns True on confirmed success."""
+    """Create the trade_audit_log table (idempotent). Returns True on confirmed success."""
     try:
         from agent.db import get_conn
         with get_conn() as conn:
@@ -140,7 +140,7 @@ def _insert_batch(events: list[dict]) -> None:
             for e in events:
                 conn.execute(
                     """
-                    INSERT INTO audit_log
+                    INSERT INTO trade_audit_log
                         (event_type, category, ticker, source, summary, detail, created_at)
                     VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
                     """,
@@ -169,7 +169,7 @@ def _prune() -> None:
         from agent.db import get_conn
         with get_conn() as conn:
             conn.execute(
-                f"DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL '{days} days'"
+                f"DELETE FROM trade_audit_log WHERE created_at < NOW() - INTERVAL '{days} days'"
             )
         logger.debug("[audit_log] pruned rows older than %d days", days)
     except Exception as exc:
@@ -271,7 +271,7 @@ def get_recent(
         sql = f"""
             SELECT id, event_type, category, ticker, source, summary, detail,
                    EXTRACT(EPOCH FROM created_at) AS created_epoch
-            FROM audit_log
+            FROM trade_audit_log
             {where}
             ORDER BY id DESC
             LIMIT %s
