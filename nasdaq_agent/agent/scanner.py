@@ -1214,6 +1214,7 @@ def analyse_ticker(
                 confidence        = pred["confidence"],
                 rr_qualifies      = bool(pred.get("rr_qualifies", False)),
                 rr_ratio          = float(pred.get("rr_ratio", 0.0)),
+                rr_quality        = pred.get("rr_quality", ""),
                 session           = sess_info.get("session", ""),
                 regime            = regime.regime,
                 vwap_event        = vwap_sig["event"],
@@ -1602,6 +1603,7 @@ def analyse_ticker(
                         except Exception:
                             pass
                     else:
+                        _asig_status: list = []
                         _trade_id = maybe_open_trade(
                             ticker            = ticker,
                             direction         = _asig["direction"],
@@ -1611,6 +1613,7 @@ def analyse_ticker(
                             confidence        = float(_asig["confidence"]),
                             rr_qualifies      = float(_asig.get("rr", 0)) >= 1.5,
                             rr_ratio          = float(_asig.get("rr", 0)),
+                            rr_quality        = "",
                             session           = sess_info.get("session", ""),
                             regime            = regime.regime,
                             entry_type        = "ALGO",
@@ -1623,6 +1626,10 @@ def analyse_ticker(
                             ml_swing_prob     = ml_swing_p,
                             ml_deep_prob      = ml_deep_p,
                             ml_ensemble_score = int(round(ml_ensemble_p * 100)),
+                            _out_status       = _asig_status,
+                        )
+                        _asig["exec_status"] = _asig_status[0] if _asig_status else (
+                            "EXECUTED_PAPER" if _trade_id else "SHADOW_LEARN_ONLY"
                         )
                 if _trade_id:
                     _algo_trade_opened = True

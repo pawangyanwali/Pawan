@@ -11,6 +11,7 @@ PRD Section 6.3 rules implemented here:
   - Portfolio heat and session blocks enforced via risk_controls.can_open_trade()
 """
 from __future__ import annotations
+import collections
 import logging
 import threading
 from datetime import datetime, timezone
@@ -332,6 +333,7 @@ _ALGO_SIGNAL_LOG_ADDITIONS = [
     ("ml_swing_prob",  "DOUBLE PRECISION"),
     ("ml_deep_prob",   "DOUBLE PRECISION"),
     ("filter_reason",  "TEXT"),
+    ("exec_status",    "TEXT"),
 ]
 
 # Additional columns for param_tune_log (applied separately)
@@ -350,6 +352,104 @@ def _migrate_columns(c) -> None:
                 c.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {definition}")
             except Exception:
                 pass
+
+
+# ── Algo family mapping ────────────────────────────────────────────────────────
+_ALGO_FAMILY_MAP = {
+    "BB_MEAN_REV": "bb_rev",
+    "MACD_ACC":    "macd_acc",
+    "SUPERTREND":  "supertrend",
+    "ORB_ZV":      "orb_zv",
+    "RSI2_SNAP":   "rsi2_snap",
+    "EMA_PULL":    "ema_pull",
+    "VWAP_TREND":  "vwap_trend",
+    "VWAP_OFI":    "vwap_ofi",
+    "DONCHIAN":    "donchian",
+    "SQUEEZE":     "squeeze",
+    "VOL_SHOCK":   "vol_shock",
+    "KELTNER_FADE":"keltner",
+    "KELTNER":     "keltner",
+    "META_ENS":    "meta_ens",
+    "PAIR_ARB":    "pair_arb",
+    "REGIME_SW":   "regime_sw",
+    "OFI":         "ofi",
+}
+
+def _algo_family(algo_name: str) -> str:
+    """Map full algo name to config family key, e.g. 'BB_MEAN_REV_BULL' → 'bb_rev'."""
+    upper = (algo_name or "").upper()
+    for prefix, family in _ALGO_FAMILY_MAP.items():
+        if upper.startswith(prefix):
+            return family
+    for sfx in ("_BULL", "_BEAR", "_LONG", "_SHORT"):
+        if upper.endswith(sfx):
+            upper = upper[:-len(sfx)]
+    return upper.lower()
+
+
+# ── Pre-T1 stop-hit storm circuit ─────────────────────────────────────────────
+_pre_t1_storm: dict = {}          # key: "family:session" → deque of (timestamp, pnl)
+_pre_t1_storm_lock = threading.Lock()
+
+def record_pre_t1_stop(algo_name: str, session: str, pnl_dollar: float) -> None:
+    """Record a pre-T1 stop hit for the storm circuit. Called from trade close logic."""
+    if not algo_name:
+        return
+    try:
+        from agent.config_manager import config as _cfg
+        if not _cfg.get("risk.pre_t1_storm_enabled", True):
+            return
+    except Exception:
+        pass
+    family = _algo_family(algo_name)
+    key = f"{family}:{session}"
+    now = __import__("time").time()
+    with _pre_t1_storm_lock:
+        if key not in _pre_t1_storm:
+            _pre_t1_storm[key] = collections.deque()
+        _pre_t1_storm[key].append((now, pnl_dollar))
+        # Prune entries older than 2× the max window to keep memory bounded
+        cutoff = now - 3600
+        while _pre_t1_storm[key] and _pre_t1_storm[key][0][0] < cutoff:
+            _pre_t1_storm[key].popleft()
+
+
+def check_pre_t1_storm(algo_name: str, session: str) -> tuple:
+    """Returns (blocked: bool, reason: str). Trips when a family has excessive pre-T1 stops."""
+    if not algo_name:
+        return False, ""
+    try:
+        from agent.config_manager import config as _cfg
+        if not _cfg.get("risk.pre_t1_storm_enabled", True):
+            return False, ""
+        window_min  = int(_cfg.get("risk.pre_t1_storm_window_min", 30))
+        max_hits    = int(_cfg.get("risk.pre_t1_storm_max_hits",   8))
+        max_loss    = -abs(float(_cfg.get("risk.pre_t1_storm_loss_usd", 250.0)))
+    except Exception:
+        return False, ""
+    family = _algo_family(algo_name)
+    key = f"{family}:{session}"
+    with _pre_t1_storm_lock:
+        entries = list(_pre_t1_storm.get(key, []))
+    if not entries:
+        return False, ""
+    cutoff = __import__("time").time() - window_min * 60
+    recent = [(t, p) for t, p in entries if t >= cutoff]
+    if not recent:
+        return False, ""
+    n_hits    = len(recent)
+    total_pnl = sum(p for _, p in recent)
+    if n_hits >= max_hits:
+        return True, (
+            f"Pre-T1 storm [{family}]: {n_hits} pre-T1 stop hits in {window_min}min "
+            f"— new {family} entries paused (learning continues)"
+        )
+    if total_pnl <= max_loss:
+        return True, (
+            f"Pre-T1 storm [{family}]: ${total_pnl:.0f} pre-T1 loss in {window_min}min "
+            f"— new {family} entries paused (learning continues)"
+        )
+    return False, ""
 
 
 def _get_min_confidence() -> float:
@@ -394,6 +494,8 @@ def maybe_open_trade(
     ml_swing_prob:    Optional[float] = None,
     ml_deep_prob:     Optional[float] = None,
     ml_ensemble_score: Optional[int] = None,
+    rr_quality:       str   = "",
+    _out_status:      Optional[list] = None,
 ) -> Optional[int]:
     """
     Open a paper trade when all PRD entry gates pass.
@@ -415,6 +517,65 @@ def maybe_open_trade(
                 f"(check Trade Rules min R:R setting)"
             )
             return None
+
+    # Hard gate: LOW rr_quality = structural resistance blocks the path to target.
+    # Signal is still logged for learning (caller sets exec_status before log_algo_signals).
+    if rr_quality == "LOW":
+        logger.debug(f"[PAPER] {ticker} skip: rr_quality=LOW — structural path blocked")
+        if _out_status is not None:
+            _out_status.append("BLOCKED_LOW_RR")
+        return None
+
+    # Block paper execution during RESTRICTED session (9:30–9:44 ET price discovery).
+    # Signals continue to algo_signal_log for learning.
+    _live_session_early = session or ""
+    if _live_session_early == "RESTRICTED":
+        from agent.config_manager import config as _cfg_sess
+        if _cfg_sess.get("paper.block_restricted_session", True):
+            logger.debug(f"[PAPER] {ticker} skip: RESTRICTED session blocked for paper execution")
+            if _out_status is not None:
+                _out_status.append("BLOCKED_RESTRICTED")
+            return None
+
+    # Per-family execution controls — check BEFORE circuit breaker for fast-path rejection.
+    if algo_name:
+        from agent.config_manager import config as _cfg_fam
+        _fam = _algo_family(algo_name)
+        _fam_enabled      = _cfg_fam.get(f"algos.{_fam}.exec_enabled", True)
+        _fam_size_mult    = float(_cfg_fam.get(f"algos.{_fam}.exec_size_mult", 1.0) or 1.0)
+        _fam_min_conf     = float(_cfg_fam.get(f"algos.{_fam}.exec_min_conf",  0.0) or 0.0)
+        _fam_min_rr       = float(_cfg_fam.get(f"algos.{_fam}.exec_min_rr",    0.0) or 0.0)
+        _fam_block_sess   = str(_cfg_fam.get(f"algos.{_fam}.exec_block_sessions", "") or "")
+        if not _fam_enabled:
+            logger.debug(f"[PAPER] {ticker} skip: family {_fam} execution disabled")
+            if _out_status is not None:
+                _out_status.append("BLOCKED_FAMILY_DISABLED")
+            return None
+        if _fam_min_conf > 0 and confidence < _fam_min_conf:
+            logger.debug(f"[PAPER] {ticker} skip: {_fam} conf {confidence:.0f}% < family min {_fam_min_conf:.0f}%")
+            if _out_status is not None:
+                _out_status.append("BLOCKED_FAMILY_CONF")
+            return None
+        if _fam_min_rr > 0 and rr_ratio > 0 and rr_ratio < _fam_min_rr:
+            logger.debug(f"[PAPER] {ticker} skip: {_fam} R:R {rr_ratio:.2f} < family min {_fam_min_rr:.1f}")
+            if _out_status is not None:
+                _out_status.append("BLOCKED_FAMILY_RR")
+            return None
+        _sess_check = session or _live_session_early
+        if _fam_block_sess and _sess_check and _sess_check in _fam_block_sess.split(","):
+            logger.debug(f"[PAPER] {ticker} skip: {_fam} blocked in session {_sess_check}")
+            if _out_status is not None:
+                _out_status.append("BLOCKED_FAMILY_SESSION")
+            return None
+        # Pre-T1 storm circuit
+        _storm_blocked, _storm_reason = check_pre_t1_storm(algo_name, session or "")
+        if _storm_blocked:
+            logger.info(f"[PAPER] {ticker} skip: {_storm_reason}")
+            if _out_status is not None:
+                _out_status.append("BLOCKED_FAMILY_STORM")
+            return None
+        # Apply family size multiplier
+        size_mult = round(size_mult * _fam_size_mult, 4)
 
     if price <= 0 or stop <= 0:
         logger.debug(f"[PAPER] {ticker} skip: invalid price ({price}) or stop ({stop})")
@@ -632,6 +793,8 @@ def maybe_open_trade(
                 f"sess:{session}  regime:{regime}"
             )
             _fire_trade_event("open", ticker)
+            if _out_status is not None:
+                _out_status.append("EXECUTED_PAPER")
             return cur.lastrowid
 
 
@@ -690,7 +853,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                        COALESCE(partial_pnl_dollar, 0) as partial_pnl_dollar,
                        COALESCE(t1_price, 0) as t1_price,
                        COALESCE(t2_price, 0) as t2_price,
-                       COALESCE(entry_type, '') as entry_type
+                       COALESCE(entry_type, '') as entry_type,
+                       COALESCE(algo_name, '') as algo_name,
+                       COALESCE(session, '') as session
                 FROM paper_trades WHERE ticker=? AND status='OPEN'
             """, (ticker,)).fetchall()
 
@@ -708,6 +873,8 @@ def update_open_trades(ticker: str, df, current_price: float,
                 partial_pnl     = float(row["partial_pnl_dollar"] or 0)
                 direction       = row["direction"]
                 entry_type      = row["entry_type"] or "IMMEDIATE"
+                _algo_nm        = row["algo_name"] or ""
+                _sess           = row["session"] or ""
 
                 # Determine time stop based on trade type (PRD 6.3)
                 # is_scalp is based solely on entry_type — not bar count, to avoid
@@ -876,6 +1043,13 @@ def update_open_trades(ticker: str, df, current_price: float,
                     if stop_hit:
                         exit_reason  = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"
                         close_shares = shares_rem
+                        # Record pre-T1 stop for storm circuit detection
+                        if not t1_hit and _algo_nm:
+                            _pnl_calc = (
+                                (ep - entry) * shares_rem if direction == "BUY"
+                                else (entry - ep) * shares_rem
+                            )
+                            record_pre_t1_stop(_algo_nm, _sess, _pnl_calc)
 
                 # ── 5. Time stop ───────────────────────────────────────────────
                 if not exit_reason and bars >= max_bars:
@@ -1887,13 +2061,14 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
                 _ml_daily = sig.get("ml_daily_prob")
                 _ml_swing = sig.get("ml_swing_prob")
                 _ml_deep  = sig.get("ml_deep_prob")
+                _exec_status = sig.get("exec_status") or ("EXECUTED_PAPER" if trade_opened else "SHADOW_LEARN_ONLY")
                 c.execute(
                     """INSERT INTO algo_signal_log
                          (logged_at, ticker, algo, direction, confidence,
                           entry, stop, target, rr, trade_opened,
                           ml_scalp_prob, ml_daily_prob, ml_swing_prob, ml_deep_prob,
-                          filter_reason)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          filter_reason, exec_status)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         now, ticker,
                         sig.get("algo", ""),
@@ -1909,6 +2084,7 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
                         float(_ml_swing) if _ml_swing is not None else None,
                         float(_ml_deep)  if _ml_deep  is not None else None,
                         sig.get("filter_reason", ""),
+                        _exec_status,
                     ),
                 )
             c.commit()

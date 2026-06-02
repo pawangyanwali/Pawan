@@ -5299,6 +5299,45 @@ async function stLoadRiskTab() {
         ${field('MAX CONSECUTIVE LOSSES',   'st-rc-consec-losses',  rc['risk.max_consecutive_losses']  ?? 5,    'Triggers full halt after N consecutive losses.', 'min="1" max="20" step="1"')}
         ${field('COOLDOWN AFTER LOSSES',    'st-rc-cooldown-losses',rc['risk.cooldown_after_losses']   ?? 3,    '30-min cooldown triggered after N consecutive losses.', 'min="1" max="10" step="1"')}
         ${field('MAX DAILY TRADES',         'st-rc-max-daily',      rc['risk.max_daily_trades']        ?? 500,  'Hard cap on total trades per day. Scale with max_open_trades × expected daily turnover (e.g. 75 positions × 7 turns = 525).', 'min="1" max="9999" step="1"')}
+        <div style="margin-top:20px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:10px">PRE-T1 STORM CIRCUIT</div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:10px">Pauses a signal family when it has too many stop hits before reaching T1. Signals continue to be logged for learning.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">ENABLED</label>
+              <select id="st-rc-storm-enabled" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+                <option value="true"  ${(rc['risk.pre_t1_storm_enabled'] ?? true)  ? 'selected' : ''}>Enabled</option>
+                <option value="false" ${!(rc['risk.pre_t1_storm_enabled'] ?? true) ? 'selected' : ''}>Disabled</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">WINDOW (MINUTES)</label>
+              <input id="st-rc-storm-window" type="number" min="5" max="240" step="5" value="${rc['risk.pre_t1_storm_window_min'] ?? 30}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">MAX PRE-T1 HITS</label>
+              <input id="st-rc-storm-hits" type="number" min="1" max="50" step="1" value="${rc['risk.pre_t1_storm_max_hits'] ?? 8}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">MAX PRE-T1 LOSS ($)</label>
+              <input id="st-rc-storm-loss" type="number" min="50" max="2000" step="25" value="${rc['risk.pre_t1_storm_loss_usd'] ?? 250}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:10px">PROFIT-AWARE LOSS CAP</div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:10px">Daily loss halt is capped at a fraction of trailing profit — prevents one bad day from erasing multiple days of gains.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">TRAILING DAYS</label>
+              <input id="st-rc-trail-days" type="number" min="1" max="30" step="1" value="${rc['risk.daily_loss_trailing_days'] ?? 5}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">MAX LOSS FRACTION (×profit)</label>
+              <input id="st-rc-trail-frac" type="number" min="0.1" max="1.0" step="0.05" value="${rc['risk.daily_loss_profit_fraction'] ?? 0.50}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+          </div>
+        </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <button onclick="stSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Risk Config</button>
@@ -5323,6 +5362,12 @@ async function stSaveRiskConfig(btn) {
     "risk.max_consecutive_losses":  parseInt(get('st-rc-consec-losses'), 10),
     "risk.cooldown_after_losses":   parseInt(get('st-rc-cooldown-losses'), 10),
     "risk.max_daily_trades":        parseInt(get('st-rc-max-daily'), 10),
+    "risk.pre_t1_storm_enabled":        document.getElementById('st-rc-storm-enabled')?.value === 'true',
+    "risk.pre_t1_storm_window_min":     parseInt(get('st-rc-storm-window'), 10),
+    "risk.pre_t1_storm_max_hits":       parseInt(get('st-rc-storm-hits'), 10),
+    "risk.pre_t1_storm_loss_usd":       parseFloat(get('st-rc-storm-loss')),
+    "risk.daily_loss_trailing_days":    parseInt(get('st-rc-trail-days'), 10),
+    "risk.daily_loss_profit_fraction":  parseFloat(get('st-rc-trail-frac')),
   };
   if (Object.values(updates).some(v => isNaN(v))) {
     if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
@@ -5468,6 +5513,21 @@ async function stLoadAlgosTab() {
     }
     _algoParamsData = data.families;
 
+    // Fetch per-family execution controls from config store
+    const execCfg = {};
+    try {
+      const execResp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=algos.`, {signal: AbortSignal.timeout(10000)});
+      const execData = (await execResp.json()).config || {};
+      for (const [key, val] of Object.entries(execData)) {
+        const m = key.match(/^algos\.(\w+)\.exec_(\w+)$/);
+        if (m) {
+          const [,fam,prop] = m;
+          if (!execCfg[fam]) execCfg[fam] = {};
+          execCfg[fam][prop] = val;
+        }
+      }
+    } catch(_) { /* exec config is optional — proceed with empty defaults */ }
+
     const families = Object.entries(data.families).sort(([a],[b]) => a.localeCompare(b));
     const anyTunedGlobal = families.some(([, params]) => Object.values(params).some(p => p.is_tuned));
 
@@ -5498,7 +5558,7 @@ async function stLoadAlgosTab() {
       </div>
       <div id="st-algo-history-panel" style="display:none;margin-bottom:16px"></div>
       <div style="display:flex;flex-direction:column;gap:16px">
-        ${families.map(([family, params]) => _renderAlgoFamilyCard(family, params)).join('')}
+        ${families.map(([family, params]) => _renderAlgoFamilyCard(family, params, execCfg)).join('')}
       </div>
     </div>`;
   } catch(e) {
@@ -5577,7 +5637,8 @@ async function stLoadAlgoHistory(family) {
   }
 }
 
-function _renderAlgoFamilyCard(family, params) {
+function _renderAlgoFamilyCard(family, params, execCfg) {
+  execCfg = execCfg || {};
   const anyTuned = Object.values(params).some(p => p.is_tuned);
   const tunedCount = Object.values(params).filter(p => p.is_tuned).length;
   const tunedBadge = anyTuned
@@ -5675,7 +5736,70 @@ function _renderAlgoFamilyCard(family, params) {
     </div>
     ${paramRows}
     <div id="st-algo-status-${family}" style="font-size:10px;color:var(--muted);margin-top:8px"></div>
+    <div style="margin-top:10px;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:5px">
+      <div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase">Execution Controls</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px">
+        <div>
+          <label style="font-size:8px;color:var(--muted);display:block;margin-bottom:2px">PAPER EXECUTION</label>
+          <select id="exec-enabled-${family}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:3px 6px;color:var(--text);font-size:11px;font-family:inherit">
+            <option value="true"  ${execCfg[family]?.enabled !== false ? 'selected':''}>Enabled</option>
+            <option value="false" ${execCfg[family]?.enabled === false  ? 'selected':''}>Disabled (shadow only)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:8px;color:var(--muted);display:block;margin-bottom:2px">SIZE MULT</label>
+          <input id="exec-size-${family}" type="number" min="0.01" max="2" step="0.05" value="${execCfg[family]?.size_mult ?? 1.0}"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:3px 6px;color:var(--text);font-size:11px;font-family:inherit">
+        </div>
+        <div>
+          <label style="font-size:8px;color:var(--muted);display:block;margin-bottom:2px">MIN CONF OVERRIDE (%)</label>
+          <input id="exec-conf-${family}" type="number" min="0" max="99" step="1" value="${execCfg[family]?.min_conf ?? 0}" placeholder="0 = global"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:3px 6px;color:var(--text);font-size:11px;font-family:inherit">
+        </div>
+        <div>
+          <label style="font-size:8px;color:var(--muted);display:block;margin-bottom:2px">MIN R:R OVERRIDE</label>
+          <input id="exec-rr-${family}" type="number" min="0" max="5" step="0.1" value="${execCfg[family]?.min_rr ?? 0}" placeholder="0 = global"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:3px 6px;color:var(--text);font-size:11px;font-family:inherit">
+        </div>
+      </div>
+      <div>
+        <label style="font-size:8px;color:var(--muted);display:block;margin-bottom:2px">BLOCK SESSIONS (comma-separated, e.g. RESTRICTED,PRE_MARKET)</label>
+        <input id="exec-sessions-${family}" type="text" value="${execCfg[family]?.block_sessions ?? ''}" placeholder="Leave empty to allow all sessions"
+          style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:3px 6px;color:var(--text);font-size:11px;font-family:inherit">
+      </div>
+      <button onclick="saveExecControls('${family}', this)" style="margin-top:8px;background:var(--accent);border:none;color:white;border-radius:4px;padding:4px 12px;cursor:pointer;font-family:inherit;font-size:10px;font-weight:700">Save Execution Controls</button>
+      <span id="exec-status-${family}" style="font-size:9px;color:var(--muted);margin-left:8px"></span>
+    </div>
   </div>`;
+}
+
+async function saveExecControls(family, btn) {
+  const get = id => document.getElementById(id)?.value;
+  const enabled  = get(`exec-enabled-${family}`) === 'true';
+  const sizeMult = parseFloat(get(`exec-size-${family}`))  || 1.0;
+  const minConf  = parseFloat(get(`exec-conf-${family}`))  || 0;
+  const minRr    = parseFloat(get(`exec-rr-${family}`))    || 0;
+  const sessions = (get(`exec-sessions-${family}`) || '').trim();
+  const status   = document.getElementById(`exec-status-${family}`);
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        [`algos.${family}.exec_enabled`]:        enabled,
+        [`algos.${family}.exec_size_mult`]:      sizeMult,
+        [`algos.${family}.exec_min_conf`]:       minConf,
+        [`algos.${family}.exec_min_rr`]:         minRr,
+        [`algos.${family}.exec_block_sessions`]: sessions,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json();
+    if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
 }
 
 async function stSaveAlgoFamily(family, btn) {

@@ -67,7 +67,7 @@ _DEFAULTS: dict[str, Any] = {
     # T2 is the full-exit target. Setting t2_r_multiple = prediction.min_rr makes
     # T2 exactly equal to the minimum R:R target — no gap between filter and exit.
     "paper.t1_r_multiple":                 lambda: 1.0,    # T1 = entry + 1× risk_dist
-    "paper.t2_r_multiple":                 lambda: 2.0,    # T2 = entry + 2× risk_dist (the actual target)
+    "paper.t2_r_multiple":                 lambda: 1.5,    # T2 = 1.5R — more achievable in choppy sessions
     # Time stops: hard-close positions after N bars if still open
     "paper.max_bars_scalp":                lambda: 20,     # 20-min hard close for scalp trades
     "paper.max_bars_intraday":             lambda: 90,     # 90-min hard close for intraday trades
@@ -125,6 +125,17 @@ _DEFAULTS: dict[str, Any] = {
     "risk.volatility_halt_atr_mult":       lambda: float(os.getenv("VOLATILITY_HALT_ATR_MULT", "2.5")),
     "risk.drawdown_throttle_1_pct":        lambda: float(os.getenv("DRAWDOWN_THROTTLE_1_PCT", "0.5")),
     "risk.drawdown_throttle_2_pct":        lambda: float(os.getenv("DRAWDOWN_THROTTLE_2_PCT", "1.0")),
+    # ── Execution safety gates ─────────────────────────────────────────────────
+    "paper.block_restricted_session":       lambda: True,   # block paper exec during 9:30-9:44 ET price discovery
+    # ── Pre-T1 stop-hit storm circuit ──────────────────────────────────────────
+    "risk.pre_t1_storm_enabled":            lambda: True,
+    "risk.pre_t1_storm_window_min":         lambda: 30,     # rolling window in minutes
+    "risk.pre_t1_storm_max_hits":           lambda: 8,      # max pre-T1 stop hits before circuit trips
+    "risk.pre_t1_storm_loss_usd":           lambda: 250.0,  # max rolling pre-T1 dollar loss before circuit trips
+    "risk.pre_t1_storm_rate":              lambda: 0.60,    # max pre-T1 hit rate (60%) before circuit trips
+    # ── Profit-aware daily loss cap ────────────────────────────────────────────
+    "risk.daily_loss_trailing_days":        lambda: 5,      # trailing days to measure profit cushion
+    "risk.daily_loss_profit_fraction":      lambda: 0.50,   # max daily loss = min(halt_pct, this × trailing_profit)
     # ── Position sizing — confidence multipliers ───────────────────────────────
     "sizing.conf_high_threshold":          lambda: 75.0,   # confidence ≥ this → high multiplier
     "sizing.conf_high_mult":               lambda: 1.25,   # size multiplier when confidence is high
@@ -172,6 +183,67 @@ _DEFAULTS: dict[str, Any] = {
     "algos.pair_arb.z_enter":            lambda: 2.0,    # pair arb entry z-score
     "algos.regime_sw.adx_trend":         lambda: 25.0,   # ADX trend threshold
     "algos.meta_ens.prob_gate":          lambda: 0.90,   # meta ensemble probability gate
+    # ── Per-family paper execution controls ────────────────────────────────────
+    # exec_enabled: allow paper trades from this family (signals still logged for learning)
+    # exec_size_mult: family-level size multiplier applied on top of global sizing
+    # exec_min_conf: family override for min confidence (0 = use global paper.min_confidence)
+    # exec_min_rr: family override for min R:R (0 = use global prediction.min_rr)
+    # exec_block_sessions: comma-separated sessions to block (e.g. "RESTRICTED,PRE_MARKET")
+    "algos.bb_rev.exec_enabled":            lambda: True,
+    "algos.bb_rev.exec_size_mult":          lambda: 0.15,   # de-risked: 15% size until positive expectancy proven
+    "algos.bb_rev.exec_min_conf":           lambda: 88.0,   # higher bar than global (de-risked)
+    "algos.bb_rev.exec_min_rr":             lambda: 1.8,    # stricter R:R than global (de-risked)
+    "algos.bb_rev.exec_block_sessions":     lambda: "RESTRICTED",
+    "algos.macd_acc.exec_enabled":          lambda: True,
+    "algos.macd_acc.exec_size_mult":        lambda: 1.0,
+    "algos.macd_acc.exec_min_conf":         lambda: 0.0,
+    "algos.macd_acc.exec_min_rr":           lambda: 0.0,
+    "algos.macd_acc.exec_block_sessions":   lambda: "",
+    "algos.supertrend.exec_enabled":        lambda: True,
+    "algos.supertrend.exec_size_mult":      lambda: 1.0,
+    "algos.supertrend.exec_min_conf":       lambda: 0.0,
+    "algos.supertrend.exec_min_rr":         lambda: 0.0,
+    "algos.supertrend.exec_block_sessions": lambda: "",
+    "algos.orb_zv.exec_enabled":            lambda: True,
+    "algos.orb_zv.exec_size_mult":          lambda: 1.0,
+    "algos.orb_zv.exec_min_conf":           lambda: 0.0,
+    "algos.orb_zv.exec_min_rr":             lambda: 0.0,
+    "algos.orb_zv.exec_block_sessions":     lambda: "",
+    "algos.rsi2_snap.exec_enabled":         lambda: True,
+    "algos.rsi2_snap.exec_size_mult":       lambda: 1.0,
+    "algos.rsi2_snap.exec_min_conf":        lambda: 0.0,
+    "algos.rsi2_snap.exec_min_rr":          lambda: 0.0,
+    "algos.rsi2_snap.exec_block_sessions":  lambda: "",
+    "algos.ema_pull.exec_enabled":          lambda: True,
+    "algos.ema_pull.exec_size_mult":        lambda: 1.0,
+    "algos.ema_pull.exec_min_conf":         lambda: 0.0,
+    "algos.ema_pull.exec_min_rr":           lambda: 0.0,
+    "algos.ema_pull.exec_block_sessions":   lambda: "",
+    "algos.vwap_trend.exec_enabled":        lambda: True,
+    "algos.vwap_trend.exec_size_mult":      lambda: 1.0,
+    "algos.vwap_trend.exec_min_conf":       lambda: 0.0,
+    "algos.vwap_trend.exec_min_rr":         lambda: 0.0,
+    "algos.vwap_trend.exec_block_sessions": lambda: "",
+    "algos.donchian.exec_enabled":          lambda: True,
+    "algos.donchian.exec_size_mult":        lambda: 1.0,
+    "algos.donchian.exec_min_conf":         lambda: 0.0,
+    "algos.donchian.exec_min_rr":           lambda: 0.0,
+    "algos.donchian.exec_block_sessions":   lambda: "",
+    "algos.vol_shock.exec_enabled":         lambda: True,
+    "algos.vol_shock.exec_size_mult":       lambda: 1.0,
+    "algos.vol_shock.exec_min_conf":        lambda: 0.0,
+    "algos.vol_shock.exec_min_rr":          lambda: 0.0,
+    "algos.vol_shock.exec_block_sessions":  lambda: "",
+    "algos.keltner.exec_enabled":           lambda: True,
+    "algos.keltner.exec_size_mult":         lambda: 1.0,
+    "algos.keltner.exec_min_conf":          lambda: 0.0,
+    "algos.keltner.exec_min_rr":            lambda: 0.0,
+    "algos.keltner.exec_block_sessions":    lambda: "",
+    "algos.meta_ens.exec_enabled":          lambda: True,
+    "algos.meta_ens.exec_size_mult":        lambda: 1.0,
+    "algos.meta_ens.exec_min_conf":         lambda: 0.0,
+    "algos.meta_ens.exec_min_rr":           lambda: 0.0,
+    "algos.meta_ens.exec_block_sessions":   lambda: "",
 }
 
 # Legacy column map: config_store key → account_config column name

@@ -341,6 +341,41 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
         # Track peak daily P&L for Profit Protect Mode drawdown check
         _peak_daily_pnl = max(_peak_daily_pnl, pnl_dollar)
 
+        # Profit-aware loss cap: max daily loss = min(halt_usd, fraction × trailing profit)
+        # Prevents one bad day from wiping multi-day profit cushion.
+        try:
+            _trailing_days    = int(_rcfg("risk.daily_loss_trailing_days",   5))
+            _profit_fraction  = float(_rcfg("risk.daily_loss_profit_fraction", 0.50))
+            if _trailing_days > 0 and _profit_fraction > 0 and pnl_dollar < 0:
+                from agent.db import get_conn
+                from datetime import date as _date
+                with get_conn() as _c:
+                    _trail_row = _c.execute(
+                        """SELECT COALESCE(SUM(daily_pnl), 0) AS trailing_profit
+                           FROM balance_snapshots
+                           WHERE snapshot_date >= (CURRENT_DATE - INTERVAL '%s days')
+                             AND snapshot_date < CURRENT_DATE
+                             AND daily_pnl > 0""",
+                        (_trailing_days,)
+                    ).fetchone()
+                _trailing_profit = float(_trail_row["trailing_profit"] or 0) if _trail_row else 0.0
+                if _trailing_profit > 0:
+                    _profit_aware_cap = _trailing_profit * _profit_fraction
+                    if abs(pnl_dollar) >= _profit_aware_cap:
+                        reason = (
+                            f"Profit-aware loss cap: today -${abs(pnl_dollar):,.0f} ≥ "
+                            f"{_profit_fraction*100:.0f}% of {_trailing_days}d trailing profit "
+                            f"${_trailing_profit:,.0f}. Locking in remaining cushion."
+                        )
+                        _circuit_open      = True
+                        _circuit_pnl_based = True
+                        _circuit_reason    = reason
+                        _circuit_date      = date.today()
+                        logger.info(f"[RiskControls] {reason}")
+                        return True, reason
+        except Exception as _pae:
+            logger.debug(f"[RiskControls] profit-aware cap check error: {_pae}")
+
         # ── Tier 3: 2.5% account loss → HALT for the day ────────────────────
         _halt_pct = _rcfg("risk.daily_loss_halt_pct", DAILY_LOSS_HALT_PCT)
         if acct_loss_pct <= -_halt_pct:
