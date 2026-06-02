@@ -520,8 +520,8 @@
     </button>
     <!-- Live price data freshness indicator -->
     <span id="data-freshness" title="Time since last live price update from Schwab" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">● PRICES</span>
-    <span id="price-source-breakdown" title="Visible price source counts" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">WS 0 | REST 0 | STALE 0</span>
-    <span id="ops-sla-chip" title="Runtime SLA status" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">SLA ...</span>
+    <span id="price-source-breakdown" title="All watched tickers – price feed coverage (server-wide, not just visible rows)" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">WS 0 | REST 0 | STALE 0</span>
+    <span id="ops-sla-chip" title="Runtime SLA – server-wide freshness &amp; component health" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;transition:color .4s,border-color .4s;cursor:default">SLA ...</span>
     <span style="white-space:nowrap">Last scan: <span id="last-scan">—</span></span>
     <span id="api-credit-chip" title="Twelve Data API credits used in rolling 60s window" style="font-size:10px;padding:2px 7px;border-radius:4px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);white-space:nowrap;display:none">API —/377</span>
     <button onclick="openHistory()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📊 History</button>
@@ -2562,11 +2562,11 @@ function _setPriceSourceBreakdown(cov, state='UNKNOWN') {
   const snapshot = Number(c.snapshot || 0);
   const stale = Number(c.stale || 0);
   el.textContent = snapshot
-    ? `WS ${live} | REST ${fallback} | SNAP ${snapshot} | STALE ${stale}`
-    : `WS ${live} | REST ${fallback} | STALE ${stale}`;
+    ? `WS ${live} | REST ${fallback} | SNAP ${snapshot} | STALE ${stale} /${total}`
+    : `WS ${live} | REST ${fallback} | STALE ${stale} /${total}`;
   el.title = total
-    ? `Visible price source counts: ${live} WebSocket, ${fallback} REST fallback, ${snapshot} scanner snapshots, ${stale} stale/no-print out of ${total}`
-    : 'Visible price source counts: no price coverage reported yet';
+    ? `All ${total} watched tickers (server-wide, not just visible rows): ${live} WebSocket live, ${fallback} REST fallback, ${snapshot} scanner snapshots, ${stale} stale/no-print`
+    : 'All watched tickers – price feed coverage: no price data reported yet';
   const upper = String(state || '').toUpperCase();
   if (!total || upper === 'CLOSED' || upper === 'NO_DATA') {
     el.style.color = 'var(--muted)';

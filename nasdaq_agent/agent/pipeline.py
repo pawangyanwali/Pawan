@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
 import numpy as np
 import pandas as pd
@@ -136,6 +136,7 @@ class ScanPipeline:
         _empty = pd.DataFrame()
         t0 = time.perf_counter()
         errors = 0
+        timeouts = 0
         results: list = []
         slow_tickers: list[tuple[str, float]] = []
         n_total = len(tickers)
@@ -147,6 +148,12 @@ class ScanPipeline:
             )
         except ValueError:
             slow_threshold_s = 5.0
+        try:
+            from agent.config_manager import config as _cfg
+            ticker_timeout_s = float(_cfg.get("scanner.ticker_timeout_s") or
+                                     os.getenv("NASDAQ_SCAN_TICKER_TIMEOUT_S", "45"))
+        except Exception:
+            ticker_timeout_s = float(os.getenv("NASDAQ_SCAN_TICKER_TIMEOUT_S", "45"))
 
         def _run(ticker: str):
             task_t0 = time.perf_counter()
@@ -169,7 +176,7 @@ class ScanPipeline:
                 ticker = future_to_ticker[future]
                 n_done += 1
                 try:
-                    sig, task_elapsed_s = future.result()
+                    sig, task_elapsed_s = future.result(timeout=ticker_timeout_s)
                     if slow_threshold_s and task_elapsed_s >= slow_threshold_s:
                         slow_tickers.append((ticker, task_elapsed_s))
                     if sig is not None:
@@ -179,6 +186,12 @@ class ScanPipeline:
                                 on_ticker_done(sig, n_done, n_total)
                             except Exception:
                                 pass
+                except FuturesTimeoutError:
+                    timeouts += 1
+                    logger.warning(
+                        "[%s] scan task timed out after %.0fs — skipping this cycle",
+                        ticker, ticker_timeout_s,
+                    )
                 except Exception as exc:
                     errors += 1
                     logger.debug("[%s] scan task raised: %s", ticker, exc)
@@ -191,7 +204,7 @@ class ScanPipeline:
         self._update_metrics(
             cycle_ms=elapsed_ms,
             scan_count=len(results),
-            errors=errors,
+            errors=errors + timeouts,
             n_tickers=len(tickers),
             elapsed_s=elapsed_s,
             slow_tickers=slow_tickers,
@@ -206,12 +219,12 @@ class ScanPipeline:
             )
 
         logger.info(
-            "ScanPipeline: %d/%d tickers OK, %d errors, %d ms "
-            "(%.1f tickers/s, workers=%d)",
-            len(results), len(tickers), errors,
+            "ScanPipeline: %d/%d tickers OK, %d errors, %d timeouts, %d ms "
+            "(%.1f tickers/s, workers=%d, timeout=%.0fs)",
+            len(results), len(tickers), errors, timeouts,
             elapsed_ms,
             len(tickers) / elapsed_s if elapsed_s > 0 else 0,
-            self.n_workers,
+            self.n_workers, ticker_timeout_s,
         )
 
         return results

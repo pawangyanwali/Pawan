@@ -89,6 +89,7 @@ _DEFAULTS: dict[str, Any] = {
     # PostgreSQL so it can be dialed down live on a smaller host without a redeploy.
     # Clamped 1–32 to prevent a typo from oversubscribing the scanner's 2.5 vCPU.
     "scanner.pipeline_workers":            lambda: max(1, min(32, int(os.getenv("PIPELINE_WORKERS", "8")))),
+    "scanner.ticker_timeout_s":            lambda: float(os.getenv("NASDAQ_SCAN_TICKER_TIMEOUT_S", "45")),
     "scanner.pre_earnings_blackout_days":  lambda: 3,
     "scanner.post_earnings_cooldown_days": lambda: 1,
     # ── Risk controls ──────────────────────────────────────────────────────────

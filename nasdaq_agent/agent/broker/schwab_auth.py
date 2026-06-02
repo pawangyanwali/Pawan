@@ -254,6 +254,7 @@ class _TokenManager:
             return False
         with self._lock:
             rt = self._tokens.get("refresh_token")
+            old_access_token = self._tokens.get("access_token", "")
         if not rt:
             logger.warning(f"[Schwab/{self.name}] No refresh token — re-auth required.")
             return False
@@ -268,16 +269,19 @@ class _TokenManager:
                 resolve_alert(alert_key=f"SCHWAB_AUTH:{self.name.lower()}")
             except Exception:
                 pass
-            # Notify market-data's _token_reload_loop so it can (re)start the streamer
-            # if the initial startup was skipped because tokens were expired then.
-            try:
-                from agent.valkey_client import _get_client as _vk_c
-                _vc = _vk_c()
-                if _vc:
-                    _vc.publish("schwab:tokens_refreshed",
-                                json.dumps({"ts": time.time(), "app": self.name.lower()}))
-            except Exception:
-                pass
+            # Only publish the streamer-restart event when the access token
+            # actually rotated.  Skipping when unchanged avoids tearing down
+            # a healthy WebSocket stream on retried or no-op refreshes.
+            new_access_token = data.get("access_token", "")
+            if new_access_token and new_access_token != old_access_token:
+                try:
+                    from agent.valkey_client import _get_client as _vk_c
+                    _vc = _vk_c()
+                    if _vc:
+                        _vc.publish("schwab:tokens_refreshed",
+                                    json.dumps({"ts": time.time(), "app": self.name.lower()}))
+                except Exception:
+                    pass
             return True
         except urllib.error.HTTPError as e:
             if e.code == 400:
