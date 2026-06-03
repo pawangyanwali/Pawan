@@ -1499,6 +1499,7 @@ TRADING_MAX_POSITION_PCT=10
       <button id="st-tab-risk"    onclick="settingsTab('risk')"    class="pt-tab">Risk Controls</button>
       <button id="st-tab-learner" onclick="settingsTab('learner')" class="pt-tab">Learner</button>
       <button id="st-tab-algos"   onclick="settingsTab('algos')"   class="pt-tab">⚙️ Algo Params</button>
+      <button id="st-tab-sr"     onclick="settingsTab('sr')"     class="pt-tab">📐 S&amp;R Tuning</button>
     </div>
     <div id="st-panel-paper"      style="display:block;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-traderules" style="display:none;max-height:72vh;overflow-y:auto"></div>
@@ -1506,6 +1507,7 @@ TRADING_MAX_POSITION_PCT=10
     <div id="st-panel-risk"    style="display:none;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-learner" style="display:none;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-algos"   style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-sr"      style="display:none;max-height:72vh;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -4838,7 +4840,7 @@ function closeSettings() {
   document.getElementById('settings-modal').classList.remove('open');
 }
 function settingsTab(name) {
-  ['paper','traderules','signal','risk','learner','algos'].forEach(t => {
+  ['paper','traderules','signal','risk','learner','algos','sr'].forEach(t => {
     document.getElementById('st-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('st-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
@@ -4848,6 +4850,7 @@ function settingsTab(name) {
   if (name === 'risk')       stLoadRiskTab();
   if (name === 'learner')    stLoadLearnerTab();
   if (name === 'algos')      stLoadAlgosTab();
+  if (name === 'sr')         stLoadSRTab();
 }
 
 // ── Trade Rules tab ────────────────────────────────────────────────────────────
@@ -5919,6 +5922,137 @@ async function stResetAlgoFamily(family, btn) {
     setTimeout(stLoadAlgosTab, 500);
   } catch(e) {
     if (status) { status.textContent = 'Reset failed: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
+}
+
+// ─── S&R Tuning tab ────────────────────────────────────────────────────────────
+async function stLoadSRTab() {
+  const el = document.getElementById('st-panel-sr');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
+  try {
+    const resp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=sr.`, {signal: AbortSignal.timeout(12000)});
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const sr = await resp.json();
+    const inp = (id, val, min, max, step) =>
+      `<input id="${id}" type="number" min="${min}" max="${max}" step="${step}" value="${val}"
+        style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">`;
+    el.innerHTML = `
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.5">
+        All S&amp;R constants — cluster tolerance, swing window, Fibonacci lookback, fallback percentages, and POC buckets — are hot-reloadable here without a code deploy.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Clustering</div>
+          <div style="display:grid;gap:8px">
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">CLUSTER TOLERANCE (%)</div>
+              ${inp('st-sr-cluster-tol', sr['sr.cluster_tolerance_pct'] ?? 0.40, 0.05, 5, 0.05)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Levels within this % of each other are merged into one. Default 0.40%.</div>
+            </div>
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Minimum Bar Requirements</div>
+          <div style="display:grid;gap:8px">
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">MIN ROWS — PIVOT</div>
+              ${inp('st-sr-min-rows-pivot', sr['sr.min_rows_pivot'] ?? 3, 1, 20, 1)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Minimum bars required to compute pivot points.</div>
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">MIN ROWS — SWING</div>
+              ${inp('st-sr-min-rows-swing', sr['sr.min_rows_swing'] ?? 5, 1, 30, 1)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Minimum bars required for the swing high/low scan.</div>
+            </div>
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Swing Levels</div>
+          <div style="display:grid;gap:8px">
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">SWING WINDOW (bars each side)</div>
+              ${inp('st-sr-swing-window', sr['sr.swing_window_bars'] ?? 10, 2, 50, 1)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Bars on each side required to confirm a local swing high/low.</div>
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">MAX LEVELS PER SIDE</div>
+              ${inp('st-sr-swing-max', sr['sr.swing_max_levels'] ?? 5, 1, 20, 1)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Maximum support and resistance levels returned per direction.</div>
+            </div>
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Volume Profile (POC)</div>
+          <div style="display:grid;gap:8px">
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">POC HISTOGRAM BUCKETS</div>
+              ${inp('st-sr-poc-buckets', sr['sr.poc_buckets'] ?? 50, 10, 200, 10)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Number of price bins for the volume POC and value area calculation.</div>
+            </div>
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Fibonacci Levels</div>
+          <div style="display:grid;gap:8px">
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">FIBONACCI LOOKBACK (bars)</div>
+              ${inp('st-sr-fib-lookback', sr['sr.fibonacci_lookback_bars'] ?? 50, 10, 500, 5)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Bars scanned to identify the swing high/low used for Fibonacci levels.</div>
+            </div>
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Fallback Levels</div>
+          <div style="display:grid;gap:8px">
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">FALLBACK SUPPORT (× price)</div>
+              ${inp('st-sr-fallback-sup', sr['sr.fallback_support_pct'] ?? 0.98, 0.90, 0.999, 0.001)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Used when no support level is found. 0.98 = 2% below current price.</div>
+            </div>
+            <div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:3px">FALLBACK RESISTANCE (× price)</div>
+              ${inp('st-sr-fallback-res', sr['sr.fallback_resistance_pct'] ?? 1.02, 1.001, 1.10, 0.001)}
+              <div style="font-size:9px;color:var(--muted);margin-top:2px">Used when no resistance level is found. 1.02 = 2% above current price.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+        <button onclick="stSaveSRConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save S&amp;R Config</button>
+        <span id="st-sr-status" style="font-size:11px;color:var(--green)"></span>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px 0">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function stSaveSRConfig(btn) {
+  const status = document.getElementById('st-sr-status');
+  const get = id => document.getElementById(id)?.value ?? '';
+  const updates = {
+    "sr.cluster_tolerance_pct":   parseFloat(get('st-sr-cluster-tol')),
+    "sr.min_rows_pivot":          parseInt(get('st-sr-min-rows-pivot'), 10),
+    "sr.min_rows_swing":          parseInt(get('st-sr-min-rows-swing'), 10),
+    "sr.swing_window_bars":       parseInt(get('st-sr-swing-window'), 10),
+    "sr.swing_max_levels":        parseInt(get('st-sr-swing-max'), 10),
+    "sr.poc_buckets":             parseInt(get('st-sr-poc-buckets'), 10),
+    "sr.fibonacci_lookback_bars": parseInt(get('st-sr-fib-lookback'), 10),
+    "sr.fallback_support_pct":    parseFloat(get('st-sr-fallback-sup')),
+    "sr.fallback_resistance_pct": parseFloat(get('st-sr-fallback-res')),
+  };
+  const invalid = Object.values(updates).filter(v => isNaN(v));
+  if (invalid.length) { if (status) { status.textContent = 'Fix invalid values.'; status.style.color = 'var(--red)'; } return; }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updates), signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
   } finally { btn.disabled = false; }
 }
 

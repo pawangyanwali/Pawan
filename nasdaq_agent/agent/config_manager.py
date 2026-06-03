@@ -258,6 +258,17 @@ _DEFAULTS: dict[str, Any] = {
     "algos.meta_ens.exec_min_conf":         lambda: 0.0,
     "algos.meta_ens.exec_min_rr":           lambda: 0.0,
     "algos.meta_ens.exec_block_sessions":   lambda: "",
+    # ── Support & Resistance tuning ────────────────────────────────────────────
+    # All constants used in support_resistance.py are hot-reloadable here.
+    "sr.cluster_tolerance_pct":             lambda: 0.40,   # % — merge levels within this distance (0.4% default)
+    "sr.min_rows_pivot":                    lambda: 3,      # min bars required to compute pivot points
+    "sr.min_rows_swing":                    lambda: 5,      # min bars required for swing high/low scan
+    "sr.swing_window_bars":                 lambda: 10,     # bars on each side to confirm a swing high/low
+    "sr.swing_max_levels":                  lambda: 5,      # max S/R levels returned per side
+    "sr.poc_buckets":                       lambda: 50,     # histogram buckets for volume POC / value area
+    "sr.fibonacci_lookback_bars":           lambda: 50,     # bars scanned for Fibonacci swing high/low
+    "sr.fallback_support_pct":              lambda: 0.98,   # price × this when no support level found
+    "sr.fallback_resistance_pct":           lambda: 1.02,   # price × this when no resistance level found
 }
 
 # Legacy column map: config_store key → account_config column name

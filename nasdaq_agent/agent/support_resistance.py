@@ -17,12 +17,28 @@ import numpy as np
 import pandas as pd
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Module-level fallback constants (used when config_store is unavailable) ───
+# All values are readable/writable via config_store keys (sr.*) and exposed
+# in Settings → S&R Tuning so they can be changed without a code deploy.
 
-_CLUSTER_TOLERANCE = 0.004    # 0.4% — tighter clustering creates too many trivial levels
-_MIN_ROWS_PIVOT    = 3        # minimum bars needed for pivot calculation
-_MIN_ROWS_SWING    = 5        # minimum bars needed for swing detection
-_POC_BUCKETS       = 50       # number of price buckets for volume profile
+_CLUSTER_TOLERANCE = 0.004    # 0.4% — merge near-duplicate levels
+_MIN_ROWS_PIVOT    = 3
+_MIN_ROWS_SWING    = 5
+_POC_BUCKETS       = 50
+_SWING_WINDOW      = 10       # bars on each side to confirm a swing high/low
+_SWING_MAX_LEVELS  = 5        # max S/R levels returned per side
+_FIB_LOOKBACK      = 50       # bars scanned for Fibonacci swing high/low
+_FALLBACK_SUP_PCT  = 0.98     # price × this when no support found
+_FALLBACK_RES_PCT  = 1.02     # price × this when no resistance found
+
+
+def _sr_cfg(key: str, default):
+    """Read an sr.* config value from config_store with a module-constant fallback."""
+    try:
+        from agent.config_manager import config as _cfg
+        return _cfg.get(key, default)
+    except Exception:
+        return default
 
 
 # ── 1. Classic Pivot Points ───────────────────────────────────────────────────
@@ -41,6 +57,7 @@ def calculate_pivot_points(df: pd.DataFrame,
     All values are float.  Returns zeros when the DataFrame is too short.
     """
     _empty = {k: 0.0 for k in ("PP", "R1", "R2", "R3", "S1", "S2", "S3")}
+    _min_rows = int(_sr_cfg("sr.min_rows_pivot", _MIN_ROWS_PIVOT))
 
     # Prefer prior complete session from daily data (correct floor-trader input)
     if df_daily is not None and len(df_daily) >= 2:
@@ -52,7 +69,7 @@ def calculate_pivot_points(df: pd.DataFrame,
             df_daily = None  # fall through to intraday fallback
 
     if df_daily is None or len(df_daily) < 2:
-        if df is None or len(df) < _MIN_ROWS_PIVOT:
+        if df is None or len(df) < _min_rows:
             return _empty
         try:
             high  = float(df["High"].iloc[-1])
@@ -87,11 +104,14 @@ def calculate_pivot_points(df: pd.DataFrame,
 
 # ── 2. Swing Highs / Lows ─────────────────────────────────────────────────────
 
-def _cluster_levels(levels: list[float], tolerance: float = _CLUSTER_TOLERANCE) -> list[float]:
+def _cluster_levels(levels: list[float], tolerance: float | None = None) -> list[float]:
     """
     Merge levels that are within `tolerance` (fractional) of each other.
     Returns the mean of each cluster, sorted ascending.
     """
+    if tolerance is None:
+        tolerance = float(_sr_cfg("sr.cluster_tolerance_pct", _CLUSTER_TOLERANCE * 100)) / 100
+
     if not levels:
         return []
 
@@ -110,8 +130,8 @@ def _cluster_levels(levels: list[float], tolerance: float = _CLUSTER_TOLERANCE) 
 
 def find_swing_levels(
     df: pd.DataFrame,
-    window: int = 10,
-    max_levels: int = 5,
+    window: int | None = None,
+    max_levels: int | None = None,
 ) -> dict:
     """
     Identify swing high and swing low levels using a rolling local-extrema
@@ -130,8 +150,13 @@ def find_swing_levels(
         resistances – list[float], sorted ascending  (nearest first)
     """
     _empty = {"supports": [], "resistances": []}
+    if window is None:
+        window = int(_sr_cfg("sr.swing_window_bars", _SWING_WINDOW))
+    if max_levels is None:
+        max_levels = int(_sr_cfg("sr.swing_max_levels", _SWING_MAX_LEVELS))
+    _min_rows = int(_sr_cfg("sr.min_rows_swing", _MIN_ROWS_SWING))
 
-    if df is None or len(df) < _MIN_ROWS_SWING or window < 1:
+    if df is None or len(df) < _min_rows or window < 1:
         return _empty
 
     required_len = 2 * window + 1
@@ -209,16 +234,17 @@ def calculate_volume_poc(df: pd.DataFrame) -> float:
         return 0.0
 
     # Build histogram: typical price (HLC/3) weighted by volume
+    n_buckets      = int(_sr_cfg("sr.poc_buckets", _POC_BUCKETS))
     typical_prices = (highs + lows + closes) / 3.0
-    bucket_size    = (price_max - price_min) / _POC_BUCKETS
+    bucket_size    = (price_max - price_min) / n_buckets
 
-    vol_profile = np.zeros(_POC_BUCKETS, dtype=float)
+    vol_profile = np.zeros(n_buckets, dtype=float)
 
     for tp, vol in zip(typical_prices, volumes):
         if not np.isfinite(tp) or not np.isfinite(vol) or vol <= 0:
             continue
         idx = int((tp - price_min) / bucket_size)
-        idx = min(idx, _POC_BUCKETS - 1)   # clamp to last bucket
+        idx = min(idx, n_buckets - 1)   # clamp to last bucket
         vol_profile[idx] += vol
 
     if vol_profile.sum() == 0:
@@ -317,7 +343,7 @@ def nearest_support(price: float, sr: dict) -> float:
         candidates.append(float(poc))
 
     if not candidates:
-        return round(price * 0.98, 4)
+        return round(price * float(_sr_cfg("sr.fallback_support_pct", _FALLBACK_SUP_PCT)), 4)
 
     # Closest support = maximum value that is still below price
     return round(max(candidates), 4)
@@ -357,7 +383,7 @@ def nearest_resistance(price: float, sr: dict) -> float:
         candidates.append(float(poc))
 
     if not candidates:
-        return round(price * 1.02, 4)
+        return round(price * float(_sr_cfg("sr.fallback_resistance_pct", _FALLBACK_RES_PCT)), 4)
 
     # Closest resistance = minimum value that is still above price
     return round(min(candidates), 4)
@@ -412,7 +438,7 @@ def calculate_camarilla_pivots(df: pd.DataFrame,
 
 # ── 7. Fibonacci Retracement from Prior Swing ─────────────────────────────────
 
-def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 50) -> dict:
+def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int | None = None) -> dict:
     """
     Calculate Fibonacci retracement and extension levels from the most recent
     significant swing high and swing low over the last `lookback` bars.
@@ -426,6 +452,9 @@ def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 50) -> dict:
               "fib_236": 0.0, "fib_382": 0.0, "fib_500": 0.0,
               "fib_618": 0.0, "fib_786": 0.0,
               "ext_1272": 0.0, "ext_1618": 0.0, "ext_2000": 0.0}
+
+    if lookback is None:
+        lookback = int(_sr_cfg("sr.fibonacci_lookback_bars", _FIB_LOOKBACK))
 
     if df is None or len(df) < 10:
         return _empty
@@ -507,7 +536,7 @@ def calculate_value_area(df: pd.DataFrame, va_pct: float = 0.70) -> dict:
         return _empty
 
     # Build volume profile histogram
-    n_buckets  = _POC_BUCKETS
+    n_buckets  = int(_sr_cfg("sr.poc_buckets", _POC_BUCKETS))
     bucket_sz  = (price_max - price_min) / n_buckets
     vol_profile = np.zeros(n_buckets)
     tp = (highs + lows + closes) / 3.0
