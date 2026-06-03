@@ -4903,9 +4903,10 @@ async function stLoadTradeRulesTab() {
         _row('st-tr-min-target',  'MIN TARGET DISTANCE (% of price)', (pc['prediction.min_target_pct']    ?? 0.003)*100, 0.05, 5, 0.05, 'Target must be at least this far from entry. Prevents degenerate micro-targets.')
       )}
       ${_section('T1 / T2 Execution Rules', 'Controls where partial exits fire and how stop management works. T1 and T2 are expressed as multiples of the initial risk distance (1R = stop distance from entry). Set T2 equal to your Min R:R Ratio above to eliminate the gap between filter and exit.',
-        _row('st-tr-t1-mult',     'T1 EXIT LEVEL (× risk)',     pp['paper.t1_r_multiple']           ?? 1.0,   0.5,  3,    0.1,  'Partial exit (50% of position) fires when price reaches entry + T1 × risk. At 1.0: exits half at exactly 1R profit. Stop then moves to breakeven.') +
-        _row('st-tr-t2-mult',     'T2 EXIT LEVEL (× risk)',     pp['paper.t2_r_multiple']           ?? 2.0,   1.0,  5,    0.1,  'Full exit fires when price reaches entry + T2 × risk. Set this equal to Min R:R Ratio to make T2 = target. Example: Min R:R = 2.0 → set T2 = 2.0.') +
-        _row('st-tr-be-offset',   'BREAKEVEN STOP OFFSET ($)',  pp['paper.breakeven_stop_offset']   ?? 0.02,  0,    2,    0.01, 'After T1 hit: stop moves to entry + this offset to lock in a small gain while the remainder runs to T2.') +
+        _row('st-tr-t1-mult',     'T1 EXIT LEVEL (× risk)',     pp['paper.t1_r_multiple']           ?? 1.0,   0.5,  3,    0.1,  'Partial exit (50% of position) fires when price reaches entry + T1 × risk. At 1.0: exits half at exactly 1R profit.') +
+        _row('st-tr-t2-mult',     'T2 EXIT LEVEL (× risk)',     pp['paper.t2_r_multiple']           ?? 1.5,   1.0,  5,    0.1,  'Full exit fires when price reaches entry + T2 × risk. Set this equal to Min R:R Ratio to make T2 = target.') +
+        _row('st-tr-profit-lock', 'T1 PROFIT LOCK (× risk)',    pp['paper.t1_profit_lock_r']        ?? 0.20,  0,    1,    0.05, 'After T1: stop moves to entry + this × R. 0.20 = locks in 20% of 1R profit. Converts breakeven exits into small real wins.') +
+        _row('st-tr-trail-r',     'POST-T1 TRAIL (× risk)',     pp['paper.post_t1_trail_r']         ?? 0.40,  0.1,  1,    0.05, 'After T1: trailing stop = highest price since T1 − this × R. Advances with the trade, locking more profit as price moves to T2.') +
         _row('st-tr-rr-denom',    'R:R SIZE DENOMINATOR',       pp['paper.rr_denominator']          ?? 2.0,   0.5,  5,    0.5,  'Position size = rr_ratio ÷ this. At 2.0: a 2:1 trade gets full size; a 1.5:1 trade gets 75%.') +
         _row('st-tr-rr-min-mult', 'MIN SIZE MULTIPLIER (R:R)',  pp['paper.rr_size_mult_min']        ?? 0.20,  0.05, 1,    0.05, 'Floor on R:R-based size reduction. 0.20 = never go below 20% of normal size regardless of R:R.') +
         _row('st-tr-scalp-bars',  'SCALP TIME STOP (bars)',     pp['paper.max_bars_scalp']          ?? 20,    5,    120,  1,    'Force-close IMMEDIATE/SCALP trades after this many 1-min bars.') +
@@ -4950,6 +4951,8 @@ async function stSaveTradeRules(btn) {
     "prediction.min_target_pct":      _v('st-tr-min-target')  / 100,
     "paper.t1_r_multiple":            _v('st-tr-t1-mult'),
     "paper.t2_r_multiple":            _v('st-tr-t2-mult'),
+    "paper.t1_profit_lock_r":         _v('st-tr-profit-lock'),
+    "paper.post_t1_trail_r":          _v('st-tr-trail-r'),
     "paper.breakeven_stop_offset":    _v('st-tr-be-offset'),
     "paper.rr_denominator":           _v('st-tr-rr-denom'),
     "paper.rr_size_mult_min":         _v('st-tr-rr-min-mult'),
@@ -5338,6 +5341,60 @@ async function stLoadRiskTab() {
             </div>
           </div>
         </div>
+        <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:10px">FLASH-STOP GUARD</div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:10px">Pauses a family when it has repeated stop hits within N seconds of open — catches bad entry timing faster than the storm circuit.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">ENABLED</label>
+              <select id="st-rc-flash-enabled" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+                <option value="true"  ${(rc['risk.flash_stop_enabled'] ?? true)  ? 'selected' : ''}>Enabled</option>
+                <option value="false" ${!(rc['risk.flash_stop_enabled'] ?? true) ? 'selected' : ''}>Disabled</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">FLASH SECS</label>
+              <input id="st-rc-flash-secs" type="number" min="10" max="300" step="5" value="${rc['risk.flash_stop_seconds'] ?? 60}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">MAX HITS</label>
+              <input id="st-rc-flash-hits" type="number" min="1" max="20" step="1" value="${rc['risk.flash_stop_max_per_family'] ?? 3}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">WINDOW (min)</label>
+              <input id="st-rc-flash-window" type="number" min="5" max="120" step="5" value="${rc['risk.flash_stop_window_min'] ?? 30}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:10px">ROLLING EV ADAPTIVE FLOOR</div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:10px">When a family+direction+session combo's rolling avg P&amp;L drops below threshold, exec_min_conf is raised by conf_bump until EV recovers.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:10px">
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">ENABLED</label>
+              <select id="st-rc-ev-enabled" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+                <option value="true"  ${(rc['risk.rolling_ev_enabled'] ?? true)  ? 'selected' : ''}>Enabled</option>
+                <option value="false" ${!(rc['risk.rolling_ev_enabled'] ?? true) ? 'selected' : ''}>Disabled</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">WINDOW (min)</label>
+              <input id="st-rc-ev-window" type="number" min="30" max="480" step="30" value="${rc['risk.rolling_ev_window_min'] ?? 120}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">MIN TRADES</label>
+              <input id="st-rc-ev-trades" type="number" min="2" max="20" step="1" value="${rc['risk.rolling_ev_min_trades'] ?? 5}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">THRESHOLD ($/trade)</label>
+              <input id="st-rc-ev-threshold" type="number" min="-20" max="-0.5" step="0.5" value="${rc['risk.rolling_ev_suppress_threshold'] ?? -2.0}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">CONF BUMP (pp)</label>
+              <input id="st-rc-ev-bump" type="number" min="5" max="30" step="1" value="${rc['risk.rolling_ev_conf_bump'] ?? 15}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+          </div>
+        </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <button onclick="stSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Risk Config</button>
@@ -5362,14 +5419,25 @@ async function stSaveRiskConfig(btn) {
     "risk.max_consecutive_losses":  parseInt(get('st-rc-consec-losses'), 10),
     "risk.cooldown_after_losses":   parseInt(get('st-rc-cooldown-losses'), 10),
     "risk.max_daily_trades":        parseInt(get('st-rc-max-daily'), 10),
-    "risk.pre_t1_storm_enabled":        document.getElementById('st-rc-storm-enabled')?.value === 'true',
-    "risk.pre_t1_storm_window_min":     parseInt(get('st-rc-storm-window'), 10),
-    "risk.pre_t1_storm_max_hits":       parseInt(get('st-rc-storm-hits'), 10),
-    "risk.pre_t1_storm_loss_usd":       parseFloat(get('st-rc-storm-loss')),
-    "risk.daily_loss_trailing_days":    parseInt(get('st-rc-trail-days'), 10),
-    "risk.daily_loss_profit_fraction":  parseFloat(get('st-rc-trail-frac')),
+    "risk.pre_t1_storm_enabled":            document.getElementById('st-rc-storm-enabled')?.value === 'true',
+    "risk.pre_t1_storm_window_min":         parseInt(get('st-rc-storm-window'), 10),
+    "risk.pre_t1_storm_max_hits":           parseInt(get('st-rc-storm-hits'), 10),
+    "risk.pre_t1_storm_loss_usd":           parseFloat(get('st-rc-storm-loss')),
+    "risk.daily_loss_trailing_days":        parseInt(get('st-rc-trail-days'), 10),
+    "risk.daily_loss_profit_fraction":      parseFloat(get('st-rc-trail-frac')),
+    "risk.flash_stop_enabled":              document.getElementById('st-rc-flash-enabled')?.value === 'true',
+    "risk.flash_stop_seconds":              parseInt(get('st-rc-flash-secs'), 10),
+    "risk.flash_stop_max_per_family":       parseInt(get('st-rc-flash-hits'), 10),
+    "risk.flash_stop_window_min":           parseInt(get('st-rc-flash-window'), 10),
+    "risk.rolling_ev_enabled":              document.getElementById('st-rc-ev-enabled')?.value === 'true',
+    "risk.rolling_ev_window_min":           parseInt(get('st-rc-ev-window'), 10),
+    "risk.rolling_ev_min_trades":           parseInt(get('st-rc-ev-trades'), 10),
+    "risk.rolling_ev_suppress_threshold":   parseFloat(get('st-rc-ev-threshold')),
+    "risk.rolling_ev_conf_bump":            parseFloat(get('st-rc-ev-bump')),
   };
-  if (Object.values(updates).some(v => isNaN(v))) {
+  // Booleans are not NaN — only validate numeric fields
+  const numericUpdates = Object.entries(updates).filter(([, v]) => typeof v === 'number').map(([, v]) => v);
+  if (numericUpdates.some(v => isNaN(v))) {
     if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
     return;
   }

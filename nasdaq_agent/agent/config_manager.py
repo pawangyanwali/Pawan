@@ -127,12 +127,26 @@ _DEFAULTS: dict[str, Any] = {
     "risk.drawdown_throttle_2_pct":        lambda: float(os.getenv("DRAWDOWN_THROTTLE_2_PCT", "1.0")),
     # ── Execution safety gates ─────────────────────────────────────────────────
     "paper.block_restricted_session":       lambda: True,   # block paper exec during 9:30-9:44 ET price discovery
+    # ── Post-T1 profit-lock and trailing stop ──────────────────────────────────
+    "paper.t1_profit_lock_r":              lambda: 0.20,   # after T1: stop = entry + 0.20R (locks small profit)
+    "paper.post_t1_trail_r":               lambda: 0.40,   # trail stop = water_mark − 0.40R after T1
     # ── Pre-T1 stop-hit storm circuit ──────────────────────────────────────────
     "risk.pre_t1_storm_enabled":            lambda: True,
     "risk.pre_t1_storm_window_min":         lambda: 30,     # rolling window in minutes
     "risk.pre_t1_storm_max_hits":           lambda: 8,      # max pre-T1 stop hits before circuit trips
     "risk.pre_t1_storm_loss_usd":           lambda: 250.0,  # max rolling pre-T1 dollar loss before circuit trips
     "risk.pre_t1_storm_rate":              lambda: 0.60,    # max pre-T1 hit rate (60%) before circuit trips
+    # ── Rolling EV adaptive confidence floor ──────────────────────────────────
+    "risk.rolling_ev_enabled":              lambda: True,
+    "risk.rolling_ev_window_min":           lambda: 120,    # rolling window in minutes
+    "risk.rolling_ev_min_trades":           lambda: 5,      # min trades before suppression kicks in
+    "risk.rolling_ev_suppress_threshold":   lambda: -2.0,   # avg $/trade below which to suppress
+    "risk.rolling_ev_conf_bump":            lambda: 15.0,   # additional confidence pts required
+    # ── Flash-stop guard (sub-60-second stop hits) ────────────────────────────
+    "risk.flash_stop_enabled":              lambda: True,
+    "risk.flash_stop_seconds":              lambda: 60,     # stop within N seconds = flash stop
+    "risk.flash_stop_max_per_family":       lambda: 3,      # max flash stops per window before gate trips
+    "risk.flash_stop_window_min":           lambda: 30,     # rolling window for flash stop count
     # ── Profit-aware daily loss cap ────────────────────────────────────────────
     "risk.daily_loss_trailing_days":        lambda: 5,      # trailing days to measure profit cushion
     "risk.daily_loss_profit_fraction":      lambda: 0.50,   # max daily loss = min(halt_pct, this × trailing_profit)

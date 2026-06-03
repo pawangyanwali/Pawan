@@ -14,6 +14,7 @@ from __future__ import annotations
 import collections
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -324,6 +325,7 @@ _COLUMN_ADDITIONS = [
     ("ml_deep_prob",           "DOUBLE PRECISION"),
     ("ml_ensemble_score",      "INTEGER"),
     ("feedback_triggered_at",  "TEXT"),
+    ("t1_water_mark",          "REAL DEFAULT 0"),  # price high/low since T1 hit, for trailing stop
 ]
 
 # Additional columns for algo_signal_log (applied separately)
@@ -452,6 +454,122 @@ def check_pre_t1_storm(algo_name: str, session: str) -> tuple:
     return False, ""
 
 
+# ── Rolling EV adaptive confidence floor ──────────────────────────────────────
+# Tracks per-(family, direction, session) P&L outcomes in a rolling window.
+# When average EV is negative enough, exec_min_conf is temporarily raised so
+# a struggling combo must show stronger conviction before opening new trades.
+_algo_rolling_ev: dict = {}
+_algo_rolling_ev_lock = threading.Lock()
+
+
+def record_algo_ev_outcome(algo_name: str, direction: str, session: str, pnl_dollar: float) -> None:
+    """Record a closed trade outcome for the rolling EV adaptive floor."""
+    if not algo_name:
+        return
+    family = _algo_family(algo_name)
+    key = f"{family}:{direction}:{session}"
+    now = time.time()
+    with _algo_rolling_ev_lock:
+        if key not in _algo_rolling_ev:
+            _algo_rolling_ev[key] = collections.deque()
+        _algo_rolling_ev[key].append((now, pnl_dollar))
+        cutoff = now - 7200  # prune entries older than 2 hours
+        while _algo_rolling_ev[key] and _algo_rolling_ev[key][0][0] < cutoff:
+            _algo_rolling_ev[key].popleft()
+
+
+def check_rolling_ev_suppress(algo_name: str, direction: str, session: str) -> tuple:
+    """Returns (suppress: bool, conf_bump: float).
+    Trips when rolling EV is below suppress_threshold for at least min_trades."""
+    if not algo_name:
+        return False, 0.0
+    try:
+        from agent.config_manager import config as _cfg
+        if not _cfg.get("risk.rolling_ev_enabled", True):
+            return False, 0.0
+        window_min  = int(_cfg.get("risk.rolling_ev_window_min", 120))
+        min_trades  = int(_cfg.get("risk.rolling_ev_min_trades", 5))
+        threshold   = float(_cfg.get("risk.rolling_ev_suppress_threshold", -2.0))
+        conf_bump   = float(_cfg.get("risk.rolling_ev_conf_bump", 15.0))
+    except Exception:
+        return False, 0.0
+    family = _algo_family(algo_name)
+    key = f"{family}:{direction}:{session}"
+    with _algo_rolling_ev_lock:
+        entries = list(_algo_rolling_ev.get(key, []))
+    if not entries:
+        return False, 0.0
+    cutoff = time.time() - window_min * 60
+    recent = [(t, p) for t, p in entries if t >= cutoff]
+    if len(recent) < min_trades:
+        return False, 0.0
+    avg_ev = sum(p for _, p in recent) / len(recent)
+    if avg_ev < threshold:
+        return True, conf_bump
+    return False, 0.0
+
+
+# ── Flash-stop guard (sub-60-second stop hits) ────────────────────────────────
+# Catches execution/timing failures faster than the pre-T1 storm circuit.
+# A "flash stop" is a stop hit within N seconds of trade open — indicative of
+# bad entry timing, spread issues, or momentum reversal on entry.
+_flash_stops: dict = {}
+_flash_stop_lock = threading.Lock()
+
+
+def record_flash_stop(algo_name: str, session: str, created_at_str: str) -> None:
+    """Record a sub-60-second stop hit for the flash-stop guard."""
+    if not algo_name or not created_at_str:
+        return
+    try:
+        from agent.config_manager import config as _cfg
+        flash_s = float(_cfg.get("risk.flash_stop_seconds", 60.0))
+        opened_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+        elapsed_s = (datetime.now(timezone.utc) - opened_dt).total_seconds()
+        if elapsed_s > flash_s:
+            return  # not a flash stop
+    except Exception:
+        return
+    family = _algo_family(algo_name)
+    key = f"{family}:{session}"
+    now = time.time()
+    with _flash_stop_lock:
+        if key not in _flash_stops:
+            _flash_stops[key] = collections.deque()
+        _flash_stops[key].append(now)
+        cutoff = now - 3600
+        while _flash_stops[key] and _flash_stops[key][0] < cutoff:
+            _flash_stops[key].popleft()
+
+
+def check_flash_stop_guard(algo_name: str, session: str) -> tuple:
+    """Returns (blocked: bool, reason: str). Trips on repeated sub-60s stop hits."""
+    if not algo_name:
+        return False, ""
+    try:
+        from agent.config_manager import config as _cfg
+        if not _cfg.get("risk.flash_stop_enabled", True):
+            return False, ""
+        window_min = int(_cfg.get("risk.flash_stop_window_min", 30))
+        max_hits   = int(_cfg.get("risk.flash_stop_max_per_family", 3))
+    except Exception:
+        return False, ""
+    family = _algo_family(algo_name)
+    key = f"{family}:{session}"
+    with _flash_stop_lock:
+        entries = list(_flash_stops.get(key, []))
+    if not entries:
+        return False, ""
+    cutoff = time.time() - window_min * 60
+    recent = [t for t in entries if t >= cutoff]
+    if len(recent) >= max_hits:
+        return True, (
+            f"Flash-stop guard [{family}]: {len(recent)} sub-60s stops in {window_min}min "
+            f"— new {family} entries paused (learning continues)"
+        )
+    return False, ""
+
+
 def _get_min_confidence() -> float:
     """
     Return the minimum confidence required to open a paper trade.
@@ -574,6 +692,25 @@ def maybe_open_trade(
             if _out_status is not None:
                 _out_status.append("BLOCKED_FAMILY_STORM")
             return None
+        # Flash-stop guard — repeated sub-60s stops indicate bad entry timing
+        _flash_blocked, _flash_reason = check_flash_stop_guard(algo_name, session or "")
+        if _flash_blocked:
+            logger.info(f"[PAPER] {ticker} skip: {_flash_reason}")
+            if _out_status is not None:
+                _out_status.append("BLOCKED_FLASH_STORM")
+            return None
+        # Rolling EV adaptive floor — raise confidence bar when combo is bleeding
+        _ev_blocked, _ev_conf_bump = check_rolling_ev_suppress(algo_name, direction, session or "")
+        if _ev_blocked and _ev_conf_bump > 0:
+            _ev_min_conf = _get_min_confidence() + _ev_conf_bump
+            if confidence < _ev_min_conf:
+                logger.info(
+                    f"[PAPER] {ticker} skip: {_algo_family(algo_name)}+{direction} rolling EV "
+                    f"negative — conf {confidence:.0f}% < bumped floor {_ev_min_conf:.0f}%"
+                )
+                if _out_status is not None:
+                    _out_status.append("BLOCKED_EV_SUPPRESS")
+                return None
         # Apply family size multiplier
         size_mult = round(size_mult * _fam_size_mult, 4)
 
@@ -855,7 +992,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                        COALESCE(t2_price, 0) as t2_price,
                        COALESCE(entry_type, '') as entry_type,
                        COALESCE(algo_name, '') as algo_name,
-                       COALESCE(session, '') as session
+                       COALESCE(session, '') as session,
+                       COALESCE(t1_water_mark, 0) as t1_water_mark,
+                       created_at
                 FROM paper_trades WHERE ticker=? AND status='OPEN'
             """, (ticker,)).fetchall()
 
@@ -875,6 +1014,8 @@ def update_open_trades(ticker: str, df, current_price: float,
                 entry_type      = row["entry_type"] or "IMMEDIATE"
                 _algo_nm        = row["algo_name"] or ""
                 _sess           = row["session"] or ""
+                _t1_water       = float(row["t1_water_mark"] or 0)
+                _created_at     = row["created_at"] or ""
 
                 # Determine time stop based on trade type (PRD 6.3)
                 # is_scalp is based solely on entry_type — not bar count, to avoid
@@ -902,6 +1043,38 @@ def update_open_trades(ticker: str, df, current_price: float,
                     (ep - entry) / entry * 100 if direction == "BUY"
                     else (entry - ep) / entry * 100
                 )
+
+                # ── 0. Post-T1 trailing stop (runs every bar after T1 hit) ──────
+                # Advances the ratchet stop: max(profit-lock floor, water_mark − trail_R).
+                # Never moves the stop in the wrong direction (ratchet only).
+                if t1_hit and t1_price > 0:
+                    from agent.config_manager import config as _cfg_trail
+                    _profit_lock_r = float(_cfg_trail.get("paper.t1_profit_lock_r", 0.20))
+                    _trail_r       = float(_cfg_trail.get("paper.post_t1_trail_r",  0.40))
+                    _risk_dist     = abs(t1_price - entry)  # = 1.0R in dollars
+                    if _risk_dist > 0:
+                        _water_ref = _t1_water if _t1_water > 0 else t1_price
+                        if direction == "BUY":
+                            new_water        = max(_water_ref, _hi)
+                            profit_lock_stop = round(entry + _risk_dist * _profit_lock_r, 4)
+                            trailing_stop    = round(new_water - _risk_dist * _trail_r, 4)
+                            new_stop         = max(stop_current, trailing_stop, profit_lock_stop)
+                        else:
+                            new_water        = min(_water_ref, _lo)
+                            profit_lock_stop = round(entry - _risk_dist * _profit_lock_r, 4)
+                            trailing_stop    = round(new_water + _risk_dist * _trail_r, 4)
+                            new_stop         = min(stop_current, trailing_stop, profit_lock_stop)
+                        # Only write if water or stop actually moved
+                        water_changed = abs(new_water - _t1_water) > 0.0001
+                        stop_moved    = abs(new_stop - stop_current) > 0.001
+                        if water_changed or stop_moved:
+                            c.execute(
+                                "UPDATE paper_trades SET stop=?, t1_water_mark=? WHERE id=?",
+                                (new_stop, new_water, row["id"]),
+                            )
+                            c.commit()
+                            _t1_water    = new_water
+                            stop_current = new_stop
 
                 # ── 1. Hard close at 3:45 PM ET (PRD — non-overridable) ────────
                 if is_hard_close_window():
@@ -992,16 +1165,22 @@ def update_open_trades(ticker: str, df, current_price: float,
                         )
                         new_partial_pnl = partial_pnl + t1_pnl
                         new_shares_rem  = shares_rem - partial_shares
-                        # Breakeven stop: above entry for BUY, below for SELL (locks in ~breakeven)
+                        # Profit-lock stop: above entry by profit_lock_r × risk for BUY.
+                        # Converts breakeven exits into small real wins.
                         from agent.config_manager import config as _cfg_be
-                        _be_offset = float(_cfg_be.get("paper.breakeven_stop_offset", 0.02))
-                        be_stop = round(entry + _be_offset, 4) if direction == "BUY" else round(entry - _be_offset, 4)
+                        _profit_lock_r_t1 = float(_cfg_be.get("paper.t1_profit_lock_r", 0.20))
+                        _risk_dist_t1     = abs(t1_price - entry)  # 1.0R
+                        be_stop = round(
+                            entry + _risk_dist_t1 * _profit_lock_r_t1 if direction == "BUY"
+                            else entry - _risk_dist_t1 * _profit_lock_r_t1,
+                            4,
+                        )
                         c.execute("""
                             UPDATE paper_trades
-                            SET t1_hit=1, breakeven_set=1, stop=?,
+                            SET t1_hit=1, breakeven_set=1, stop=?, t1_water_mark=?,
                                 partial_pnl_dollar=?, shares_remaining=?
                             WHERE id=?
-                        """, (be_stop, round(new_partial_pnl, 2), new_shares_rem, row["id"]))
+                        """, (be_stop, t1_price, round(new_partial_pnl, 2), new_shares_rem, row["id"]))
                         c.commit()
                         logger.info(
                             f"[PAPER] T1 HIT {direction} {ticker} @ ${ep:.2f} | "
@@ -1050,6 +1229,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                                 else (entry - ep) * shares_rem
                             )
                             record_pre_t1_stop(_algo_nm, _sess, _pnl_calc)
+                        # Flash-stop guard: record sub-60-second stop hits
+                        if _algo_nm:
+                            record_flash_stop(_algo_nm, _sess, _created_at)
 
                 # ── 5. Time stop ───────────────────────────────────────────────
                 if not exit_reason and bars >= max_bars:
@@ -1079,6 +1261,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                         + partial_pnl
                     )
                     won_any = final_pnl > 0
+                    # Feed rolling EV tracker so adaptive floor adjusts in real-time
+                    if _algo_nm:
+                        record_algo_ev_outcome(_algo_nm, direction, _sess, final_pnl)
 
             c.commit()
 
