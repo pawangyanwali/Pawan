@@ -14,8 +14,9 @@ import numpy as np
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 # ── Service mode flags ────────────────────────────────────────────────────────
@@ -1038,6 +1039,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NASDAQ Scalping Agent", lifespan=lifespan)
+
+# ── Bot / scanner probe blocking ──────────────────────────────────────────────
+# Silently drop requests for paths that are never valid on this API server.
+# Avoids noisy 404s from WordPress scanners, credential harvesters, etc.
+_BOT_PATH_PREFIXES = (
+    "/.env", "/.git", "/wp-", "/wp_", "/wordpress", "/admin/",
+    "/phpmyadmin", "/pma", "/.aws", "/.ssh", "/config.php",
+    "/xmlrpc", "/cgi-bin", "/shell", "/cmd", "/eval",
+)
+_BOT_EXTENSIONS = (".php", ".asp", ".aspx", ".jsp", ".cgi", ".bak", ".sql",
+                   ".tar", ".gz", ".zip", ".env")
+
+
+@app.middleware("http")
+async def block_bot_probes(request: Request, call_next):
+    path = request.url.path.lower()
+    if any(path.startswith(p) for p in _BOT_PATH_PREFIXES):
+        return Response(status_code=404)
+    if any(path.endswith(ext) for ext in _BOT_EXTENSIONS):
+        return Response(status_code=404)
+    return await call_next(request)
+
 
 # CORS — restrict to same-origin + known frontends
 _CORS_ORIGINS = [

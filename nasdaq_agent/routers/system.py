@@ -14,13 +14,26 @@ import os
 import time
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse, Response
 
 from auth.dependencies import require_viewer, AuthenticatedUser
 
 router = APIRouter(tags=["system"])
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web", "static")
+
+
+@router.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt():
+    return PlainTextResponse(
+        "User-agent: *\nDisallow: /api/\nDisallow: /static/\n",
+        media_type="text/plain",
+    )
+
+
+@router.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 
 @router.get("/", response_class=HTMLResponse)
