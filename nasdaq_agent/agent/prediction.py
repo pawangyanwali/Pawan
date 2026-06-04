@@ -867,6 +867,21 @@ def generate_prediction(
         _atr = float(last_row["atr_14"]) if last_row is not None and "atr_14" in last_row.index else 0.0
     except Exception:
         pass
+
+    # Daily ATR floor: prevent 1-min ATR (which is tiny in pre/after-market) from
+    # producing unrealistically tight stops.  The floor is a fraction of the 14-day
+    # daily ATR — configurable via prediction.min_stop_daily_atr_pct (default 5%).
+    if df_daily is not None and not df_daily.empty:
+        try:
+            from agent.config_manager import config as _cfg_atr_fl
+            _daily_atr_pct = float(_cfg_atr_fl.get("prediction.min_stop_daily_atr_pct", 0.05))
+            if _daily_atr_pct > 0 and "atr_14" in df_daily.columns:
+                _d_atr = float(df_daily["atr_14"].dropna().iloc[-1]) if not df_daily["atr_14"].dropna().empty else 0.0
+                if _d_atr > 0:
+                    _atr = max(_atr, _d_atr * _daily_atr_pct)
+        except Exception:
+            pass
+
     stop_loss, target, rr_ratio, rr_quality, rr_qualifies = _evaluate_rr(
         price, sr, direction, atr=_atr
     )
@@ -883,9 +898,11 @@ def generate_prediction(
                 retest_entry, sr, direction, atr=_atr
             )
             if adj_rr > 0:
-                rr_ratio  = adj_rr
                 stop_loss = exhaustion["adjusted_stop"] or adj_stop
                 target    = exhaustion["adjusted_target"] or adj_target
+                # Recompute rr_ratio from the ACTUAL target/stop after any structural
+                # override — the stored ratio must reflect real geometry, not just t2_mult.
+                rr_ratio  = _compute_rr(price, target, stop_loss)
 
     # ── 7c. Bounce setup check ────────────────────────────────────────────────
     bounce = _detect_bounce_setup(price, support, resistance, df, last_row)

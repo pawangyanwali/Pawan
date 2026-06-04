@@ -4985,6 +4985,7 @@ async function stLoadTradeRulesTab() {
           <div style="font-size:9px;color:var(--muted);margin-top:4px">37.7% of trades that hit T1 reached T2 in structure mode. ATR mode eliminates this gap by making T2 = target.</div>
         </div>` +
         _row('st-tr-atr-mult',    'ATR STOP MULTIPLE',         pc['prediction.stop_atr_multiple']  ?? 1.0,   0.2,  3,    0.1, 'Stop distance = this × ATR(14). 1.0 = standard scalp stop. Increase for wider stops on volatile stocks.') +
+        _row('st-tr-daily-atr-floor', 'MIN STOP (% of daily ATR)', (pc['prediction.min_stop_daily_atr_pct'] ?? 0.05)*100, 1, 30, 1, 'Floor: stop ≥ this % of the 14-day daily ATR. Prevents 6-cent pre/after-market stops when 1-min ATR is tiny. 5% of daily ATR ≈ $0.15 for a $65 stock.') +
         _row('st-tr-min-rr',      'MINIMUM R:R RATIO',         pc['prediction.min_rr']            ?? 1.5,   0.5,  10,   0.1, 'In ATR mode: trades where structure blocks the T2 path are rejected. In structural mode: R:R must be ≥ this.') +
         _row('st-tr-min-stop',    'MIN STOP DISTANCE (% of price)', (pc['prediction.min_stop_dist_pct'] ?? 0.004)*100, 0.1, 5, 0.05, 'Floor on stop distance. Prevents stops too close to entry that trigger on normal noise.') +
         _row('st-tr-max-risk',    'MAX RISK PER TRADE (% of price)', (pc['prediction.max_risk_pct']      ?? 0.020)*100, 0.1, 10, 0.1, 'Cap on stop distance. Prevents oversized risk on volatile stocks.') +
@@ -5032,9 +5033,10 @@ async function stSaveTradeRules(btn) {
   const status = document.getElementById('st-tr-status');
   const payload = {
     "prediction.use_atr_stops":        document.getElementById('st-tr-mode-atr')?.checked ?? true,
-    "prediction.stop_atr_multiple":   _v('st-tr-atr-mult'),
-    "prediction.min_rr":              _v('st-tr-min-rr'),
-    "prediction.min_stop_dist_pct":   _v('st-tr-min-stop')   / 100,
+    "prediction.stop_atr_multiple":        _v('st-tr-atr-mult'),
+    "prediction.min_stop_daily_atr_pct":  _v('st-tr-daily-atr-floor') / 100,
+    "prediction.min_rr":                  _v('st-tr-min-rr'),
+    "prediction.min_stop_dist_pct":       _v('st-tr-min-stop') / 100,
     "prediction.max_risk_pct":        _v('st-tr-max-risk')    / 100,
     "prediction.min_target_pct":      _v('st-tr-min-target')  / 100,
     "paper.t1_r_multiple":            _v('st-tr-t1-mult'),

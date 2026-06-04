@@ -62,6 +62,7 @@ _DEFAULTS: dict[str, Any] = {
     # When false: legacy structural mode (stop at support, target at resistance).
     "prediction.use_atr_stops":            lambda: True,   # true = fixed R:R (recommended); false = structure-based
     "prediction.stop_atr_multiple":        lambda: 1.0,    # stop distance = N × ATR(14). 1.0 = 1×ATR is standard scalp stop
+    "prediction.min_stop_daily_atr_pct":   lambda: 0.05,   # floor: stop ≥ 5% of daily ATR(14) — prevents 6-cent pre-market stops
     # T1/T2 exit multipliers — both expressed as multiples of the initial risk distance.
     # T1 is the partial-exit level (take 50% off, move stop to breakeven).
     # T2 is the full-exit target. Setting t2_r_multiple = prediction.min_rr makes
