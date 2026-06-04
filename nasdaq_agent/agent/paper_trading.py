@@ -1142,7 +1142,7 @@ def update_open_trades(ticker: str, df, current_price: float,
                        COALESCE(entry_ideal_price, entry_price) as entry_ideal_price,
                        COALESCE(entry_slip_bps, 0) as entry_slip_bps,
                        COALESCE(entry_spread_usd, 0) as entry_spread_usd,
-                       created_at
+                       opened_at
                 FROM paper_trades WHERE ticker=? AND status='OPEN'
             """, (ticker,)).fetchall()
 
@@ -1169,7 +1169,7 @@ def update_open_trades(ticker: str, df, current_price: float,
                 _ideal_exit      = 0.0
                 _exit_slip_bps   = 0.0
                 _t1_water       = float(row["t1_water_mark"] or 0)
-                _created_at     = row["created_at"] or ""
+                _created_at     = row["opened_at"] or ""
 
                 # Determine time stop based on trade type (PRD 6.3)
                 # is_scalp is based solely on entry_type — not bar count, to avoid
