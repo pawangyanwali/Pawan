@@ -163,37 +163,45 @@ jobs:
                 exit 1
               fi
 
-              # ── Wait for market-data (non-fatal warning) ───────────────────────
-              echo "=== Waiting for market-data to become healthy (max 90s) ==="
-              for i in $(seq 1 9); do
+              # ── Wait for market-data (fatal; feeds prices to scanner) ─────────
+              echo "=== Waiting for market-data to become healthy (max 2 min) ==="
+              MARKET_DATA_HEALTHY=0
+              for i in $(seq 1 12); do
                 sleep 10
                 status=$(_svc_health market-data)
                 if [ "$status" = "healthy" ]; then
                   echo "  market-data healthy after $((i*10))s"
+                  MARKET_DATA_HEALTHY=1
                   break
                 fi
-                echo "  Attempt $i/9: health=$status"
-                if [ $i -eq 9 ]; then
-                  echo "WARNING: market-data not yet healthy after 90s — check logs"
-                  _dc logs --tail 30 market-data 2>/dev/null || true
-                fi
+                echo "  Attempt $i/12: health=$status"
               done
 
-              # ── Wait for scanner (non-fatal; first scan cycle can take 90s) ────
-              echo "=== Waiting for scanner to become healthy (max 2 min) ==="
-              for i in $(seq 1 12); do
+              if [ "$MARKET_DATA_HEALTHY" = "0" ]; then
+                echo "ERROR: market-data did not become healthy within 2 min — printing logs"
+                _dc logs --tail 60 market-data 2>/dev/null || true
+                exit 1
+              fi
+
+              # ── Wait for scanner (fatal; first scan cycle can take 90s) ────────
+              echo "=== Waiting for scanner to become healthy (max 3 min) ==="
+              SCANNER_HEALTHY=0
+              for i in $(seq 1 18); do
                 sleep 10
                 status=$(_svc_health scanner)
                 if [ "$status" = "healthy" ]; then
                   echo "  scanner healthy after $((i*10))s"
+                  SCANNER_HEALTHY=1
                   break
                 fi
-                echo "  Attempt $i/12: health=$status"
-                if [ $i -eq 12 ]; then
-                  echo "WARNING: scanner not yet healthy after 2 min — check logs"
-                  _dc logs --tail 30 scanner 2>/dev/null || true
-                fi
+                echo "  Attempt $i/18: health=$status"
               done
+
+              if [ "$SCANNER_HEALTHY" = "0" ]; then
+                echo "ERROR: scanner did not become healthy within 3 min — printing logs"
+                _dc logs --tail 60 scanner 2>/dev/null || true
+                exit 1
+              fi
 
               # ── Wait for scheduler (non-fatal; just needs Valkey) ─────────────
               echo "=== Waiting for scheduler to become healthy (max 2 min) ==="
@@ -208,6 +216,54 @@ jobs:
                 if [ $i -eq 12 ]; then
                   echo "WARNING: scheduler not yet healthy after 2 min"
                   _dc logs --tail 30 scheduler 2>/dev/null || true
+                fi
+              done
+
+              # ── Wait for learner (non-fatal; 5 min startup delay by design) ───
+              echo "=== Waiting for learner to become healthy (max 5 min) ==="
+              for i in $(seq 1 30); do
+                sleep 10
+                status=$(_svc_health learner)
+                if [ "$status" = "healthy" ]; then
+                  echo "  learner healthy after $((i*10))s"
+                  break
+                fi
+                echo "  Attempt $i/30: health=$status"
+                if [ $i -eq 30 ]; then
+                  echo "WARNING: learner not yet healthy after 5 min — check logs"
+                  _dc logs --tail 30 learner 2>/dev/null || true
+                fi
+              done
+
+              # ── Wait for context-intel (non-fatal; 120s start_period) ─────────
+              echo "=== Waiting for context-intel to become healthy (max 3 min) ==="
+              for i in $(seq 1 18); do
+                sleep 10
+                status=$(_svc_health context-intel)
+                if [ "$status" = "healthy" ]; then
+                  echo "  context-intel healthy after $((i*10))s"
+                  break
+                fi
+                echo "  Attempt $i/18: health=$status"
+                if [ $i -eq 18 ]; then
+                  echo "WARNING: context-intel not yet healthy after 3 min — check logs"
+                  _dc logs --tail 30 context-intel 2>/dev/null || true
+                fi
+              done
+
+              # ── Wait for watchdog (non-fatal; quick 15s start_period) ─────────
+              echo "=== Waiting for watchdog to become healthy (max 1 min) ==="
+              for i in $(seq 1 6); do
+                sleep 10
+                status=$(_svc_health watchdog)
+                if [ "$status" = "healthy" ]; then
+                  echo "  watchdog healthy after $((i*10))s"
+                  break
+                fi
+                echo "  Attempt $i/6: health=$status"
+                if [ $i -eq 6 ]; then
+                  echo "WARNING: watchdog not yet healthy after 1 min — check logs"
+                  _dc logs --tail 30 watchdog 2>/dev/null || true
                 fi
               done
 

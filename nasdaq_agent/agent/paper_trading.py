@@ -981,10 +981,10 @@ def maybe_open_trade(
 
             # ── Capital gate: check available capital before sizing ────────────
             from agent.config_manager import config as _cfg
-            _budget      = float(_cfg.get("paper.budget",            50000.0))
-            _max_trade_v = _budget * float(_cfg.get("paper.max_trade_pct",     5.0))  / 100.0
-            _max_alloc_v = _budget * float(_cfg.get("paper.max_allocated_pct", 40.0)) / 100.0
-            _max_open    = int(_cfg.get("paper.max_open_trades", 10))
+            _budget      = float(_cfg.get("paper.budget"))
+            _max_trade_v = _budget * float(_cfg.get("paper.max_trade_pct"))  / 100.0
+            _max_alloc_v = _budget * float(_cfg.get("paper.max_allocated_pct")) / 100.0
+            _max_open    = int(_cfg.get("paper.max_open_trades"))
 
             if open_count >= _max_open:
                 logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_max_open}) reached")
@@ -2044,7 +2044,7 @@ def get_daily_pnl(days: int = 30) -> list[dict]:
         """, (f'-{days} days',)).fetchall()
 
     from agent.config_manager import config as _cfg
-    budget = float(_cfg.get("paper.budget", 50000.0))
+    budget = float(_cfg.get("paper.budget"))
     result = []
     running_equity = budget
     for r in rows:
@@ -2088,7 +2088,7 @@ def get_today_pnl() -> dict:
         """).fetchone()
 
     from agent.config_manager import config as _cfg
-    budget = float(_cfg.get("paper.budget", 50000.0))
+    budget = float(_cfg.get("paper.budget"))
     d = dict(row) if row else {}
     total_dollar = float(d.get("total_pnl_dollar") or 0)
     d["total_pnl_pct"] = round(total_dollar / budget * 100, 3) if budget > 0 else 0.0
@@ -2215,7 +2215,7 @@ def get_summary() -> dict:
             ).fetchall()
 
     from agent.config_manager import config as _cfg
-    budget = float(_cfg.get("paper.budget", 50000.0))
+    budget = float(_cfg.get("paper.budget"))
     open_count  = len(open_rows)
     total       = len(closed)
     wins        = sum(1 for r in closed if (r["pnl_dollar"] or 0) > 0)
@@ -2300,10 +2300,10 @@ def get_account_state(open_prices: dict | None = None) -> dict:
         """).fetchone()
 
     from agent.config_manager import config as _cfg
-    budget        = float(_cfg.get("paper.budget",            50000.0))
-    max_trade_pct = float(_cfg.get("paper.max_trade_pct",     5.0))
-    max_alloc_pct = float(_cfg.get("paper.max_allocated_pct", 40.0))
-    max_open      = int(_cfg.get("paper.max_open_trades",     10))
+    budget        = float(_cfg.get("paper.budget"))
+    max_trade_pct = float(_cfg.get("paper.max_trade_pct"))
+    max_alloc_pct = float(_cfg.get("paper.max_allocated_pct"))
+    max_open      = int(_cfg.get("paper.max_open_trades"))
 
     dollars      = [float(r["pnl_dollar"]) for r in closed]
     realized_pnl = round(sum(dollars), 2) if dollars else 0.0
@@ -2416,10 +2416,10 @@ def update_account_config(
 ) -> dict:
     """Update account configuration. Returns new config."""
     from agent.config_manager import config as _cfg
-    cur_budget    = _cfg.get("paper.budget",            50000.0)
-    cur_trade_pct = _cfg.get("paper.max_trade_pct",     5.0)
-    cur_alloc_pct = _cfg.get("paper.max_allocated_pct", 40.0)
-    cur_max_open  = _cfg.get("paper.max_open_trades",   10)
+    cur_budget    = _cfg.get("paper.budget")
+    cur_trade_pct = _cfg.get("paper.max_trade_pct")
+    cur_alloc_pct = _cfg.get("paper.max_allocated_pct")
+    cur_max_open  = _cfg.get("paper.max_open_trades")
     new_budget    = float(total_budget)      if total_budget      is not None else float(cur_budget)
     new_trade_pct = float(max_trade_pct)     if max_trade_pct     is not None else float(cur_trade_pct)
     new_alloc_pct = float(max_allocated_pct) if max_allocated_pct is not None else float(cur_alloc_pct)

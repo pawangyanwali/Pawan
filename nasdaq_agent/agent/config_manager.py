@@ -593,4 +593,31 @@ class ConfigManager:
 
 # ── Module-level singleton ─────────────────────────────────────────────────────
 
+_SENTINEL = object()
+
+
+# Patch get() to fall through to _DEFAULTS when key is absent from cache and
+# no explicit default was supplied.  This makes config_manager the single source
+# of truth: callers can write config.get("paper.budget") with no hardcoded
+# fallback and still get the env-var-seeded default on a cold start.
+_orig_get = ConfigManager.get
+
+
+def _get_with_defaults(self, key: str, default: Any = _SENTINEL) -> Any:
+    with self._lock:
+        if key in self._cache:
+            return self._cache[key]
+    if default is not _SENTINEL:
+        return default
+    factory = _DEFAULTS.get(key)
+    if factory is not None:
+        try:
+            return factory()
+        except Exception:
+            pass
+    return None
+
+
+ConfigManager.get = _get_with_defaults  # type: ignore[method-assign]
+
 config = ConfigManager()
