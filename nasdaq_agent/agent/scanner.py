@@ -1775,6 +1775,16 @@ class Scanner:
         t0 = time.time()
         active_tickers = get_active_tickers()
 
+        # Mark scan as active so the healthcheck won't flag a slow cycle as hung.
+        # Key expires in 10 min — well above any realistic cycle length.
+        try:
+            from agent.valkey_client import _get_client as _vk_active_c
+            _vk_active = _vk_active_c()
+            if _vk_active:
+                _vk_active.setex("scan:active", 600, str(t0))
+        except Exception:
+            pass
+
         # ── Market-holiday guard ─────────────────────────────────────────────
         # On NYSE/NASDAQ holidays the market is CLOSED all day. Skip the full
         # 250-ticker data fetch and signal analysis to conserve Schwab API quota.
@@ -2018,6 +2028,15 @@ class Scanner:
         if self._scan_count >= 2:
             self._second_scan_done.set()
         logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(active_tickers)} active (universe: {len(NASDAQ_TICKERS)})")
+
+        # Clear the active-scan marker now that the cycle completed cleanly.
+        try:
+            from agent.valkey_client import _get_client as _vk_done_c
+            _vk_done = _vk_done_c()
+            if _vk_done:
+                _vk_done.delete("scan:active")
+        except Exception:
+            pass
 
         # ML feedback/retraining is owned by learner services in production.
         # Keeping this out of the scanner protects price freshness and scan SLA.

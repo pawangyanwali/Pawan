@@ -127,6 +127,22 @@ def main() -> int:
     # scan_ts being None is acceptable during start_period (cold start).
     # We only hard-fail on stale data during active market sessions (tier 3).
 
+    # ── 2b. scan:active — scanner is mid-cycle ────────────────────────────────
+    # Written at the start of each run_once() and deleted on completion.
+    # If present and recent it means a long data-fetch cycle is in progress,
+    # NOT that the scanner is hung.  Accept as healthy so a slow but working
+    # scan doesn't trigger a watchdog restart mid-cycle.
+    try:
+        raw_active = client.get("scan:active")
+        if raw_active:
+            active_ts  = float(raw_active)
+            active_age = time.time() - active_ts
+            if active_age < 600:   # 10-min TTL — same as the Valkey key
+                print(f"INFO: scan:active age={active_age:.0f}s — cycle in progress, healthy")
+                return 0
+    except Exception as _ae:
+        print(f"WARN: scan:active lookup error: {_ae}")
+
     # ── 3. scan:latest freshness (active sessions only) ──────────────────────
     try:
         from agent.market_hours import get_market_session
