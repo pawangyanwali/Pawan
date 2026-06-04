@@ -8046,12 +8046,26 @@ async function triggerDeepTrain(btn) {
 }
 
 async function triggerFullRetrain(btn) {
-  if (!confirm('Retrain ALL XGBoost models (scalp/daily/reversal/ensemble/swing) + Deep BiLSTM. Runs in background, takes 5–20 min. Continue?')) return;
+  const force = confirm(
+    'Retrain ALL XGBoost models (scalp/daily/reversal/ensemble/swing) + Deep BiLSTM.\n\n' +
+    'Click OK  → Force Retrain (bypasses economic gate — always saves if accuracy ≥ 52%)\n' +
+    'Click Cancel → Normal Retrain (respects economic gate)\n\n' +
+    'Use Force Retrain if models are not being saved despite training completing.'
+  );
+  // User closed the dialog entirely via Escape — prompt again for confirmation
+  // Actually: OK=force, Cancel=normal, but we need a way to abort entirely.
+  // Use a second confirm only when Cancel was clicked to distinguish abort vs normal.
+  let proceed = true;
+  if (!force) {
+    proceed = confirm('Run Normal Retrain (with economic gate)?');
+  }
+  if (!proceed) return;
   const orig = btn.textContent;
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
-    const r = await (await _authFetch(`${BACKEND_HTTP}/api/ml-retrain`, { method: 'POST' })).json();
+    const url = force ? `${BACKEND_HTTP}/api/ml-retrain?force=true` : `${BACKEND_HTTP}/api/ml-retrain`;
+    const r = await (await _authFetch(url, { method: 'POST' })).json();
     if (r.status === 'deferred') {
       btn.textContent = '⏰ Market Open';
       btn.style.color = '#f59e0b';

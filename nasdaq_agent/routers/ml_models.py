@@ -154,11 +154,15 @@ async def ml_status(_user: AuthenticatedUser = Depends(require_viewer)):
 @router.post("/api/ml-retrain")
 async def trigger_retrain(
     background_tasks: BackgroundTasks,
+    force: bool = False,
     _current: AuthenticatedUser = Depends(require_admin),
 ):
     """
     Manually trigger a full ML retrain cycle (XGBoost + SwingML + Deep BiLSTM).
     Runs in background — check /api/ml-status for progress.
+
+    ?force=true  bypasses the economic gate so models are promoted on accuracy
+    alone. Use when you want fresh models regardless of recent trade performance.
     """
     from agent.ml_model import retrain_all, _is_retraining
     from config import TRAINING_TICKERS
@@ -170,7 +174,7 @@ async def trigger_retrain(
         session = get_market_session()
     except Exception:
         session = "UNKNOWN"
-    if session != "CLOSED":
+    if session != "CLOSED" and not force:
         return {
             "status": "deferred",
             "message": f"ML retrain deferred during {session}; run it in the CLOSED window.",
@@ -178,12 +182,13 @@ async def trigger_retrain(
 
     def _run():
         try:
-            retrain_all(TRAINING_TICKERS)
+            retrain_all(TRAINING_TICKERS, force=force)
         except Exception as e:
             logger.warning(f"[manual retrain] failed: {e}")
 
     background_tasks.add_task(_run)
-    return {"status": "started", "message": "Retrain started in background. Watch /api/ml-status for progress."}
+    msg = "Force retrain started — economic gate bypassed." if force else "Retrain started in background. Watch /api/ml-status for progress."
+    return {"status": "started", "message": msg}
 
 
 @router.post("/api/ml-retrain/cancel")

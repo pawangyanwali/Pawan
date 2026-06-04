@@ -75,7 +75,8 @@ import threading as _threading
 _retrain_lock        = _threading.Lock()
 _progress_lock       = _threading.Lock()   # guards concurrent updates from worker threads
 _is_retraining       = False               # quick non-blocking check before acquiring lock
-_cancel_retrain_flag = False               # set by cancel_retrain(); checked between tickers
+_cancel_retrain_flag  = False               # set by cancel_retrain(); checked between tickers
+_force_retrain_flag   = False               # bypass economic gate when user explicitly forces
 
 
 def request_retrain_cancel() -> None:
@@ -427,16 +428,19 @@ class StockMLModel:
         # Bootstrap phase (< 10 outcomes): accuracy gate alone is sufficient.
         econ_ok = True
         econ_note = "bootstrap"
-        try:
-            from agent.live_backtest import get_ticker_performance
-            perf = get_ticker_performance(self.ticker, min_resolved=10)
-            if perf is not None:
-                exp = perf["expectancy"]
-                pf  = perf["profit_factor"]
-                econ_ok = exp > 0 and pf > 1.0
-                econ_note = f"exp={exp:.3f} pf={pf:.3f} n={perf['n_resolved']}"
-        except Exception:
-            pass
+        if not _force_retrain_flag:
+            try:
+                from agent.live_backtest import get_ticker_performance
+                perf = get_ticker_performance(self.ticker, min_resolved=10)
+                if perf is not None:
+                    exp = perf["expectancy"]
+                    pf  = perf["profit_factor"]
+                    econ_ok = exp > 0 and pf > 1.0
+                    econ_note = f"exp={exp:.3f} pf={pf:.3f} n={perf['n_resolved']}"
+            except Exception:
+                pass
+        else:
+            econ_note = "force"
 
         promoted = acc_ok and econ_ok
 
@@ -509,7 +513,7 @@ def get_or_create(ticker: str) -> StockMLModel:
 
 def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
                 hist_5m: dict = None, hist_15m: dict = None,
-                skip_deep: bool = False) -> None:
+                skip_deep: bool = False, force: bool = False) -> None:
     """Train/retrain all models using a single batch historical fetch.
 
     XGBoost scalp/ensemble/reversal models train on 1-min bars (Schwab provides
@@ -524,7 +528,7 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
     hist_5m    : accepted for API compat; treated as hist_1m (1-min data).
     hist_15m   : optional pre-fetched 15-min data dict {ticker: DataFrame}.
     """
-    global _is_retraining, _cancel_retrain_flag
+    global _is_retraining, _cancel_retrain_flag, _force_retrain_flag
     # Non-blocking guard: if another retrain is already running, skip this call
     if _is_retraining:
         logger.info("[retrain_all] Skipped — another retrain already in progress")
@@ -533,13 +537,17 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
         logger.info("[retrain_all] Skipped — lock held by concurrent retrain")
         return
     _cancel_retrain_flag = False   # reset any previous cancel request
+    _force_retrain_flag  = force
     _is_retraining = True
+    if force:
+        logger.info("[retrain_all] Force mode — economic gate bypassed")
     try:
         _retrain_all_locked(tickers, delay=delay, daily_data=daily_data,
                             hist_5m=hist_5m, hist_15m=hist_15m, skip_deep=skip_deep)
     finally:
         _is_retraining = False
         _cancel_retrain_flag = False
+        _force_retrain_flag  = False
         _retrain_lock.release()
 
 
@@ -911,14 +919,17 @@ class DailyMLModel:
         acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
 
         econ_ok, econ_note = True, "bootstrap"
-        try:
-            from agent.live_backtest import get_ticker_performance
-            perf = get_ticker_performance(self.ticker, min_resolved=10)
-            if perf is not None:
-                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
-                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
-        except Exception:
-            pass
+        if not _force_retrain_flag:
+            try:
+                from agent.live_backtest import get_ticker_performance
+                perf = get_ticker_performance(self.ticker, min_resolved=10)
+                if perf is not None:
+                    econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                    econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+            except Exception:
+                pass
+        else:
+            econ_note = "force"
 
         promoted = acc_ok and econ_ok
         if promoted:
@@ -1160,14 +1171,17 @@ class ReversalMLModel:
         acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
 
         econ_ok, econ_note = True, "bootstrap"
-        try:
-            from agent.live_backtest import get_ticker_performance
-            perf = get_ticker_performance(self.ticker, min_resolved=10)
-            if perf is not None:
-                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
-                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
-        except Exception:
-            pass
+        if not _force_retrain_flag:
+            try:
+                from agent.live_backtest import get_ticker_performance
+                perf = get_ticker_performance(self.ticker, min_resolved=10)
+                if perf is not None:
+                    econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                    econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+            except Exception:
+                pass
+        else:
+            econ_note = "force"
 
         promoted = acc_ok and econ_ok
         if promoted:
@@ -1355,14 +1369,17 @@ class SwingMLModel:
         acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
 
         econ_ok, econ_note = True, "bootstrap"
-        try:
-            from agent.live_backtest import get_ticker_performance
-            perf = get_ticker_performance(self.ticker, min_resolved=10)
-            if perf is not None:
-                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
-                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
-        except Exception:
-            pass
+        if not _force_retrain_flag:
+            try:
+                from agent.live_backtest import get_ticker_performance
+                perf = get_ticker_performance(self.ticker, min_resolved=10)
+                if perf is not None:
+                    econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                    econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+            except Exception:
+                pass
+        else:
+            econ_note = "force"
 
         promoted = acc_ok and econ_ok
         if promoted:
@@ -1567,14 +1584,17 @@ class EnsembleMLModel:
         acc_ok = new_acc >= _MIN_ACC and (old_acc == 0.0 or new_acc >= old_acc - _MAX_REGRESSION)
 
         econ_ok, econ_note = True, "bootstrap"
-        try:
-            from agent.live_backtest import get_ticker_performance
-            perf = get_ticker_performance(self.ticker, min_resolved=10)
-            if perf is not None:
-                econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
-                econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
-        except Exception:
-            pass
+        if not _force_retrain_flag:
+            try:
+                from agent.live_backtest import get_ticker_performance
+                perf = get_ticker_performance(self.ticker, min_resolved=10)
+                if perf is not None:
+                    econ_ok = perf["expectancy"] > 0 and perf["profit_factor"] > 1.0
+                    econ_note = f"exp={perf['expectancy']:.3f} pf={perf['profit_factor']:.3f}"
+            except Exception:
+                pass
+        else:
+            econ_note = "force"
 
         promoted = acc_ok and econ_ok
         if promoted:
