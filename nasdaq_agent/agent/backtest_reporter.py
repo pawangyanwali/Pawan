@@ -159,6 +159,23 @@ def _run_feedback_retrain(outcomes_df: pd.DataFrame, tickers: list) -> None:
         from config import TRAINING_TICKERS
 
         logger.info("[BT Feedback] Starting feedback-weighted retrain…")
+
+        # Stamp every closed paper_trade that hasn't been flagged yet.
+        # This marks the cohort of resolved trades whose outcomes triggered this cycle.
+        try:
+            from datetime import datetime, timezone
+            from agent.db import get_conn as _get_conn
+            _now_ts = datetime.now(timezone.utc).isoformat()
+            with _get_conn() as _c:
+                _c.execute(
+                    "UPDATE paper_trades SET feedback_triggered_at = ? "
+                    "WHERE status = 'CLOSED' AND feedback_triggered_at IS NULL",
+                    (_now_ts,)
+                )
+            logger.debug(f"[BT Feedback] Marked paper_trades feedback_triggered_at={_now_ts}")
+        except Exception as _fe:
+            logger.warning(f"[BT Feedback] Could not set feedback_triggered_at: {_fe}")
+
         _log_attribution(outcomes_df)
 
         # 1. Update confidence calibration table (±15% per context)
