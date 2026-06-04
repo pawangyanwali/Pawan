@@ -903,6 +903,14 @@ def generate_prediction(
                 # Recompute rr_ratio from the ACTUAL target/stop after any structural
                 # override — the stored ratio must reflect real geometry, not just t2_mult.
                 rr_ratio  = _compute_rr(price, target, stop_loss)
+                # Re-evaluate rr_qualifies against the true ratio so bad-geometry
+                # WAIT_RETEST trades are correctly blocked at execution time.
+                try:
+                    from agent.config_manager import config as _cfg_rr_wrt
+                    _min_rr_wrt = float(_cfg_rr_wrt.get("prediction.min_rr", 1.5))
+                except Exception:
+                    _min_rr_wrt = 1.5
+                rr_qualifies = rr_ratio >= _min_rr_wrt
 
     # ── 7c. Bounce setup check ────────────────────────────────────────────────
     bounce = _detect_bounce_setup(price, support, resistance, df, last_row)
