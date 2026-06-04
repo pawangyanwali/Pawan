@@ -3074,6 +3074,10 @@ function renderTable() {
         : s.earnings_phase === 'blackout'  ? '🚫 Earnings blackout'
         : s.earnings_phase === 'cooldown'  ? '⏳ Post-earnings cooldown'
         : s.earnings_phase === 'caution'   ? '📅 Earnings soon'
+        : s.session === 'CLOSED'           ? 'Market closed'
+        : s.session === 'PRE_MARKET'       ? 'Pre-market'
+        : s.session === 'AFTER_HOURS'      ? 'After-hours'
+        : s.session === 'HARD_CLOSE'       ? 'Hard close window'
         : 'Monitoring';
       statusCell = `<div style="padding:5px 7px;background:rgba(71,85,105,.07);border:1px solid rgba(71,85,105,.2);border-radius:6px;font-size:9px">
         <div style="color:#64748b;font-weight:700">👁 WATCHING</div>
@@ -3226,7 +3230,7 @@ function renderTable() {
         ${(() => { const ma=s.mtf_alignment||'MIXED'; const mc=ma==='BULLISH'?'var(--green)':ma==='BEARISH'?'var(--red)':'var(--muted)'; return `<span style="color:${mc};font-weight:600">${ma}</span><span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt(s.mtf_score||0,2)}</span>`; })()}
       </td>
       <td style="font-size:12px;font-weight:700;color:${(s.score||0)>=0.3?'var(--green)':(s.score||0)<=-0.3?'var(--red)':'var(--muted)'}">
-        ${Math.abs(s.score||0)*100 < 1 ? `<span style="color:var(--muted);font-size:10px" title="Score near zero — low conviction or dead zone">–</span>` : fmt((s.score||0)*100,0)}
+        ${Math.abs(s.score||0)*100 < 1 ? `<span style="color:var(--muted);font-size:10px" title="${['CLOSED','PRE_MARKET'].includes(s.session) ? 'Market closed / pre-market — no active signal' : 'Score near zero — low conviction or dead zone'}">–</span>` : fmt((s.score||0)*100,0)}
       </td>
       <td style="font-size:11px">
         ${(() => {
@@ -3292,7 +3296,7 @@ function renderTable() {
       <td>
         <span class="exit-badge exit-${s.exit_recommendation||'HOLD'}">${s.exit_recommendation||'HOLD'}</span>
       </td>
-      <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':s.rel_volume>0?'var(--muted)':'var(--muted)'}" title="${s.rel_volume<=0?'Volume data unavailable':'Relative volume vs. 20-day baseline'}">${s.rel_volume > 0 ? fmt(s.rel_volume,1)+'x' : '—'}</td>
+      <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':s.rel_volume>0?'var(--muted)':'var(--muted)'}" title="${s.rel_volume<=0?(['CLOSED','PRE_MARKET'].includes(s.session)?'No intraday volume yet — '+s.session_label:'Volume data unavailable'):'Relative volume vs. 20-day baseline'}">${s.rel_volume > 0 ? fmt(s.rel_volume,1)+'x' : '—'}</td>
     </tr>`;
   }).join('');
 
