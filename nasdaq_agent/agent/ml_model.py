@@ -72,9 +72,20 @@ def _candidate_rejection_reason(
 
 import threading as _threading
 
-_retrain_lock  = _threading.Lock()
-_progress_lock = _threading.Lock()   # guards concurrent updates from worker threads
-_is_retraining = False               # quick non-blocking check before acquiring lock
+_retrain_lock        = _threading.Lock()
+_progress_lock       = _threading.Lock()   # guards concurrent updates from worker threads
+_is_retraining       = False               # quick non-blocking check before acquiring lock
+_cancel_retrain_flag = False               # set by cancel_retrain(); checked between tickers
+
+
+def request_retrain_cancel() -> None:
+    """Signal the running retrain to stop after the current ticker finishes."""
+    global _cancel_retrain_flag
+    _cancel_retrain_flag = True
+
+
+def is_retrain_cancelling() -> bool:
+    return _cancel_retrain_flag
 
 
 def _safe_transform(scaler, row: np.ndarray) -> np.ndarray | None:
@@ -124,9 +135,10 @@ _retrain_progress: dict = {
 def get_retrain_progress() -> dict:
     """Return a snapshot of the current retrain progress (safe to call any time)."""
     p = dict(_retrain_progress)
-    p["elapsed_s"] = round(_time_module.time() - p["started_at"], 1) if p["started_at"] else 0.0
-    p["completed"] = list(p["completed"])
-    p["failed"]    = list(p["failed"])
+    p["elapsed_s"]   = round(_time_module.time() - p["started_at"], 1) if p["started_at"] else 0.0
+    p["completed"]   = list(p["completed"])
+    p["failed"]      = list(p["failed"])
+    p["cancelling"]  = _cancel_retrain_flag
     return p
 
 
@@ -512,7 +524,7 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
     hist_5m    : accepted for API compat; treated as hist_1m (1-min data).
     hist_15m   : optional pre-fetched 15-min data dict {ticker: DataFrame}.
     """
-    global _is_retraining
+    global _is_retraining, _cancel_retrain_flag
     # Non-blocking guard: if another retrain is already running, skip this call
     if _is_retraining:
         logger.info("[retrain_all] Skipped — another retrain already in progress")
@@ -520,12 +532,14 @@ def retrain_all(tickers: list, delay: float = 0.0, daily_data: dict = None,
     if not _retrain_lock.acquire(blocking=False):
         logger.info("[retrain_all] Skipped — lock held by concurrent retrain")
         return
+    _cancel_retrain_flag = False   # reset any previous cancel request
     _is_retraining = True
     try:
         _retrain_all_locked(tickers, delay=delay, daily_data=daily_data,
                             hist_5m=hist_5m, hist_15m=hist_15m, skip_deep=skip_deep)
     finally:
         _is_retraining = False
+        _cancel_retrain_flag = False
         _retrain_lock.release()
 
 
@@ -543,6 +557,9 @@ def _train_one_ticker(
     ticker_models_ok: list[str] = []
     t0 = time.time()
 
+    if _cancel_retrain_flag:
+        return t, ticker_models_ok, 0.0
+
     # Pre-compute training data ONCE for 5m and 15m — shared across models
     # that use the same lookahead to avoid duplicate feature engineering.
     prepared_5m  = prepare_training_data(df5m,  ticker=t, lookahead_bars=LOOKAHEAD_BARS)
@@ -558,6 +575,9 @@ def _train_one_ticker(
         logger.warning(f"[{t}] scalp retrain failed: {e}")
         _rp_append_failed({"ticker": t, "model": "scalp", "error": str(e)})
 
+    if _cancel_retrain_flag:
+        return t, ticker_models_ok, round(time.time() - t0, 1)
+
     # ── Daily model ───────────────────────────────────────────────────────
     if daily_data and t in daily_data:
         try:
@@ -569,31 +589,34 @@ def _train_one_ticker(
             _rp_append_failed({"ticker": t, "model": "daily", "error": str(e)})
 
     # ── Reversal model (has its own label logic — can't share prepared_5m) ──
-    try:
-        rm = get_or_create_reversal(t)
-        if rm.train_from_df(df5m):
-            ticker_models_ok.append("reversal")
-    except Exception as e:
-        logger.warning(f"[{t}] reversal retrain failed: {e}")
-        _rp_append_failed({"ticker": t, "model": "reversal", "error": str(e)})
+    if not _cancel_retrain_flag:
+        try:
+            rm = get_or_create_reversal(t)
+            if rm.train_from_df(df5m):
+                ticker_models_ok.append("reversal")
+        except Exception as e:
+            logger.warning(f"[{t}] reversal retrain failed: {e}")
+            _rp_append_failed({"ticker": t, "model": "reversal", "error": str(e)})
 
     # ── Ensemble model (shares prepared_5m with scalp — same features/split) ─
-    try:
-        em = get_or_create_ensemble(t)
-        if em.train_from_df(df5m, _prepared=prepared_5m):
-            ticker_models_ok.append("ensemble")
-    except Exception as e:
-        logger.warning(f"[{t}] ensemble retrain failed: {e}")
-        _rp_append_failed({"ticker": t, "model": "ensemble", "error": str(e)})
+    if not _cancel_retrain_flag:
+        try:
+            em = get_or_create_ensemble(t)
+            if em.train_from_df(df5m, _prepared=prepared_5m):
+                ticker_models_ok.append("ensemble")
+        except Exception as e:
+            logger.warning(f"[{t}] ensemble retrain failed: {e}")
+            _rp_append_failed({"ticker": t, "model": "ensemble", "error": str(e)})
 
     # ── Swing model (shares prepared_15m) ────────────────────────────────
-    try:
-        sm = get_or_create_swing(t)
-        if sm.train_from_df(df15m, _prepared=prepared_15m):
-            ticker_models_ok.append("swing")
-    except Exception as e:
-        logger.warning(f"[{t}] swing retrain failed: {e}")
-        _rp_append_failed({"ticker": t, "model": "swing", "error": str(e)})
+    if not _cancel_retrain_flag:
+        try:
+            sm = get_or_create_swing(t)
+            if sm.train_from_df(df15m, _prepared=prepared_15m):
+                ticker_models_ok.append("swing")
+        except Exception as e:
+            logger.warning(f"[{t}] swing retrain failed: {e}")
+            _rp_append_failed({"ticker": t, "model": "swing", "error": str(e)})
 
     gc.collect()
     return t, ticker_models_ok, round(time.time() - t0, 1)
@@ -702,6 +725,11 @@ def _retrain_all_locked(tickers: list, delay: float = 0.0, daily_data: dict = No
         del b5m, bday
         gc.collect()
         logger.info(f"[retrain_all] {batch_label} complete — memory freed")
+
+        if _cancel_retrain_flag:
+            logger.info("[retrain_all] Cancel requested — stopping after batch %d", batch_idx + 1)
+            _rp_set(phase="cancelled", phase_label="Retrain cancelled by user.", is_running=False)
+            return
 
     # Free remaining 1-min references (b15m still referenced in _all_15m_for_deep)
     gc.collect()

@@ -981,10 +981,11 @@
     </div>
 
     <!-- Training status banner -->
-    <div id="nn-training-banner" style="display:none;background:linear-gradient(90deg,#1e1f3a,#0f172a);border:1px solid var(--accent);border-radius:8px;padding:10px 14px;margin-bottom:14px;gap:10px">
-      <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite"></div>
-      <span id="nn-training-msg" style="font-size:12px;color:var(--text)">Deep BiLSTM training in progress…</span>
+    <div id="nn-training-banner" style="display:none;background:linear-gradient(90deg,#1e1f3a,#0f172a);border:1px solid var(--accent);border-radius:8px;padding:10px 14px;margin-bottom:14px;gap:10px;align-items:center">
+      <div style="width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite;flex-shrink:0"></div>
+      <span id="nn-training-msg" style="font-size:12px;color:var(--text);flex:1">Deep BiLSTM training in progress…</span>
       <span id="nn-epoch-badge" style="font-size:11px;color:var(--muted)"></span>
+      <button id="nn-cancel-btn" onclick="cancelRetrain(this)" style="display:none;background:#7f1d1d;border:1px solid #ef4444;color:#fca5a5;border-radius:4px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:11px;flex-shrink:0">✕ Cancel</button>
     </div>
 
     <!-- Session / availability bar -->
@@ -7558,10 +7559,13 @@ function renderNeuralPanel(d) {
   // Training banner — phase-specific message
   const banner = document.getElementById('nn-training-banner');
   const isActive = rp.is_running || d.is_training_now;
+  const cancelBtn = document.getElementById('nn-cancel-btn');
   if (isActive) {
     banner.style.cssText += ';display:flex!important';
+    const cancelling = rp.cancelling;
     let msg = 'Training in progress…';
-    if (phase === 'fetching_5m')     msg = 'Fetching 5-min price history…';
+    if (cancelling)                  msg = '⏳ Cancelling — finishing current ticker…';
+    else if (phase === 'fetching_5m')     msg = 'Fetching 5-min price history…';
     else if (phase === 'fetching_15m')  msg = 'Fetching 15-min price history…';
     else if (phase === 'fetching_daily') msg = 'Fetching daily bars (2 years)…';
     else if (phase === 'xgboost')  msg = `XGBoost: training ${rp.current_ticker || ''}` +
@@ -7572,8 +7576,16 @@ function renderNeuralPanel(d) {
     const last = hist[hist.length - 1];
     document.getElementById('nn-epoch-badge').textContent =
       last ? `Epoch ${last.epoch}/${last.total_epochs} · loss=${last.loss.toFixed(4)}` : '';
+    // Show Cancel only for XGBoost retrain (not BiLSTM which can't be cancelled)
+    if (cancelBtn) {
+      const xgbRunning = ['xgboost','fetching_5m','fetching_15m','fetching_daily'].includes(phase);
+      cancelBtn.style.display = (xgbRunning && !cancelling) ? 'inline-block' : 'none';
+      cancelBtn.textContent = cancelling ? '⏳ Cancelling…' : '✕ Cancel';
+      cancelBtn.disabled = cancelling;
+    }
   } else {
     banner.style.display = 'none';
+    if (cancelBtn) cancelBtn.style.display = 'none';
   }
   const xgbDone = ['deep', 'done'].includes(phase) ||
                   (phase === '' && (rp.done_count || 0) === (rp.total || 0) && rp.total > 0);
@@ -8061,6 +8073,21 @@ async function triggerFullRetrain(btn) {
     btn.textContent = '✕ Error';
     btn.style.color = 'var(--red)';
     setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.color = 'var(--muted)'; }, 4000);
+  }
+}
+
+async function cancelRetrain(btn) {
+  btn.disabled = true;
+  btn.textContent = '⏳ Cancelling…';
+  try {
+    const r = await (await _authFetch(`${BACKEND_HTTP}/api/ml-retrain/cancel`, { method: 'POST' })).json();
+    if (r.status === 'not_running') {
+      btn.style.display = 'none';
+    }
+    // Banner + button state will update on next loadNeuralStatus() poll
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '✕ Cancel';
   }
 }
 

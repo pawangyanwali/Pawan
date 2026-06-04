@@ -186,6 +186,23 @@ async def trigger_retrain(
     return {"status": "started", "message": "Retrain started in background. Watch /api/ml-status for progress."}
 
 
+@router.post("/api/ml-retrain/cancel")
+async def cancel_retrain(
+    _current: AuthenticatedUser = Depends(require_admin),
+):
+    """
+    Request the running XGBoost retrain to stop after the current ticker finishes.
+    No-op if no retrain is in progress.
+    """
+    from agent.ml_model import _is_retraining, request_retrain_cancel
+
+    if not _is_retraining:
+        return {"status": "not_running", "message": "No retrain is currently in progress."}
+
+    request_retrain_cancel()
+    return {"status": "cancelling", "message": "Cancel signal sent — retrain will stop after the current ticker completes."}
+
+
 @router.post("/api/deep-model/train")
 async def trigger_deep_train(
     _current: AuthenticatedUser = Depends(require_admin),
