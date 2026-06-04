@@ -185,6 +185,30 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# ── Cross-container hot-reload ────────────────────────────────────────────────
+# When a retrain runs in the web-api container it writes new joblib files to
+# the shared bind-mount.  The scanner container's in-memory registry never sees
+# those files unless it explicitly checks.  _hot_reload_check() does a cheap
+# stat() at most once every 30 s per model instance; if the file on disk is
+# newer than what was last loaded, it reloads the model transparently.
+_RELOAD_THROTTLE: dict[str, float] = {}
+_RELOAD_INTERVAL = 30.0  # seconds between disk checks per model instance
+
+
+def _hot_reload_check(model) -> None:
+    _key = f"{type(model).__name__}:{model.ticker}"
+    _now = time.time()
+    if _now - _RELOAD_THROTTLE.get(_key, 0.0) < _RELOAD_INTERVAL:
+        return
+    _RELOAD_THROTTLE[_key] = _now
+    try:
+        _p = model._path()
+        if _p.exists() and _p.stat().st_mtime > getattr(model, '_loaded_mtime', 0.0):
+            model._load()
+    except Exception:
+        pass
+
+
 # ── Fast XGBoost training helper ──────────────────────────────────────────────
 
 def _fast_xgb_fit(
@@ -313,11 +337,12 @@ class StockMLModel:
     LABEL_ATR_MULT   = 0.3
 
     def __init__(self, ticker: str):
-        self.ticker  = ticker
-        self.model   = None
-        self.scaler  = StandardScaler()
-        self.trained = False
-        self._meta: dict = {}
+        self.ticker        = ticker
+        self.model         = None
+        self.scaler        = StandardScaler()
+        self.trained       = False
+        self._meta: dict   = {}
+        self._loaded_mtime = 0.0
         self._load()   # restore from disk on construction
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -355,6 +380,7 @@ class StockMLModel:
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
                 self._meta = d.get("meta", {})
+                self._loaded_mtime = p.stat().st_mtime
                 logger.debug(f"[{self.ticker}] scalp model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] scalp load failed (will retrain): {e}")
@@ -477,6 +503,7 @@ class StockMLModel:
         Return probability [0,1] that the price goes UP in the next N bars.
         Returns 0.5 (neutral) when the model is not trained or features are missing.
         """
+        _hot_reload_check(self)
         if not self.trained or self.model is None:
             return 0.5
 
@@ -807,11 +834,12 @@ class DailyMLModel:
     LABEL_ATR_MULT   = None
 
     def __init__(self, ticker: str):
-        self.ticker  = ticker
-        self.model   = None
-        self.scaler  = StandardScaler()
-        self.trained = False
-        self._meta: dict = {}
+        self.ticker        = ticker
+        self.model         = None
+        self.scaler        = StandardScaler()
+        self.trained       = False
+        self._meta: dict   = {}
+        self._loaded_mtime = 0.0
         self._load()
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -849,6 +877,7 @@ class DailyMLModel:
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
                 self._meta = d.get("meta", {})
+                self._loaded_mtime = p.stat().st_mtime
                 logger.debug(f"[{self.ticker}] daily model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] daily load failed (will retrain): {e}")
@@ -965,6 +994,7 @@ class DailyMLModel:
         Return probability [0, 1] that tomorrow's close will be higher.
         Returns 0.5 (neutral) when untrained or features are missing.
         """
+        _hot_reload_check(self)
         if not self.trained or self.model is None:
             return 0.5
         if df_daily is None or len(df_daily) < 30:
@@ -1042,11 +1072,12 @@ class ReversalMLModel:
     LABEL_ATR_MULT   = None
 
     def __init__(self, ticker: str):
-        self.ticker  = ticker
-        self.model   = None
-        self.scaler  = StandardScaler()
-        self.trained = False
-        self._meta: dict = {}
+        self.ticker        = ticker
+        self.model         = None
+        self.scaler        = StandardScaler()
+        self.trained       = False
+        self._meta: dict   = {}
+        self._loaded_mtime = 0.0
         self._load()
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -1084,6 +1115,7 @@ class ReversalMLModel:
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
                 self._meta = d.get("meta", {})
+                self._loaded_mtime = p.stat().st_mtime
                 logger.debug(f"[{self.ticker}] reversal model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] reversal load failed (will retrain): {e}")
@@ -1213,6 +1245,7 @@ class ReversalMLModel:
 
     def predict_proba(self, df: pd.DataFrame) -> float:
         """Return probability [0,1] of bullish reversal in next 5 bars. 0.5 if untrained."""
+        _hot_reload_check(self)
         if not self.trained or self.model is None:
             return 0.5
         try:
@@ -1272,11 +1305,12 @@ class SwingMLModel:
     LABEL_ATR_MULT   = 0.3
 
     def __init__(self, ticker: str):
-        self.ticker  = ticker
-        self.model   = None
-        self.scaler  = StandardScaler()
-        self.trained = False
-        self._meta: dict = {}
+        self.ticker        = ticker
+        self.model         = None
+        self.scaler        = StandardScaler()
+        self.trained       = False
+        self._meta: dict   = {}
+        self._loaded_mtime = 0.0
         self._load()
 
     def _path(self) -> Path:
@@ -1312,6 +1346,7 @@ class SwingMLModel:
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
                 self._meta = d.get("meta", {})
+                self._loaded_mtime = p.stat().st_mtime
                 logger.debug(f"[{self.ticker}] swing model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] swing load failed (will retrain): {e}")
@@ -1413,6 +1448,7 @@ class SwingMLModel:
         Return probability [0, 1] that price will be higher 2h ahead.
         Returns 0.5 (neutral) when untrained or features are missing.
         """
+        _hot_reload_check(self)
         if not self.trained or self.model is None:
             return 0.5
 
@@ -1478,11 +1514,12 @@ class EnsembleMLModel:
     LABEL_ATR_MULT   = 0.3
 
     def __init__(self, ticker: str):
-        self.ticker  = ticker
-        self.models  = []
-        self.scaler  = StandardScaler()
-        self.trained = False
-        self._meta: dict = {}
+        self.ticker        = ticker
+        self.models        = []
+        self.scaler        = StandardScaler()
+        self.trained       = False
+        self._meta: dict   = {}
+        self._loaded_mtime = 0.0
         self._load()
 
     def _path(self) -> Path:
@@ -1519,6 +1556,7 @@ class EnsembleMLModel:
                 d = joblib.load(p)
                 self.models, self.scaler, self.trained = d["models"], d["scaler"], d.get("trained", False)
                 self._meta = d.get("meta", {})
+                self._loaded_mtime = p.stat().st_mtime
         except Exception as e:
             logger.debug(f"[{self.ticker}] ensemble load failed: {e}")
 
@@ -1625,6 +1663,7 @@ class EnsembleMLModel:
     def predict(self, df: pd.DataFrame) -> tuple[float, float]:
         """Returns (probability_up, agreement_0_to_1).
         agreement=1.0 means all models agree, 0.5 means split."""
+        _hot_reload_check(self)
         if not self.trained or not self.models:
             return 0.5, 0.0
         try:
