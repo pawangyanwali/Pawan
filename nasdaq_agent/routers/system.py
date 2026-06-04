@@ -53,6 +53,19 @@ async def health():
     from routers._deps import manager
     from agent.scanner import scanner
     sigs, last_scan, from_cache = _current_signal_snapshot()
+    # Memory pressure — best-effort, never blocks the health response
+    _memory_rss_mb: float | None = None
+    try:
+        import psutil as _psutil
+        _memory_rss_mb = round(_psutil.Process().memory_info().rss / 1_048_576, 1)
+    except Exception:
+        try:
+            import resource as _resource
+            # Linux: ru_maxrss is in KB; macOS it is in bytes
+            _raw = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+            _memory_rss_mb = round(_raw / 1024, 1)   # KB → MB (Linux default)
+        except Exception:
+            pass
     return {
         "status": "ok",
         "is_running": scanner.is_running,
@@ -62,6 +75,7 @@ async def health():
         "ws_clients": len(manager.active),
         "api_credits": get_credit_usage(),
         "valkey": vk_health(),
+        "memory_rss_mb": _memory_rss_mb,
     }
 
 

@@ -1029,6 +1029,31 @@ def maybe_open_trade(
             )
             actual_entry = _entry_fill.fill_price   # slippage-adjusted entry
 
+            # Recompute T1, T2, and R:R from the actual fill price.
+            # Stop stays at its signal level (structural anchor); the risk
+            # distance naturally reflects actual execution cost.
+            _actual_risk = abs(actual_entry - stop)
+            if _actual_risk > 0:
+                if direction == "BUY":
+                    t1_price = round(actual_entry + _t1_mult * _actual_risk, 4)
+                    t2_price = round(actual_entry + _t2_mult * _actual_risk, 4)
+                else:
+                    t1_price = round(actual_entry - _t1_mult * _actual_risk, 4)
+                    t2_price = round(actual_entry - _t2_mult * _actual_risk, 4)
+                _actual_reward = abs(target - actual_entry)
+                rr_ratio = round(_actual_reward / _actual_risk, 2)
+                try:
+                    from agent.config_manager import config as _cfg_fillrr
+                    _min_rr_fill = float(_cfg_fillrr.get("prediction.min_rr", 1.5))
+                except Exception:
+                    _min_rr_fill = 1.5
+                rr_qualifies = rr_ratio >= _min_rr_fill
+                if not rr_qualifies:
+                    logger.debug(
+                        "[PAPER] %s post-fill R:R %.2f:1 < %.1f:1 (slippage degraded entry)",
+                        ticker, rr_ratio, _min_rr_fill,
+                    )
+
             cur = c.execute("""
                 INSERT INTO paper_trades
                   (opened_at, ticker, direction, entry_price, target, stop,
@@ -1351,7 +1376,8 @@ def update_open_trades(ticker: str, df, current_price: float,
                             close_shares = 0   # all shares already accounted for
                             # Record closed trade
                             _record_close(c, row["id"], ep, exit_reason, entry, direction,
-                                          shares_total, partial_pnl, shares_total, ticker=ticker)
+                                          shares_total, partial_pnl, shares_total, ticker=ticker,
+                                          ideal_exit_price=t1_price)
                             closed_any = True
                             won_any    = partial_pnl > 0
                             continue
@@ -2057,7 +2083,8 @@ def get_today_pnl() -> dict:
             FROM paper_trades
             WHERE status='CLOSED'
               AND closed_at IS NOT NULL AND closed_at != ''
-              AND closed_at::date = CURRENT_DATE
+              AND (closed_at::timestamptz AT TIME ZONE 'America/New_York')::date
+                    = (NOW() AT TIME ZONE 'America/New_York')::date
         """).fetchone()
 
     from agent.config_manager import config as _cfg
@@ -2106,7 +2133,8 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
                 if (d == "BUY" and last_price <= stp) or (d == "SELL" and last_price >= stp):
                     exit_reason = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"
                     _record_close(c, row["id"], last_price, exit_reason, entry, d,
-                                  shares_r, partial, int(row["shares"]), ticker=ticker)
+                                  shares_r, partial, int(row["shares"]), ticker=ticker,
+                                  ideal_exit_price=stp)
                     actions.append(exit_reason)
                     logger.info(
                         f"[PAPER-RT] {exit_reason} {d} {ticker} @ ${last_price:.2f} "
@@ -2118,7 +2146,8 @@ def rt_check_positions(ticker: str, last_price: float) -> list[str]:
                 if t1_hit and t2 > 0:
                     if (d == "BUY" and last_price >= t2) or (d == "SELL" and last_price <= t2):
                         _record_close(c, row["id"], t2, "TARGET_T2", entry, d,
-                                      shares_r, partial, int(row["shares"]), ticker=ticker)
+                                      shares_r, partial, int(row["shares"]), ticker=ticker,
+                                      ideal_exit_price=t2)
                         actions.append("TARGET_T2")
                         logger.info(
                             f"[PAPER-RT] TARGET_T2 {d} {ticker} @ ${t2:.2f} (real-time)"
@@ -2266,7 +2295,8 @@ def get_account_state(open_prices: dict | None = None) -> dict:
             FROM paper_trades
             WHERE status='CLOSED'
               AND closed_at IS NOT NULL AND closed_at != ''
-              AND closed_at::date = CURRENT_DATE
+              AND (closed_at::timestamptz AT TIME ZONE 'America/New_York')::date
+                    = (NOW() AT TIME ZONE 'America/New_York')::date
         """).fetchone()
 
     from agent.config_manager import config as _cfg
