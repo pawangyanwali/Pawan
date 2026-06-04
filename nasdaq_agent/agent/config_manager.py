@@ -258,6 +258,37 @@ _DEFAULTS: dict[str, Any] = {
     "algos.meta_ens.exec_min_conf":         lambda: 0.0,
     "algos.meta_ens.exec_min_rr":           lambda: 0.0,
     "algos.meta_ens.exec_block_sessions":   lambda: "",
+    # ── Execution realism (Phase 6) ────────────────────────────────────────────
+    # fill_model_enabled: set False to revert to ideal-price fills (for comparison)
+    "execution.fill_model_enabled":         lambda: True,
+    # Session baseline slippage (bps) — controls how much worse than ideal each fill is
+    "execution.slip_base_regular":          lambda: 3.0,
+    "execution.slip_base_restricted":       lambda: 8.0,
+    "execution.slip_base_pre_market":       lambda: 12.0,
+    "execution.slip_base_after_hours":      lambda: 18.0,
+    # Volatility penalty — adds N bps per % ATR above threshold
+    "execution.slip_vol_threshold_pct":     lambda: 1.0,    # ATR% above which penalty starts
+    "execution.slip_vol_penalty_bps":       lambda: 1.5,    # bps per % ATR over threshold
+    # Liquidity penalty based on avg daily volume
+    "execution.slip_liq_low_vol":           lambda: 100_000, # shares/day below = low liquidity
+    "execution.slip_liq_mid_vol":           lambda: 500_000, # shares/day below = mid liquidity
+    "execution.slip_liq_low_penalty_bps":   lambda: 10.0,
+    "execution.slip_liq_mid_penalty_bps":   lambda: 3.0,
+    # Position size penalty — large orders relative to daily volume cost more
+    "execution.slip_size_rate":             lambda: 50.0,   # bps per % of daily dollar vol
+    "execution.slip_size_cap_bps":          lambda: 20.0,   # cap on size penalty
+    "execution.slip_max_bps":               lambda: 60.0,   # hard ceiling on total slippage
+    # Stop-market specific — gap penalty when bar low is well below stop
+    "execution.stop_gap_factor":            lambda: 0.30,   # fraction of gap below stop added to slippage
+    # Spread estimation from ATR when bid/ask unavailable
+    "execution.spread_atr_rate":            lambda: 0.15,   # synthetic spread = 15% of ATR
+    "execution.spread_min_bps":             lambda: 1.0,    # floor spread in bps
+    # ── Ticker-level damage control ─────────────────────────────────────────────
+    "risk.ticker_loss_cooldown_usd":        lambda: 50.0,   # $ loss in window to trip cooldown
+    "risk.ticker_loss_window_min":          lambda: 30,     # rolling window (minutes)
+    "risk.ticker_pre_t1_stops_max":         lambda: 2,      # pre-T1 stops in window before cooldown
+    "risk.ticker_pre_t1_window_min":        lambda: 30,     # rolling window for pre-T1 stops
+    "risk.ticker_cooldown_min":             lambda: 60,     # how long to block the ticker
     # ── Support & Resistance tuning ────────────────────────────────────────────
     # All constants used in support_resistance.py are hot-reloadable here.
     "sr.cluster_tolerance_pct":             lambda: 0.40,   # % — merge levels within this distance (0.4% default)

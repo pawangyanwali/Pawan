@@ -287,6 +287,12 @@ def init_db() -> None:
                     )
             except Exception:
                 pass
+    # Execution realism tables (Phase 6 — paper_orders, paper_fills, attribution)
+    try:
+        from agent.execution.paper_broker import init_execution_tables
+        init_execution_tables()
+    except Exception as _et:
+        logger.warning("[init_db] execution tables init failed: %s", _et)
 
 
 _COLUMN_ADDITIONS = [
@@ -326,6 +332,10 @@ _COLUMN_ADDITIONS = [
     ("ml_ensemble_score",      "INTEGER"),
     ("feedback_triggered_at",  "TEXT"),
     ("t1_water_mark",          "REAL DEFAULT 0"),  # price high/low since T1 hit, for trailing stop
+    # Execution realism (Phase 6) — separates strategy P&L from execution cost
+    ("entry_ideal_price",      "REAL DEFAULT 0"),  # signal price before slippage
+    ("entry_slip_bps",         "REAL DEFAULT 0"),  # entry slippage in bps
+    ("entry_spread_usd",       "REAL DEFAULT 0"),  # entry half-spread cost in dollars
 ]
 
 # Additional columns for algo_signal_log (applied separately)
@@ -570,6 +580,101 @@ def check_flash_stop_guard(algo_name: str, session: str) -> tuple:
     return False, ""
 
 
+# ── Ticker-level damage control ───────────────────────────────────────────────
+# Blocks a specific ticker after repeated losses or pre-T1 stops.
+# Operates independently of algo-family controls — one bad ticker won't
+# pollute the algo family's metrics. Config: risk.ticker_* keys.
+_ticker_loss_tracker:    dict = {}   # ticker → deque of (timestamp, pnl_dollar)
+_ticker_pre_t1_stops:    dict = {}   # ticker → deque of timestamp
+_ticker_cooldown_until:  dict = {}   # ticker → epoch when cooldown ends
+_ticker_lock = threading.Lock()
+
+
+def _rcfg(key: str, default):
+    try:
+        from agent.config_manager import config as _cfg
+        return _cfg.get(key, default)
+    except Exception:
+        return default
+
+
+def record_ticker_loss(ticker: str, pnl_dollar: float) -> None:
+    """Record a loss outcome for ticker-level cooldown tracking."""
+    if not ticker or pnl_dollar >= 0:
+        return
+    now = time.time()
+    window_s = int(_rcfg("risk.ticker_loss_window_min", 30)) * 60
+    with _ticker_lock:
+        if ticker not in _ticker_loss_tracker:
+            _ticker_loss_tracker[ticker] = collections.deque()
+        _ticker_loss_tracker[ticker].append((now, pnl_dollar))
+        cutoff = now - window_s
+        while _ticker_loss_tracker[ticker] and _ticker_loss_tracker[ticker][0][0] < cutoff:
+            _ticker_loss_tracker[ticker].popleft()
+        # Trip cooldown immediately if threshold exceeded
+        total = sum(p for _, p in _ticker_loss_tracker[ticker])
+        threshold = -abs(float(_rcfg("risk.ticker_loss_cooldown_usd", 50.0)))
+        if total < threshold:
+            cooldown_s = int(_rcfg("risk.ticker_cooldown_min", 60)) * 60
+            _ticker_cooldown_until[ticker] = now + cooldown_s
+            logger.info(
+                f"[PAPER] Ticker cooldown tripped: {ticker} lost ${total:.2f} "
+                f"in {int(_rcfg('risk.ticker_loss_window_min', 30))}min "
+                f"→ blocked {int(_rcfg('risk.ticker_cooldown_min', 60))}min"
+            )
+
+
+def record_ticker_pre_t1_stop(ticker: str) -> None:
+    """Record a pre-T1 stop for per-ticker fast-stop detection."""
+    if not ticker:
+        return
+    now = time.time()
+    window_s = int(_rcfg("risk.ticker_pre_t1_window_min", 30)) * 60
+    with _ticker_lock:
+        if ticker not in _ticker_pre_t1_stops:
+            _ticker_pre_t1_stops[ticker] = collections.deque()
+        _ticker_pre_t1_stops[ticker].append(now)
+        cutoff = now - window_s
+        while _ticker_pre_t1_stops[ticker] and _ticker_pre_t1_stops[ticker][0] < cutoff:
+            _ticker_pre_t1_stops[ticker].popleft()
+        max_stops = int(_rcfg("risk.ticker_pre_t1_stops_max", 2))
+        if len(_ticker_pre_t1_stops[ticker]) >= max_stops:
+            cooldown_s = int(_rcfg("risk.ticker_cooldown_min", 60)) * 60
+            _ticker_cooldown_until[ticker] = now + cooldown_s
+            logger.info(
+                f"[PAPER] Ticker cooldown tripped: {ticker} hit {max_stops} pre-T1 stops "
+                f"in {int(_rcfg('risk.ticker_pre_t1_window_min', 30))}min "
+                f"→ blocked {int(_rcfg('risk.ticker_cooldown_min', 60))}min"
+            )
+
+
+def check_ticker_cooldown(ticker: str) -> tuple:
+    """Returns (blocked: bool, reason: str) for ticker-level cooldown."""
+    if not ticker:
+        return False, ""
+    now = time.time()
+    with _ticker_lock:
+        blocked_until = _ticker_cooldown_until.get(ticker, 0.0)
+    if now < blocked_until:
+        remaining_min = round((blocked_until - now) / 60, 0)
+        return True, f"ticker {ticker} cooling down ({int(remaining_min)}min remaining)"
+    return False, ""
+
+
+def get_ticker_cooldowns() -> list[dict]:
+    """Return list of currently active ticker cooldowns (for dashboard)."""
+    now = time.time()
+    result = []
+    with _ticker_lock:
+        for ticker, until in _ticker_cooldown_until.items():
+            if now < until:
+                result.append({
+                    "ticker": ticker,
+                    "remaining_min": round((until - now) / 60, 1),
+                })
+    return sorted(result, key=lambda x: x["remaining_min"], reverse=True)
+
+
 def _get_min_confidence() -> float:
     """
     Return the minimum confidence required to open a paper trade.
@@ -613,6 +718,8 @@ def maybe_open_trade(
     ml_deep_prob:     Optional[float] = None,
     ml_ensemble_score: Optional[int] = None,
     rr_quality:       str   = "",
+    atr:              float = 0.0,           # ATR(14) at time of signal — used for fill model
+    avg_daily_volume: float = 0.0,           # avg daily shares — used for liquidity penalty
     _out_status:      Optional[list] = None,
 ) -> Optional[int]:
     """
@@ -654,6 +761,14 @@ def maybe_open_trade(
             if _out_status is not None:
                 _out_status.append("BLOCKED_RESTRICTED")
             return None
+
+    # Ticker-level damage control — independent of algo-family controls.
+    _tk_blocked, _tk_reason = check_ticker_cooldown(ticker)
+    if _tk_blocked:
+        logger.info(f"[PAPER] {ticker} skip: {_tk_reason}")
+        if _out_status is not None:
+            _out_status.append("BLOCKED_TICKER_COOLDOWN")
+        return None
 
     # Per-family execution controls — check BEFORE circuit breaker for fast-path rejection.
     if algo_name:
@@ -699,7 +814,9 @@ def maybe_open_trade(
             if _out_status is not None:
                 _out_status.append("BLOCKED_FLASH_STORM")
             return None
-        # Rolling EV adaptive floor — raise confidence bar when combo is bleeding
+        # Rolling EV adaptive floor — raise confidence bar AND reduce size when combo is bleeding.
+        # Two-tier response: if conf meets bumped floor → allow but halve size.
+        #                    if conf below bumped floor → block entirely.
         _ev_blocked, _ev_conf_bump = check_rolling_ev_suppress(algo_name, direction, session or "")
         if _ev_blocked and _ev_conf_bump > 0:
             _ev_min_conf = _get_min_confidence() + _ev_conf_bump
@@ -711,6 +828,13 @@ def maybe_open_trade(
                 if _out_status is not None:
                     _out_status.append("BLOCKED_EV_SUPPRESS")
                 return None
+            else:
+                # Qualifies but combo is struggling — halve size as adaptive throttle
+                size_mult = round(size_mult * 0.50, 4)
+                logger.info(
+                    f"[PAPER] {ticker} EV throttle: {_algo_family(algo_name)}+{direction} "
+                    f"rolling EV negative → size halved (conf {confidence:.0f}% ≥ floor {_ev_min_conf:.0f}%)"
+                )
         # Apply family size multiplier
         size_mult = round(size_mult * _fam_size_mult, 4)
 
@@ -895,6 +1019,16 @@ def maybe_open_trade(
             max_by_capital = max(1, int(available    / cost_basis_per_share))
             shares = min(shares, max_by_trade, max_by_capital)
 
+            # ── Realistic entry fill (Phase 6 execution realism) ─────────────
+            from agent.execution.fill_model import compute_entry_fill as _cef
+            _atr_eff  = atr if atr > 0 else price * 0.01   # fallback: 1% ATR estimate
+            _entry_fill = _cef(
+                direction, price, _atr_eff,
+                _live_session or session or "REGULAR",
+                shares, avg_daily_volume,
+            )
+            actual_entry = _entry_fill.fill_price   # slippage-adjusted entry
+
             cur = c.execute("""
                 INSERT INTO paper_trades
                   (opened_at, ticker, direction, entry_price, target, stop,
@@ -903,32 +1037,43 @@ def maybe_open_trade(
                    t1_price, t2_price, order_flow_score, size_mult, cost_basis,
                    algo_name,
                    ml_scalp_prob, ml_daily_prob, ml_swing_prob, ml_deep_prob,
-                   ml_ensemble_score)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ml_ensemble_score,
+                   entry_ideal_price, entry_slip_bps, entry_spread_usd)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
-                round(price, 4), round(target, 4), round(stop, 4),
+                round(actual_entry, 4), round(target, 4), round(stop, 4),
                 round(confidence, 2), round(rr_ratio, 2), int(rr_qualifies),
                 shares, shares,  # shares_remaining starts = shares
                 session, regime, vwap_event, rsi_zone, entry_type,
                 t1_price, t2_price,
                 round(order_flow_score, 4), round(effective_size_mult, 2),
-                round(price * shares, 2),
+                round(actual_entry * shares, 2),
                 algo_name,
                 round(ml_scalp_prob, 4) if ml_scalp_prob is not None else None,
                 round(ml_daily_prob, 4) if ml_daily_prob is not None else None,
                 round(ml_swing_prob, 4) if ml_swing_prob is not None else None,
                 round(ml_deep_prob, 4) if ml_deep_prob is not None else None,
                 ml_ensemble_score,
+                round(price, 4),                              # entry_ideal_price = signal close
+                round(_entry_fill.slippage_bps, 2),           # entry_slip_bps
+                round(_entry_fill.spread_dollar, 4),          # entry_spread_usd
             ))
             c.commit()
             logger.info(
-                f"[PAPER] Opened {direction} {ticker} @ ${price:.2f} "
+                f"[PAPER] Opened {direction} {ticker} @ ${actual_entry:.2f} "
+                f"(signal ${price:.2f} slip {_entry_fill.slippage_bps:.1f}bps) "
                 f"T1:${t1_price:.2f}  T2:${t2_price:.2f}  S:${stop:.2f}  "
                 f"conf:{confidence:.0f}%  shares:{shares}  OF:{order_flow_score:+.2f}  "
                 f"sess:{session}  regime:{regime}"
             )
+            # Record entry fill in paper_fills
+            try:
+                from agent.execution.paper_broker import record_fill as _rfill
+                _rfill(c, cur.lastrowid, ticker, direction, shares, _entry_fill)
+            except Exception as _fe:
+                logger.debug("[PAPER] entry fill record error: %s", _fe)
             _fire_trade_event("open", ticker)
             if _out_status is not None:
                 _out_status.append("EXECUTED_PAPER")
@@ -994,6 +1139,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                        COALESCE(algo_name, '') as algo_name,
                        COALESCE(session, '') as session,
                        COALESCE(t1_water_mark, 0) as t1_water_mark,
+                       COALESCE(entry_ideal_price, entry_price) as entry_ideal_price,
+                       COALESCE(entry_slip_bps, 0) as entry_slip_bps,
+                       COALESCE(entry_spread_usd, 0) as entry_spread_usd,
                        created_at
                 FROM paper_trades WHERE ticker=? AND status='OPEN'
             """, (ticker,)).fetchall()
@@ -1002,18 +1150,24 @@ def update_open_trades(ticker: str, df, current_price: float,
                 bars = (row["bars_held"] or 0) + 1
                 c.execute("UPDATE paper_trades SET bars_held=? WHERE id=?", (bars, row["id"]))
 
-                entry           = float(row["entry_price"] or current_price)
-                stop_current    = float(row["stop"])
-                t1_price        = float(row["t1_price"] or 0)
-                t2_price        = float(row["t2_price"] or 0)
-                shares_total    = int(row["shares"] or 1)
-                shares_rem      = int(row["shares_remaining"] or shares_total)
-                t1_hit          = bool(row["t1_hit"])
-                partial_pnl     = float(row["partial_pnl_dollar"] or 0)
-                direction       = row["direction"]
-                entry_type      = row["entry_type"] or "IMMEDIATE"
-                _algo_nm        = row["algo_name"] or ""
-                _sess           = row["session"] or ""
+                entry            = float(row["entry_price"] or current_price)
+                stop_current     = float(row["stop"])
+                t1_price         = float(row["t1_price"] or 0)
+                t2_price         = float(row["t2_price"] or 0)
+                shares_total     = int(row["shares"] or 1)
+                shares_rem       = int(row["shares_remaining"] or shares_total)
+                t1_hit           = bool(row["t1_hit"])
+                partial_pnl      = float(row["partial_pnl_dollar"] or 0)
+                direction        = row["direction"]
+                entry_type       = row["entry_type"] or "IMMEDIATE"
+                _algo_nm         = row["algo_name"] or ""
+                _sess            = row["session"] or ""
+                _entry_ideal     = float(row["entry_ideal_price"] or entry)
+                _entry_slip_bps  = float(row["entry_slip_bps"]    or 0)
+                _entry_spread    = float(row["entry_spread_usd"]  or 0)
+                # Filled in per close-scenario for attribution
+                _ideal_exit      = 0.0
+                _exit_slip_bps   = 0.0
                 _t1_water       = float(row["t1_water_mark"] or 0)
                 _created_at     = row["created_at"] or ""
 
@@ -1202,6 +1356,11 @@ def update_open_trades(ticker: str, df, current_price: float,
                             won_any    = partial_pnl > 0
                             continue
 
+                # ── Execution realism helpers (Phase 6) ───────────────────────
+                # ATR and avg_volume for fill model; derived from the bar DataFrame.
+                _atr_fm  = float(df["atr_14"].iloc[-1]) if "atr_14" in df.columns and not df["atr_14"].isna().all() else stop_current * 0.01
+                _avol_fm = float(df["Volume"].mean() * 390) if "Volume" in df.columns else 0.0
+
                 # ── 3. T2 full exit (2R profit) — only if T1 already hit ──────
                 if not exit_reason and t1_hit and t2_price > 0:
                     t2_hit_now = (
@@ -1211,7 +1370,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                     if t2_hit_now:
                         exit_reason  = "TARGET_T2"
                         close_shares = shares_rem
-                        ep           = t2_price  # fill at T2
+                        ep           = t2_price   # limit order: fills at T2
+                        _ideal_exit  = t2_price
+                        _exit_slip_bps = 0.0
 
                 # ── 4. Stop hit ────────────────────────────────────────────────
                 if not exit_reason:
@@ -1222,6 +1383,14 @@ def update_open_trades(ticker: str, df, current_price: float,
                     if stop_hit:
                         exit_reason  = "STOP_HIT_BREAKEVEN" if row["breakeven_set"] else "STOP_HIT"
                         close_shares = shares_rem
+                        # Realistic stop fill: stop-market fills at stop ± slippage, NOT bar close.
+                        # This also fixes the current bug where a stop fills at bar close even
+                        # when the bar recovers above the stop after briefly touching it.
+                        from agent.execution.fill_model import compute_stop_fill as _csf
+                        _stop_fill   = _csf(direction, stop_current, _lo, _hi, _atr_fm, _sess, shares_rem, _avol_fm)
+                        ep           = _stop_fill.fill_price
+                        _ideal_exit  = stop_current
+                        _exit_slip_bps = _stop_fill.slippage_bps
                         # Record pre-T1 stop for storm circuit detection
                         if not t1_hit and _algo_nm:
                             _pnl_calc = (
@@ -1229,9 +1398,18 @@ def update_open_trades(ticker: str, df, current_price: float,
                                 else (entry - ep) * shares_rem
                             )
                             record_pre_t1_stop(_algo_nm, _sess, _pnl_calc)
+                        # Ticker-level pre-T1 stop tracking
+                        if not t1_hit:
+                            record_ticker_pre_t1_stop(ticker)
                         # Flash-stop guard: record sub-60-second stop hits
                         if _algo_nm:
                             record_flash_stop(_algo_nm, _sess, _created_at)
+                        # Record stop fill in paper_fills
+                        try:
+                            from agent.execution.paper_broker import record_fill as _rfill
+                            _rfill(c, row["id"], ticker, direction, shares_rem, _stop_fill)
+                        except Exception as _sfe:
+                            logger.debug("[PAPER] stop fill record error: %s", _sfe)
 
                 # ── 5. Time stop ───────────────────────────────────────────────
                 if not exit_reason and bars >= max_bars:
@@ -1251,8 +1429,16 @@ def update_open_trades(ticker: str, df, current_price: float,
 
                 # ── Close trade ────────────────────────────────────────────────
                 if exit_reason and close_shares > 0:
-                    _record_close(c, row["id"], ep, exit_reason, entry, direction,
-                                  close_shares, partial_pnl, shares_total, ticker=ticker)
+                    _record_close(
+                        c, row["id"], ep, exit_reason, entry, direction,
+                        close_shares, partial_pnl, shares_total, ticker=ticker,
+                        ideal_exit_price  = _ideal_exit,
+                        ideal_entry_price = _entry_ideal,
+                        entry_slip_bps    = _entry_slip_bps,
+                        exit_slip_bps     = _exit_slip_bps,
+                        entry_spread_usd  = _entry_spread,
+                        session           = _sess,
+                    )
                     closed_any = True
                     # Calculate net P&L for consecutive loss tracking
                     final_pnl = (
@@ -1261,6 +1447,9 @@ def update_open_trades(ticker: str, df, current_price: float,
                         + partial_pnl
                     )
                     won_any = final_pnl > 0
+                    # Ticker-level loss tracking for cooldown
+                    if final_pnl < 0:
+                        record_ticker_loss(ticker, final_pnl)
                     # Feed rolling EV tracker so adaptive floor adjusts in real-time
                     if _algo_nm:
                         record_algo_ev_outcome(_algo_nm, direction, _sess, final_pnl)
@@ -1279,15 +1468,22 @@ def update_open_trades(ticker: str, df, current_price: float,
 
 def _record_close(
     c,
-    trade_id:     int,
-    exit_price:   float,
-    exit_reason:  str,
-    entry:        float,
-    direction:    str,
-    close_shares: int,
-    partial_pnl:  float = 0.0,
-    total_shares: int   = 0,      # original position size for correct pnl_pct
-    ticker:       str   = "",
+    trade_id:          int,
+    exit_price:        float,
+    exit_reason:       str,
+    entry:             float,
+    direction:         str,
+    close_shares:      int,
+    partial_pnl:       float = 0.0,
+    total_shares:      int   = 0,
+    ticker:            str   = "",
+    # Attribution params (Phase 6)
+    ideal_exit_price:  float = 0.0,
+    ideal_entry_price: float = 0.0,
+    entry_slip_bps:    float = 0.0,
+    exit_slip_bps:     float = 0.0,
+    entry_spread_usd:  float = 0.0,
+    session:           str   = "",
 ) -> None:
     """Write the final closed state for a trade record."""
     ep = exit_price
@@ -1322,6 +1518,27 @@ def _record_close(
     )
     if ticker:
         _fire_trade_event("close", ticker)
+    # Record execution attribution for strategy P&L vs actual P&L analysis
+    try:
+        from agent.execution.paper_broker import record_attribution as _ratrib
+        _eff_ideal_entry = ideal_entry_price if ideal_entry_price > 0 else ep
+        _eff_ideal_exit  = ideal_exit_price  if ideal_exit_price  > 0 else ep
+        _eff_shares      = total_shares if total_shares > 0 else close_shares
+        _ratrib(
+            c, trade_id, ticker, direction, session,
+            ideal_entry    = _eff_ideal_entry,
+            actual_entry   = entry,
+            ideal_exit     = _eff_ideal_exit,
+            actual_exit    = ep,
+            shares         = _eff_shares,
+            actual_pnl     = round(pnl_dollar, 2),
+            entry_slip_bps = entry_slip_bps,
+            exit_slip_bps  = exit_slip_bps,
+            entry_spread_usd = entry_spread_usd,
+            attribution_note = exit_reason,
+        )
+    except Exception as _ae:
+        logger.debug("[PAPER] attribution record error: %s", _ae)
     # Publish immediate trade-close event for algo feedback loop
     try:
         import json as _json, time as _time

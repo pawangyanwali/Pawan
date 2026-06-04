@@ -202,6 +202,21 @@ async def paper_daily_pnl():
     return {"daily": get_daily_pnl(days=14), "today": get_today_pnl()}
 
 
+@router.get("/api/execution-quality")
+async def execution_quality():
+    """Today's execution quality metrics: slippage, spread, strategy P&L vs actual P&L."""
+    loop = asyncio.get_running_loop()
+    try:
+        from agent.execution.paper_broker import get_daily_execution_quality
+        from agent.paper_trading import get_ticker_cooldowns
+        quality = await loop.run_in_executor(_pt_executor, get_daily_execution_quality)
+        cooldowns = await loop.run_in_executor(_pt_executor, get_ticker_cooldowns)
+        quality["ticker_cooldowns"] = cooldowns
+        return quality
+    except Exception as _e:
+        return {"error": str(_e)}
+
+
 @router.get("/api/paper-trading/performance")
 async def paper_performance():
     """Full P&L performance dashboard data."""

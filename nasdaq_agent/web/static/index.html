@@ -938,7 +938,15 @@
     </div>
 
     <!-- Summary stats -->
-    <div id="paper-stats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px"></div>
+    <div id="paper-stats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+    <!-- Execution Quality strip -->
+    <div id="exec-quality-strip" style="display:none;background:#0e1017;border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div style="font-size:9px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px">Execution Quality</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap" id="exec-quality-stats"></div>
+      </div>
+      <div id="exec-quality-attribution" style="margin-top:8px"></div>
+    </div>
 
     <!-- Tab bar -->
     <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap">
@@ -4353,15 +4361,17 @@ async function openPaperTrading() {
   document.getElementById('paper-stats').innerHTML     = _loadingHtml;
   ptTab('open');
   try {
-    const [d, ls] = await Promise.all([
+    const [d, ls, eq] = await Promise.all([
       _authFetch(`${BACKEND_HTTP}/api/paper-trading`, {signal: AbortSignal.timeout(15000)}).then(async r => {
         const body = await r.json();
         if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
         return body;
       }),
       _authFetch(`${BACKEND_HTTP}/api/learning-status`, {signal: AbortSignal.timeout(10000)}).then(r=>r.json()).catch(()=>({})),
+      _authFetch(`${BACKEND_HTTP}/api/execution-quality`, {signal: AbortSignal.timeout(10000)}).then(r=>r.json()).catch(()=>({})),
     ]);
     _ptData = d; _ptLearn = ls;
+    _renderExecQuality(eq);
     const s = d.summary;
     const target = ls.target_win_rate || 55;
 
@@ -4593,6 +4603,74 @@ function _ptRenderLearning(ls, summary) {
 }
 
 function closePaperTrading() { document.getElementById('paper-modal').classList.remove('open'); }
+
+function _renderExecQuality(eq) {
+  const strip = document.getElementById('exec-quality-strip');
+  const stats = document.getElementById('exec-quality-stats');
+  const attr  = document.getElementById('exec-quality-attribution');
+  if (!strip || !eq || eq.error || !eq.fill_count) {
+    if (strip) strip.style.display = 'none';
+    return;
+  }
+  strip.style.display = '';
+
+  const _fmt  = (v, prefix='$') => `${prefix}${Math.abs(v).toFixed(2)}`;
+  const _bps  = v => `${(+v).toFixed(1)} bps`;
+  const _clr  = v => v >= 0 ? 'var(--green)' : 'var(--red)';
+  const _neg  = v => v < 0;
+
+  const metrics = [
+    { label: 'Fills',         val: eq.fill_count,                    color: 'var(--text)',    unit: '' },
+    { label: 'Avg Slip',      val: _bps(eq.avg_slip_bps),            color: _neg(eq.avg_slip_bps) ? 'var(--yellow)' : 'var(--green)', unit: '' },
+    { label: 'Total Slip $',  val: '−'+_fmt(eq.total_slip_usd),      color: 'var(--red)',     unit: '' },
+    { label: 'Stop Fills',    val: eq.stop_fills,                    color: eq.stop_fills > 5 ? 'var(--red)' : 'var(--text)', unit: '' },
+    { label: 'Stop Slip',     val: _bps(eq.avg_stop_slip_bps),       color: eq.avg_stop_slip_bps > 10 ? 'var(--red)' : 'var(--yellow)', unit: '' },
+    { label: 'Avg Spread',    val: _bps(eq.avg_spread_bps),          color: 'var(--muted)',   unit: '' },
+  ];
+  stats.innerHTML = metrics.map(m => `
+    <div style="text-align:center">
+      <div style="font-size:8px;color:var(--muted)">${m.label}</div>
+      <div style="font-size:12px;font-weight:700;color:${m.color}">${m.val}</div>
+    </div>`).join('');
+
+  const sp = eq.strategy_pnl ?? 0;
+  const ap = eq.actual_pnl   ?? 0;
+  const slp = eq.slippage_pnl ?? 0;
+  const sq = eq.signal_quality || {};
+
+  const spSign = sp >= 0 ? '+' : '';
+  const apSign = ap >= 0 ? '+' : '';
+  const slSign = slp >= 0 ? '+' : '';
+
+  const cooldowns = eq.ticker_cooldowns || [];
+  const cooldownHtml = cooldowns.length ? `
+    <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:9px;color:var(--muted)">Ticker Cooldowns:</span>
+      ${cooldowns.map(c => `<span style="font-size:9px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 6px">${c.ticker} ${c.remaining_min}m</span>`).join('')}
+    </div>` : '';
+
+  attr.innerHTML = `
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--border);padding-top:8px;margin-top:2px">
+      <div>
+        <span style="font-size:9px;color:var(--muted)">Strategy P&L</span>
+        <span style="font-size:12px;font-weight:700;color:${_clr(sp)};margin-left:4px">${spSign}$${Math.abs(sp).toFixed(2)}</span>
+      </div>
+      <div>
+        <span style="font-size:9px;color:var(--muted)">Actual P&L</span>
+        <span style="font-size:12px;font-weight:700;color:${_clr(ap)};margin-left:4px">${apSign}$${Math.abs(ap).toFixed(2)}</span>
+      </div>
+      <div>
+        <span style="font-size:9px;color:var(--muted)">Exec Cost</span>
+        <span style="font-size:12px;font-weight:700;color:var(--red);margin-left:4px">${slSign}$${Math.abs(slp).toFixed(2)}</span>
+      </div>
+      <div style="font-size:9px;color:var(--muted)">
+        ${sq.good_good||0} good/good &nbsp;|&nbsp;
+        <span style="color:var(--red)">${sq.good_bad||0} good-sig/bad-exec</span> &nbsp;|&nbsp;
+        ${sq.bad_good||0} bad-sig/good-exec &nbsp;|&nbsp;
+        ${sq.bad_bad||0} bad/bad
+      </div>
+    </div>${cooldownHtml}`;
+}
 
 // ─── Algorithm Performance Modal ──────────────────────────────────────────────
 function openAlgoPerf() {

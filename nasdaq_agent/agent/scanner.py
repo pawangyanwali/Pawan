@@ -1228,6 +1228,8 @@ def analyse_ticker(
                 ml_swing_prob     = ml_swing_p,
                 ml_deep_prob      = ml_deep_p,
                 ml_ensemble_score = int(round(ml_ensemble_p * 100)),
+                atr               = float(last.get("atr_14", 0.0)),
+                avg_daily_volume  = float(df_ind["Volume"].mean() * 390) if "Volume" in df_ind.columns else 0.0,
             )
 
         # Update open paper trades + live backtest tracking.
@@ -1626,6 +1628,8 @@ def analyse_ticker(
                             ml_swing_prob     = ml_swing_p,
                             ml_deep_prob      = ml_deep_p,
                             ml_ensemble_score = int(round(ml_ensemble_p * 100)),
+                            atr               = float(last.get("atr_14", 0.0)),
+                            avg_daily_volume  = float(df_ind["Volume"].mean() * 390) if "Volume" in df_ind.columns else 0.0,
                             _out_status       = _asig_status,
                         )
                         _asig["exec_status"] = _asig_status[0] if _asig_status else (
