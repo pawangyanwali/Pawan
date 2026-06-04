@@ -385,54 +385,66 @@ class ConfigManager:
             logger.warning("[ConfigManager] load() failed: %s", exc)
 
     def seed_defaults(self) -> None:
-        """
-        For each key in _DEFAULTS not yet in cache:
-          1. Try to read from legacy account_config table (paper.* keys).
-          2. Fall back to the default factory lambda.
+        """Write all _DEFAULTS to config_store using INSERT … ON CONFLICT DO NOTHING.
 
-        This preserves user-tuned settings across the migration.
-        """
-        for key, factory in _DEFAULTS.items():
-            with self._lock:
-                if key in self._cache:
-                    continue
+        Existing user-set values are never overwritten — only absent keys get the
+        Python default.  Also migrates legacy account_config values for the four
+        paper.* keys that were previously stored there.
 
-            # Try legacy account_config migration for paper.* keys
-            value = None
-            legacy_col = _LEGACY_COLUMN_MAP.get(key)
-            if legacy_col:
-                try:
-                    from agent.db import get_conn
-                    with get_conn() as c:
-                        row = c.execute(
-                            f"SELECT {legacy_col} FROM account_config WHERE id=1"
-                        ).fetchone()
-                    if row and row[legacy_col] is not None:
-                        value = row[legacy_col]
-                        logger.info(
-                            "[ConfigManager] Migrated %s from account_config.%s = %r",
-                            key, legacy_col, value,
+        Called at startup (main.py, scanner_service.py, learner_service.py) after
+        load() so that every config key appears in the DB and the Settings UI.
+        """
+        self._ensure_table()
+        now = self._now_iso()
+
+        # Legacy migration: read from account_config if present
+        legacy: dict[str, Any] = {}
+        try:
+            from agent.db import get_conn
+            with get_conn() as c:
+                row = c.execute(
+                    "SELECT total_budget, max_trade_pct, max_allocated_pct, max_open_trades"
+                    " FROM account_config WHERE id=1"
+                ).fetchone()
+            if row:
+                mapping = {
+                    "paper.budget":            ("total_budget",      float),
+                    "paper.max_trade_pct":     ("max_trade_pct",     float),
+                    "paper.max_allocated_pct": ("max_allocated_pct", float),
+                    "paper.max_open_trades":   ("max_open_trades",   int),
+                }
+                for cfg_key, (col, cast) in mapping.items():
+                    if row[col] is not None:
+                        legacy[cfg_key] = cast(row[col])
+        except Exception:
+            pass  # account_config may not exist on fresh deploys
+
+        inserted = 0
+        try:
+            from agent.db import get_conn
+            with get_conn() as c:
+                for key, factory in _DEFAULTS.items():
+                    try:
+                        value = legacy.get(key)
+                        if value is None:
+                            value = factory()
+                        val_json = json.dumps(value)
+                        c.execute(
+                            """INSERT INTO config_store (key, value, updated_at, updated_by)
+                               VALUES (?, ?, ?, 'seed_defaults')
+                               ON CONFLICT (key) DO NOTHING""",
+                            (key, val_json, now),
                         )
-                except Exception as exc:
-                    logger.debug("[ConfigManager] Legacy read for %s failed: %s", key, exc)
+                        inserted += 1
+                    except Exception as exc:
+                        logger.warning("[ConfigManager] seed_defaults: skip %s: %s", key, exc)
+        except Exception as exc:
+            logger.warning("[ConfigManager] seed_defaults failed: %s", exc)
+            return
 
-            # Fall back to default factory
-            if value is None:
-                try:
-                    value = factory()
-                except Exception as exc:
-                    logger.warning("[ConfigManager] Default factory for %s failed: %s", key, exc)
-                    continue
-
-            # Persist to DB (only if still absent — race guard)
-            with self._lock:
-                if key in self._cache:
-                    continue
-
-            try:
-                self.set(key, value, updated_by="system")
-            except Exception as exc:
-                logger.warning("[ConfigManager] seed_defaults set(%s) failed: %s", key, exc)
+        logger.info("[ConfigManager] seed_defaults: seeded %d keys (ON CONFLICT DO NOTHING)", inserted)
+        # Reload cache so newly-inserted defaults are visible immediately in this process
+        self.load()
 
     def get(self, key: str, default: Any = None) -> Any:
         """Thread-safe read from in-memory cache."""

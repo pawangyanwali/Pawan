@@ -1507,15 +1507,19 @@ TRADING_MAX_POSITION_PCT=10
       <button id="st-tab-risk"    onclick="settingsTab('risk')"    class="pt-tab">Risk Controls</button>
       <button id="st-tab-learner" onclick="settingsTab('learner')" class="pt-tab">Learner</button>
       <button id="st-tab-algos"   onclick="settingsTab('algos')"   class="pt-tab">⚙️ Algo Params</button>
-      <button id="st-tab-sr"     onclick="settingsTab('sr')"     class="pt-tab">📐 S&amp;R Tuning</button>
+      <button id="st-tab-sr"      onclick="settingsTab('sr')"      class="pt-tab">📐 S&amp;R Tuning</button>
+      <button id="st-tab-execution" onclick="settingsTab('execution')" class="pt-tab">⚡ Execution</button>
+      <button id="st-tab-system"    onclick="settingsTab('system')"    class="pt-tab">🔧 System</button>
     </div>
     <div id="st-panel-paper"      style="display:block;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-traderules" style="display:none;max-height:72vh;overflow-y:auto"></div>
     <div id="st-panel-signal"     style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-risk"    style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-learner" style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-algos"   style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-sr"      style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-risk"       style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-learner"    style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-algos"      style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-sr"         style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-execution"  style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div id="st-panel-system"     style="display:none;max-height:72vh;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -4918,7 +4922,7 @@ function closeSettings() {
   document.getElementById('settings-modal').classList.remove('open');
 }
 function settingsTab(name) {
-  ['paper','traderules','signal','risk','learner','algos','sr'].forEach(t => {
+  ['paper','traderules','signal','risk','learner','algos','sr','execution','system'].forEach(t => {
     document.getElementById('st-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('st-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
@@ -4929,6 +4933,8 @@ function settingsTab(name) {
   if (name === 'learner')    stLoadLearnerTab();
   if (name === 'algos')      stLoadAlgosTab();
   if (name === 'sr')         stLoadSRTab();
+  if (name === 'execution')  stLoadExecutionTab();
+  if (name === 'system')     stLoadSystemTab();
 }
 
 // ── Trade Rules tab ────────────────────────────────────────────────────────────
@@ -5034,7 +5040,6 @@ async function stSaveTradeRules(btn) {
     "paper.t2_r_multiple":            _v('st-tr-t2-mult'),
     "paper.t1_profit_lock_r":         _v('st-tr-profit-lock'),
     "paper.post_t1_trail_r":          _v('st-tr-trail-r'),
-    "paper.breakeven_stop_offset":    _v('st-tr-be-offset'),
     "paper.rr_denominator":           _v('st-tr-rr-denom'),
     "paper.rr_size_mult_min":         _v('st-tr-rr-min-mult'),
     "paper.max_bars_scalp":           _i('st-tr-scalp-bars'),
@@ -6121,6 +6126,317 @@ async function stSaveSRConfig(btn) {
   };
   const invalid = Object.values(updates).filter(v => isNaN(v));
   if (invalid.length) { if (status) { status.textContent = 'Fix invalid values.'; status.style.color = 'var(--red)'; } return; }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updates), signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
+}
+
+// ── Execution tab ─────────────────────────────────────────────────────────────
+async function stLoadExecutionTab() {
+  const el = document.getElementById('st-panel-execution');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
+  try {
+    const [exResp, rkResp] = await Promise.all([
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=execution.`, {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`,      {signal: AbortSignal.timeout(12000)}),
+    ]);
+    const ex = (await exResp.json()).config || {};
+    const rk = (await rkResp.json()).config || {};
+    const inp = (id, val, min, max, step, label) =>
+      `<div><div style="font-size:9px;color:var(--muted);margin-bottom:3px;text-transform:uppercase">${label}</div>
+       <input id="${id}" type="number" min="${min}" max="${max}" step="${step}" value="${val}"
+         style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit"></div>`;
+    el.innerHTML = `
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.5">
+        Paper broker fill model — slippage, spread, stop gap penalties, and ticker damage control. All hot-reloadable without restart.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="grid-column:1/-1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Fill Model</div>
+          <div style="display:flex;align-items:center;gap:14px">
+            <select id="st-ex-fill-enabled" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 10px;color:var(--text);font-size:12px;font-family:inherit">
+              <option value="true"  ${(ex['execution.fill_model_enabled']??true)  ?'selected':''}>Enabled — realistic fills</option>
+              <option value="false" ${!(ex['execution.fill_model_enabled']??true) ?'selected':''}>Disabled — ideal prices</option>
+            </select>
+            <div style="font-size:9px;color:var(--muted);line-height:1.5">Disable to revert to ideal-price fills for comparison. All slippage/spread parameters below are ignored when disabled.</div>
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Session Baseline Slippage (bps)</div>
+          <div style="display:grid;gap:8px">
+            ${inp('st-ex-slip-regular',    ex['execution.slip_base_regular']     ?? 3.0,  0, 50,  0.5, 'REGULAR (9:45–15:45 ET)')}
+            ${inp('st-ex-slip-restricted', ex['execution.slip_base_restricted']  ?? 8.0,  0, 50,  0.5, 'RESTRICTED (9:30–9:44 ET)')}
+            ${inp('st-ex-slip-premarket',  ex['execution.slip_base_pre_market']  ?? 12.0, 0, 100, 1,   'PRE-MARKET')}
+            ${inp('st-ex-slip-afterhours', ex['execution.slip_base_after_hours'] ?? 18.0, 0, 100, 1,   'AFTER-HOURS')}
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Volatility Penalty</div>
+          <div style="display:grid;gap:8px">
+            ${inp('st-ex-vol-thr',     ex['execution.slip_vol_threshold_pct'] ?? 1.0, 0, 10, 0.1, 'ATR% threshold — penalty starts above this')}
+            ${inp('st-ex-vol-penalty', ex['execution.slip_vol_penalty_bps']   ?? 1.5, 0, 20, 0.5, 'Bps added per % ATR over threshold')}
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Liquidity Penalty</div>
+          <div style="display:grid;gap:8px">
+            ${inp('st-ex-liq-low-vol',     ex['execution.slip_liq_low_vol']          ?? 100000, 0, 5000000, 10000, 'Low-liq threshold (shares/day)')}
+            ${inp('st-ex-liq-mid-vol',     ex['execution.slip_liq_mid_vol']          ?? 500000, 0, 5000000, 50000, 'Mid-liq threshold (shares/day)')}
+            ${inp('st-ex-liq-low-penalty', ex['execution.slip_liq_low_penalty_bps']  ?? 10.0,   0, 100, 1,       'Low-liq penalty (bps)')}
+            ${inp('st-ex-liq-mid-penalty', ex['execution.slip_liq_mid_penalty_bps']  ?? 3.0,    0, 50,  0.5,     'Mid-liq penalty (bps)')}
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Order Size Penalty</div>
+          <div style="display:grid;gap:8px">
+            ${inp('st-ex-size-rate', ex['execution.slip_size_rate']    ?? 50.0, 0, 500, 5,  'Bps per % of avg daily dollar volume')}
+            ${inp('st-ex-size-cap',  ex['execution.slip_size_cap_bps'] ?? 20.0, 0, 100, 1,  'Cap on size penalty (bps)')}
+            ${inp('st-ex-slip-max',  ex['execution.slip_max_bps']      ?? 60.0, 5, 200, 5,  'Hard ceiling on total slippage (bps)')}
+          </div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Stop &amp; Spread</div>
+          <div style="display:grid;gap:8px">
+            ${inp('st-ex-stop-gap',   ex['execution.stop_gap_factor']  ?? 0.30, 0, 1,  0.05, 'Stop gap factor (fraction of gap below stop)')}
+            ${inp('st-ex-spread-atr', ex['execution.spread_atr_rate']  ?? 0.15, 0, 1,  0.01, 'Spread as fraction of ATR')}
+            ${inp('st-ex-spread-min', ex['execution.spread_min_bps']   ?? 1.0,  0, 20, 0.5,  'Minimum spread floor (bps)')}
+          </div>
+        </div>
+        <div style="grid-column:1/-1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+          <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Ticker Damage Control</div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:10px">Per-ticker circuit independent of algo-family controls. Blocks a ticker entry after excessive losses or pre-T1 stops within a rolling window.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:10px">
+            ${inp('st-ex-tk-loss-usd',    rk['risk.ticker_loss_cooldown_usd'] ?? 50.0, 5, 1000, 5, 'Loss to trip ($ in window)')}
+            ${inp('st-ex-tk-loss-window', rk['risk.ticker_loss_window_min']   ?? 30,   5, 240,  5, 'Loss window (min)')}
+            ${inp('st-ex-tk-pt1-max',     rk['risk.ticker_pre_t1_stops_max']  ?? 2,    1, 20,   1, 'Max pre-T1 stops in window')}
+            ${inp('st-ex-tk-pt1-window',  rk['risk.ticker_pre_t1_window_min'] ?? 30,   5, 240,  5, 'Pre-T1 stop window (min)')}
+            ${inp('st-ex-tk-cooldown',    rk['risk.ticker_cooldown_min']      ?? 60,   5, 480,  5, 'Cooldown duration (min)')}
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+        <button onclick="stSaveExecutionConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Execution Config</button>
+        <span id="st-ex-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px 0">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function stSaveExecutionConfig(btn) {
+  const status = document.getElementById('st-ex-status');
+  const getF = id => parseFloat(document.getElementById(id)?.value ?? '');
+  const getI = id => parseInt(document.getElementById(id)?.value ?? '', 10);
+  const updates = {
+    "execution.fill_model_enabled":       document.getElementById('st-ex-fill-enabled')?.value === 'true',
+    "execution.slip_base_regular":        getF('st-ex-slip-regular'),
+    "execution.slip_base_restricted":     getF('st-ex-slip-restricted'),
+    "execution.slip_base_pre_market":     getF('st-ex-slip-premarket'),
+    "execution.slip_base_after_hours":    getF('st-ex-slip-afterhours'),
+    "execution.slip_vol_threshold_pct":   getF('st-ex-vol-thr'),
+    "execution.slip_vol_penalty_bps":     getF('st-ex-vol-penalty'),
+    "execution.slip_liq_low_vol":         getI('st-ex-liq-low-vol'),
+    "execution.slip_liq_mid_vol":         getI('st-ex-liq-mid-vol'),
+    "execution.slip_liq_low_penalty_bps": getF('st-ex-liq-low-penalty'),
+    "execution.slip_liq_mid_penalty_bps": getF('st-ex-liq-mid-penalty'),
+    "execution.slip_size_rate":           getF('st-ex-size-rate'),
+    "execution.slip_size_cap_bps":        getF('st-ex-size-cap'),
+    "execution.slip_max_bps":             getF('st-ex-slip-max'),
+    "execution.stop_gap_factor":          getF('st-ex-stop-gap'),
+    "execution.spread_atr_rate":          getF('st-ex-spread-atr'),
+    "execution.spread_min_bps":           getF('st-ex-spread-min'),
+    "risk.ticker_loss_cooldown_usd":      getF('st-ex-tk-loss-usd'),
+    "risk.ticker_loss_window_min":        getI('st-ex-tk-loss-window'),
+    "risk.ticker_pre_t1_stops_max":       getI('st-ex-tk-pt1-max'),
+    "risk.ticker_pre_t1_window_min":      getI('st-ex-tk-pt1-window'),
+    "risk.ticker_cooldown_min":           getI('st-ex-tk-cooldown'),
+  };
+  const nums = Object.entries(updates).filter(([,v]) => typeof v === 'number').map(([,v]) => v);
+  if (nums.some(v => isNaN(v))) {
+    if (status) { status.textContent = 'Fix invalid values.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(updates), signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (status) { status.textContent = 'Saved!'; status.style.color = 'var(--green)'; setTimeout(() => { status.textContent = ''; }, 3000); }
+  } catch(e) {
+    if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
+  } finally { btn.disabled = false; }
+}
+
+// ── System tab ────────────────────────────────────────────────────────────────
+async function stLoadSystemTab() {
+  const el = document.getElementById('st-panel-system');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
+  try {
+    const [ppResp, rkResp, scResp, trResp, brResp, lcResp, auResp] = await Promise.all([
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`,   {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`,    {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=scanner.`, {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=trading.`, {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=broker.`,  {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=learner.`, {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=audit.`,   {signal: AbortSignal.timeout(12000)}),
+    ]);
+    const pp = (await ppResp.json()).config || {};
+    const rk = (await rkResp.json()).config || {};
+    const sc = (await scResp.json()).config || {};
+    const tr = (await trResp.json()).config || {};
+    const br = (await brResp.json()).config || {};
+    const lc = (await lcResp.json()).config || {};
+    const au = (await auResp.json()).config || {};
+
+    const inp = (id, val, min, max, step, label) =>
+      `<div><div style="font-size:9px;color:var(--muted);margin-bottom:3px;text-transform:uppercase">${label}</div>
+       <input id="${id}" type="number" min="${min}" max="${max}" step="${step}" value="${val}"
+         style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit"></div>`;
+
+    const sel = (id, val, opts, label) =>
+      `<div><div style="font-size:9px;color:var(--muted);margin-bottom:3px;text-transform:uppercase">${label}</div>
+       <select id="${id}" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+         ${opts.map(([v,l]) => `<option value="${v}" ${String(val)===String(v)?'selected':''}>${l}</option>`).join('')}
+       </select></div>`;
+
+    const card = (title, cols, content) =>
+      `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px">
+         <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">${title}</div>
+         <div style="display:grid;grid-template-columns:${cols};gap:8px">${content}</div>
+       </div>`;
+
+    el.innerHTML = `
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.5">
+        Extended-hours gates, EOD management, profit protect, risk extensions, scanner cadence, and system settings. All hot-reloadable.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        ${card('Extended-Hours Gates', '1fr 1fr',
+          inp('st-sys-eh-high-conf',  pp['paper.ext_hours_high_min_conf']    ?? 70.0,  50, 100, 1,    'HIGH-tier min conf (%)') +
+          inp('st-sys-eh-mod-conf',   pp['paper.ext_hours_moderate_min_conf']?? 60.0,  40, 100, 1,    'MODERATE-tier min conf (%)') +
+          inp('st-sys-pm-stop-mult',  pp['paper.pre_market_stop_mult']       ?? 1.5,   1,  5,   0.1,  'Pre-market stop mult (×)') +
+          inp('st-sys-ah-stop-mult',  pp['paper.after_hours_stop_mult']      ?? 2.0,   1,  5,   0.1,  'After-hours stop mult (×)') +
+          sel('st-sys-block-restr',   pp['paper.block_restricted_session']   ?? true,  [['true','Block (9:30–9:44 ET)'],['false','Allow restricted']], 'Block restricted session') +
+          inp('st-sys-be-offset',     pp['paper.breakeven_stop_offset']      ?? 0.02,  0,  1,   0.01, 'Breakeven stop offset ($)')
+        )}
+        ${card('EOD Management', '1fr 1fr',
+          inp('st-sys-eod-trail',         pp['paper.eod_trail_stop_pct']        ?? 0.003, 0,  0.05, 0.001, 'EOD trail stop (price %)') +
+          inp('st-sys-eod-recovery',      pp['paper.eod_recovery_stop_pct']     ?? 0.002, 0,  0.05, 0.001, 'EOD recovery stop (price %)') +
+          inp('st-sys-eod-strong',        pp['paper.eod_strong_winner_pct']     ?? 0.5,   0,  10,   0.1,   'Strong winner threshold (P&amp;L %)') +
+          inp('st-sys-eod-small',         pp['paper.eod_small_winner_pct']      ?? 0.1,   0,  5,    0.05,  'Small winner threshold (P&amp;L %)') +
+          inp('st-sys-eod-loss',          pp['paper.eod_loss_threshold_pct']    ?? -0.3, -10, 0,    0.1,   'Meaningful loss threshold (P&amp;L %)') +
+          inp('st-sys-filter-feedback',   pp['paper.filter_feedback_min_trades']?? 5,     1,  50,   1,     'Min trades for filter feedback')
+        )}
+        ${card('Profit Protect Mode', '1fr 1fr 1fr',
+          inp('st-sys-pp-conf',     rk['risk.profit_protect_min_conf']  ?? 80.0,  50,   100,  1,    'Min confidence (%)') +
+          inp('st-sys-pp-size',     rk['risk.profit_protect_size_mult'] ?? 0.60,  0.05, 1,    0.05, 'Size multiplier (×)') +
+          inp('st-sys-pp-drawdown', rk['risk.profit_protect_drawdown']  ?? 300.0, 0,    5000, 50,   'Max drawdown from peak ($)')
+        )}
+        ${card('Extended-Hours Risk Sizing', '1fr 1fr',
+          inp('st-sys-pm-high-sz',  rk['risk.pre_market_high_size_mult']      ?? 0.40, 0.05, 1, 0.05, 'Pre-market HIGH (×)') +
+          inp('st-sys-pm-mod-sz',   rk['risk.pre_market_moderate_size_mult']  ?? 0.25, 0.05, 1, 0.05, 'Pre-market MODERATE (×)') +
+          inp('st-sys-ah-high-sz',  rk['risk.after_hours_high_size_mult']     ?? 0.50, 0.05, 1, 0.05, 'After-hours HIGH (×)') +
+          inp('st-sys-ah-mod-sz',   rk['risk.after_hours_moderate_size_mult'] ?? 0.30, 0.05, 1, 0.05, 'After-hours MODERATE (×)')
+        )}
+        ${card('Risk Extensions', '1fr 1fr 1fr 1fr',
+          inp('st-sys-acct-size',     rk['risk.account_size']               ?? 50000, 1000, 10000000, 1000, 'Account size ($)') +
+          inp('st-sys-liquidate-pct', rk['risk.daily_loss_liquidate_pct']   ?? 4.0,   0.5,  20,       0.25, 'Liquidate-all loss (%)') +
+          inp('st-sys-max-sector',    rk['risk.max_per_sector']             ?? 2,     1,    20,       1,    'Max positions per sector') +
+          inp('st-sys-vol-halt-sz',   rk['risk.volatility_halt_size_mult']  ?? 0.50,  0.1,  1,        0.05, 'Volatility halt size (×)') +
+          inp('st-sys-vol-halt-atr',  rk['risk.volatility_halt_atr_mult']   ?? 2.5,   0.5,  10,       0.25, 'Volatility ATR mult') +
+          inp('st-sys-dd-thr1',       rk['risk.drawdown_throttle_1_pct']    ?? 0.5,   0.1,  5,        0.1,  'Drawdown throttle 1 (%)') +
+          inp('st-sys-dd-thr2',       rk['risk.drawdown_throttle_2_pct']    ?? 1.0,   0.1,  5,        0.1,  'Drawdown throttle 2 (%)') +
+          inp('st-sys-storm-rate',    rk['risk.pre_t1_storm_rate']          ?? 0.60,  0.1,  1,        0.05, 'Pre-T1 storm max rate')
+        )}
+        ${card('Scanner Cadence', '1fr 1fr 1fr',
+          inp('st-sys-scan-interval',    sc['scanner.scan_interval_s']    ?? 60, 10, 600, 5,  'Scan interval (seconds)') +
+          inp('st-sys-pipeline-workers', sc['scanner.pipeline_workers']   ?? 8,  1,  32,  1,  'Pipeline workers') +
+          inp('st-sys-ticker-timeout',   sc['scanner.ticker_timeout_s']   ?? 45, 5,  300, 5,  'Ticker timeout (seconds)')
+        )}
+        ${card('Trading &amp; Broker', '1fr 1fr',
+          inp('st-sys-trading-acct',   tr['trading.account_size']     ?? 50000, 1000, 10000000, 1000, 'Trading account size ($)') +
+          inp('st-sys-trading-risk',   tr['trading.risk_pct']         ?? 1.5,   0.1,  10,       0.1,  'Risk per trade (%)') +
+          inp('st-sys-trading-maxpos', tr['trading.max_position_pct'] ?? 10.0,  1,    50,       1,    'Max position (%)') +
+          sel('st-sys-broker-auto',    br['broker.auto_trade']        ?? false, [['false','Disabled (paper only)'],['true','Enabled (LIVE!)']], 'Auto-trade (Schwab)') +
+          sel('st-sys-broker-paper',   br['broker.paper_trading']     ?? true,  [['true','Paper trading'],['false','Live trading']], 'Broker mode')
+        )}
+        ${card('Learner &amp; Audit', '1fr 1fr 1fr',
+          inp('st-sys-lc-market-intv',    lc['learner.deep_market_interval_s'] ?? 1800, 0, 7200, 300, 'Market-hours retrain (s, 0=off)') +
+          sel('st-sys-audit-enabled',     au['audit.enabled']                  ?? true,  [['true','Enabled'],['false','Disabled']], 'Audit log') +
+          inp('st-sys-audit-retention',   au['audit.retention_days']           ?? 14,    0, 365,  1,   'Audit retention (days)')
+        )}
+      </div>
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+        <button onclick="stSaveSystemConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save System Config</button>
+        <span id="st-sys-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--red);font-size:11px;padding:12px 0">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function stSaveSystemConfig(btn) {
+  const status = document.getElementById('st-sys-status');
+  const getF = id => parseFloat(document.getElementById(id)?.value ?? '');
+  const getI = id => parseInt(document.getElementById(id)?.value ?? '', 10);
+  const getBool = id => document.getElementById(id)?.value === 'true';
+  const updates = {
+    "paper.ext_hours_high_min_conf":      getF('st-sys-eh-high-conf'),
+    "paper.ext_hours_moderate_min_conf":  getF('st-sys-eh-mod-conf'),
+    "paper.pre_market_stop_mult":         getF('st-sys-pm-stop-mult'),
+    "paper.after_hours_stop_mult":        getF('st-sys-ah-stop-mult'),
+    "paper.block_restricted_session":     getBool('st-sys-block-restr'),
+    "paper.breakeven_stop_offset":        getF('st-sys-be-offset'),
+    "paper.eod_trail_stop_pct":          getF('st-sys-eod-trail'),
+    "paper.eod_recovery_stop_pct":       getF('st-sys-eod-recovery'),
+    "paper.eod_strong_winner_pct":       getF('st-sys-eod-strong'),
+    "paper.eod_small_winner_pct":        getF('st-sys-eod-small'),
+    "paper.eod_loss_threshold_pct":      getF('st-sys-eod-loss'),
+    "paper.filter_feedback_min_trades":  getI('st-sys-filter-feedback'),
+    "risk.profit_protect_min_conf":      getF('st-sys-pp-conf'),
+    "risk.profit_protect_size_mult":     getF('st-sys-pp-size'),
+    "risk.profit_protect_drawdown":      getF('st-sys-pp-drawdown'),
+    "risk.pre_market_high_size_mult":        getF('st-sys-pm-high-sz'),
+    "risk.pre_market_moderate_size_mult":    getF('st-sys-pm-mod-sz'),
+    "risk.after_hours_high_size_mult":       getF('st-sys-ah-high-sz'),
+    "risk.after_hours_moderate_size_mult":   getF('st-sys-ah-mod-sz'),
+    "risk.account_size":                 getF('st-sys-acct-size'),
+    "risk.daily_loss_liquidate_pct":     getF('st-sys-liquidate-pct'),
+    "risk.max_per_sector":               getI('st-sys-max-sector'),
+    "risk.volatility_halt_size_mult":    getF('st-sys-vol-halt-sz'),
+    "risk.volatility_halt_atr_mult":     getF('st-sys-vol-halt-atr'),
+    "risk.drawdown_throttle_1_pct":      getF('st-sys-dd-thr1'),
+    "risk.drawdown_throttle_2_pct":      getF('st-sys-dd-thr2'),
+    "risk.pre_t1_storm_rate":            getF('st-sys-storm-rate'),
+    "scanner.scan_interval_s":           getI('st-sys-scan-interval'),
+    "scanner.pipeline_workers":          getI('st-sys-pipeline-workers'),
+    "scanner.ticker_timeout_s":          getF('st-sys-ticker-timeout'),
+    "trading.account_size":              getF('st-sys-trading-acct'),
+    "trading.risk_pct":                  getF('st-sys-trading-risk'),
+    "trading.max_position_pct":          getF('st-sys-trading-maxpos'),
+    "broker.auto_trade":                 getBool('st-sys-broker-auto'),
+    "broker.paper_trading":              getBool('st-sys-broker-paper'),
+    "learner.deep_market_interval_s":    getI('st-sys-lc-market-intv'),
+    "audit.enabled":                     getBool('st-sys-audit-enabled'),
+    "audit.retention_days":              getI('st-sys-audit-retention'),
+  };
+  const nums = Object.entries(updates).filter(([,v]) => typeof v === 'number').map(([,v]) => v);
+  if (nums.some(v => isNaN(v))) {
+    if (status) { status.textContent = 'Fix invalid values.'; status.style.color = 'var(--red)'; }
+    return;
+  }
   btn.disabled = true;
   try {
     const r = await _authFetch(`${BACKEND_HTTP}/api/config`, {
