@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -69,16 +70,19 @@ class MetaEnsemble:
     These 7 features train a small XGBoost meta-learner on historical outcomes.
     """
 
+    MODEL_TYPE    = "meta_ensemble"
     FEATURE_NAMES = [
         "scalp_prob", "ensemble_prob", "ensemble_agreement",
         "daily_prob", "reversal_prob", "tech_score", "vol_score",
     ]
+    LABEL_DEFINITION = "1 if trade outcome won else 0 (trained on historical signal outcomes)"
 
     def __init__(self, ticker: str):
         self.ticker  = ticker
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._meta: dict = {}
         self._load()
 
     def _path(self) -> Path:
@@ -86,7 +90,22 @@ class MetaEnsemble:
 
     def _save(self) -> None:
         try:
-            joblib.dump({"model": self.model, "scaler": self.scaler, "trained": self.trained}, self._path())
+            joblib.dump(
+                {
+                    "model":   self.model,
+                    "scaler":  self.scaler,
+                    "trained": self.trained,
+                    "meta": {
+                        "model_type":       self.MODEL_TYPE,
+                        "ticker":           self.ticker,
+                        "feature_names":    self.FEATURE_NAMES,
+                        "feature_count":    len(self.FEATURE_NAMES),
+                        "label_definition": self.LABEL_DEFINITION,
+                        **self._meta,
+                    },
+                },
+                self._path(),
+            )
         except Exception as e:
             logger.debug(f"[{self.ticker}] meta save: {e}")
 
@@ -96,6 +115,7 @@ class MetaEnsemble:
             if p.exists():
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                self._meta = d.get("meta", {})
         except Exception as e:
             logger.debug(f"[{self.ticker}] meta load: {e}")
 
@@ -142,6 +162,12 @@ class MetaEnsemble:
                 warnings.filterwarnings("ignore")
                 self.model.fit(Xs, y)
             self.trained = True
+            self._meta = {
+                "saved_at":   datetime.now(timezone.utc).isoformat(),
+                "n_outcomes": len(rows),
+                "n_pos":      int(sum(labels)),
+                "n_neg":      len(labels) - int(sum(labels)),
+            }
             self._save()
             logger.info(f"[{self.ticker}] MetaEnsemble trained on {len(rows)} outcomes")
             return True

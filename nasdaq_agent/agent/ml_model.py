@@ -17,6 +17,7 @@ import tempfile
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -167,6 +168,10 @@ def _atomic_save(obj, path: Path) -> None:
         raise
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ── Fast XGBoost training helper ──────────────────────────────────────────────
 
 def _fast_xgb_fit(
@@ -289,11 +294,17 @@ _DAILY_FEATURE_COLS = [
 
 
 class StockMLModel:
+    MODEL_TYPE       = "scalp"
+    FEATURE_NAMES    = FEATURE_COLS_V2
+    LABEL_DEFINITION = "1 if close[+3] > close[0] else 0 (ATR-adaptive 0.3x ATR noise band, 5-min bars)"
+    LABEL_ATR_MULT   = 0.3
+
     def __init__(self, ticker: str):
         self.ticker  = ticker
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._meta: dict = {}
         self._load()   # restore from disk on construction
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -304,7 +315,21 @@ class StockMLModel:
     def _save(self) -> None:
         try:
             _atomic_save(
-                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                {
+                    "model":   self.model,
+                    "scaler":  self.scaler,
+                    "trained": self.trained,
+                    "meta": {
+                        "model_type":       self.MODEL_TYPE,
+                        "ticker":           self.ticker,
+                        "feature_names":    self.FEATURE_NAMES,
+                        "feature_count":    len(self.FEATURE_NAMES),
+                        "label_definition": self.LABEL_DEFINITION,
+                        "lookahead_bars":   LOOKAHEAD_BARS,
+                        "label_atr_mult":   self.LABEL_ATR_MULT,
+                        **self._meta,
+                    },
+                },
                 self._path(),
             )
         except Exception as e:
@@ -316,6 +341,7 @@ class StockMLModel:
             if p.exists():
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                self._meta = d.get("meta", {})
                 logger.debug(f"[{self.ticker}] scalp model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] scalp load failed (will retrain): {e}")
@@ -406,6 +432,14 @@ class StockMLModel:
             self.model   = candidate
             self.scaler  = new_scaler
             self.trained = True
+            self._meta = {
+                "saved_at":  _now_iso(),
+                "train_acc": round(new_acc, 4),
+                "n_train":   len(X_train),
+                "n_test":    len(X_test),
+                "n_trees":   n_trees if isinstance(n_trees, int) else None,
+                "econ_note": econ_note,
+            }
             self._save()
             logger.info(
                 f"[{self.ticker}] ScalpML promoted | acc={new_acc:.3f} "
@@ -714,11 +748,17 @@ class DailyMLModel:
     are zeroed out but kept for model-schema compatibility.
     """
 
+    MODEL_TYPE       = "daily"
+    FEATURE_NAMES    = _DAILY_FEATURE_COLS
+    LABEL_DEFINITION = "1 if next_day_close > today_close else 0 (daily bars)"
+    LABEL_ATR_MULT   = None
+
     def __init__(self, ticker: str):
         self.ticker  = ticker
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._meta: dict = {}
         self._load()
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -729,7 +769,21 @@ class DailyMLModel:
     def _save(self) -> None:
         try:
             _atomic_save(
-                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                {
+                    "model":   self.model,
+                    "scaler":  self.scaler,
+                    "trained": self.trained,
+                    "meta": {
+                        "model_type":       self.MODEL_TYPE,
+                        "ticker":           self.ticker,
+                        "feature_names":    self.FEATURE_NAMES,
+                        "feature_count":    len(self.FEATURE_NAMES),
+                        "label_definition": self.LABEL_DEFINITION,
+                        "lookahead_bars":   1,
+                        "label_atr_mult":   self.LABEL_ATR_MULT,
+                        **self._meta,
+                    },
+                },
                 self._path(),
             )
         except Exception as e:
@@ -741,6 +795,7 @@ class DailyMLModel:
             if p.exists():
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                self._meta = d.get("meta", {})
                 logger.debug(f"[{self.ticker}] daily model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] daily load failed (will retrain): {e}")
@@ -825,6 +880,14 @@ class DailyMLModel:
             self.model   = candidate
             self.scaler  = new_scaler
             self.trained = True
+            self._meta = {
+                "saved_at":  _now_iso(),
+                "train_acc": round(new_acc, 4),
+                "n_train":   len(X_train),
+                "n_test":    len(X_test),
+                "n_trees":   n_trees if isinstance(n_trees, int) else None,
+                "econ_note": econ_note,
+            }
             self._save()
             logger.info(
                 f"[{self.ticker}] DailyML promoted | acc={new_acc:.3f} "
@@ -917,11 +980,17 @@ class ReversalMLModel:
     _LOOKAHEAD  = 5     # bars ahead to check
     _MOVE_PCT   = 0.008  # 0.8% = meaningful reversal
 
+    MODEL_TYPE       = "reversal"
+    FEATURE_NAMES    = REVERSAL_FEATURE_COLS
+    LABEL_DEFINITION = "1 if max(close[+1..+5]) >= close[0] * 1.008 else 0 (0.8% bullish reversal, 5-min bars)"
+    LABEL_ATR_MULT   = None
+
     def __init__(self, ticker: str):
         self.ticker  = ticker
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._meta: dict = {}
         self._load()
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -932,7 +1001,21 @@ class ReversalMLModel:
     def _save(self) -> None:
         try:
             _atomic_save(
-                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                {
+                    "model":   self.model,
+                    "scaler":  self.scaler,
+                    "trained": self.trained,
+                    "meta": {
+                        "model_type":       self.MODEL_TYPE,
+                        "ticker":           self.ticker,
+                        "feature_names":    self.FEATURE_NAMES,
+                        "feature_count":    len(self.FEATURE_NAMES),
+                        "label_definition": self.LABEL_DEFINITION,
+                        "lookahead_bars":   self._LOOKAHEAD,
+                        "label_atr_mult":   self.LABEL_ATR_MULT,
+                        **self._meta,
+                    },
+                },
                 self._path(),
             )
         except Exception as e:
@@ -944,6 +1027,7 @@ class ReversalMLModel:
             if p.exists():
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                self._meta = d.get("meta", {})
                 logger.debug(f"[{self.ticker}] reversal model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] reversal load failed (will retrain): {e}")
@@ -1045,6 +1129,14 @@ class ReversalMLModel:
             self.model   = candidate
             self.scaler  = new_scaler
             self.trained = True
+            self._meta = {
+                "saved_at":  _now_iso(),
+                "train_acc": round(new_acc, 4),
+                "n_train":   len(X_train),
+                "n_test":    len(X_test),
+                "n_trees":   n_trees if isinstance(n_trees, int) else None,
+                "econ_note": econ_note,
+            }
             self._save()
             logger.info(
                 f"[{self.ticker}] ReversalML promoted | acc={new_acc:.3f} "
@@ -1115,11 +1207,17 @@ class SwingMLModel:
 
     LOOKAHEAD = 8   # 8 × 15min = 2 hours ahead
 
+    MODEL_TYPE       = "swing"
+    FEATURE_NAMES    = FEATURE_COLS_V2
+    LABEL_DEFINITION = "1 if close[+8] > close[0] else 0 (ATR-adaptive 0.3x ATR noise band, 15-min bars, 2h ahead)"
+    LABEL_ATR_MULT   = 0.3
+
     def __init__(self, ticker: str):
         self.ticker  = ticker
         self.model   = None
         self.scaler  = StandardScaler()
         self.trained = False
+        self._meta: dict = {}
         self._load()
 
     def _path(self) -> Path:
@@ -1128,7 +1226,21 @@ class SwingMLModel:
     def _save(self) -> None:
         try:
             _atomic_save(
-                {"model": self.model, "scaler": self.scaler, "trained": self.trained},
+                {
+                    "model":   self.model,
+                    "scaler":  self.scaler,
+                    "trained": self.trained,
+                    "meta": {
+                        "model_type":       self.MODEL_TYPE,
+                        "ticker":           self.ticker,
+                        "feature_names":    self.FEATURE_NAMES,
+                        "feature_count":    len(self.FEATURE_NAMES),
+                        "label_definition": self.LABEL_DEFINITION,
+                        "lookahead_bars":   self.LOOKAHEAD,
+                        "label_atr_mult":   self.LABEL_ATR_MULT,
+                        **self._meta,
+                    },
+                },
                 self._path(),
             )
         except Exception as e:
@@ -1140,6 +1252,7 @@ class SwingMLModel:
             if p.exists():
                 d = joblib.load(p)
                 self.model, self.scaler, self.trained = d["model"], d["scaler"], d.get("trained", False)
+                self._meta = d.get("meta", {})
                 logger.debug(f"[{self.ticker}] swing model loaded from disk")
         except Exception as e:
             logger.debug(f"[{self.ticker}] swing load failed (will retrain): {e}")
@@ -1211,6 +1324,14 @@ class SwingMLModel:
             self.model   = candidate
             self.scaler  = new_scaler
             self.trained = True
+            self._meta = {
+                "saved_at":  _now_iso(),
+                "train_acc": round(new_acc, 4),
+                "n_train":   len(X_train),
+                "n_test":    len(X_test),
+                "n_trees":   n_trees if isinstance(n_trees, int) else None,
+                "econ_note": econ_note,
+            }
             self._save()
             logger.info(
                 f"[{self.ticker}] SwingML promoted | acc={new_acc:.3f} "
@@ -1289,11 +1410,17 @@ class EnsembleMLModel:
         dict(n_estimators=300, max_depth=5, learning_rate=0.08, subsample=0.6, colsample_bytree=0.8),
     ]
 
+    MODEL_TYPE       = "ensemble"
+    FEATURE_NAMES    = FEATURE_COLS_V2
+    LABEL_DEFINITION = "majority vote: 1 if close[+3] > close[0] else 0 (ATR-adaptive 0.3x ATR noise band, 5-min bars)"
+    LABEL_ATR_MULT   = 0.3
+
     def __init__(self, ticker: str):
         self.ticker  = ticker
         self.models  = []
         self.scaler  = StandardScaler()
         self.trained = False
+        self._meta: dict = {}
         self._load()
 
     def _path(self) -> Path:
@@ -1302,7 +1429,22 @@ class EnsembleMLModel:
     def _save(self) -> None:
         try:
             _atomic_save(
-                {"models": self.models, "scaler": self.scaler, "trained": self.trained},
+                {
+                    "models":  self.models,
+                    "scaler":  self.scaler,
+                    "trained": self.trained,
+                    "meta": {
+                        "model_type":       self.MODEL_TYPE,
+                        "ticker":           self.ticker,
+                        "feature_names":    self.FEATURE_NAMES,
+                        "feature_count":    len(self.FEATURE_NAMES),
+                        "label_definition": self.LABEL_DEFINITION,
+                        "lookahead_bars":   LOOKAHEAD_BARS,
+                        "label_atr_mult":   self.LABEL_ATR_MULT,
+                        "n_members":        self.N_MODELS,
+                        **self._meta,
+                    },
+                },
                 self._path(),
             )
         except Exception as e:
@@ -1314,6 +1456,7 @@ class EnsembleMLModel:
             if p.exists():
                 d = joblib.load(p)
                 self.models, self.scaler, self.trained = d["models"], d["scaler"], d.get("trained", False)
+                self._meta = d.get("meta", {})
         except Exception as e:
             logger.debug(f"[{self.ticker}] ensemble load failed: {e}")
 
@@ -1393,6 +1536,13 @@ class EnsembleMLModel:
             self.models  = candidate_models
             self.scaler  = new_scaler
             self.trained = True
+            self._meta = {
+                "saved_at":  _now_iso(),
+                "train_acc": round(new_acc, 4),
+                "n_train":   len(X_train),
+                "n_test":    len(X_test),
+                "econ_note": econ_note,
+            }
             self._save()
             logger.info(
                 f"[{self.ticker}] Ensemble promoted | acc={new_acc:.3f} "
