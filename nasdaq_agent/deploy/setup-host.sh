@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # ── deploy/setup-host.sh ──────────────────────────────────────────────────────
 # Run ONCE on the EC2 host before the first 'docker compose up'.
-# Creates EBS bind-mount directories and sets correct ownership.
+# Creates the host bind-mount directories and sets correct ownership.
+#
+# The docker-compose.yml mounts:
+#   /opt/nasdaq-agent/nasdaq_agent/data  →  /app/data   (models, cache)
+#   /opt/nasdaq-agent/tokens             →  /app/tokens  (Schwab OAuth)
+#   /opt/nasdaq-agent/logs               →  /app/logs
 #
 # Usage:
 #   chmod +x deploy/setup-host.sh
@@ -11,29 +16,29 @@ set -euo pipefail
 
 BASE=/opt/nasdaq-agent
 
-echo "Creating EBS bind-mount directories under ${BASE} ..."
+echo "Creating host bind-mount directories under ${BASE} ..."
 
-# These directories are bind-mounted into containers as named volumes.
-# They survive image rebuilds and container restarts.
 mkdir -p \
-    "${BASE}/models" \
+    "${BASE}/nasdaq_agent/data/models" \
+    "${BASE}/nasdaq_agent/data/cache" \
     "${BASE}/tokens" \
     "${BASE}/tokens/backup" \
-    "${BASE}/cache" \
     "${BASE}/logs"
 
 # Containers run as UID 1000 (user 'nasdaq' created in Dockerfile).
 # Host directories must be writable by that UID.
-chown -R 1000:1000 "${BASE}"
-chmod -R 755 "${BASE}"
+chown -R 1000:1000 "${BASE}/nasdaq_agent/data"
+chown -R 1000:1000 "${BASE}/tokens"
+chown -R 1000:1000 "${BASE}/logs"
+chmod -R 755 "${BASE}/nasdaq_agent/data"
+chmod 700 "${BASE}/tokens"
 
 echo "Done. Directory layout:"
 ls -la "${BASE}"
+echo ""
+ls -la "${BASE}/nasdaq_agent/data"
 
 echo ""
 echo "Next steps:"
 echo "  1. Copy .env.example to .env and fill in all values"
-echo "  2. docker build -t nasdaq-agent:latest ."
-echo "  3. docker compose up -d"
-echo "  4. docker compose ps        # verify all containers healthy"
-echo "  5. docker compose logs -f   # tail all logs"
+echo "  2. sudo bash nasdaq_agent/update.sh"
