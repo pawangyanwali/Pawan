@@ -7561,7 +7561,7 @@ function renderNeuralPanel(d) {
   const isActive = rp.is_running || d.is_training_now;
   const cancelBtn = document.getElementById('nn-cancel-btn');
   if (isActive) {
-    banner.style.cssText += ';display:flex!important';
+    banner.style.display = 'flex';
     const cancelling = rp.cancelling;
     let msg = 'Training in progress…';
     if (cancelling)                  msg = '⏳ Cancelling — finishing current ticker…';

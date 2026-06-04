@@ -566,8 +566,13 @@ def _train_one_ticker(
     prepared_15m = prepare_training_data(df15m, ticker=t, lookahead_bars=SwingMLModel.LOOKAHEAD)
 
     # ── Scalp model ───────────────────────────────────────────────────────
+    # Always use a fresh instance when the file is absent — avoids the in-memory
+    # model acting as a high-accuracy baseline after the user deletes .joblib files,
+    # which would cause every new candidate to fail the regression gate.
     try:
-        m = _model_registry[t] if t in _model_registry else StockMLModel(t)
+        m = _model_registry.get(t)
+        if m is None or not m._path().exists():
+            m = StockMLModel(t)
         if m.train_from_df(df5m, _prepared=prepared_5m):
             ticker_models_ok.append("scalp")
         _model_registry[t] = m
@@ -581,7 +586,10 @@ def _train_one_ticker(
     # ── Daily model ───────────────────────────────────────────────────────
     if daily_data and t in daily_data:
         try:
-            dm = get_or_create_daily(t)
+            dm = _daily_model_registry.get(t)
+            if dm is None or not dm._path().exists():
+                dm = DailyMLModel(t)
+                _daily_model_registry[t] = dm
             if dm.train_from_df(daily_data[t]):
                 ticker_models_ok.append("daily")
         except Exception as e:
@@ -591,7 +599,10 @@ def _train_one_ticker(
     # ── Reversal model (has its own label logic — can't share prepared_5m) ──
     if not _cancel_retrain_flag:
         try:
-            rm = get_or_create_reversal(t)
+            rm = _reversal_model_registry.get(t)
+            if rm is None or not rm._path().exists():
+                rm = ReversalMLModel(t)
+                _reversal_model_registry[t] = rm
             if rm.train_from_df(df5m):
                 ticker_models_ok.append("reversal")
         except Exception as e:
@@ -601,7 +612,10 @@ def _train_one_ticker(
     # ── Ensemble model (shares prepared_5m with scalp — same features/split) ─
     if not _cancel_retrain_flag:
         try:
-            em = get_or_create_ensemble(t)
+            em = _ensemble_registry.get(t)
+            if em is None or not em._path().exists():
+                em = EnsembleMLModel(t)
+                _ensemble_registry[t] = em
             if em.train_from_df(df5m, _prepared=prepared_5m):
                 ticker_models_ok.append("ensemble")
         except Exception as e:
@@ -611,7 +625,10 @@ def _train_one_ticker(
     # ── Swing model (shares prepared_15m) ────────────────────────────────
     if not _cancel_retrain_flag:
         try:
-            sm = get_or_create_swing(t)
+            sm = _swing_model_registry.get(t)
+            if sm is None or not sm._path().exists():
+                sm = SwingMLModel(t)
+                _swing_model_registry[t] = sm
             if sm.train_from_df(df15m, _prepared=prepared_15m):
                 ticker_models_ok.append("swing")
         except Exception as e:
