@@ -134,7 +134,10 @@ def main() -> None:
     _start_health_server()
 
     # Import the two singleton _TokenManager instances.
-    from agent.broker.schwab_auth import _trader, _market_data
+    from agent.broker.schwab_auth import _trader, _market_data, init_schwab_token_store
+
+    if init_schwab_token_store():
+        logger.info("[token-service] PostgreSQL schwab_tokens table ready")
 
     # Load tokens and start refresh timers.  schedule_refresh=True means this
     # container owns the threading.Timer — no other container does this.

@@ -34,6 +34,15 @@ def test_token_service_owns_refresh_requests():
     assert 'os.environ["SCHWAB_TOKEN_OWNER"] = "1"' in token_service
 
 
+def test_token_service_initializes_postgres_token_table():
+    auth = _read("agent/broker/schwab_auth.py")
+    token_service = _read("services/token_service.py")
+
+    assert "def init_schwab_token_store()" in auth
+    assert "CREATE TABLE IF NOT EXISTS schwab_tokens" in auth
+    assert "init_schwab_token_store()" in token_service
+
+
 def test_market_data_reacts_to_app_specific_token_events():
     service = _read("services/market_data_service.py")
 
@@ -52,3 +61,10 @@ def test_web_oauth_callback_does_not_start_streamer():
 
     assert "start_streamer" not in callback
     assert "tokens_refreshed" not in callback
+
+
+def test_scanner_algo_path_passes_rr_quality_to_paper_execution():
+    scanner = _read("agent/scanner.py")
+
+    assert "_algo_rr_quality" in scanner
+    assert 'rr_quality        = ""' not in scanner

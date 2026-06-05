@@ -336,10 +336,10 @@ class TestPredictionEngine:
         if rr is not None:
             assert rr >= 0
 
-    def test_evaluate_rr_qualifies_at_2r(self):
+    def test_evaluate_rr_qualifies_at_min_rr(self):
         sr = {"supports": [90.0], "resistances": [120.0]}
         stop, target, rr, quality, qualifies = _evaluate_rr(100.0, sr, "BUY")
-        if rr is not None and rr >= 2.0:
+        if rr is not None and rr >= 1.5:
             assert qualifies is True
 
     def test_evaluate_rr_empty_sr_returns_gracefully(self):

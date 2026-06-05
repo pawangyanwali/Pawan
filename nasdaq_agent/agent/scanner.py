@@ -1606,6 +1606,13 @@ def analyse_ticker(
                             pass
                     else:
                         _asig_status: list = []
+                        _algo_rr = float(_asig.get("rr", 0))
+                        _algo_rr_quality = (
+                            "EXCELLENT" if _algo_rr >= 3.0 else
+                            "GOOD" if _algo_rr >= 2.0 else
+                            "OK" if _algo_rr >= 1.5 else
+                            "LOW"
+                        )
                         _trade_id = maybe_open_trade(
                             ticker            = ticker,
                             direction         = _asig["direction"],
@@ -1613,9 +1620,9 @@ def analyse_ticker(
                             target            = float(_asig["target"]),
                             stop              = float(_asig["stop"]),
                             confidence        = float(_asig["confidence"]),
-                            rr_qualifies      = float(_asig.get("rr", 0)) >= 1.5,
-                            rr_ratio          = float(_asig.get("rr", 0)),
-                            rr_quality        = "",
+                            rr_qualifies      = _algo_rr >= 1.5,
+                            rr_ratio          = _algo_rr,
+                            rr_quality        = _algo_rr_quality,
                             session           = sess_info.get("session", ""),
                             regime            = regime.regime,
                             entry_type        = "ALGO",

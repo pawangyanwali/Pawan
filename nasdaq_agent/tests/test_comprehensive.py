@@ -1195,14 +1195,14 @@ class TestPredictionPipeline:
             assert target <= 100.0 * 0.997, "SELL target must be at least 0.3% below price"
             assert stop >= 100.0, "SELL stop must be at or above price"
 
-    def test_rr_qualifies_at_2r(self):
+    def test_rr_qualifies_at_min_rr(self):
         from agent.prediction import _evaluate_rr
-        # Use large spread to get >2R
+        # Use large spread to get above the configured minimum R:R.
         df = make_ohlcv(n=120, start_price=100.0, trend=0.3)
         from agent.support_resistance import get_all_sr_levels
         sr = get_all_sr_levels(df)
         _, _, rr, _, qualifies = _evaluate_rr(100.0, sr=sr, direction="BUY")
-        assert qualifies == (rr >= 2.0)
+        assert qualifies == (rr >= 1.5)
 
     def test_quality_labels_valid(self):
         from agent.prediction import _evaluate_rr

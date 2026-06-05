@@ -462,7 +462,7 @@ def _evaluate_rr(
 
     ATR mode (prediction.use_atr_stops = true, default):
       Stop  = price ± N×ATR  (N = prediction.stop_atr_multiple, default 1.0)
-      Target= price ± T2×risk (T2 = paper.t2_r_multiple, default 2.0)
+      Target= price ± T2×risk (T2 = paper.t2_r_multiple, default 1.5)
       Structure = FILTER only — trade rejected if resistance blocks path to target.
       Result: T2 always equals the target → the gap that caused 62% of T1 winners
               to reverse before T2 is eliminated.
@@ -475,7 +475,7 @@ def _evaluate_rr(
     from agent.config_manager import config as _cfg_rr
     _use_atr      = bool(_cfg_rr.get("prediction.use_atr_stops",     True))
     _atr_mult     = float(_cfg_rr.get("prediction.stop_atr_multiple", 1.0))
-    _t2_mult      = float(_cfg_rr.get("paper.t2_r_multiple",          2.0))
+    _t2_mult      = float(_cfg_rr.get("paper.t2_r_multiple",          1.5))
     _MIN_RR_RT    = float(_cfg_rr.get("prediction.min_rr",            _MIN_RR))
     _TGT_PCT_RT   = float(_cfg_rr.get("prediction.min_target_pct",    _MIN_TARGET_PCT))
     MIN_STOP_DIST = float(_cfg_rr.get("prediction.min_stop_dist_pct", 0.004))
@@ -500,14 +500,16 @@ def _evaluate_rr(
             stop_loss = round(price - risk, 4)
             target    = round(price + _t2_mult * risk, 4)
             # Filter: reject if any resistance sits between entry and 97% of target
-            blocking  = [r for r in resistances if price < r < target * 0.97]
+            near_target = price + (target - price) * 0.97
+            blocking  = [r for r in resistances if price < r < near_target]
         else:
             stop_loss = round(price + risk, 4)
             target    = round(price - _t2_mult * risk, 4)
-            blocking  = [s for s in supports if target * 1.03 < s < price]
+            near_target = price - (price - target) * 0.97
+            blocking  = [s for s in supports if near_target < s < price]
 
-        rr           = _t2_mult   # always exactly T2:1 (e.g. 2.0:1)
-        quality      = "BLOCKED" if blocking else "CLEAR"
+        rr           = _t2_mult   # always exactly T2:1 (e.g. 1.5:1)
+        quality      = "LOW" if blocking else "OK"
         rr_qualifies = not blocking   # only trade when path is clear
 
         return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr_qualifies
@@ -999,8 +1001,7 @@ def generate_prediction(
         "EXCELLENT": +4.0,   # ≥4:1 R:R — extra conviction
         "GOOD":      +2.0,   # ≥3:1 R:R — solid geometry
         "OK":         0.0,   # ≥1.5:1 R:R — acceptable, no change
-        "LOW":       -2.0,   # <1.5:1 R:R — mild reduction, still show signal
-        "BLOCKED":   -1.0,   # ATR mode: path blocked by resistance, small caution
+        "LOW":       -2.0,   # <1.5:1 R:R or blocked path — mild display penalty
     }.get(rr_quality, 0.0)
     if _rr_adj != 0.0:
         confidence = round(float(np.clip(confidence + _rr_adj, 25.0, 95.0)), 1)
@@ -1036,6 +1037,11 @@ def generate_prediction(
     # R:R quality reason — always shown so trader knows if setup is worth taking
     if rr_qualifies:
         rr_reason = f"R:R {rr_ratio:.1f}:1 ({rr_quality}) — risk/reward qualifies ≥ {_MIN_RR}:1 threshold"
+    elif rr_quality == "LOW" and rr_ratio >= _MIN_RR:
+        rr_reason = (
+            f"R:R {rr_ratio:.1f}:1 (LOW) - support/resistance blocks the path "
+            "before target. Skip execution or wait for a cleaner entry."
+        )
     else:
         rr_reason = (
             f"R:R {rr_ratio:.1f}:1 — below {_MIN_RR}:1 minimum. "

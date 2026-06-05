@@ -957,7 +957,7 @@ def maybe_open_trade(
     # ── T1 and T2 price levels (multiples read from config_store) ─────────────
     from agent.config_manager import config as _cfg_t
     _t1_mult  = float(_cfg_t.get("paper.t1_r_multiple", 1.0))
-    _t2_mult  = float(_cfg_t.get("paper.t2_r_multiple", 2.0))
+    _t2_mult  = float(_cfg_t.get("paper.t2_r_multiple", 1.5))
     risk_dist = abs(price - stop)
     if direction == "BUY":
         t1_price = round(price + _t1_mult * risk_dist, 4)
@@ -1049,10 +1049,14 @@ def maybe_open_trade(
                     _min_rr_fill = 1.5
                 rr_qualifies = rr_ratio >= _min_rr_fill
                 if not rr_qualifies:
-                    logger.debug(
-                        "[PAPER] %s post-fill R:R %.2f:1 < %.1f:1 (slippage degraded entry)",
+                    logger.info(
+                        "[PAPER] %s skip: post-fill R:R %.2f:1 < %.1f:1 "
+                        "(actual entry/stop/target no longer qualifies)",
                         ticker, rr_ratio, _min_rr_fill,
                     )
+                    if _out_status is not None:
+                        _out_status.append("BLOCKED_POST_FILL_RR")
+                    return None
 
             cur = c.execute("""
                 INSERT INTO paper_trades

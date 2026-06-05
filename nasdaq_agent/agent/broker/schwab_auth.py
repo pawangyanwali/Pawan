@@ -54,6 +54,36 @@ def _configured_token_dir() -> Path:
 # Override with SCHWAB_TOKEN_BACKUP_DIR env var if a different path is preferred.
 _BACKUP_DIR = Path(os.getenv("SCHWAB_TOKEN_BACKUP_DIR", Path.home() / ".nasdaq-agent"))
 
+_SCHWAB_TOKENS_DDL = """
+    CREATE TABLE IF NOT EXISTS schwab_tokens (
+        app           TEXT PRIMARY KEY,
+        access_token  TEXT,
+        refresh_token TEXT,
+        expires_in    INTEGER NOT NULL DEFAULT 1800,
+        stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        generation    BIGINT NOT NULL DEFAULT 0,
+        status        TEXT NOT NULL DEFAULT 'OK',
+        last_error    TEXT
+    )
+"""
+
+
+def init_schwab_token_store() -> bool:
+    """Ensure the durable PostgreSQL Schwab token store exists."""
+    try:
+        from agent.db import get_pool
+        pool = get_pool()
+        with pool.connection() as conn:
+            conn.execute(_SCHWAB_TOKENS_DDL)
+            conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
+            conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+        return True
+    except Exception as exc:
+        logger.warning("[Schwab] schwab_tokens table init failed: %s", exc)
+        return False
+
 
 # ── Distributed refresh-lock helper ──────────────────────────────────────────
 

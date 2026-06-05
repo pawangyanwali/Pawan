@@ -26,6 +26,21 @@ def test_rr_not_qualifying_still_opens():
     tid = maybe_open_trade("NVDA", "BUY", 500.0, 510.0, 495.0, confidence=80.0, rr_qualifies=False, session="REGULAR")
     assert tid is not None, "rr_qualifies=False must still open a paper trade (data collection)"
 
+def test_post_fill_bad_rr_is_blocked():
+    """Actual executable R:R must be re-gated after fill/slippage/stop adjustments."""
+    tid = maybe_open_trade(
+        "BADRR",
+        "BUY",
+        100.0,
+        100.2,
+        99.0,
+        confidence=80.0,
+        rr_qualifies=True,
+        rr_ratio=2.0,
+        session="REGULAR",
+    )
+    assert tid is None, "post-fill R:R below min must not insert a paper trade"
+
 def test_no_duplicate_open_trade():
     maybe_open_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     tid2 = maybe_open_trade("TSLA", "SELL", 250.0, 240.0, 255.0, confidence=70.0, rr_qualifies=True, session="REGULAR")

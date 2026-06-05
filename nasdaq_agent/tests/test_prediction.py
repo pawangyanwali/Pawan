@@ -100,7 +100,29 @@ def test_rr_qualifies_threshold():
     stop, target, rr, quality, qualifies = _evaluate_rr(
         price=100.0, sr=_sr(96.0, 110.0), direction="BUY"
     )
-    assert qualifies == (rr >= 2.0)
+    assert qualifies == (rr >= 1.5)
+
+def test_atr_buy_rr_blocks_resistance_inside_target_path():
+    stop, target, rr, quality, qualifies = _evaluate_rr(
+        price=100.0,
+        sr=_sr(96.0, 100.75),
+        direction="BUY",
+        atr=1.0,
+    )
+    assert target > 100.0
+    assert quality == "LOW"
+    assert qualifies is False
+
+def test_atr_sell_rr_blocks_support_inside_target_path():
+    stop, target, rr, quality, qualifies = _evaluate_rr(
+        price=100.0,
+        sr=_sr(99.25, 104.0),
+        direction="SELL",
+        atr=1.0,
+    )
+    assert target < 100.0
+    assert quality == "LOW"
+    assert qualifies is False
 
 def test_quality_labels():
     _, _, rr, quality, _ = _evaluate_rr(
