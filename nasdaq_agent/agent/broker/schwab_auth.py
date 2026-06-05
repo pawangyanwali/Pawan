@@ -655,6 +655,12 @@ class _TokenManager:
             data = self._post_token(payload)
             data["_redirect_uri"] = redirect_uri
             self._store(data)
+            # Resolve outstanding re-auth alert immediately — tokens are fresh.
+            try:
+                from agent.system_alerts import resolve_alert
+                resolve_alert(alert_key=f"SCHWAB_AUTH:{self.name.lower()}")
+            except Exception:
+                pass
             # token-service is the sole owner of refresh timers — notify it and
             # all consumers via pub/sub.  Do NOT call _schedule_refresh() here:
             # that would create a second timer competing with token-service's,
