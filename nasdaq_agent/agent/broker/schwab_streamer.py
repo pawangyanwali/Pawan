@@ -66,6 +66,7 @@ _bar_persist_worker_started: bool = False
 
 # ── WebSocket streamer lifecycle ───────────────────────────────────────────────
 _streamer_thread:  Optional[threading.Thread] = None   # WS streamer thread
+_streamer_start_lock = threading.Lock()
 _event_loop:       Optional[asyncio.AbstractEventLoop] = None
 _ws_connected:     bool = False
 _ws_error:         Optional[str] = None
@@ -720,6 +721,13 @@ async def _streamer_main(tickers: list[str]) -> None:
                         _process_message(raw)
                 finally:
                     flush_task.cancel()
+            _ws_connected = False
+            _ws_error = "WebSocket closed by Schwab"
+            logger.warning(
+                f"[Streamer] Connection closed by Schwab - retrying in {retry_delay}s"
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 15)
 
         except Exception as e:
             _ws_connected = False

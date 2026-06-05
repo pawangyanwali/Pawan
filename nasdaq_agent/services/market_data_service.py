@@ -24,6 +24,7 @@ Environment variables:
 from __future__ import annotations
 
 import os
+import json
 import sys
 import time
 
@@ -38,6 +39,8 @@ from services._base import configure_logging, ServiceRunner
 
 _log    = configure_logging("market-data")
 _runner = ServiceRunner("market-data")
+_last_token_generation: dict[str, int] = {}
+_last_token_reload_at: dict[str, float] = {}
 
 
 # ── Market data startup ───────────────────────────────────────────────────────
@@ -119,6 +122,79 @@ def _publish_streamer_status_loop() -> None:
         time.sleep(15)
 
 
+def _handle_token_event(payload: dict) -> None:
+    """Load rotated Schwab tokens without blindly restarting all data sources."""
+    app = str(payload.get("app") or "").lower()
+    if app in {"at", "accounts", "accounts_trading"}:
+        app = "trader"
+    if app not in {"trader", "marketdata"}:
+        return
+
+    generation = int(payload.get("generation") or 0)
+    if generation and generation <= _last_token_generation.get(app, 0):
+        _log.debug("[token_reload] Ignoring duplicate %s generation=%s", app, generation)
+        return
+
+    now = time.time()
+    if now - _last_token_reload_at.get(app, 0.0) < 5:
+        _log.debug("[token_reload] Debounced %s token event", app)
+        return
+    _last_token_reload_at[app] = now
+    if generation:
+        _last_token_generation[app] = generation
+
+    from config import NASDAQ_TICKERS
+
+    if app == "trader":
+        from agent.broker.schwab_auth import load_stored_tokens
+        from agent.broker.schwab_streamer import get_streamer_status, start_streamer
+
+        if not load_stored_tokens(schedule_refresh=False):
+            _log.warning("[token_reload] Trader token event but token could not be loaded")
+            return
+
+        status = get_streamer_status()
+        if status.get("connected"):
+            _log.info(
+                "[token_reload] Trader token loaded (generation=%s); WS already connected",
+                generation or "-",
+            )
+            return
+
+        _log.info(
+            "[token_reload] Trader token loaded (generation=%s); starting WS streamer",
+            generation or "-",
+        )
+        start_streamer(list(NASDAQ_TICKERS))
+        return
+
+    from agent.broker.schwab_auth import load_stored_md_tokens
+    from agent.broker.schwab_streamer import is_md_poller_running, start_md_poller
+
+    if not load_stored_md_tokens(schedule_refresh=False):
+        _log.warning("[token_reload] MarketData token event but token could not be loaded")
+        return
+
+    if is_md_poller_running():
+        _log.info(
+            "[token_reload] MarketData token loaded (generation=%s); REST poller already running",
+            generation or "-",
+        )
+        return
+
+    delay = float(os.getenv("NASDAQ_MD_STARTUP_DELAY_S", "0"))
+    _log.info(
+        "[token_reload] MarketData token loaded (generation=%s); starting REST poller",
+        generation or "-",
+    )
+    start_md_poller(
+        list(NASDAQ_TICKERS),
+        interval=1.0,
+        parallel_batches=2,
+        startup_delay_s=delay,
+    )
+
+
 # ── Token hot-reload ──────────────────────────────────────────────────────────
 
 def _token_reload_loop() -> None:
@@ -142,13 +218,26 @@ def _token_reload_loop() -> None:
                 continue
 
             pubsub = client.pubsub()
-            pubsub.subscribe("schwab:tokens_refreshed")
-            _log.info("[token_reload] Subscribed to schwab:tokens_refreshed")
+            pubsub.subscribe(
+                "schwab:token_rotated:trader",
+                "schwab:token_rotated:marketdata",
+                "schwab:tokens_refreshed",
+            )
+            _log.info("[token_reload] Subscribed to Schwab token rotation channels")
 
             for message in pubsub.listen():
                 if _runner.stopped:
                     break
                 if message and message.get("type") == "message":
+                    try:
+                        raw = message.get("data") or "{}"
+                        if isinstance(raw, bytes):
+                            raw = raw.decode()
+                        payload = json.loads(raw)
+                        _handle_token_event(payload)
+                    except Exception as exc:
+                        _log.warning("[token_reload] Token event handling failed: %s", exc)
+                    continue
                     _log.info(
                         "[token_reload] Token refresh detected — restarting data sources"
                     )

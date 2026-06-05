@@ -72,6 +72,11 @@ def _new_auth_listener() -> None:
         "schwab:new_auth:trader":     _trader,
         "schwab:new_auth:marketdata": _market_data,
     }
+    _refresh_map = {
+        "schwab:refresh_requested:trader":     _trader,
+        "schwab:refresh_requested:marketdata": _market_data,
+    }
+    _last_refresh_request: dict[str, float] = {}
 
     while True:
         try:
@@ -84,13 +89,28 @@ def _new_auth_listener() -> None:
             pubsub = client.pubsub()
             for channel in _app_map:
                 pubsub.subscribe(channel)
-            logger.info("[token-service] Subscribed to schwab:new_auth:{trader,marketdata}")
+            for channel in _refresh_map:
+                pubsub.subscribe(channel)
+            logger.info("[token-service] Subscribed to Schwab token channels")
 
             for msg in pubsub.listen():
                 if msg and msg.get("type") == "message":
                     channel = msg.get("channel", b"")
                     if isinstance(channel, bytes):
                         channel = channel.decode()
+                    refresh_mgr = _refresh_map.get(channel)
+                    if refresh_mgr is not None:
+                        now = time.time()
+                        key = refresh_mgr.name.lower()
+                        if now - _last_refresh_request.get(key, 0.0) < 60:
+                            continue
+                        _last_refresh_request[key] = now
+                        logger.info(
+                            "[token-service] Refresh requested for %s by consumer",
+                            refresh_mgr.name,
+                        )
+                        refresh_mgr.refresh()
+                        continue
                     mgr = _app_map.get(channel)
                     if mgr is None:
                         continue
@@ -108,6 +128,7 @@ def _new_auth_listener() -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    os.environ["SCHWAB_TOKEN_OWNER"] = "1"
     logger.info("=== token-service starting ===")
 
     _start_health_server()

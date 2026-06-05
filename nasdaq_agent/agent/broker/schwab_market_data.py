@@ -115,8 +115,11 @@ def _get(path: str, params: dict, timeout: "int | tuple" = 20) -> dict | list:
                     f"[Schwab MD] {r.status_code} on {path} — CDN/IP block, 30s hold"
                 )
                 return {}
-            # Genuine auth failure (expired/revoked token) — refresh and retry once
-            logger.info(f"[Schwab MD] {r.status_code} on {path} — refreshing token…")
+            # Genuine auth failure (expired/revoked token). Market-data is a
+            # read-only token consumer, so it asks token-service to refresh.
+            logger.info(
+                f"[Schwab MD] {r.status_code} on {path} — requesting token-service refresh"
+            )
             if _try_refresh_md_token():
                 headers = _auth_headers()
                 if headers:
@@ -128,7 +131,7 @@ def _get(path: str, params: dict, timeout: "int | tuple" = 20) -> dict | list:
                     r.raise_for_status()
                     _on_success()
                     return r.json()
-            logger.warning("[Schwab MD] Auth refresh failed — re-authenticate at /schwab/auth/md")
+            logger.warning("[Schwab MD] Auth failure reported to token-service")
             return {}
         r.raise_for_status()
         _on_success()
@@ -211,32 +214,28 @@ _refresh_last: float = 0.0
 
 def _try_refresh_md_token() -> bool:
     """
-    Refresh the Market Data access token.  Coalesces concurrent refresh attempts:
-    only one thread calls Schwab at a time; others wait behind _refresh_lock
-    and hit the 180-second dedup check instead of hammering the token endpoint.
+    Ask token-service to refresh the Market Data access token.
 
-    _refresh_last is stamped BEFORE the attempt (not only on success) so that
-    even a failed refresh prevents re-hammering the token endpoint for 180s.
-
-    If the refresh itself fails (e.g. the token endpoint is also blocked by
-    Akamai), _on_429() is called so that _get() skips subsequent API calls
-    for the same back-off window instead of looping every second.
+    This module is a read-only token consumer. _refresh_last is stamped before
+    the request so 401/403 fan-out cannot spam token-service or Schwab.
     """
     global _refresh_last
     with _refresh_lock:
         if time.time() - _refresh_last < 180:
-            return bool(_auth_headers())
+            return False
         _refresh_last = time.time()   # stamp before attempt — prevents storm on failure
         try:
-            from agent.broker.schwab_auth import _market_data as _md_app
-            ok = _md_app.refresh()
-            if not ok:
-                # Token endpoint blocked (CDN/IP block) — back off API calls too
-                _on_429()
-            return ok
+            from agent.valkey_client import _get_client
+            client = _get_client()
+            if client:
+                client.publish(
+                    "schwab:refresh_requested:marketdata",
+                    json.dumps({"ts": time.time(), "app": "marketdata"}),
+                )
+                logger.info("[Schwab MD] Requested token-service refresh")
+            return False
         except Exception as e:
-            logger.warning(f"[Schwab MD] Token refresh error: {e}")
-            _on_429()
+            logger.warning(f"[Schwab MD] Token refresh request error: {e}")
             return False
 
 
@@ -625,6 +624,8 @@ async def _fetch_one_async(
             # Genuine auth failure — refresh once, guarded by _try_refresh_md_token dedup
             import asyncio as _aio
             loop = _aio.get_event_loop()
+            await loop.run_in_executor(None, _try_refresh_md_token)
+            return pd.DataFrame()
             refreshed = await loop.run_in_executor(None, _try_refresh_md_token)
             if refreshed:
                 from agent.broker.schwab_auth import _market_data as _md_app

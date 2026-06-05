@@ -187,26 +187,10 @@ async def schwab_at_web_callback(
     redirect_uri = _schwab_callback_url(request).replace("/schwab/callback", "/schwab/callback/at")
     success, reason = exchange_auth_code(code, state, redirect_uri)
     if success:
-        try:
-            from agent.broker.schwab_streamer import start_streamer
-            from main import _ensure_tick_broadcast_registered
-            from config import NASDAQ_TICKERS as _nq_t
-            start_streamer(list(_nq_t))
-            _ensure_tick_broadcast_registered()
-        except Exception:
-            pass
-        try:
-            from agent.valkey_client import _get_client as _vk_c
-            _vk = _vk_c()
-            if _vk:
-                _vk.publish("schwab:tokens_refreshed",
-                            json.dumps({"ts": time.time(), "app": "at"}))
-        except Exception:
-            pass
         html = ("<html><body style='font-family:sans-serif;padding:40px;background:#f0fff4'>"
                 "<h2 style='color:#276749'>&#10003; Schwab Accounts+Trading Connected!</h2>"
-                "<p>Tokens saved. WebSocket Level 1 streamer starting now.</p>"
-                "<p>You will see real-time bid/ask/last updates and 1-min candles within seconds.</p>"
+                "<p>Tokens saved. token-service and market-data will adopt the new token automatically.</p>"
+                "<p>The WebSocket streamer stays owned by the market-data container.</p>"
                 "<p><a href='/'>&#8592; Back to Dashboard</a></p></body></html>")
         return HTMLResponse(html)
     else:

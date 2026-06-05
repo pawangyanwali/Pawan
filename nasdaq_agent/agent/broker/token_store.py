@@ -35,6 +35,17 @@ def put_token(app: str, token_data: dict) -> None:
         logger.warning("[token_store] Valkey write failed for %s: %s", app, exc)
 
 
+def delete_token(app: str) -> None:
+    """Delete token JSON from Valkey. Best-effort - never raises."""
+    try:
+        from agent.valkey_client import _get_client
+        client = _get_client()
+        if client:
+            client.delete(f"{_VALKEY_PREFIX}{app}")
+    except Exception as exc:
+        logger.warning("[token_store] Valkey delete failed for %s: %s", app, exc)
+
+
 def get_token(app: str) -> Optional[dict]:
     """
     Read token for `app` ('trader' or 'marketdata').
@@ -49,7 +60,9 @@ def get_token(app: str) -> Optional[dict]:
         if client:
             raw = client.get(f"{_VALKEY_PREFIX}{app}")
             if raw:
-                return json.loads(raw)
+                data = json.loads(raw)
+                if str(data.get("status", "OK")).upper() == "OK" and data.get("access_token"):
+                    return data
     except Exception as exc:
         logger.warning("[token_store] Valkey read failed for %s: %s", app, exc)
 
@@ -57,7 +70,11 @@ def get_token(app: str) -> Optional[dict]:
     try:
         from agent.service_state import get_state
         data = get_state(f"schwab:tokens:{app}", ignore_expiry=False)
-        if data and "access_token" in data:
+        if (
+            data
+            and "access_token" in data
+            and str(data.get("status", "OK")).upper() == "OK"
+        ):
             return data
     except Exception as exc:
         logger.warning("[token_store] PG read failed for %s: %s", app, exc)

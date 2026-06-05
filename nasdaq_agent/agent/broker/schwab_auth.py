@@ -135,6 +135,14 @@ class _TokenManager:
             logger.debug(f"[Schwab/{self.name}] Token backup write skipped: {_e}")
 
     def _load_from_disk(self) -> dict:
+        try:
+            from agent.broker.token_store import get_token as _vk_get_token
+            cached = _vk_get_token(self.name.lower())
+            if cached and cached.get("access_token"):
+                return cached
+        except Exception:
+            pass
+
         candidates = [self._token_path]
         legacy_path = _DEFAULT_TOKEN_DIR / self._token_path.name
         if legacy_path != self._token_path:
@@ -222,6 +230,8 @@ class _TokenManager:
             if "refresh_token" not in self._tokens and existing_rt:
                 self._tokens["refresh_token"] = existing_rt
             self._tokens["stored_at"] = time.time()
+            self._tokens["generation"] = int(self._tokens["stored_at"] * 1000)
+            self._tokens["status"] = "OK"
             snapshot = dict(self._tokens)
         self._save()
         # Persist to PostgreSQL as a durable fallback — survives token-dir wipes.
@@ -243,6 +253,101 @@ class _TokenManager:
             pass
         logger.info(f"[Schwab/{self.name}] Tokens saved.")
 
+    def _publish_token_event(self, event: str, snapshot: dict | None = None) -> None:
+        """Publish an app-specific token event plus the legacy aggregate event."""
+        try:
+            from agent.valkey_client import _get_client as _vk_get
+            client = _vk_get()
+            if not client:
+                return
+            snap = snapshot or {}
+            payload = {
+                "ts": time.time(),
+                "app": self.name.lower(),
+                "event": event,
+                "generation": int(snap.get("generation") or 0),
+                "access_expires_at": (
+                    float(snap.get("stored_at") or 0.0)
+                    + float(snap.get("expires_in") or 1800)
+                ),
+            }
+            client.publish(f"schwab:{event}:{self.name.lower()}", json.dumps(payload))
+            client.publish("schwab:tokens_refreshed", json.dumps(payload))
+        except Exception:
+            pass
+
+    def _invalidate_all_stores(self, reason: str = "auth_required") -> None:
+        """Clear every token store so invalid refresh tokens cannot be resurrected."""
+        with self._lock:
+            self._tokens.clear()
+        for path in (self._token_path, _BACKUP_DIR / self._token_path.name):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+        try:
+            from agent.broker.token_store import delete_token as _vk_delete
+            _vk_delete(self.name.lower())
+        except Exception:
+            pass
+        try:
+            from agent.db import get_pool
+            pool = get_pool()
+            with pool.connection() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS schwab_tokens (
+                        app           TEXT PRIMARY KEY,
+                        access_token  TEXT,
+                        refresh_token TEXT,
+                        expires_in    INTEGER NOT NULL DEFAULT 1800,
+                        stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        generation    BIGINT NOT NULL DEFAULT 0,
+                        status        TEXT NOT NULL DEFAULT 'OK',
+                        last_error    TEXT
+                    )
+                """)
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+                conn.execute("""
+                    INSERT INTO schwab_tokens
+                        (app, access_token, refresh_token, expires_in, stored_at,
+                         refreshed_at, generation, status, last_error)
+                    VALUES (%s, NULL, NULL, 1800, now(), now(), 0, 'AUTH_REQUIRED', %s)
+                    ON CONFLICT (app) DO UPDATE SET
+                        access_token = NULL,
+                        refresh_token = NULL,
+                        refreshed_at = now(),
+                        status = 'AUTH_REQUIRED',
+                        last_error = EXCLUDED.last_error
+                """, (self.name.lower(), reason))
+        except Exception as exc:
+            logger.debug(f"[Schwab/{self.name}] schwab_tokens invalidation failed: {exc}")
+        try:
+            from agent.service_state import set_state
+            set_state(
+                f"schwab:tokens:{self.name.lower()}",
+                {"status": "AUTH_REQUIRED", "reason": reason, "stored_at": time.time()},
+                ttl_s=8 * 86400,
+            )
+        except Exception:
+            pass
+        try:
+            from agent.valkey_client import _get_client as _vk_get
+            client = _vk_get()
+            if client:
+                payload = {
+                    "ts": time.time(),
+                    "app": self.name.lower(),
+                    "event": "auth_required",
+                    "reason": reason,
+                }
+                client.publish(f"schwab:auth_required:{self.name.lower()}", json.dumps(payload))
+        except Exception:
+            pass
+
     def _pg_save(self, tokens: dict) -> None:
         """Mirror tokens to PostgreSQL — dedicated schwab_tokens table + service_state fallback."""
         # ── 1. Dedicated schwab_tokens table (primary durable store) ──────────
@@ -257,25 +362,36 @@ class _TokenManager:
                         refresh_token TEXT,
                         expires_in    INTEGER NOT NULL DEFAULT 1800,
                         stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        generation    BIGINT NOT NULL DEFAULT 0,
+                        status        TEXT NOT NULL DEFAULT 'OK',
+                        last_error    TEXT
                     )
                 """)
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
                 conn.execute("""
                     INSERT INTO schwab_tokens
-                        (app, access_token, refresh_token, expires_in, stored_at, refreshed_at)
-                    VALUES (%s, %s, %s, %s, to_timestamp(%s), now())
+                        (app, access_token, refresh_token, expires_in, stored_at,
+                         refreshed_at, generation, status, last_error)
+                    VALUES (%s, %s, %s, %s, to_timestamp(%s), now(), %s, 'OK', NULL)
                     ON CONFLICT (app) DO UPDATE SET
                         access_token  = EXCLUDED.access_token,
                         refresh_token = EXCLUDED.refresh_token,
                         expires_in    = EXCLUDED.expires_in,
                         stored_at     = EXCLUDED.stored_at,
-                        refreshed_at  = now()
+                        refreshed_at  = now(),
+                        generation    = EXCLUDED.generation,
+                        status        = 'OK',
+                        last_error    = NULL
                 """, (
                     self.name.lower(),
                     tokens.get("access_token"),
                     tokens.get("refresh_token"),
                     tokens.get("expires_in", 1800),
                     tokens.get("stored_at", time.time()),
+                    int(tokens.get("generation") or int(tokens.get("stored_at", time.time()) * 1000)),
                 ))
         except Exception as exc:
             logger.debug(f"[Schwab/{self.name}] schwab_tokens PG write failed: {exc}")
@@ -293,18 +409,38 @@ class _TokenManager:
             from agent.db import get_pool
             pool = get_pool()
             with pool.connection() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS schwab_tokens (
+                        app           TEXT PRIMARY KEY,
+                        access_token  TEXT,
+                        refresh_token TEXT,
+                        expires_in    INTEGER NOT NULL DEFAULT 1800,
+                        stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        generation    BIGINT NOT NULL DEFAULT 0,
+                        status        TEXT NOT NULL DEFAULT 'OK',
+                        last_error    TEXT
+                    )
+                """)
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
+                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
                 row = conn.execute(
                     """SELECT access_token, refresh_token, expires_in,
-                              EXTRACT(EPOCH FROM stored_at)::double precision AS stored_at
+                              EXTRACT(EPOCH FROM stored_at)::double precision AS stored_at,
+                              COALESCE(generation, 0) AS generation,
+                              COALESCE(status, 'OK') AS status
                        FROM schwab_tokens WHERE app = %s""",
                     (self.name.lower(),)
                 ).fetchone()
-                if row and row[0]:
+                if row and row[0] and str(row[5]).upper() == "OK":
                     return {
                         "access_token":  row[0],
                         "refresh_token": row[1],
                         "expires_in":    row[2],
                         "stored_at":     float(row[3]),
+                        "generation":    int(row[4] or 0),
+                        "status":        row[5],
                     }
         except Exception as exc:
             logger.debug(f"[Schwab/{self.name}] schwab_tokens PG read failed: {exc}")
@@ -446,19 +582,14 @@ class _TokenManager:
                 resolve_alert(alert_key=f"SCHWAB_AUTH:{self.name.lower()}")
             except Exception:
                 pass
-            # Only publish the streamer-restart event when the access token
-            # actually rotated.  Skipping when unchanged avoids tearing down
-            # a healthy WebSocket stream on retried or no-op refreshes.
+            # Only publish a token-rotation event when the access token
+            # actually rotated. New consumers use app-specific channels and
+            # generation ids so a MarketData refresh cannot restart the WS.
             new_access_token = data.get("access_token", "")
             if new_access_token and new_access_token != old_access_token:
-                try:
-                    from agent.valkey_client import _get_client as _vk_c
-                    _vc = _vk_c()
-                    if _vc:
-                        _vc.publish("schwab:tokens_refreshed",
-                                    json.dumps({"ts": time.time(), "app": self.name.lower()}))
-                except Exception:
-                    pass
+                with self._lock:
+                    snapshot = dict(self._tokens)
+                self._publish_token_event("token_rotated", snapshot)
             return True
         except urllib.error.HTTPError as e:
             if e.code == 400:
@@ -492,13 +623,7 @@ class _TokenManager:
                 # lock already gone; it will then re-read the (now-deleted) file
                 # and skip a second Schwab call.
                 _release_refresh_lock(_vk_client, _lock_key, _lock_token, _lock_held)
-                with self._lock:
-                    self._tokens.clear()
-                if self._token_path.exists():
-                    try:
-                        self._token_path.unlink()
-                    except Exception:
-                        pass
+                self._invalidate_all_stores(reason="refresh_token_rejected")
             else:
                 # 403 = Akamai WAF transient block; 5xx = Schwab outage.
                 # Retry with exponential backoff (2, 4, 8, 16 … up to 30 min).
@@ -580,7 +705,7 @@ class _TokenManager:
 
     # ── Load from disk (called at startup) ────────────────────────────────────
 
-    def load_stored(self, schedule_refresh: bool = True) -> bool:
+    def load_stored(self, schedule_refresh: bool = False) -> bool:
         """
         Load tokens from disk (or PG/Valkey fallback).
 
@@ -671,14 +796,19 @@ class _TokenManager:
                 if _vk:
                     import json as _json
                     _ts = time.time()
+                    with self._lock:
+                        snapshot = dict(self._tokens)
+                    payload = {
+                        "ts": _ts,
+                        "app": self.name.lower(),
+                        "event": "new_auth",
+                        "generation": int(snapshot.get("generation") or 0),
+                    }
                     _vk.publish(
                         f"schwab:new_auth:{self.name.lower()}",
-                        _json.dumps({"ts": _ts, "app": self.name.lower()}),
+                        _json.dumps(payload),
                     )
-                    _vk.publish(
-                        "schwab:tokens_refreshed",
-                        _json.dumps({"ts": _ts, "app": self.name.lower()}),
-                    )
+                    self._publish_token_event("token_rotated", snapshot)
             except Exception:
                 pass
             logger.info(f"[Schwab/{self.name}] Web OAuth complete.")
@@ -740,14 +870,14 @@ _market_data = _TokenManager(
 
 # ── Public API (backwards-compatible names) ───────────────────────────────────
 
-def load_stored_tokens(schedule_refresh: bool = True) -> bool:
+def load_stored_tokens(schedule_refresh: bool = False) -> bool:
     """Load primary (Trader) tokens from disk. Called at startup.
 
     Pass schedule_refresh=False in all containers except token-service.
     """
     return _trader.load_stored(schedule_refresh=schedule_refresh)
 
-def load_stored_md_tokens(schedule_refresh: bool = True) -> bool:
+def load_stored_md_tokens(schedule_refresh: bool = False) -> bool:
     """Load Market Data tokens from disk. Called at startup.
 
     Pass schedule_refresh=False in all containers except token-service.
@@ -762,14 +892,13 @@ def get_access_token() -> Optional[str]:
 
 def get_md_access_token() -> Optional[str]:
     """
-    Market Data access token.
-    Falls back to the primary token if MD app is not configured,
-    so a single-app setup still works.
+    Dedicated Market Data access token.
+
+    Do not fall back to the Trader app token. The two-app production setup must
+    keep WS/trading auth and REST market-data auth independent so one failure
+    cannot mask the other.
     """
-    tok = _market_data.get_access_token()
-    if tok:
-        return tok
-    return _trader.get_access_token()
+    return _market_data.get_access_token()
 
 def get_token_status() -> dict:
     status = _trader.get_status()
