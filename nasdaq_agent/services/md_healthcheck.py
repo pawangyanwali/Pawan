@@ -55,13 +55,29 @@ def main() -> int:
         print(f"FAIL: Valkey error: {exc}")
         return 1
 
+    # Only fail on a stale streamer key if Schwab tokens are present.
+    # When tokens are expired/missing the streamer can't connect — the staleness
+    # is expected and will be surfaced as a SCHWAB_AUTH alert, not a health failure.
+    try:
+        schwab_tokens_present = bool(client.get("schwab:tokens:trader") or
+                                     client.exists("schwab:tokens:trader"))
+    except Exception:
+        schwab_tokens_present = True  # assume present if Valkey check fails
+
+    # Fallback: check the token file on disk if Valkey key is absent
+    if not schwab_tokens_present:
+        import pathlib
+        schwab_tokens_present = pathlib.Path("/app/data/tokens/schwab_tokens.json").exists()
+
     try:
         raw = client.get("scanner:streamer")
         if raw:
             age = time.time() - json.loads(raw).get("ts", 0)
             if age > 90:
-                print(f"FAIL: scanner:streamer stale ({age:.0f}s)")
-                return 1
+                if schwab_tokens_present:
+                    print(f"FAIL: scanner:streamer stale ({age:.0f}s)")
+                    return 1
+                print(f"WARN: scanner:streamer stale ({age:.0f}s) — skipping (no Schwab tokens)")
     except Exception as exc:
         print(f"WARN: scanner:streamer check error: {exc}")
 
@@ -78,15 +94,23 @@ def main() -> int:
             min_fresh_pct = _min_fresh_pct_for_session(session)
             health = price_bus_health(max_age_s=max_age_s)
             if health["total"] == 0:
-                print(f"FAIL: md:prices empty during {session} session")
-                return 1
+                if not schwab_tokens_present:
+                    print(f"WARN: md:prices empty during {session} — no Schwab tokens (re-auth needed)")
+                else:
+                    print(f"FAIL: md:prices empty during {session} session")
+                    return 1
             trusted_pct = float(health.get("trusted_fresh_pct") or 0.0)
             if trusted_pct < min_fresh_pct:
-                print(
-                    f"FAIL: md:prices trusted freshness {trusted_pct}% < {min_fresh_pct}% "
-                    f"(status={health['status']}, max_age={max_age_s}s, session={session})"
-                )
-                return 1
+                if not schwab_tokens_present:
+                    print(
+                        f"WARN: md:prices low ({trusted_pct}%) during {session} — no Schwab tokens"
+                    )
+                else:
+                    print(
+                        f"FAIL: md:prices trusted freshness {trusted_pct}% < {min_fresh_pct}% "
+                        f"(status={health['status']}, max_age={max_age_s}s, session={session})"
+                    )
+                    return 1
             if health.get("status") in {"REST_FALLBACK", "PARTIAL_FALLBACK"}:
                 print(
                     f"OK: REST fallback active "
