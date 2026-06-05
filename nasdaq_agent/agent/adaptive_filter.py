@@ -288,10 +288,13 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
     throttle_start = THROTTLE_START_WR if is_trade_source else SUPPRESS_BELOW
     obs_min_sample = max(MIN_SAMPLE * 3, 25) if not is_trade_source else MIN_SAMPLE
 
-    # Read config-store override for display threshold if available
+    max_penalty_pts = 35
+    # Read config-store overrides for display/advisory thresholds if available.
     try:
         from agent.config_manager import config as _cfg
         throttle_start = float(_cfg.get("filter.throttle_start_wr", throttle_start))
+        max_penalty_pts = int(_cfg.get("filter.max_penalty_pts", max_penalty_pts))
+        max_penalty_pts = max(0, min(100, max_penalty_pts))
     except Exception:
         pass
 
@@ -303,9 +306,11 @@ def _apply_stats(stats: dict, source: str = "backtest") -> None:
             if count < obs_min_sample:
                 continue
             key = f"{dim}:{val}"
+            penalty_pts = max(0, min(max_penalty_pts, round((throttle_start - wr) * 100)))
             new_context_stats[key] = {
                 "win_rate":       round(wr, 3),
                 "count":          count,
+                "penalty_pts":    penalty_pts,
                 "underperforming": wr < throttle_start,
             }
 

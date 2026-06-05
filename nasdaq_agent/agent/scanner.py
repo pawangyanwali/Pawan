@@ -164,7 +164,11 @@ def _scan_interval() -> int:
         return 30
     if CLOSE_START <= minutes < CLOSE_END:
         return 30
-    return SCAN_INTERVAL_SECONDS
+    try:
+        from agent.config_manager import config as _cfg
+        return max(10, min(600, int(_cfg.get("scanner.scan_interval_s", SCAN_INTERVAL_SECONDS))))
+    except Exception:
+        return SCAN_INTERVAL_SECONDS
 
 
 # ── StockSignal dataclass ─────────────────────────────────────────────────────

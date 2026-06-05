@@ -335,6 +335,30 @@
     .history-modal.open { display:flex; }
     .history-modal-inner { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:90vw; max-width:900px; max-height:80vh; overflow-y:auto; padding:20px; }
 
+    /* Settings page */
+    .settings-page { display:none; position:fixed; inset:0; z-index:760; overflow:auto; background:var(--bg); padding:18px 22px 32px; }
+    .settings-page.open { display:block; }
+    .settings-shell { max-width:1360px; margin:0 auto; }
+    .settings-page-header { position:sticky; top:0; z-index:3; display:flex; align-items:center; justify-content:space-between; gap:18px; padding:4px 0 14px; margin-bottom:14px; background:linear-gradient(180deg,var(--bg) 82%,transparent); border-bottom:1px solid var(--border); }
+    .settings-page-title { font-size:18px; font-weight:800; color:var(--text); }
+    .settings-page-subtitle { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.45; }
+    .settings-back-btn { background:var(--surface2); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:8px 12px; cursor:pointer; font-family:inherit; font-size:12px; font-weight:700; }
+    .settings-body { display:grid; grid-template-columns:220px minmax(0,1fr); gap:18px; align-items:start; }
+    .settings-nav { position:sticky; top:78px; display:flex; flex-direction:column; gap:7px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px; }
+    .settings-nav .pt-tab { width:100%; justify-content:flex-start; text-align:left; }
+    .settings-content { min-width:0; }
+    .settings-field-guide { margin-bottom:14px; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; }
+    .settings-field-guide-title { font-size:12px; font-weight:800; color:var(--text); margin-bottom:5px; }
+    .settings-field-guide-subtitle { font-size:10px; color:var(--muted); line-height:1.5; margin-bottom:12px; }
+    .settings-guide-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:10px; }
+    .settings-guide-item { background:var(--surface2); border:1px solid var(--border); border-radius:7px; padding:10px 11px; }
+    .settings-guide-label { font-size:10px; color:var(--accent); font-weight:800; text-transform:uppercase; letter-spacing:.35px; margin-bottom:4px; }
+    .settings-guide-key { font-size:9px; color:var(--muted); margin-bottom:6px; }
+    .settings-guide-copy { font-size:10px; color:var(--muted); line-height:1.55; }
+    .settings-field-note { margin-top:5px; font-size:10px; color:var(--muted); line-height:1.5; }
+    .settings-field-note strong { color:var(--text); }
+    .settings-panel { min-width:0; }
+
     /* Backtest modal */
     .bt-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.8); z-index:500; align-items:flex-start; justify-content:center; padding:20px; overflow-y:auto; }
     .bt-modal.open { display:flex; }
@@ -473,6 +497,11 @@
       /* Modals — full screen */
       .watchlist-modal-inner { width:100%; max-height:100vh; border-radius:0; }
       .history-modal-inner { width:100%; max-height:100vh; max-width:100%; border-radius:0; padding:14px; }
+      .settings-page { padding:12px; }
+      .settings-page-header { position:relative; top:auto; align-items:flex-start; }
+      .settings-body { grid-template-columns:1fr; }
+      .settings-nav { position:relative; top:auto; flex-direction:row; overflow-x:auto; }
+      .settings-nav .pt-tab { width:auto; white-space:nowrap; }
       .bt-modal { padding:0; }
       .bt-modal-inner { border-radius:0; padding:14px; min-height:100vh; }
       .bt-kpi-grid { grid-template-columns:repeat(2, 1fr); }
@@ -1492,37 +1521,42 @@ TRADING_MAX_POSITION_PCT=10
   </div>
 </div>
 
-<!-- Settings Modal -->
-<div class="history-modal" id="settings-modal">
-  <div class="history-modal-inner" style="max-width:720px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+<!-- Settings Page -->
+<div class="settings-page" id="settings-modal" aria-hidden="true">
+  <div class="settings-shell">
+    <div class="settings-page-header">
       <div>
-        <div style="font-size:14px;font-weight:700;color:var(--text)">⚙️ Settings</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px">All configuration — changes take effect immediately without a restart</div>
+        <div class="settings-page-title">System Settings</div>
+        <div class="settings-page-subtitle">Runtime configuration backed by PostgreSQL config_store. Changes are hot-reloaded by the service that owns each setting.</div>
       </div>
-      <button onclick="closeSettings()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+      <button onclick="closeSettings()" class="settings-back-btn">Back to Dashboard</button>
     </div>
     <!-- Tab bar -->
-    <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap">
+    <div class="settings-body">
+    <div class="settings-nav">
       <button id="st-tab-paper"      onclick="settingsTab('paper')"      class="pt-tab pt-tab-active">Paper Trading</button>
       <button id="st-tab-traderules" onclick="settingsTab('traderules')" class="pt-tab">Trade Rules</button>
       <button id="st-tab-signal"  onclick="settingsTab('signal')"  class="pt-tab">Signal Config</button>
       <button id="st-tab-risk"    onclick="settingsTab('risk')"    class="pt-tab">Risk Controls</button>
       <button id="st-tab-learner" onclick="settingsTab('learner')" class="pt-tab">Learner</button>
-      <button id="st-tab-algos"   onclick="settingsTab('algos')"   class="pt-tab">⚙️ Algo Params</button>
-      <button id="st-tab-sr"      onclick="settingsTab('sr')"      class="pt-tab">📐 S&amp;R Tuning</button>
-      <button id="st-tab-execution" onclick="settingsTab('execution')" class="pt-tab">⚡ Execution</button>
-      <button id="st-tab-system"    onclick="settingsTab('system')"    class="pt-tab">🔧 System</button>
+      <button id="st-tab-algos"   onclick="settingsTab('algos')"   class="pt-tab">Algo Params</button>
+      <button id="st-tab-sr"      onclick="settingsTab('sr')"      class="pt-tab">S&amp;R Tuning</button>
+      <button id="st-tab-execution" onclick="settingsTab('execution')" class="pt-tab">Execution</button>
+      <button id="st-tab-system"    onclick="settingsTab('system')"    class="pt-tab">System</button>
     </div>
-    <div id="st-panel-paper"      style="display:block;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-traderules" style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-signal"     style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-risk"       style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-learner"    style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-algos"      style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-sr"         style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-execution"  style="display:none;max-height:72vh;overflow-y:auto"></div>
-    <div id="st-panel-system"     style="display:none;max-height:72vh;overflow-y:auto"></div>
+    <div class="settings-content">
+    <div id="settings-field-guide" class="settings-field-guide"></div>
+    <div id="st-panel-paper"      class="settings-panel" style="display:block"></div>
+    <div id="st-panel-traderules" class="settings-panel" style="display:none"></div>
+    <div id="st-panel-signal"     class="settings-panel" style="display:none"></div>
+    <div id="st-panel-risk"       class="settings-panel" style="display:none"></div>
+    <div id="st-panel-learner"    class="settings-panel" style="display:none"></div>
+    <div id="st-panel-algos"      class="settings-panel" style="display:none"></div>
+    <div id="st-panel-sr"         class="settings-panel" style="display:none"></div>
+    <div id="st-panel-execution"  class="settings-panel" style="display:none"></div>
+    <div id="st-panel-system"     class="settings-panel" style="display:none"></div>
+    </div>
+    </div>
   </div>
 </div>
 
@@ -5102,18 +5136,153 @@ async function ptLoadAccountTab() {
 
 // ─── Paper Trading — Budget Config tab ────────────────────────────────────────
 // ─── Settings Modal ────────────────────────────────────────────────────────────
+const SETTINGS_FIELD_GUIDES = {
+  paper: {
+    title: 'Paper Trading: simulated capital and mode control',
+    subtitle: 'Read by paper_trading.py and risk_controls.py. Affects new paper positions immediately; existing open positions keep their already-calculated entry, stop, target, and share count.',
+    items: [
+      ['Trading Mode', 'trading.is_paper', 'Risk controls use paper.budget in paper mode and risk.account_size in live mode. Example: keep this ON while validating strategy changes.'],
+      ['Total Budget', 'paper.budget', 'Total simulated capital pool. Example: 150000 means allocation gates and paper P&L percentages are measured against $150k.'],
+      ['Max Trade Size', 'paper.max_trade_pct', 'Caps one paper position by budget percentage. Example: 5 with $150k budget caps one entry at $7,500 before confidence/R:R sizing.'],
+      ['Max Allocated', 'paper.max_allocated_pct', 'Caps total open paper exposure. Example: 70 with $150k allows up to $105k allocated across open trades.'],
+      ['Max Open Trades', 'paper.max_open_trades', 'Hard concurrent position cap. Example: 30 allows up to 30 open paper positions if capital gates also pass.'],
+      ['Min Confidence', 'paper.min_confidence', 'Global paper execution floor before adaptive and family bumps. Example: 55 means a 54% signal is observed and learned from but not opened.']
+    ],
+  },
+  traderules: {
+    title: 'Trade Rules: stop, target, R:R, T1/T2, and sizing math',
+    subtitle: 'prediction.* is read by prediction.py; paper.* exit settings are read by paper_trading.py; sizing.* is read by position_sizing.py.',
+    items: [
+      ['Stop / Target Mode', 'prediction.use_atr_stops', 'ATR mode uses stop = ATR x multiplier and target = T2 x risk. Structure mode uses support/resistance directly. Example: ATR mode keeps a 1.5R target aligned to the actual T2 exit.'],
+      ['ATR Stop Multiple', 'prediction.stop_atr_multiple', 'Initial stop width in 1-minute ATR units. Example: 1.2 gives volatile stocks more room than 1.0.'],
+      ['Daily ATR Stop Floor', 'prediction.min_stop_daily_atr_pct', 'Minimum stop as percent of daily ATR. Example: 5% prevents tiny 1-minute ATR stops in pre-market.'],
+      ['Minimum R:R', 'prediction.min_rr', 'Minimum acceptable reward/risk. Example: 1.5 rejects trades whose target path cannot support at least 1.5R.'],
+      ['Stop/Target Floors', 'prediction.min_stop_dist_pct, prediction.max_risk_pct, prediction.min_target_pct', 'Bounds degenerate trades. Example: min target 0.3% blocks trades where the computed target is only a few cents away.'],
+      ['T1/T2 Exit Levels', 'paper.t1_r_multiple, paper.t2_r_multiple', 'Partial and final exits as multiples of initial risk. Example: T1=1.0 and T2=1.5 exits half at 1R and the rest at 1.5R.'],
+      ['Post-T1 Management', 'paper.t1_profit_lock_r, paper.post_t1_trail_r', 'After T1, the stop locks profit and then trails the water mark. Example: 0.20R lock prevents breakeven exits on the remaining half.'],
+      ['R:R Size Scaling', 'paper.rr_denominator, paper.rr_size_mult_min', 'Scales size by signal quality. Example: denominator 2.0 means a 1.5R trade sizes at 75% before confidence/family multipliers.'],
+      ['Time Stops', 'paper.max_bars_scalp, paper.max_bars_intraday', 'Closes stale paper trades after N one-minute bars. Example: scalp 20 exits a fast setup after about 20 minutes if unresolved.'],
+      ['Confidence Multipliers', 'sizing.conf_*', 'Adjusts position size based on confidence. Example: high threshold 75 and high multiplier 1.25 makes a 78% signal 25% larger than baseline.']
+    ],
+  },
+  signal: {
+    title: 'Signal Config: earnings risk and adaptive filter display controls',
+    subtitle: 'Earnings windows are read by earnings.py; adaptive filter thresholds are read by adaptive_filter.py during learning updates.',
+    items: [
+      ['Pre-Earnings Blackout', 'scanner.pre_earnings_blackout_days', 'Blocks trading before known earnings because gap risk can invalidate technical stops. Example: 3 blocks the three calendar days before a report.'],
+      ['Post-Earnings Cooldown', 'scanner.post_earnings_cooldown_days', 'Blocks trading immediately after earnings while spreads, gaps, and volatility normalize. Example: 1 skips the next day.'],
+      ['Throttle Start Win Rate', 'filter.throttle_start_wr', 'Marks contexts under this win rate as underperforming. Example: 50 means a 35% context is flagged for a 15-point advisory penalty.'],
+      ['Max Confidence Penalty', 'filter.max_penalty_pts', 'Caps the advisory penalty recorded for weak contexts. In observe mode this does not hard-block trades; it explains how strict the learner would be if enforcement is enabled.']
+    ],
+  },
+  risk: {
+    title: 'Risk Controls: daily circuit breakers and adaptive execution gates',
+    subtitle: 'Most risk.* values are read by risk_controls.py; family storm, flash-stop, rolling EV, and ticker damage controls are read by paper_trading.py.',
+    items: [
+      ['Profit Target and Ceiling', 'risk.daily_profit_target_usd, risk.daily_profit_max_usd', 'Target activates profit-protect behavior; ceiling halts new trading. Example: target 1000 starts defensive sizing after +$1000.'],
+      ['Loss Warning and Halt', 'risk.daily_loss_warning_pct, risk.daily_loss_halt_pct', 'Warning logs early drawdown; halt blocks new entries. In paper mode the denominator is paper.budget.'],
+      ['Trade and Heat Caps', 'risk.max_concurrent_trades, risk.max_portfolio_heat_pct, risk.max_daily_trades', 'Limits total activity and open risk. Example: max heat 1.5 means open stop-risk cannot exceed 1.5% of the active account base.'],
+      ['Consecutive Loss Cooldown', 'risk.max_consecutive_losses, risk.cooldown_after_losses', 'Live-mode circuit breakers for repeated losses; paper mode records observability but avoids blocking learning flow.'],
+      ['Pre-T1 Storm Circuit', 'risk.pre_t1_storm_*', 'Pauses a family/session when too many trades stop before T1. Example: 8 hits or $250 rolling loss in 30 minutes pauses that family.'],
+      ['Flash-Stop Guard', 'risk.flash_stop_*', 'Catches immediate failures. Example: three stops within 60 seconds in 30 minutes pauses that family/session.'],
+      ['Rolling EV Gate', 'risk.rolling_ev_*', 'Raises execution confidence for losing family/direction/session combos. Example: average below -$2 over five trades adds a 15-point confidence bump.']
+    ],
+  },
+  learner: {
+    title: 'Learner: continuous model retraining cadence',
+    subtitle: 'Read by learner_service.py. The learner container owns deep retraining, adaptive filter refresh, backtest feedback, and neural updates without blocking scanner/web-api.',
+    items: [
+      ['Deep Training Enabled', 'learner.deep_enabled', 'Master switch for continuous deep learning. Example: keep enabled in production unless debugging learner memory pressure.'],
+      ['Closed-Market Interval', 'learner.deep_interval_s', 'Full retrain cadence outside active sessions. Example: 3600 runs roughly hourly.'],
+      ['Market-Hours Interval', 'learner.deep_market_interval_s', 'Light fine-tune cadence during pre-market, regular, and after-hours. Example: 1800 refreshes every 30 minutes while scanner keeps running.'],
+      ['Ticker Limit', 'learner.deep_ticker_limit', 'Caps tickers per cycle to protect RAM/CPU. Example: 100 trains the top 100 names per pass.']
+    ],
+  },
+  algos: {
+    title: 'Algo Params: learned family parameters plus execution overrides',
+    subtitle: 'Learning parameters come from learning endpoints; execution overrides are saved as algos.<family>.* and read by paper_trading.py before opening a paper trade.',
+    items: [
+      ['Learned Parameters', 'algo parameter tables', 'Per-family gates such as rvol_gate, conf_gate, and target_mult are tuned from outcomes. Example: a weak family can learn a higher confidence gate.'],
+      ['Execution Enabled', 'algos.<family>.exec_enabled', 'Controls whether the family can open paper trades. Signals still display and feed learning when disabled.'],
+      ['Size Multiplier', 'algos.<family>.exec_size_mult', 'Family-level size haircut or boost. Example: BB_REV at 0.15 means only 15% of normal size.'],
+      ['Min Confidence / R:R', 'algos.<family>.exec_min_conf, exec_min_rr', 'Family overrides for execution floors. Example: setting min confidence 88 forces only very strong BB_REV trades.'],
+      ['Blocked Sessions', 'algos.<family>.exec_block_sessions', 'Comma-separated sessions to block. Example: RESTRICTED prevents price-discovery trades for that family.']
+    ],
+  },
+  sr: {
+    title: 'S&R Tuning: support/resistance sensitivity',
+    subtitle: 'Read by support_resistance.py on each scan. These settings affect pivots, swing levels, volume POC/value area, Fibonacci levels, and fallback support/resistance.',
+    items: [
+      ['Cluster Tolerance', 'sr.cluster_tolerance_pct', 'Merges nearby S/R levels. Example: 0.40 merges levels within 0.4% of each other.'],
+      ['Pivot and Swing Rows', 'sr.min_rows_pivot, sr.min_rows_swing', 'Minimum bars needed before computing daily pivots or intraday swings.'],
+      ['Swing Window and Count', 'sr.swing_window_bars, sr.swing_max_levels', 'Controls swing sensitivity and max levels returned. Example: 15 bars produces fewer, stronger swing levels than 10.'],
+      ['Volume POC Buckets', 'sr.poc_buckets', 'Histogram buckets for point of control and value area. Example: 50 balances precision with noise.'],
+      ['Fibonacci Lookback', 'sr.fibonacci_lookback_bars', 'Bars scanned for intraday fib high/low. Example: 50 uses roughly the last 50 one-minute bars.'],
+      ['Fallback Levels', 'sr.fallback_support_pct, sr.fallback_resistance_pct', 'Used only when no level is found. Example: 0.98 means fallback support at price x 0.98.']
+    ],
+  },
+  execution: {
+    title: 'Execution: realistic paper fills and ticker damage control',
+    subtitle: 'execution.* is read by execution/fill_model.py; ticker cooldown settings are read by paper_trading.py.',
+    items: [
+      ['Fill Model Enabled', 'execution.fill_model_enabled', 'When enabled, paper fills include spread, slippage, volatility, liquidity, and size penalties. Disable only to compare ideal fills.'],
+      ['Session Slippage', 'execution.slip_base_*', 'Baseline bps by session. Example: after-hours 18 bps reflects wider spreads than regular 3 bps.'],
+      ['Volatility Penalty', 'execution.slip_vol_threshold_pct, slip_vol_penalty_bps', 'Adds cost when ATR% is high. Example: ATR% above 1.0 adds bps per extra ATR%.'],
+      ['Liquidity Penalty', 'execution.slip_liq_*', 'Thin stocks cost more. Example: volume below 100k shares/day adds the low-liquidity penalty.'],
+      ['Order Size Penalty', 'execution.slip_size_rate, slip_size_cap_bps, slip_max_bps', 'Penalizes large orders relative to daily dollar volume and caps total slippage.'],
+      ['Stop and Spread Model', 'execution.stop_gap_factor, spread_atr_rate, spread_min_bps', 'Models worse stop fills and synthetic spread when bid/ask is unavailable.'],
+      ['Ticker Cooldowns', 'risk.ticker_*', 'Blocks a ticker after concentrated losses or repeated pre-T1 stops. Example: two pre-T1 stops in 30 minutes can pause that ticker for 60 minutes.']
+    ],
+  },
+  system: {
+    title: 'System: advanced hot-reload controls',
+    subtitle: 'This tab now shows only settings that are actually consumed by runtime code. Duplicate account and broker toggles were consolidated out of this page.',
+    items: [
+      ['Extended-Hours Gates', 'paper.ext_hours_*, paper.pre_market_stop_mult, paper.after_hours_stop_mult', 'Sets confidence floors and wider stops outside regular hours. Example: after-hours stop mult 2.0 doubles the initial stop.'],
+      ['Restricted Session Block', 'paper.block_restricted_session', 'Blocks 9:30-9:44 ET price-discovery trading. Example: true prevents open-bell stop hunts from opening paper trades.'],
+      ['EOD Management', 'paper.eod_*', 'Controls trailing, recovery, and classification thresholds near end-of-day exits.'],
+      ['Profit Protect', 'risk.profit_protect_*', 'After reaching daily profit target, requires stronger confidence and smaller size.'],
+      ['Live Risk Account', 'risk.account_size', 'Canonical live account size for risk percentages. Paper mode uses paper.budget instead.'],
+      ['Scanner Cadence', 'scanner.scan_interval_s, scanner.pipeline_workers, scanner.ticker_timeout_s', 'Controls normal scan cadence, worker count, and per-ticker timeout. Open/close power-hour overrides still run at 30 seconds.'],
+      ['Audit', 'audit.enabled, audit.retention_days', 'Controls decision-trail writes and retention. Learner cadence is consolidated under the Learner tab.']
+    ],
+  },
+};
+
+function renderSettingsFieldGuide(name) {
+  const guide = SETTINGS_FIELD_GUIDES[name];
+  const el = document.getElementById('settings-field-guide');
+  if (!el || !guide) return;
+  el.innerHTML = `
+    <div class="settings-field-guide-title">${guide.title}</div>
+    <div class="settings-field-guide-subtitle">${guide.subtitle}</div>
+    <div class="settings-guide-grid">
+      ${guide.items.map(([label, key, copy]) => `
+        <div class="settings-guide-item">
+          <div class="settings-guide-label">${label}</div>
+          <div class="settings-guide-key">${key}</div>
+          <div class="settings-guide-copy">${copy}</div>
+        </div>`).join('')}
+    </div>`;
+}
+
 function openSettings(tab) {
-  document.getElementById('settings-modal').classList.add('open');
+  const page = document.getElementById('settings-modal');
+  page.classList.add('open');
+  page.setAttribute('aria-hidden', 'false');
   settingsTab(tab || 'paper');
 }
 function closeSettings() {
-  document.getElementById('settings-modal').classList.remove('open');
+  const page = document.getElementById('settings-modal');
+  page.classList.remove('open');
+  page.setAttribute('aria-hidden', 'true');
 }
 function settingsTab(name) {
   ['paper','traderules','signal','risk','learner','algos','sr','execution','system'].forEach(t => {
     document.getElementById('st-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('st-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
+  renderSettingsFieldGuide(name);
   if (name === 'paper')      stLoadPaperTab();
   if (name === 'traderules') stLoadTradeRulesTab();
   if (name === 'signal')     stLoadSignalTab();
@@ -5155,7 +5324,7 @@ async function stLoadTradeRulesTab() {
         <div style="display:flex;flex-direction:column;gap:12px">${content}</div>
       </div>`;
 
-    el.innerHTML = `<div style="max-width:560px">
+    el.innerHTML = `<div style="max-width:900px">
       ${_section('Risk : Reward Rules', 'Define the stop/target calculation method and minimum trade quality. Changes apply to all new signals immediately — no restart required.',
         `<div>
           <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">STOP / TARGET MODE</label>
@@ -5279,7 +5448,7 @@ async function stLoadPaperTab() {
     const minConf  = pc["paper.min_confidence"]    ?? 25;
 
     el.innerHTML = `
-    <div style="max-width:520px">
+    <div style="max-width:900px">
       <div style="margin-bottom:20px;padding:14px 16px;background:${isPaper ? '#10b98111' : '#ef444411'};border:1px solid ${isPaper ? '#10b98133' : '#ef444433'};border-radius:8px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <div>
@@ -5432,7 +5601,7 @@ async function stLoadSignalTab() {
     const maxPenaltyPts   = fc["filter.max_penalty_pts"] ?? 35;
 
     el.innerHTML = `
-    <div style="max-width:520px">
+    <div style="max-width:900px">
       <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Signal Config</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
         Earnings blackout windows — suppress trading signals near earnings announcements.
@@ -5480,7 +5649,7 @@ async function stLoadSignalTab() {
             <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">MAX CONFIDENCE PENALTY (pts)</label>
             <input id="st-flt-max-penalty" type="number" min="10" max="50" step="5" value="${maxPenaltyPts}"
               style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
-            <div style="font-size:9px;color:var(--muted);margin-top:3px">Max extra confidence required for the worst contexts. At 35pts + 55% base = 90% max needed. Signals above this always trade.</div>
+            <div style="font-size:9px;color:var(--muted);margin-top:3px">Max advisory confidence penalty recorded for the worst contexts. At 35pts + 55% base = 90% displayed need if enforcement mode is enabled.</div>
           </div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
@@ -5563,7 +5732,7 @@ async function stLoadRiskTab() {
       </div>`;
 
     el.innerHTML = `
-    <div style="max-width:520px">
+    <div style="max-width:900px">
       <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Risk Controls</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
         Daily circuit breakers and position limits. Changes take effect immediately — no restart needed.
@@ -5748,7 +5917,7 @@ async function stLoadLearnerTab() {
       </div>`;
 
     el.innerHTML = `
-    <div style="max-width:520px">
+    <div style="max-width:900px">
       <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">Learner Config</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:16px">
         Deep BiLSTM retraining schedule. Changes take effect on the next sleep cycle — no restart needed.
@@ -5761,9 +5930,10 @@ async function stLoadLearnerTab() {
               style="width:16px;height:16px;cursor:pointer">
             <span style="font-size:12px;color:var(--text)">Enable continuous BiLSTM retraining</span>
           </label>
-          <div style="font-size:9px;color:var(--muted);margin-top:4px">Only runs outside market hours. Disable if learner container is CPU-constrained.</div>
+          <div style="font-size:9px;color:var(--muted);margin-top:4px">Runs continuously in the learner container. Closed-market cycles use the full retrain interval; active sessions use the market-hours fine-tune interval below.</div>
         </div>
-        ${field('RETRAIN INTERVAL (seconds)', 'st-lc-interval',     lc['learner.deep_interval_s']   ?? 3600, 'How often to retrain (min 300s). Next cycle picks up the new value.',   'min="300" max="86400" step="300"')}
+        ${field('CLOSED-MARKET RETRAIN INTERVAL (seconds)', 'st-lc-interval',     lc['learner.deep_interval_s']   ?? 3600, 'Full retrain cadence when the market is closed. Example: 3600 = once per hour.',   'min="300" max="86400" step="300"')}
+        ${field('ACTIVE-SESSION FINE-TUNE INTERVAL (seconds)', 'st-lc-market-interval', lc['learner.deep_market_interval_s'] ?? 1800, 'Lightweight market-hours fine-tune cadence. Example: 1800 = every 30 minutes during pre-market, regular, and after-hours. 0 disables active-session fine-tunes.', 'min="0" max="7200" step="300"')}
         ${field('MAX TICKERS PER CYCLE',      'st-lc-ticker-limit', lc['learner.deep_ticker_limit'] ?? 100,  'Limit tickers trained per cycle to control memory pressure.', 'min="1" max="500" step="10"')}
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
@@ -5780,8 +5950,9 @@ async function stSaveLearnerConfig(btn) {
   const status      = document.getElementById('st-lc-status');
   const deepEnabled = document.getElementById('st-lc-deep-enabled')?.checked ?? true;
   const interval    = parseInt(document.getElementById('st-lc-interval')?.value, 10);
+  const marketInterval = parseInt(document.getElementById('st-lc-market-interval')?.value, 10);
   const tickerLimit = parseInt(document.getElementById('st-lc-ticker-limit')?.value, 10);
-  if (isNaN(interval) || isNaN(tickerLimit)) {
+  if (isNaN(interval) || isNaN(marketInterval) || isNaN(tickerLimit)) {
     if (status) { status.textContent = 'All fields required.'; status.style.color = 'var(--red)'; }
     return;
   }
@@ -5792,6 +5963,7 @@ async function stSaveLearnerConfig(btn) {
       body: JSON.stringify({
         "learner.deep_enabled":      deepEnabled,
         "learner.deep_interval_s":   Math.max(300, interval),
+        "learner.deep_market_interval_s": Math.max(0, marketInterval),
         "learner.deep_ticker_limit": Math.max(1, tickerLimit),
       }),
       signal: AbortSignal.timeout(8000),
@@ -6474,21 +6646,15 @@ async function stLoadSystemTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const [ppResp, rkResp, scResp, trResp, brResp, lcResp, auResp] = await Promise.all([
+    const [ppResp, rkResp, scResp, auResp] = await Promise.all([
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`,   {signal: AbortSignal.timeout(12000)}),
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`,    {signal: AbortSignal.timeout(12000)}),
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=scanner.`, {signal: AbortSignal.timeout(12000)}),
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=trading.`, {signal: AbortSignal.timeout(12000)}),
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=broker.`,  {signal: AbortSignal.timeout(12000)}),
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=learner.`, {signal: AbortSignal.timeout(12000)}),
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=audit.`,   {signal: AbortSignal.timeout(12000)}),
     ]);
     const pp = (await ppResp.json()).config || {};
     const rk = (await rkResp.json()).config || {};
     const sc = (await scResp.json()).config || {};
-    const tr = (await trResp.json()).config || {};
-    const br = (await brResp.json()).config || {};
-    const lc = (await lcResp.json()).config || {};
     const au = (await auResp.json()).config || {};
 
     const inp = (id, val, min, max, step, label) =>
@@ -6547,23 +6713,14 @@ async function stLoadSystemTab() {
           inp('st-sys-vol-halt-sz',   rk['risk.volatility_halt_size_mult']  ?? 0.50,  0.1,  1,        0.05, 'Volatility halt size (×)') +
           inp('st-sys-vol-halt-atr',  rk['risk.volatility_halt_atr_mult']   ?? 2.5,   0.5,  10,       0.25, 'Volatility ATR mult') +
           inp('st-sys-dd-thr1',       rk['risk.drawdown_throttle_1_pct']    ?? 0.5,   0.1,  5,        0.1,  'Drawdown throttle 1 (%)') +
-          inp('st-sys-dd-thr2',       rk['risk.drawdown_throttle_2_pct']    ?? 1.0,   0.1,  5,        0.1,  'Drawdown throttle 2 (%)') +
-          inp('st-sys-storm-rate',    rk['risk.pre_t1_storm_rate']          ?? 0.60,  0.1,  1,        0.05, 'Pre-T1 storm max rate')
+          inp('st-sys-dd-thr2',       rk['risk.drawdown_throttle_2_pct']    ?? 1.0,   0.1,  5,        0.1,  'Drawdown throttle 2 (%)')
         )}
         ${card('Scanner Cadence', '1fr 1fr 1fr',
           inp('st-sys-scan-interval',    sc['scanner.scan_interval_s']    ?? 60, 10, 600, 5,  'Scan interval (seconds)') +
           inp('st-sys-pipeline-workers', sc['scanner.pipeline_workers']   ?? 8,  1,  32,  1,  'Pipeline workers') +
           inp('st-sys-ticker-timeout',   sc['scanner.ticker_timeout_s']   ?? 45, 5,  300, 5,  'Ticker timeout (seconds)')
         )}
-        ${card('Trading &amp; Broker', '1fr 1fr',
-          inp('st-sys-trading-acct',   tr['trading.account_size']     ?? 50000, 1000, 10000000, 1000, 'Trading account size ($)') +
-          inp('st-sys-trading-risk',   tr['trading.risk_pct']         ?? 1.5,   0.1,  10,       0.1,  'Risk per trade (%)') +
-          inp('st-sys-trading-maxpos', tr['trading.max_position_pct'] ?? 10.0,  1,    50,       1,    'Max position (%)') +
-          sel('st-sys-broker-auto',    br['broker.auto_trade']        ?? false, [['false','Disabled (paper only)'],['true','Enabled (LIVE!)']], 'Auto-trade (Schwab)') +
-          sel('st-sys-broker-paper',   br['broker.paper_trading']     ?? true,  [['true','Paper trading'],['false','Live trading']], 'Broker mode')
-        )}
-        ${card('Learner &amp; Audit', '1fr 1fr 1fr',
-          inp('st-sys-lc-market-intv',    lc['learner.deep_market_interval_s'] ?? 1800, 0, 7200, 300, 'Market-hours retrain (s, 0=off)') +
+        ${card('Audit', '1fr 1fr',
           sel('st-sys-audit-enabled',     au['audit.enabled']                  ?? true,  [['true','Enabled'],['false','Disabled']], 'Audit log') +
           inp('st-sys-audit-retention',   au['audit.retention_days']           ?? 14,    0, 365,  1,   'Audit retention (days)')
         )}
@@ -6609,16 +6766,9 @@ async function stSaveSystemConfig(btn) {
     "risk.volatility_halt_atr_mult":     getF('st-sys-vol-halt-atr'),
     "risk.drawdown_throttle_1_pct":      getF('st-sys-dd-thr1'),
     "risk.drawdown_throttle_2_pct":      getF('st-sys-dd-thr2'),
-    "risk.pre_t1_storm_rate":            getF('st-sys-storm-rate'),
     "scanner.scan_interval_s":           getI('st-sys-scan-interval'),
     "scanner.pipeline_workers":          getI('st-sys-pipeline-workers'),
     "scanner.ticker_timeout_s":          getF('st-sys-ticker-timeout'),
-    "trading.account_size":              getF('st-sys-trading-acct'),
-    "trading.risk_pct":                  getF('st-sys-trading-risk'),
-    "trading.max_position_pct":          getF('st-sys-trading-maxpos'),
-    "broker.auto_trade":                 getBool('st-sys-broker-auto'),
-    "broker.paper_trading":              getBool('st-sys-broker-paper'),
-    "learner.deep_market_interval_s":    getI('st-sys-lc-market-intv'),
     "audit.enabled":                     getBool('st-sys-audit-enabled'),
     "audit.retention_days":              getI('st-sys-audit-retention'),
   };
