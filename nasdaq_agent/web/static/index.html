@@ -2612,9 +2612,10 @@ function _setPriceSourceBreakdown(cov, state='UNKNOWN') {
   const fallback = Number(c.fallback || 0);
   const snapshot = Number(c.snapshot || 0);
   const stale = Number(c.stale || 0);
-  el.textContent = snapshot
-    ? `WS ${live} | REST ${fallback} | SNAP ${snapshot} | STALE ${stale} /${total}`
-    : `WS ${live} | REST ${fallback} | STALE ${stale} /${total}`;
+  const label = snapshot
+    ? `WS ${live} | REST ${fallback} | SNAP ${snapshot} | STALE ${stale}`
+    : `WS ${live} | REST ${fallback} | STALE ${stale}`;
+  el.textContent = `${label} /${total}`;
   el.title = total
     ? `All ${total} watched tickers (server-wide, not just visible rows): ${live} WebSocket live, ${fallback} REST fallback, ${snapshot} scanner snapshots, ${stale} stale/no-print`
     : 'All watched tickers – price feed coverage: no price data reported yet';
@@ -2987,6 +2988,98 @@ function miniBar(v, w=50) {
   return `<div class="score-bar-track" style="width:${w}px"><div class="score-bar-fill" style="width:${pct}%;left:${left}%;background:${col}"></div></div>`;
 }
 function fmt(n, d=2) { return n != null ? Number(n).toFixed(d) : '—'; }
+function escAttr(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+function _isTradeDirection(pred) {
+  return ['BUY', 'SELL', 'STRONG BUY', 'STRONG SELL'].includes(pred || '');
+}
+function _mlSummary(s) {
+  const parts = [];
+  parts.push(s.ml_trained ? `Scalp ${fmt((s.ml_prob || 0) * 100, 0)}%` : 'Scalp training');
+  parts.push(s.ml_swing_trained ? `Swing ${fmt((s.ml_swing_prob || 0) * 100, 0)}%` : 'Swing training');
+  parts.push(s.ml_deep_trained ? `Deep ${fmt((s.ml_deep_prob || 0) * 100, 0)}%` : 'Deep training');
+  return parts.join(' | ');
+}
+function buildRrTooltip(s) {
+  const rr = `${fmt(s.rr_ratio, 1)}:1`;
+  const q = s.rr_quality || 'LOW';
+  if (q === 'LOW') {
+    return `R:R ${rr} (${q})\nNumeric R:R may look acceptable, but nearby support/resistance blocks the path to target.\nPaper execution treats LOW quality as a hard no-trade gate.`;
+  }
+  if (!s.rr_qualifies) {
+    return `R:R ${rr} (${q})\nBelow the configured minimum R:R or does not pass structural trade-quality checks.`;
+  }
+  return `R:R ${rr} (${q})\nRisk/reward geometry qualifies for execution if all other gates also pass.`;
+}
+function buildRsiTooltip(s) {
+  const z = s.rsi_zone || 'NEUTRAL';
+  const val = fmt(s.rsi_value ?? 50, 1);
+  const desc = {
+    EXTREME_OB: 'Extreme overbought: BUY direction is usually blocked or flipped unless there is a very strong exception.',
+    OB: 'Overbought: BUY entries require strong momentum confirmation.',
+    NEUTRAL: 'Neutral: RSI is not creating a mean-reversion edge either way.',
+    OS: 'Oversold: SELL entries are gated unless downtrend momentum is strong.',
+    EXTREME_OS: 'Extreme oversold: SELL direction is usually blocked or flipped unless there is a very strong exception.',
+  }[z] || 'RSI zone from the latest indicator row.';
+  return `RSI ${val} (${z})\nMain dashboard RSI uses RSI-14 on 1-minute bars.\n${desc}${s.rsi_gated ? '\nRSI gate changed or blocked the displayed direction.' : ''}`;
+}
+function buildSignalExplanation(s, trade) {
+  const lines = [];
+  const pred = s.prediction || 'NEUTRAL';
+  const dir = _isTradeDirection(pred);
+  lines.push(`${s.ticker || ''} - ${s.name || ''}`);
+  lines.push(`State: ${trade ? `IN TRADE ${trade.direction || ''}` : pred}`);
+  lines.push(`Price: $${fmt(s.price, 2)} (${(s.change_pct || 0) >= 0 ? '+' : ''}${fmt(s.change_pct || 0, 2)}%) | Open: ${s.open_price > 0 ? '$' + fmt(s.open_price, 2) : 'not available'}`);
+  lines.push(`Confidence: ${fmt(s.confidence || 0, 0)}% | Score: ${fmt((s.score || 0) * 100, 0)} | Trend: ${s.trend || 'UNKNOWN'} ${fmt((s.trend_probability || 0) * 100, 0)}%`);
+  lines.push(`MTF: ${s.mtf_alignment || 'MIXED'} (${fmt(s.mtf_score || 0, 2)}) | VWAP: ${s.vwap_event || 'FLAT'} ${fmt(s.vwap_deviation || 0, 2)}%`);
+  lines.push(`RSI: ${fmt(s.rsi_value ?? 50, 1)} ${s.rsi_zone || 'NEUTRAL'} | R:R: ${fmt(s.rr_ratio || 0, 1)}:1 ${s.rr_quality || 'LOW'}`);
+  lines.push(`Session: ${s.session_label || s.session || 'UNKNOWN'} | Tier: ${s.trading_tier || 'REGULAR'} | ML: ${_mlSummary(s)}`);
+
+  const gates = [];
+  if (trade) {
+    gates.push(`Open paper trade from $${fmt(trade.entry_price, 2)}; live row P&L updates from current price.`);
+  } else if (s.is_suppressed) {
+    gates.push(`Suppressed: ${s.suppress_reason || 'adaptive/risk filter blocked this signal'}`);
+  } else if (!dir) {
+    gates.push('No trade: composite prediction is NEUTRAL, so execution is not called.');
+  }
+  if ((s.rr_quality || 'LOW') === 'LOW') gates.push('No trade: LOW R:R quality means structure blocks the path to target.');
+  if (s.rr_ratio > 0 && !s.rr_qualifies) gates.push('Reduced/no trade: R:R did not pass the configured quality threshold.');
+  if (s.rsi_gated) gates.push('RSI gate changed or blocked direction due to overbought/oversold risk.');
+  if (s.ctx_stale) gates.push('Context-intel stale or unavailable.');
+  if (s.earnings_blocked) gates.push(`Earnings block: ${s.earnings_reason || 'earnings blackout/cooldown'}`);
+  else if (s.earnings_reason) gates.push(`Earnings context: ${s.earnings_reason}`);
+  if (s.macro_blocked) gates.push(`Macro block: ${s.macro_description || s.macro_event || 'high-impact macro event'}`);
+  if (['PRE_MARKET', 'AFTER_HOURS'].includes(s.session || '') && (s.trading_tier || 'REGULAR') === 'REGULAR') {
+    gates.push('Extended-hours gate: REGULAR-tier tickers are monitored only, not traded.');
+  }
+  if (['PRE_MARKET', 'AFTER_HOURS'].includes(s.session || '') && (s.trading_tier || '') === 'HIGH' && (s.confidence || 0) < 70) {
+    gates.push('Extended-hours gate: HIGH-tier signal is below the default 70% confidence floor.');
+  }
+  if (['PRE_MARKET', 'AFTER_HOURS'].includes(s.session || '') && (s.trading_tier || '') === 'MODERATE' && (s.confidence || 0) < 60) {
+    gates.push('Extended-hours gate: MODERATE-tier signal is below the default 60% confidence floor.');
+  }
+  if (s.vwap_event === 'BELOW' && /BUY/.test(pred)) gates.push('Long caution: price is below VWAP.');
+  if (s.vwap_event === 'ABOVE' && /SELL/.test(pred)) gates.push('Short caution: price is above VWAP.');
+  if (!s.ml_trained && !s.ml_swing_trained && !s.ml_deep_trained) gates.push('ML models still training for this ticker.');
+
+  if (gates.length) {
+    lines.push('');
+    lines.push('Decision notes:');
+    gates.slice(0, 8).forEach(g => lines.push(`- ${g}`));
+  }
+  if (Array.isArray(s.reasons) && s.reasons.length) {
+    lines.push('');
+    lines.push('Model reasons:');
+    s.reasons.slice(0, 5).forEach(r => lines.push(`- ${r}`));
+  }
+  return lines.join('\n');
+}
 
 // ─── Summary ───────────────────────────────────────────────────────────────────
 function updateSummary() {
@@ -3072,14 +3165,30 @@ function renderTable() {
 
     // ── Trade STATUS cell ──────────────────────────────────────────────────
     const trade = allOpenTrades[s.ticker];
+    const explainTitle = escAttr(buildSignalExplanation(s, trade));
+    const rrTitle = escAttr(buildRrTooltip(s));
+    const rsiTitle = escAttr(buildRsiTooltip(s));
+    const confidenceTitle = escAttr(
+      `Confidence ${fmt(s.confidence || 0, 0)}%\nThis is the blended conviction after technicals, trend, volume, ML, RSI, momentum, R:R, session, and context adjustments.`
+    );
+    const trendTitle = escAttr(
+      `Trend ${s.trend || 'UNKNOWN'} (${fmt((s.trend_probability || 0) * 100, 0)}%)\nTrend is one input into the composite prediction and paper-trade gate.`
+    );
+    const mtfTitle = escAttr(
+      `Multi-timeframe alignment: ${s.mtf_alignment || 'MIXED'}\nScore: ${fmt(s.mtf_score || 0, 2)}\nHigher alignment means more timeframes agree with the same direction.`
+    );
+    const mlTitle = escAttr(`ML state\n${_mlSummary(s)}`);
+    const vwapTitle = escAttr(
+      `VWAP: ${s.vwap_event || 'FLAT'}\nDeviation: ${(s.vwap_deviation || 0) >= 0 ? '+' : ''}${fmt(s.vwap_deviation || 0, 2)}%\nVWAP location helps decide whether a long/short has intraday support.`
+    );
     let statusCell = '';
     if (s.is_observation) {
-      statusCell = `<div style="padding:5px 7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;font-size:9px">
+      statusCell = `<div title="${explainTitle}" style="padding:5px 7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;font-size:9px">
         <div style="color:var(--blue);font-weight:700">LIVE QUOTE</div>
         <div style="color:#94a3b8;margin-top:2px;font-size:8px">No trade signal</div>
       </div>`;
     } else if (s.is_suppressed) {
-      statusCell = `<div style="padding:5px 7px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:9px">
+      statusCell = `<div title="${explainTitle}" style="padding:5px 7px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:9px">
         <div style="color:var(--red);font-weight:700">🚫 FILTERED</div>
         <div style="color:#94a3b8;margin-top:2px;font-size:8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.suppress_reason||''}">${s.suppress_reason||'Adaptive filter'}</div>
       </div>`;
@@ -3090,7 +3199,7 @@ function renderTable() {
       const pnlCol = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--muted)';
       const bars   = trade.bars_held || 0;
       const dirCol = trade.direction === 'BUY' ? 'var(--green-s)' : 'var(--red-s)';
-      statusCell = `<div style="padding:5px 7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.35);border-radius:6px;min-width:110px">
+      statusCell = `<div title="${explainTitle}" style="padding:5px 7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.35);border-radius:6px;min-width:110px">
         <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
           <span style="color:var(--blue);font-weight:700;font-size:9px">📍 IN TRADE</span>
           <span style="color:${dirCol};font-size:9px;font-weight:700">${trade.direction}</span>
@@ -3101,7 +3210,7 @@ function renderTable() {
     } else if (s.prediction === 'BUY' || s.prediction === 'SELL' || s.prediction === 'STRONG BUY' || s.prediction === 'STRONG SELL') {
       const rrNote = s.rr_qualifies ? 'Full size' : 'Half size (low R:R)';
       const watchCol = s.rr_qualifies ? 'var(--green)' : 'var(--yellow)';
-      statusCell = `<div style="padding:5px 7px;background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.25);border-radius:6px;font-size:9px">
+      statusCell = `<div title="${explainTitle}" style="padding:5px 7px;background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.25);border-radius:6px;font-size:9px">
         <div style="color:var(--green);font-weight:700">✅ SIGNAL LIVE</div>
         <div style="color:${watchCol};margin-top:2px">${rrNote}</div>
       </div>`;
@@ -3115,7 +3224,7 @@ function renderTable() {
         : s.session === 'AFTER_HOURS'      ? 'After-hours'
         : s.session === 'HARD_CLOSE'       ? 'Hard close window'
         : 'Monitoring';
-      statusCell = `<div style="padding:5px 7px;background:rgba(71,85,105,.07);border:1px solid rgba(71,85,105,.2);border-radius:6px;font-size:9px">
+      statusCell = `<div title="${explainTitle}" style="padding:5px 7px;background:rgba(71,85,105,.07);border:1px solid rgba(71,85,105,.2);border-radius:6px;font-size:9px">
         <div style="color:#64748b;font-weight:700">👁 WATCHING</div>
         <div style="color:#475569;margin-top:2px">${ctxNote}</div>
       </div>`;
@@ -3213,20 +3322,20 @@ function renderTable() {
       </td>`;
     })();
 
-    return `<tr data-ticker="${s.ticker}" style="${rowBg}">
-      <td class="ticker-cell">${s.ticker}${uvol}${ahTag}${clusterTag}${learnTag}</td>
+    return `<tr data-ticker="${s.ticker}" style="${rowBg}" title="${explainTitle}">
+      <td class="ticker-cell" title="${explainTitle}">${s.ticker}${uvol}${ahTag}${clusterTag}${learnTag}</td>
       ${tierCell}
       <td style="padding:4px 6px;vertical-align:middle">${_spark}</td>
-      <td class="name-cell trend-cell" title="${s.name}">${s.name}</td>
-      <td class="chg-cell ${chgC}" style="white-space:nowrap">
+      <td class="name-cell trend-cell" title="${explainTitle}">${s.name}</td>
+      <td class="chg-cell ${chgC}" title="${explainTitle}" style="white-space:nowrap">
         <div style="font-size:13px;font-weight:700">${s.change_pct>=0?'+':''}${fmt(s.change_pct)}%${sessionTag}</div>
         <div style="font-size:11px;color:var(--text);font-weight:600;margin-top:1px">$${fmt(s.price)}</div>
       </td>
-      <td class="open-cell" style="white-space:nowrap;color:var(--muted);font-size:11px;font-weight:600">
+      <td class="open-cell" title="${escAttr(s.open_price > 0 ? `Session open price: $${fmt(s.open_price, 2)}` : 'Open price not available yet for this ticker/session.')}" style="white-space:nowrap;color:var(--muted);font-size:11px;font-weight:600">
         ${s.open_price > 0 ? `$${fmt(s.open_price)}` : '—'}
       </td>
-      <td>
-        <span class="signal-badge ${sigC}">${s.prediction}</span>
+      <td title="${explainTitle}">
+        <span class="signal-badge ${sigC}" title="${explainTitle}">${s.prediction}</span>
         ${s.entry_type==='WAIT_RETEST'
           ? `<span class="signal-badge badge-WAIT-RETEST" style="margin-left:3px;font-size:9px" title="Wait for retest of $${fmt(s.retest_level)}">WAIT $${fmt(s.retest_level)}</span>`
           : s.entry_type==='STRONG_REVERSAL'
@@ -3246,29 +3355,29 @@ function renderTable() {
         ${supInlineTag}
         ${s.news_shock ? `<span style="display:block;margin-top:2px;font-size:8px;font-weight:700;color:#f59e0b;background:rgba(245,158,11,.12);padding:1px 5px;border-radius:3px;border:1px solid rgba(245,158,11,.3)" title="News shock: ${s.news_count_30m||0} articles in last 30m">📰 NEWS SHOCK</span>` : ''}
       </td>
-      <td>${statusCell}</td>
-      <td>${levelsCell}</td>
-      <td>
+      <td title="${explainTitle}">${statusCell}</td>
+      <td title="${explainTitle}">${levelsCell}</td>
+      <td title="${rrTitle}">
         <span style="color:${rrC};font-weight:600">${fmt(s.rr_ratio,1)}:1</span>
         <span class="rr-badge rr-${s.rr_quality||'LOW'}" style="display:block;margin-top:1px">${s.rr_quality||'LOW'}</span>
       </td>
-      <td style="font-size:11px">
+      <td style="font-size:11px" title="${rsiTitle}">
         ${(() => { const z=s.rsi_zone||'NEUTRAL'; const c=z==='OVERBOUGHT'?'var(--red)':z==='OVERSOLD'?'var(--green)':z==='HIGH'?'var(--yellow)':z==='LOW'?'#60a5fa':'var(--muted)'; return `<span style="color:${c};font-weight:600">${z}</span>`; })()}
       </td>
-      <td>
+      <td title="${confidenceTitle}">
         ${(() => { const c=s.confidence>60?'var(--green-s)':s.confidence>35?'var(--yellow)':'var(--muted)'; return `<span style="font-size:12px;font-weight:700;color:${c}">${fmt(s.confidence,0)}%</span><div class="conf-bar" style="margin-top:3px"><div class="conf-fill" style="width:${Math.min(s.confidence,100)}%;background:${c}"></div></div>`; })()}
       </td>
-      <td>
+      <td title="${trendTitle}">
         <span class="trend-badge trend-${(s.trend||'SIDEWAYS').replace(/ /g,'-')}">${s.trend||'—'}</span>
         <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt((s.trend_probability||0.5)*100,0)}%</span>
       </td>
-      <td style="font-size:11px">
+      <td style="font-size:11px" title="${mtfTitle}">
         ${(() => { const ma=s.mtf_alignment||'MIXED'; const mc=ma==='BULLISH'?'var(--green)':ma==='BEARISH'?'var(--red)':'var(--muted)'; return `<span style="color:${mc};font-weight:600">${ma}</span><span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt(s.mtf_score||0,2)}</span>`; })()}
       </td>
-      <td style="font-size:12px;font-weight:700;color:${(s.score||0)>=0.3?'var(--green)':(s.score||0)<=-0.3?'var(--red)':'var(--muted)'}">
+      <td title="${explainTitle}" style="font-size:12px;font-weight:700;color:${(s.score||0)>=0.3?'var(--green)':(s.score||0)<=-0.3?'var(--red)':'var(--muted)'}">
         ${Math.abs(s.score||0)*100 < 1 ? `<span style="color:var(--muted);font-size:10px" title="${['CLOSED','PRE_MARKET'].includes(s.session) ? 'Market closed / pre-market — no active signal' : 'Score near zero — low conviction or dead zone'}">–</span>` : fmt((s.score||0)*100,0)}
       </td>
-      <td style="font-size:11px">
+      <td style="font-size:11px" title="${mlTitle}">
         ${(() => {
           const pScalp = s.ml_trained    ? s.ml_prob       : null;
           const pSwing = s.ml_swing_trained ? s.ml_swing_prob : null;
@@ -3285,11 +3394,11 @@ function renderTable() {
           return `${mainPct}<div style="margin-top:3px">${dot(pScalp,'Scalp 5m')}${dot(pSwing,'Swing 15m')}${dot(pDeep,'Deep BiLSTM')}</div>`;
         })()}
       </td>
-      <td>
+      <td title="${escAttr(`Relative strength: ${s.rs_label || 'IN_LINE'}\nRatio: ${fmt(s.rs_ratio, 2)}x vs market benchmark.`)}">
         <span class="rs-badge rs-${s.rs_label||'IN_LINE'}">${s.rs_label||'IN_LINE'}</span>
         <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${fmt(s.rs_ratio,2)}x</span>
       </td>
-      <td>
+      <td title="${explainTitle}">
         ${s.gap_type!=='FLAT'
           ? `<span class="gap-badge gap-${s.gap_type}">${s.gap_type==='GAP_UP'?'↑':'↓'} ${fmt(Math.abs(s.gap_pct),1)}%</span>
              <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${Math.round((s.gap_fill_prob||0)*100)}% fill</span>`
@@ -3313,7 +3422,7 @@ function renderTable() {
           return `<span style="font-size:8px;color:${c};font-weight:600;display:block;margin-top:2px" title="30m sentiment ${arrow}: ${(snt*100).toFixed(0)}%">${arrow}snt ${snt>0?'+':''}${(snt*100).toFixed(0)}%</span>`;
         })()}
       </td>
-      <td>
+      <td title="${vwapTitle}">
         ${s.vwap_event && s.vwap_event!=='FLAT'
           ? `<span class="vwap-badge vwap-${s.vwap_event}">${s.vwap_event.replace('_',' ')}</span>
              <span style="font-size:9px;color:var(--muted);display:block;margin-top:1px">${(s.vwap_deviation||0)>=0?'+':''}${fmt(s.vwap_deviation,2)}%${isExtended?' ↩':''}</span>`
@@ -3322,15 +3431,15 @@ function renderTable() {
             : `<span class="vwap-badge vwap-FLAT">FLAT</span>`
         }
       </td>
-      <td>
+      <td title="${escAttr(`Sector: ${s.sector_etf || 'none'}\nSector trend: ${s.sector_trend || 'NEUTRAL'}\nStock vs sector: ${s.stock_vs_sector || 'IN_LINE'}`)}">
         ${s.sector_etf
           ? `<span style="font-size:10px;font-weight:700;color:${s.sector_trend==='BULLISH'?'var(--green)':s.sector_trend==='BEARISH'?'var(--red)':'var(--muted)'}">${s.sector_etf}</span>
              <span style="font-size:9px;color:${s.sector_trend==='BULLISH'?'var(--green)':s.sector_trend==='BEARISH'?'var(--red)':'var(--muted)'};display:block;margin-top:1px">${s.sector_trend||'NEUTRAL'}</span>`
           : `<span style="font-size:9px;color:var(--muted)">—</span>`
         }
       </td>
-      <td>
-        <span class="exit-badge exit-${s.exit_recommendation||'HOLD'}">${s.exit_recommendation||'HOLD'}</span>
+      <td title="${escAttr(`Exit recommendation: ${s.exit_recommendation || 'HOLD'}\n${s.exit_summary || 'No active exit pressure.'}`)}">
+        <span class="exit-badge exit-${s.exit_recommendation||'HOLD'}" title="${escAttr(s.exit_summary || 'No active exit pressure.')}">${s.exit_recommendation||'HOLD'}</span>
       </td>
       <td style="font-size:11px;color:${s.rel_volume>=2.5?'var(--yellow)':s.rel_volume>0?'var(--muted)':'var(--muted)'}" title="${s.rel_volume<=0?(['CLOSED','PRE_MARKET'].includes(s.session)?'No intraday volume yet — '+s.session_label:'Volume data unavailable'):'Relative volume vs. 20-day baseline'}">${s.rel_volume > 0 ? fmt(s.rel_volume,1)+'x' : '—'}</td>
     </tr>`;
