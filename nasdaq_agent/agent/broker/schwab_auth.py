@@ -376,9 +376,10 @@ class _TokenManager:
             if e.code == 400:
                 # 400 = invalid_grant (expired/revoked refresh token) or bad credentials.
                 # Do not retry — clear tokens and require re-auth.
+                _auth_url = "/schwab/auth/md" if self.name.lower() == "marketdata" else "/schwab/auth"
                 logger.error(
                     f"[Schwab/{self.name}] Refresh token rejected (400) — "
-                    f"tokens cleared. Re-authenticate via /schwab/auth"
+                    f"tokens cleared. Re-authenticate via {_auth_url}"
                 )
                 # CRITICAL: re-auth required — surface to dashboard, not just logs.
                 # This blocks live quotes/trading until an operator re-authenticates.
@@ -391,7 +392,7 @@ class _TokenManager:
                         title=f"Schwab {self.name} re-authentication required",
                         message=(
                             "Refresh token was rejected (HTTP 400 invalid_grant). "
-                            "Tokens cleared — re-authenticate via /schwab/auth to "
+                            f"Tokens cleared — re-authenticate via {_auth_url} to "
                             "restore live market data and trading."
                         ),
                         metadata={"http_code": 400, "app": self.name.lower()},
