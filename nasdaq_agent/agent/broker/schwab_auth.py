@@ -69,16 +69,31 @@ _SCHWAB_TOKENS_DDL = """
 """
 
 
+def _ensure_schwab_token_table(conn) -> None:
+    """Create or migrate the durable PostgreSQL Schwab token table."""
+    conn.execute(_SCHWAB_TOKENS_DDL)
+    conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
+    conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+
+
+def _row_value(row, key: str, index: int, default=None):
+    if row is None:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[index]
+    except Exception:
+        return default
+
+
 def init_schwab_token_store() -> bool:
     """Ensure the durable PostgreSQL Schwab token store exists."""
     try:
-        from agent.db import get_pool
-        pool = get_pool()
-        with pool.connection() as conn:
-            conn.execute(_SCHWAB_TOKENS_DDL)
-            conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
-            conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
-            conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+        from agent.db import get_conn
+        with get_conn() as conn:
+            _ensure_schwab_token_table(conn)
         return True
     except Exception as exc:
         logger.warning("[Schwab] schwab_tokens table init failed: %s", exc)
@@ -322,25 +337,9 @@ class _TokenManager:
         except Exception:
             pass
         try:
-            from agent.db import get_pool
-            pool = get_pool()
-            with pool.connection() as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS schwab_tokens (
-                        app           TEXT PRIMARY KEY,
-                        access_token  TEXT,
-                        refresh_token TEXT,
-                        expires_in    INTEGER NOT NULL DEFAULT 1800,
-                        stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        generation    BIGINT NOT NULL DEFAULT 0,
-                        status        TEXT NOT NULL DEFAULT 'OK',
-                        last_error    TEXT
-                    )
-                """)
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+            from agent.db import get_conn
+            with get_conn() as conn:
+                _ensure_schwab_token_table(conn)
                 conn.execute("""
                     INSERT INTO schwab_tokens
                         (app, access_token, refresh_token, expires_in, stored_at,
@@ -382,25 +381,9 @@ class _TokenManager:
         """Mirror tokens to PostgreSQL — dedicated schwab_tokens table + service_state fallback."""
         # ── 1. Dedicated schwab_tokens table (primary durable store) ──────────
         try:
-            from agent.db import get_pool
-            pool = get_pool()
-            with pool.connection() as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS schwab_tokens (
-                        app           TEXT PRIMARY KEY,
-                        access_token  TEXT,
-                        refresh_token TEXT,
-                        expires_in    INTEGER NOT NULL DEFAULT 1800,
-                        stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        generation    BIGINT NOT NULL DEFAULT 0,
-                        status        TEXT NOT NULL DEFAULT 'OK',
-                        last_error    TEXT
-                    )
-                """)
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+            from agent.db import get_conn
+            with get_conn() as conn:
+                _ensure_schwab_token_table(conn)
                 conn.execute("""
                     INSERT INTO schwab_tokens
                         (app, access_token, refresh_token, expires_in, stored_at,
@@ -436,25 +419,9 @@ class _TokenManager:
         """Load tokens from PostgreSQL — schwab_tokens table first, then service_state."""
         # ── 1. Dedicated table ────────────────────────────────────────────────
         try:
-            from agent.db import get_pool
-            pool = get_pool()
-            with pool.connection() as conn:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS schwab_tokens (
-                        app           TEXT PRIMARY KEY,
-                        access_token  TEXT,
-                        refresh_token TEXT,
-                        expires_in    INTEGER NOT NULL DEFAULT 1800,
-                        stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        generation    BIGINT NOT NULL DEFAULT 0,
-                        status        TEXT NOT NULL DEFAULT 'OK',
-                        last_error    TEXT
-                    )
-                """)
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
-                conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+            from agent.db import get_conn
+            with get_conn() as conn:
+                _ensure_schwab_token_table(conn)
                 row = conn.execute(
                     """SELECT access_token, refresh_token, expires_in,
                               EXTRACT(EPOCH FROM stored_at)::double precision AS stored_at,
@@ -463,14 +430,16 @@ class _TokenManager:
                        FROM schwab_tokens WHERE app = %s""",
                     (self.name.lower(),)
                 ).fetchone()
-                if row and row[0] and str(row[5]).upper() == "OK":
+                access_token = _row_value(row, "access_token", 0)
+                status = _row_value(row, "status", 5, "OK")
+                if row and access_token and str(status).upper() == "OK":
                     return {
-                        "access_token":  row[0],
-                        "refresh_token": row[1],
-                        "expires_in":    row[2],
-                        "stored_at":     float(row[3]),
-                        "generation":    int(row[4] or 0),
-                        "status":        row[5],
+                        "access_token":  access_token,
+                        "refresh_token": _row_value(row, "refresh_token", 1),
+                        "expires_in":    _row_value(row, "expires_in", 2, 1800),
+                        "stored_at":     float(_row_value(row, "stored_at", 3, 0.0)),
+                        "generation":    int(_row_value(row, "generation", 4, 0) or 0),
+                        "status":        status,
                     }
         except Exception as exc:
             logger.debug(f"[Schwab/{self.name}] schwab_tokens PG read failed: {exc}")

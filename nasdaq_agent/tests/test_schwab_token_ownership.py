@@ -40,6 +40,10 @@ def test_token_service_initializes_postgres_token_table():
 
     assert "def init_schwab_token_store()" in auth
     assert "CREATE TABLE IF NOT EXISTS schwab_tokens" in auth
+    assert "def _ensure_schwab_token_table(conn)" in auth
+    assert "from agent.db import get_conn" in auth
+    assert "from agent.db import get_pool" not in auth
+    assert "pool.connection()" not in auth
     assert "init_schwab_token_store()" in token_service
 
 
