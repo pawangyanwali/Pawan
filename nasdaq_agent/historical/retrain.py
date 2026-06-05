@@ -37,6 +37,8 @@ STATUS_FILE = Path.home() / ".nasdaq_agent" / "hist_retrain_status.json"
 def _write_status(state: dict) -> None:
     try:
         STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state = dict(state)
+        state["updated_at"] = time.time()
         tmp = STATUS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state))
         tmp.replace(STATUS_FILE)

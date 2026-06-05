@@ -23,6 +23,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends
@@ -55,6 +56,68 @@ def _read_status(path: Path) -> dict:
         return json.loads(path.read_text())
     except Exception:
         return {}
+
+
+def _write_status(path: Path, state: dict) -> None:
+    """Write a lightweight job status file visible to every web worker."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = dict(state)
+        data["updated_at"] = time.time()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except Exception as exc:
+        logger.debug("historical status write failed for %s: %s", path, exc)
+
+
+def _job_status(path: Path, proc: subprocess.Popen | None, *, stale_after_s: float = 300.0) -> dict:
+    """Return process status without assuming this Gunicorn worker owns the child.
+
+    The worker that starts a subprocess keeps the Popen handle, but status
+    requests can land on any worker.  A fresh status file is therefore the
+    source of truth; the in-memory handle is only an extra confirmation.
+    """
+    state = _read_status(path)
+    proc_running = _proc_running(proc)
+    now = time.time()
+
+    if not state:
+        return {
+            "running": proc_running,
+            "proc_running": proc_running,
+            "status": "running" if proc_running else "not_started",
+            "done": 0,
+            "total": 0,
+            "elapsed_s": 0.0,
+        }
+
+    state["proc_running"] = proc_running
+    if proc_running:
+        state["running"] = True
+        state.setdefault("status", "running")
+        return state
+
+    if state.get("running"):
+        updated_at = float(state.get("updated_at") or state.get("started_at") or 0.0)
+        if updated_at and (now - updated_at) <= stale_after_s:
+            state["running"] = True
+            state["tracking_via_status_file"] = True
+            state.setdefault("status", "running")
+        else:
+            state["running"] = False
+            state["stale"] = True
+            state.setdefault("status", "stale")
+            state.setdefault(
+                "error",
+                "No recent progress update from historical worker; check container logs.",
+            )
+    else:
+        done = int(state.get("done") or 0)
+        total = int(state.get("total") or 0)
+        is_complete = bool(state.get("results") or state.get("summary") or (total > 0 and done >= total))
+        state.setdefault("status", "complete" if is_complete else "idle")
+    return state
 
 
 @router.get("/api/backtest/stats")
@@ -134,20 +197,31 @@ async def historical_retrain(
     if _proc_running(_hist_retrain_proc):
         return {"status": "already_running", "message": "Historical retrain already in progress."}
 
+    now = time.time()
+    _write_status(_RETRAIN_STATUS, {
+        "running": True,
+        "status": "starting",
+        "phase": "starting",
+        "done": 0,
+        "total": 0,
+        "current_ticker": "",
+        "trained": 0,
+        "skipped": 0,
+        "elapsed_s": 0.0,
+        "started_at": now,
+        "summary": {},
+        "message": "Historical retrain subprocess is starting.",
+    })
     cmd = [sys.executable, "-m", "historical", "--retrain", "--interval", "5min", "--workers", "4"]
     _hist_retrain_proc = subprocess.Popen(cmd, cwd=str(_PACKAGE_DIR))
     logger.info("[hist-retrain] Subprocess started (pid=%d)", _hist_retrain_proc.pid)
-    return {"status": "started", "message": "Historical retrain started as background process."}
+    return {"status": "started", "pid": _hist_retrain_proc.pid, "message": "Historical retrain started as background process."}
 
 
 @router.get("/api/historical/retrain/status")
 async def historical_retrain_status():
     """Live progress of the historical retrain subprocess (reads status file)."""
-    state = _read_status(_RETRAIN_STATUS)
-    state["proc_running"] = _proc_running(_hist_retrain_proc)
-    if not state.get("proc_running") and state.get("running"):
-        state["running"] = False
-    return state
+    return _job_status(_RETRAIN_STATUS, _hist_retrain_proc)
 
 
 @router.post("/api/historical/backtest/run")
@@ -162,20 +236,31 @@ async def historical_backtest_run(interval: str = "5min",
     if _proc_running(_hist_backtest_proc):
         return {"status": "already_running", "message": "Historical backtest already in progress."}
 
+    now = time.time()
+    _write_status(_BACKTEST_STATUS, {
+        "running": True,
+        "status": "starting",
+        "phase": "starting",
+        "interval": interval,
+        "done": 0,
+        "total": 0,
+        "current_ticker": "",
+        "trades_so_far": 0,
+        "elapsed_s": 0.0,
+        "started_at": now,
+        "results": [],
+        "message": f"Historical backtest subprocess is starting ({interval}).",
+    })
     cmd = [sys.executable, "-m", "historical", "--backtest", "--interval", interval]
     _hist_backtest_proc = subprocess.Popen(cmd, cwd=str(_PACKAGE_DIR))
     logger.info("[hist-backtest] Subprocess started (pid=%d)", _hist_backtest_proc.pid)
-    return {"status": "started", "message": f"Historical backtest started ({interval})."}
+    return {"status": "started", "pid": _hist_backtest_proc.pid, "message": f"Historical backtest started ({interval})."}
 
 
 @router.get("/api/historical/backtest/results")
 async def historical_backtest_results():
     """Live progress and final results of the historical backtest (reads status file)."""
-    state = _read_status(_BACKTEST_STATUS)
-    state["proc_running"] = _proc_running(_hist_backtest_proc)
-    if not state.get("proc_running") and state.get("running"):
-        state["running"] = False
-    return state
+    return _job_status(_BACKTEST_STATUS, _hist_backtest_proc)
 
 
 @router.get("/api/backtest/mtf")

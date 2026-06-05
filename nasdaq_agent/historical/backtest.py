@@ -37,6 +37,8 @@ STATUS_FILE = Path.home() / ".nasdaq_agent" / "hist_backtest_status.json"
 def _write_status(state: dict) -> None:
     try:
         STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state = dict(state)
+        state["updated_at"] = time.time()
         tmp = STATUS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state))
         tmp.replace(STATUS_FILE)
@@ -338,13 +340,12 @@ def run_backtest(
         trades = backtest_ticker(ticker, interval, max_bars)
         all_trades.extend(trades)
 
-        if i % 10 == 0 or i == n:
-            _write_status({
-                "running": True, "done": i, "total": n,
-                "current_ticker": ticker, "trades_so_far": len(all_trades),
-                "elapsed_s": round(time.time() - t0, 1),
-                "started_at": t0, "results": [],
-            })
+        _write_status({
+            "running": True, "done": i, "total": n,
+            "current_ticker": ticker, "trades_so_far": len(all_trades),
+            "elapsed_s": round(time.time() - t0, 1),
+            "started_at": t0, "results": [],
+        })
         if i % 100 == 0 or i == n:
             logger.info("[Backtest] [%d/%d] total trades so far: %d", i, n, len(all_trades))
         if progress_cb:

@@ -8556,10 +8556,11 @@ async function cancelRetrain(btn) {
 // ── Historical retrain & backtest ─────────────────────────────────────────────
 
 let _histPollTimer = null;
+let _histLastActionAt = 0;
 
 function _startHistPoll() {
   if (_histPollTimer) return;
-  _histPollTimer = setInterval(loadHistoricalStatus, 10000);
+  _histPollTimer = setInterval(loadHistoricalStatus, 3000);
 }
 function _stopHistPoll() {
   if (_histPollTimer) { clearInterval(_histPollTimer); _histPollTimer = null; }
@@ -8573,6 +8574,34 @@ function _progressBar(done, total) {
   return `<div style="background:var(--surface);border-radius:3px;height:4px;margin-top:5px;overflow:hidden">
     <div style="background:var(--accent);height:100%;width:${p}%;transition:width .3s"></div></div>`;
 }
+function _histActive(job) {
+  return !!(job && (job.running || job.proc_running || job.status === 'starting'));
+}
+function _histNote(job) {
+  if (!job) return '';
+  if (job.tracking_via_status_file) return ' · cross-worker status';
+  if (job.status === 'starting') return ' · starting subprocess';
+  return '';
+}
+function _histSetButton(id, active, label, activeLabel) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.disabled = !!active;
+  btn.textContent = active ? activeLabel : label;
+  if (id === 'hist-retrain-btn') btn.style.background = active ? '#b45309' : '#16a34a';
+}
+function _histKeepPolling(rt, bt) {
+  const active = _histActive(rt) || _histActive(bt);
+  if (active) {
+    _startHistPoll();
+    return;
+  }
+  if (Date.now() - _histLastActionAt < 30000) {
+    _startHistPoll();
+    return;
+  }
+  _stopHistPoll();
+}
 
 async function loadHistoricalStatus() {
   try {
@@ -8583,17 +8612,20 @@ async function loadHistoricalStatus() {
 
     // ── Retrain status ───────────────────────────────────────────────────────
     const rEl = document.getElementById('hist-retrain-status');
+    const rtActive = _histActive(rt);
+    _histSetButton('hist-retrain-btn', rtActive, '↻ Retrain from History', '⏳ Retraining…');
     if (rEl) {
-      if (rt.running) {
+      if (rtActive) {
         const pct = _pct(rt.done, rt.total);
-        rEl.innerHTML = `<span style="color:#f59e0b">⏳ ${rt.done}/${rt.total} tickers (${pct}%) — ${rt.current_ticker} — ${rt.trained} trained, ${rt.skipped} skipped — ${rt.elapsed_s}s elapsed</span>
+        const progress = rt.total > 0 ? `${rt.done}/${rt.total} tickers (${pct}%)` : 'Starting worker';
+        const ticker = rt.current_ticker ? ` — ${rt.current_ticker}` : '';
+        rEl.innerHTML = `<span style="color:#f59e0b">⏳ ${progress}${ticker} — ${rt.trained||0} trained, ${rt.skipped||0} skipped — ${rt.elapsed_s||0}s elapsed${_histNote(rt)}</span>
           ${_progressBar(rt.done, rt.total)}`;
-        _startHistPoll();
+      } else if (rt.error || rt.stale) {
+        rEl.innerHTML = `<span style="color:var(--red)">✕ ${rt.error || 'Historical retrain status is stale — check logs.'}</span>`;
       } else if (rt.summary?.trained !== undefined) {
         rEl.innerHTML = `<span style="color:var(--green)">✓ Done — ${rt.summary.trained} trained, ${rt.summary.skipped} skipped in ${rt.summary.elapsed_s}s</span>
           ${_progressBar(rt.total, rt.total)}`;
-      } else if (rt.summary?.error) {
-        rEl.innerHTML = `<span style="color:var(--red)">✕ Error: ${rt.summary.error}</span>`;
       } else {
         rEl.textContent = 'Not started';
       }
@@ -8601,22 +8633,28 @@ async function loadHistoricalStatus() {
 
     // ── Backtest status ──────────────────────────────────────────────────────
     const bEl = document.getElementById('hist-bt-status');
+    const btActive = _histActive(bt);
+    _histSetButton('hist-bt-btn', btActive, '✓ Run Backtest', '⏳ Running…');
     if (bEl) {
-      if (bt.running) {
+      if (btActive) {
         const pct = _pct(bt.done, bt.total);
-        bEl.innerHTML = `<span style="color:#f59e0b">⏳ ${bt.done}/${bt.total} tickers (${pct}%) — ${bt.current_ticker} — ${bt.trades_so_far.toLocaleString()} trades found — ${bt.elapsed_s}s elapsed</span>
+        const progress = bt.total > 0 ? `${bt.done}/${bt.total} tickers (${pct}%)` : 'Starting worker';
+        const ticker = bt.current_ticker ? ` — ${bt.current_ticker}` : '';
+        bEl.innerHTML = `<span style="color:#f59e0b">⏳ ${progress}${ticker} — ${Number(bt.trades_so_far||0).toLocaleString()} trades found — ${bt.elapsed_s||0}s elapsed${_histNote(bt)}</span>
           ${_progressBar(bt.done, bt.total)}`;
-        _startHistPoll();
+      } else if (bt.error || bt.stale) {
+        bEl.innerHTML = `<span style="color:var(--red)">✕ ${bt.error || 'Historical backtest status is stale — check logs.'}</span>`;
       } else if (bt.results?.length) {
         bEl.innerHTML = `<span style="color:var(--green)">✓ Complete — ${bt.results.length} signals, ${bt.elapsed_s}s</span>`;
         renderHistBacktestTable(bt.results);
+      } else if (bt.status === 'complete' && Number(bt.total||0) > 0) {
+        bEl.innerHTML = `<span style="color:var(--green)">✓ Complete — 0 signals, ${bt.elapsed_s||0}s</span>`;
       } else {
         bEl.textContent = 'No results yet';
       }
     }
 
-    // Stop polling when both subprocesses are idle
-    if (!rt.running && !rt.proc_running && !bt.running && !bt.proc_running) _stopHistPoll();
+    _histKeepPolling(rt, bt);
 
   } catch(e) {}
 }
@@ -8658,14 +8696,16 @@ function renderHistBacktestTable(results) {
 async function triggerHistRetrain(btn) {
   if (!confirm('Retrain all ML models using 2-year historical bars. Runs in background, takes 10–30 min. Continue?')) return;
   const orig = btn.textContent;
+  _histLastActionAt = Date.now();
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
     const r = await (await _authFetch(`${BACKEND_HTTP}/api/historical/retrain`, { method: 'POST' })).json();
-    btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '✓ Started';
-    btn.style.background = r.status === 'already_running' ? '#b45309' : '#15803d';
-    document.getElementById('hist-retrain-status').innerHTML = '<span style="color:#f59e0b">⏳ Running…</span>';
-    setTimeout(() => { btn.disabled = false; btn.textContent = orig; btn.style.background = '#16a34a'; }, 15000);
+    btn.textContent = r.status === 'already_running' ? '⏳ Running…' : '⏳ Starting…';
+    btn.style.background = '#b45309';
+    document.getElementById('hist-retrain-status').innerHTML = '<span style="color:#f59e0b">⏳ Starting historical retrain subprocess…</span>';
+    _startHistPoll();
+    setTimeout(loadHistoricalStatus, 500);
   } catch(e) {
     btn.textContent = '✕ Error';
     btn.style.background = '#dc2626';
@@ -8677,13 +8717,15 @@ async function triggerHistBacktest(btn) {
   const interval = document.getElementById('hist-bt-interval')?.value || '5min';
   if (!confirm(`Run vectorized backtest on ${interval} bars for all 477 tickers. This may take several minutes. Continue?`)) return;
   const orig = btn.textContent;
+  _histLastActionAt = Date.now();
   btn.disabled = true;
   btn.textContent = '⏳ Starting…';
   try {
     const r = await (await _authFetch(`${BACKEND_HTTP}/api/historical/backtest/run?interval=${interval}`, { method: 'POST' })).json();
-    btn.textContent = r.status === 'already_running' ? '⏳ In progress…' : '✓ Started';
+    btn.textContent = r.status === 'already_running' ? '⏳ In progress…' : '⏳ Starting…';
+    document.getElementById('hist-bt-status').innerHTML = `<span style="color:#f59e0b">⏳ Starting historical backtest subprocess (${interval})…</span>`;
     _startHistPoll();
-    setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 600000);
+    setTimeout(loadHistoricalStatus, 500);
   } catch(e) {
     btn.textContent = '✕ Error';
     setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 4000);
