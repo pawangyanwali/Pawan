@@ -950,17 +950,19 @@
 
     <!-- Tab bar -->
     <div style="display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap">
-      <button id="pt-tab-open"    onclick="ptTab('open')"    class="pt-tab pt-tab-active">Open Trades</button>
-      <button id="pt-tab-closed"  onclick="ptTab('closed')"  class="pt-tab">Closed Trades</button>
-      <button id="pt-tab-account" onclick="ptTab('account')" class="pt-tab">Account</button>
-      <button id="pt-tab-learn"   onclick="ptTab('learn')"   class="pt-tab">What We're Learning</button>
+      <button id="pt-tab-open"     onclick="ptTab('open')"     class="pt-tab pt-tab-active">Open Trades</button>
+      <button id="pt-tab-closed"   onclick="ptTab('closed')"   class="pt-tab">Closed Trades</button>
+      <button id="pt-tab-account"  onclick="ptTab('account')"  class="pt-tab">Account</button>
+      <button id="pt-tab-learn"    onclick="ptTab('learn')"    class="pt-tab">What We're Learning</button>
+      <button id="pt-tab-analysis" onclick="ptTab('analysis')" class="pt-tab">📊 Analysis</button>
       <button onclick="openSettings('paper')" class="pt-tab" style="border-color:var(--accent);color:var(--accent)" title="Open Settings panel">⚙️ Settings</button>
     </div>
 
-    <div id="pt-panel-open"    style="display:block"></div>
-    <div id="pt-panel-closed"  style="display:none"></div>
-    <div id="pt-panel-account" style="display:none"></div>
-    <div id="pt-panel-learn"   style="display:none"></div>
+    <div id="pt-panel-open"     style="display:block"></div>
+    <div id="pt-panel-closed"   style="display:none"></div>
+    <div id="pt-panel-account"  style="display:none"></div>
+    <div id="pt-panel-learn"    style="display:none"></div>
+    <div id="pt-panel-analysis" style="display:none"></div>
   </div>
 </div>
 
@@ -4326,11 +4328,12 @@ function populateMacroSection(s) {
 let _ptData = null, _ptLearn = null;
 
 function ptTab(name) {
-  ['open','closed','account','learn'].forEach(t => {
+  ['open','closed','account','learn','analysis'].forEach(t => {
     document.getElementById('pt-panel-'+t).style.display = t===name ? 'block' : 'none';
     document.getElementById('pt-tab-'+t).classList.toggle('pt-tab-active', t===name);
   });
-  if (name === 'account') ptLoadAccountTab();
+  if (name === 'account')  ptLoadAccountTab();
+  if (name === 'analysis') ptLoadAnalysis();
 }
 
 function _ptExitBadge(reason) {
@@ -4612,6 +4615,186 @@ function _ptRenderLearning(ls, summary) {
 }
 
 function closePaperTrading() { document.getElementById('paper-modal').classList.remove('open'); }
+
+// ── Trade Analysis tab ────────────────────────────────────────────────────────
+let _analysisDate = null;   // null = today
+
+async function ptLoadAnalysis(dateOverride) {
+  const panel = document.getElementById('pt-panel-analysis');
+  if (!panel) return;
+  if (dateOverride !== undefined) _analysisDate = dateOverride || null;
+
+  panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:20px;text-align:center">Loading trade analysis…</div>`;
+
+  let url = `${BACKEND_HTTP}/api/trade-analysis`;
+  if (_analysisDate) url += `?date=${_analysisDate}`;
+
+  let d;
+  try {
+    const resp = await _authFetch(url, {signal: AbortSignal.timeout(15000)});
+    d = await resp.json();
+  } catch(e) {
+    panel.innerHTML = `<div style="color:#ef4444;font-size:12px;padding:20px">Failed to load: ${e.message}</div>`;
+    return;
+  }
+
+  if (d.error || d.trades === 0) {
+    panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:20px;text-align:center">${d.message || d.error || 'No trades found for this date.'}</div>`;
+    return;
+  }
+
+  const s = d.summary || {};
+  const fmt  = (v, dec=2) => v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toFixed(dec);
+  const fmtN = (v, dec=2) => v == null ? '—' : Number(v).toFixed(dec);
+  const pnlColor = v => (v > 0) ? '#22c55e' : (v < 0) ? '#ef4444' : 'var(--muted)';
+  const wrColor  = wr => wr >= 55 ? '#22c55e' : wr >= 45 ? '#f59e0b' : '#ef4444';
+  const pfColor  = pf => pf == null ? 'var(--muted)' : pf >= 1.5 ? '#22c55e' : pf >= 1.0 ? '#f59e0b' : '#ef4444';
+
+  // ── Summary bar ──────────────────────────────────────────────────────────────
+  const wr = s.win_pct || 0;
+  const pf = s.profit_factor;
+  const summaryHtml = `
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+      ${[
+        ['Trades',       s.trades,                                 'var(--text)',    ''],
+        ['Win Rate',     wr.toFixed(1)+'%',                        wrColor(wr),     ''],
+        ['Net P&amp;L',  fmt(s.total_pnl),                         pnlColor(s.total_pnl), ''],
+        ['Avg/Trade',    fmt(s.avg_pnl),                           pnlColor(s.avg_pnl),   ''],
+        ['Avg Win',      fmt(s.avg_win),                           '#22c55e',       ''],
+        ['Avg Loss',     fmt(s.avg_loss),                          '#ef4444',       ''],
+        ['Profit Factor',pf != null ? fmtN(pf,2) : '—',           pfColor(pf),     ''],
+      ].map(([label,val,color,_]) => `
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 14px;min-width:90px">
+          <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px">${label}</div>
+          <div style="font-size:14px;font-weight:700;color:${color}">${val}</div>
+        </div>
+      `).join('')}
+    </div>`;
+
+  // ── Breakdown table helper ────────────────────────────────────────────────
+  function _breakdownTable(title, rows, keyField, keyLabel) {
+    if (!rows || !rows.length) return '';
+    const hdr = `<th style="color:var(--muted);font-weight:600;text-align:left;padding:5px 8px;font-size:10px;border-bottom:1px solid var(--border)">${keyLabel}</th>
+      <th style="color:var(--muted);font-weight:600;text-align:right;padding:5px 8px;font-size:10px;border-bottom:1px solid var(--border)">Trades</th>
+      <th style="color:var(--muted);font-weight:600;text-align:right;padding:5px 8px;font-size:10px;border-bottom:1px solid var(--border)">Win%</th>
+      <th style="color:var(--muted);font-weight:600;text-align:right;padding:5px 8px;font-size:10px;border-bottom:1px solid var(--border)">Avg P&amp;L</th>
+      <th style="color:var(--muted);font-weight:600;text-align:right;padding:5px 8px;font-size:10px;border-bottom:1px solid var(--border)">Total P&amp;L</th>
+      <th style="color:var(--muted);font-weight:600;text-align:right;padding:5px 8px;font-size:10px;border-bottom:1px solid var(--border)">Avg Win</th>
+      <th style="color:var(--muted);font-weight:600;text-align:right;padding:5px 8px;font-size:10px;border-bottom:1px solid var(--border)">Avg Loss</th>`;
+    const body = rows.map(r => {
+      const wr2 = r.win_pct || 0;
+      return `<tr>
+        <td style="padding:5px 8px;font-size:11px;font-weight:600;color:var(--text)">${r[keyField] || '—'}</td>
+        <td style="padding:5px 8px;font-size:11px;text-align:right;color:var(--muted)">${r.trades}</td>
+        <td style="padding:5px 8px;font-size:11px;text-align:right;color:${wrColor(wr2)};font-weight:700">${wr2.toFixed(1)}%</td>
+        <td style="padding:5px 8px;font-size:11px;text-align:right;color:${pnlColor(r.avg_pnl)};font-weight:700">${fmt(r.avg_pnl)}</td>
+        <td style="padding:5px 8px;font-size:11px;text-align:right;color:${pnlColor(r.total_pnl)}">${fmt(r.total_pnl)}</td>
+        <td style="padding:5px 8px;font-size:11px;text-align:right;color:#22c55e">${r.avg_win ? fmt(r.avg_win) : '—'}</td>
+        <td style="padding:5px 8px;font-size:11px;text-align:right;color:#ef4444">${r.avg_loss ? fmt(r.avg_loss) : '—'}</td>
+      </tr>`;
+    }).join('');
+    return `
+      <div style="margin-bottom:16px">
+        <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">${title}</div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-family:inherit">
+            <thead><tr>${hdr}</tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // ── Ticker table helper ───────────────────────────────────────────────────
+  function _tickerTable(title, rows) {
+    if (!rows || !rows.length) return '';
+    const body = rows.map(r => {
+      const wr2 = r.win_pct || 0;
+      return `<tr>
+        <td style="padding:4px 8px;font-size:11px;font-weight:700;color:var(--text)">${r.ticker}</td>
+        <td style="padding:4px 8px;font-size:11px;text-align:right;color:var(--muted)">${r.trades}</td>
+        <td style="padding:4px 8px;font-size:11px;text-align:right;color:${wrColor(wr2)}">${wr2.toFixed(0)}%</td>
+        <td style="padding:4px 8px;font-size:11px;text-align:right;color:${pnlColor(r.total_pnl)};font-weight:700">${fmt(r.total_pnl)}</td>
+        <td style="padding:4px 8px;font-size:11px;text-align:right;color:${pnlColor(r.avg_pnl)}">${fmt(r.avg_pnl)}</td>
+      </tr>`;
+    }).join('');
+    const hdr2 = ['Ticker','Trades','Win%','Total','Avg'].map(h =>
+      `<th style="color:var(--muted);font-size:10px;text-align:${h==='Ticker'?'left':'right'};padding:4px 8px;border-bottom:1px solid var(--border)">${h}</th>`
+    ).join('');
+    return `
+      <div>
+        <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">${title}</div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-family:inherit">
+            <thead><tr>${hdr2}</tr></thead><tbody>${body}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // ── Date picker row ──────────────────────────────────────────────────────
+  const todayISO = new Date().toISOString().slice(0,10);
+  const pickerHtml = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <div style="font-size:11px;color:var(--muted)">Date:</div>
+      <input type="date" id="analysis-date-picker" value="${_analysisDate || todayISO}"
+        style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:4px 8px;font-family:inherit;font-size:11px"
+        onchange="ptLoadAnalysis(this.value)">
+      <button onclick="ptLoadAnalysis(null)"
+        style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:4px 10px;cursor:pointer;font-family:inherit;font-size:11px">
+        Today
+      </button>
+      <div style="font-size:11px;color:var(--muted);margin-left:auto">${d.date} · ${s.trades} trades</div>
+    </div>`;
+
+  // ── Key insight chip ─────────────────────────────────────────────────────
+  let insightHtml = '';
+  const rrRatio = s.avg_win && s.avg_loss && s.avg_loss < 0 ? Math.abs(s.avg_win / s.avg_loss) : null;
+  const breakevenRR = wr > 0 ? (100 - wr) / wr : null;
+  if (rrRatio !== null && breakevenRR !== null) {
+    const ok = rrRatio >= breakevenRR;
+    insightHtml = `
+      <div style="background:${ok ? '#052e16' : '#450a0a'};border:1px solid ${ok ? '#16a34a' : '#dc2626'};border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:11px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:18px">${ok ? '✅' : '⚠️'}</span>
+        <div>
+          <div style="font-weight:700;color:${ok ? '#22c55e' : '#f87171'}">
+            R:R = ${fmtN(rrRatio,2)}× &nbsp;·&nbsp; Break-even needs ${fmtN(breakevenRR,2)}× at ${wr.toFixed(1)}% WR
+          </div>
+          <div style="color:var(--muted);margin-top:2px">
+            ${ok
+              ? `Positive expectancy: avg win covers avg loss. Keep WR above ${fmtN(breakevenRR,1)}% to stay profitable.`
+              : `Negative expectancy: avg loss ($${Math.abs(s.avg_loss).toFixed(2)}) exceeds avg win ($${(s.avg_win||0).toFixed(2)}) — losses grow faster than wins.`
+            }
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // ── Two-column grid for breakdown tables ────────────────────────────────
+  const col1 = [
+    _breakdownTable('By Exit Reason',      d.by_exit,       'exit_reason', 'Exit Reason'),
+    _breakdownTable('By Confidence Band',  d.by_confidence, 'band',        'Confidence'),
+    _breakdownTable('By Algo Family',      d.by_algo,       'algo',        'Algorithm'),
+  ].join('');
+  const col2 = [
+    _breakdownTable('By Session',          d.by_session,    'session',     'Session'),
+    _breakdownTable('By Direction',        d.by_direction,  'direction',   'Direction'),
+    _breakdownTable('T1 Hit vs Pre-T1',    d.by_t1,         'label',       'Stage'),
+    _breakdownTable('By Market Regime',    d.by_regime,     'regime',      'Regime'),
+  ].join('');
+
+  const tickerGrid = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+      <div>${_tickerTable('Top Losers', d.top_losers)}</div>
+      <div>${_tickerTable('Top Winners', d.top_winners)}</div>
+    </div>`;
+
+  panel.innerHTML = pickerHtml + summaryHtml + insightHtml + `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+      <div>${col1}</div><div>${col2}</div>
+    </div>
+    ${tickerGrid}`;
+}
 
 function _renderExecQuality(eq) {
   const strip = document.getElementById('exec-quality-strip');

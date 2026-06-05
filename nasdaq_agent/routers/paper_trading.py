@@ -32,6 +32,7 @@ from agent.paper_trading import (
     get_account_state,
     update_account_config,
     get_algo_performance,
+    get_trade_analysis,
 )
 
 router = APIRouter(tags=["paper_trading"])
@@ -215,6 +216,22 @@ async def execution_quality():
         return quality
     except Exception as _e:
         return {"error": str(_e)}
+
+
+@router.get("/api/trade-analysis")
+async def trade_analysis(date: str | None = None, _user: AuthenticatedUser = Depends(require_viewer)):
+    """
+    Day-end diagnostic breakdown for a given date (YYYY-MM-DD ET, defaults to today).
+    Returns trade stats grouped by exit_reason, confidence, algo family, session,
+    direction, T1 hit/miss, regime, and top winning/losing tickers.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(_pt_executor, get_trade_analysis, date)
+        return result
+    except Exception as exc:
+        logging.getLogger(__name__).error("[trade-analysis] %s", exc, exc_info=True)
+        return {"error": str(exc), "trades": 0}
 
 
 @router.get("/api/paper-trading/performance")
