@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -52,6 +53,30 @@ def _configured_token_dir() -> Path:
 # Persistent backup dir in the app user's home — writable without sudo, survives redeploys.
 # Override with SCHWAB_TOKEN_BACKUP_DIR env var if a different path is preferred.
 _BACKUP_DIR = Path(os.getenv("SCHWAB_TOKEN_BACKUP_DIR", Path.home() / ".nasdaq-agent"))
+
+
+# ── Distributed refresh-lock helper ──────────────────────────────────────────
+
+def _release_refresh_lock(vk_client, lock_key: str, lock_token: str, held: bool) -> None:
+    """Release the Valkey SETNX refresh lock if we hold it.
+
+    Uses a Lua compare-and-delete to avoid accidentally releasing a lock that
+    was re-acquired by another container after our TTL expired.
+    """
+    if not held or vk_client is None:
+        return
+    try:
+        # Lua atomic compare-and-delete: only DEL if the stored value matches
+        # our UUID, so we never accidentally delete another container's lock.
+        _LUA_RELEASE = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end"""
+        vk_client.eval(_LUA_RELEASE, 1, lock_key, lock_token)
+    except Exception:
+        pass  # best-effort — TTL will expire the lock in ≤30s regardless
 
 
 # ── Reusable token manager ────────────────────────────────────────────────────
@@ -95,11 +120,17 @@ class _TokenManager:
     def _save(self) -> None:
         self._token_dir.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self._tokens, indent=2)
-        self._token_path.write_text(payload)
+        # Atomic write: write to a sibling tmp file then rename so concurrent
+        # readers in the other container never see a partial JSON blob.
+        _tmp = self._token_path.with_suffix(".json.tmp")
+        _tmp.write_text(payload)
+        _tmp.rename(self._token_path)
         # Mirror to persistent backup so tokens survive git-pull redeploys / container restarts.
         try:
             _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            (_BACKUP_DIR / self._token_path.name).write_text(payload)
+            _btmp = _BACKUP_DIR / (_tmp.name)
+            _btmp.write_text(payload)
+            _btmp.rename(_BACKUP_DIR / self._token_path.name)
         except Exception as _e:
             logger.debug(f"[Schwab/{self.name}] Token backup write skipped: {_e}")
 
@@ -258,11 +289,69 @@ class _TokenManager:
         if not rt:
             logger.warning(f"[Schwab/{self.name}] No refresh token — re-auth required.")
             return False
+
+        # ── Distributed refresh lock ───────────────────────────────────────────
+        # Both web-api and market-data containers share the same token file.
+        # Both schedule independent refresh timers for the same _TokenManager,
+        # so they can race: both call _post_token with the same refresh_token.
+        # Schwab rotates refresh tokens on use — the second caller gets 400
+        # invalid_grant with the now-consumed old token.
+        #
+        # Fix: SET NX EX 30 in Valkey; loser waits 5s, re-reads the fresh token
+        # written by the winner, and skips calling Schwab entirely.
+        _lock_key   = f"schwab:refresh_lock:{self.name.lower()}"
+        _lock_token = str(uuid.uuid4())
+        _vk_client  = None
+        _lock_held  = False
+        try:
+            from agent.valkey_client import _get_client as _vk_get
+            _vk_client = _vk_get()
+        except Exception:
+            pass
+
+        if _vk_client is not None:
+            try:
+                _lock_held = bool(_vk_client.set(_lock_key, _lock_token, nx=True, ex=30))
+            except Exception:
+                _lock_held = True   # Valkey error — proceed without lock (best-effort)
+
+            if not _lock_held:
+                # Another container is already refreshing; wait for it to finish,
+                # then reload the newly-written token instead of calling Schwab again.
+                logger.info(
+                    f"[Schwab/{self.name}] Refresh lock held by peer — "
+                    f"waiting 5 s then reloading"
+                )
+                time.sleep(5)
+                fresh = self._load_from_disk()
+                if fresh and fresh.get("access_token"):
+                    remaining = fresh.get("expires_in", 1800) - (
+                        time.time() - fresh.get("stored_at", 0)
+                    )
+                    if remaining > 60:
+                        with self._lock:
+                            self._tokens.update(fresh)
+                        self._schedule_refresh(int(remaining))
+                        logger.info(
+                            f"[Schwab/{self.name}] Adopted token from peer refresh "
+                            f"(valid for {int(remaining)}s)."
+                        )
+                        return True
+                # Token still stale after waiting — fall through and try anyway.
+                logger.warning(
+                    f"[Schwab/{self.name}] Peer-written token still stale — "
+                    f"attempting own refresh."
+                )
+        else:
+            _lock_held = True   # No Valkey — proceed without distributed lock
+
         try:
             data = self._post_token({"grant_type": "refresh_token", "refresh_token": rt})
             self._store(data)
             self._schedule_refresh(data.get("expires_in", 1800))
             logger.info(f"[Schwab/{self.name}] Access token refreshed.")
+            # Release the distributed lock now that the new token is on disk.
+            _release_refresh_lock(_vk_client, _lock_key, _lock_token, _lock_held)
             # Clear any outstanding auth alert now that refresh succeeded.
             try:
                 from agent.system_alerts import resolve_alert
@@ -309,6 +398,11 @@ class _TokenManager:
                     )
                 except Exception:
                     pass
+                # Release lock before clearing state — the peer container that
+                # lost the race will wake up from its 5-s sleep and find our
+                # lock already gone; it will then re-read the (now-deleted) file
+                # and skip a second Schwab call.
+                _release_refresh_lock(_vk_client, _lock_key, _lock_token, _lock_held)
                 with self._lock:
                     self._tokens.clear()
                 if self._token_path.exists():
@@ -345,6 +439,8 @@ class _TokenManager:
                         )
                     except Exception:
                         pass
+                # Release lock so the retry timer can re-acquire it when it fires.
+                _release_refresh_lock(_vk_client, _lock_key, _lock_token, _lock_held)
                 with self._lock:
                     if self._refresh_timer:
                         self._refresh_timer.cancel()
@@ -375,6 +471,7 @@ class _TokenManager:
                     )
                 except Exception:
                     pass
+            _release_refresh_lock(_vk_client, _lock_key, _lock_token, _lock_held)
             with self._lock:
                 if self._refresh_timer:
                     self._refresh_timer.cancel()
