@@ -80,12 +80,14 @@ def _job_status(path: Path, proc: subprocess.Popen | None, *, stale_after_s: flo
     """
     state = _read_status(path)
     proc_running = _proc_running(proc)
+    proc_known = proc is not None
     now = time.time()
 
     if not state:
         return {
             "running": proc_running,
             "proc_running": proc_running,
+            "returncode": proc.poll() if proc_known else None,
             "status": "running" if proc_running else "not_started",
             "done": 0,
             "total": 0,
@@ -93,12 +95,23 @@ def _job_status(path: Path, proc: subprocess.Popen | None, *, stale_after_s: flo
         }
 
     state["proc_running"] = proc_running
+    if proc_known:
+        state["returncode"] = proc.poll()
     if proc_running:
         state["running"] = True
         state.setdefault("status", "running")
         return state
 
     if state.get("running"):
+        if proc_known:
+            state["running"] = False
+            state["failed"] = True
+            state["status"] = "failed"
+            state.setdefault(
+                "error",
+                "Historical worker exited before publishing progress; check backfill.log and web-api logs.",
+            )
+            return state
         updated_at = float(state.get("updated_at") or state.get("started_at") or 0.0)
         if updated_at and (now - updated_at) <= stale_after_s:
             state["running"] = True
@@ -107,7 +120,7 @@ def _job_status(path: Path, proc: subprocess.Popen | None, *, stale_after_s: flo
         else:
             state["running"] = False
             state["stale"] = True
-            state.setdefault("status", "stale")
+            state["status"] = "stale"
             state.setdefault(
                 "error",
                 "No recent progress update from historical worker; check container logs.",

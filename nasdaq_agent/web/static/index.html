@@ -8575,11 +8575,12 @@ function _progressBar(done, total) {
     <div style="background:var(--accent);height:100%;width:${p}%;transition:width .3s"></div></div>`;
 }
 function _histActive(job) {
-  return !!(job && (job.running || job.proc_running || job.status === 'starting'));
+  return !!(job && !job.stale && !job.failed && !job.error && (job.running || job.proc_running || job.status === 'starting' || job.status === 'initializing'));
 }
 function _histNote(job) {
   if (!job) return '';
   if (job.tracking_via_status_file) return ' · cross-worker status';
+  if (job.status === 'initializing') return ` · ${job.phase || 'initializing'}`;
   if (job.status === 'starting') return ' · starting subprocess';
   return '';
 }

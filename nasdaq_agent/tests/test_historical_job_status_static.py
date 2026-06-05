@@ -13,6 +13,7 @@ def test_historical_jobs_show_live_dashboard_progress_after_start() -> None:
 
     assert "function _histActive(job)" in src
     assert "setInterval(loadHistoricalStatus, 3000)" in src
+    assert "!job.stale && !job.failed && !job.error" in src
     assert "_histSetButton('hist-retrain-btn', rtActive" in src
     assert "_histSetButton('hist-bt-btn', btActive" in src
     assert "Starting historical retrain subprocess" in src
@@ -24,16 +25,23 @@ def test_historical_jobs_show_live_dashboard_progress_after_start() -> None:
 
 def test_historical_status_survives_multi_worker_status_polling() -> None:
     router = _src("routers/backtest.py")
+    entrypoint = _src("historical/__main__.py")
     retrain = _src("historical/retrain.py")
     backtest = _src("historical/backtest.py")
 
     assert "def _job_status" in router
     assert "fresh status file is therefore the" in router
     assert "tracking_via_status_file" in router
+    assert 'state["status"] = "stale"' in router
+    assert 'state["status"] = "failed"' in router
     assert "_write_status(_RETRAIN_STATUS" in router
     assert "_write_status(_BACKTEST_STATUS" in router
     assert "\"status\": \"starting\"" in router
     assert "done >= total" in router
+    assert 'Path(os.getenv("LOG_DIR", "/app/logs"))' in entrypoint
+    assert "def _write_job_status" in entrypoint
+    assert '"status": "initializing"' in entrypoint
+    assert '"status": "failed"' in entrypoint
     assert "state[\"updated_at\"] = time.time()" in retrain
     assert "state[\"updated_at\"] = time.time()" in backtest
     assert "if i % 10 == 0 or i == n" not in backtest

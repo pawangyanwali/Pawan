@@ -35,6 +35,7 @@ Usage examples
 """
 
 import argparse
+import json
 import logging
 import logging.handlers
 import os
@@ -64,6 +65,21 @@ except (ImportError, Exception):
     pass  # env vars may already be exported in the shell
 
 
+def _write_job_status(kind: str, state: dict) -> None:
+    """Best-effort status update before the worker-specific module runs."""
+    try:
+        filename = "hist_retrain_status.json" if kind == "retrain" else "hist_backtest_status.json"
+        path = Path.home() / ".nasdaq_agent" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(state)
+        payload["updated_at"] = time.time()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     fmt   = logging.Formatter(
@@ -75,26 +91,37 @@ def _setup_logging(verbose: bool) -> None:
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(fmt)
 
-    # File — always written regardless of verbose flag
-    log_dir = Path("/opt/nasdaq-agent/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "backfill.log"
-    fh = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=20 * 1024 * 1024, backupCount=3, encoding="utf-8"
-    )
-    fh.setFormatter(fmt)
-
     root = logging.getLogger()
     root.setLevel(level)
     root.addHandler(ch)
-    root.addHandler(fh)
+
+    # File logging must never prevent historical jobs from starting.  In Docker
+    # the mounted path is /app/logs; older host installs used /opt/nasdaq-agent.
+    log_path = None
+    for log_dir in (Path(os.getenv("LOG_DIR", "/app/logs")), Path("/opt/nasdaq-agent/logs")):
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "backfill.log"
+            fh = logging.handlers.RotatingFileHandler(
+                log_path, maxBytes=20 * 1024 * 1024, backupCount=3, encoding="utf-8"
+            )
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+            break
+        except Exception as exc:
+            logging.getLogger("backfill.main").warning(
+                "Could not open historical log dir %s: %s", log_dir, exc
+            )
 
     # Silence noisy sub-loggers unless verbose
     if not verbose:
         for noisy in ("urllib3", "httpx", "httpcore", "asyncio"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    logging.getLogger("backfill.main").info("Logging to %s", log_path)
+    if log_path:
+        logging.getLogger("backfill.main").info("Logging to %s", log_path)
+    else:
+        logging.getLogger("backfill.main").warning("File logging disabled; using stdout only")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -185,28 +212,62 @@ def main() -> None:
 
     # ── Retrain ML models from historical bars ───────────────────────────────
     if args.retrain:
-        store.init_tables()
-        if args.tickers:
-            tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
-        else:
-            from config import NASDAQ_TICKERS
-            tickers = list(NASDAQ_TICKERS)
-        from historical.retrain import retrain_from_history
-        summary = retrain_from_history(tickers, interval=args.interval, max_workers=args.workers)
-        log.info("Retrain summary: %s", summary)
+        t0 = time.time()
+        _write_job_status("retrain", {
+            "running": True, "status": "initializing", "phase": "init_db",
+            "done": 0, "total": 0, "current_ticker": "",
+            "trained": 0, "skipped": 0, "elapsed_s": 0.0,
+            "started_at": t0, "summary": {},
+        })
+        try:
+            store.init_tables()
+            if args.tickers:
+                tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+            else:
+                from config import NASDAQ_TICKERS
+                tickers = list(NASDAQ_TICKERS)
+            from historical.retrain import retrain_from_history
+            summary = retrain_from_history(tickers, interval=args.interval, max_workers=args.workers)
+            log.info("Retrain summary: %s", summary)
+        except Exception as exc:
+            _write_job_status("retrain", {
+                "running": False, "status": "failed", "phase": "startup",
+                "done": 0, "total": 0, "current_ticker": "",
+                "trained": 0, "skipped": 0,
+                "elapsed_s": round(time.time() - t0, 1),
+                "started_at": t0, "summary": {}, "error": str(exc),
+            })
+            raise
         return
 
     # ── Vectorized backtest over historical bars ─────────────────────────────
     if args.backtest:
-        store.init_tables()
-        if args.tickers:
-            tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
-        else:
-            from config import NASDAQ_TICKERS
-            tickers = list(NASDAQ_TICKERS)
-        from historical.backtest import run_backtest, print_report
-        reports = run_backtest(tickers, interval=args.interval)
-        print_report(reports)
+        t0 = time.time()
+        _write_job_status("backtest", {
+            "running": True, "status": "initializing", "phase": "init_db",
+            "interval": args.interval, "done": 0, "total": 0,
+            "current_ticker": "", "trades_so_far": 0,
+            "elapsed_s": 0.0, "started_at": t0, "results": [],
+        })
+        try:
+            store.init_tables()
+            if args.tickers:
+                tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+            else:
+                from config import NASDAQ_TICKERS
+                tickers = list(NASDAQ_TICKERS)
+            from historical.backtest import run_backtest, print_report
+            reports = run_backtest(tickers, interval=args.interval)
+            print_report(reports)
+        except Exception as exc:
+            _write_job_status("backtest", {
+                "running": False, "status": "failed", "phase": "startup",
+                "interval": args.interval, "done": 0, "total": 0,
+                "current_ticker": "", "trades_so_far": 0,
+                "elapsed_s": round(time.time() - t0, 1),
+                "started_at": t0, "results": [], "error": str(exc),
+            })
+            raise
         return
 
     # ── Reset ────────────────────────────────────────────────────────────────
