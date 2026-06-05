@@ -141,6 +141,26 @@ jobs:
               # Rolling update: bring up new containers; remove old ones when healthy
               _dc up -d --remove-orphans
 
+              # ── Wait for token-service (fatal; owns all refresh timers) ──────────
+              echo "=== Waiting for token-service to become healthy (max 1 min) ==="
+              TOKEN_SVC_HEALTHY=0
+              for i in $(seq 1 6); do
+                sleep 10
+                status=$(_svc_health token-service)
+                if [ "$status" = "healthy" ]; then
+                  echo "  token-service healthy after $((i*10))s"
+                  TOKEN_SVC_HEALTHY=1
+                  break
+                fi
+                echo "  Attempt $i/6: health=$status"
+              done
+
+              if [ "$TOKEN_SVC_HEALTHY" = "0" ]; then
+                echo "ERROR: token-service did not become healthy within 1 min — printing logs"
+                _dc logs --tail 40 token-service 2>/dev/null || true
+                exit 1
+              fi
+
               # ── Wait for web-api (fatal if not healthy) ────────────────────────
               echo "=== Waiting for web-api to become healthy (max 3 min) ==="
               WEB_API_HEALTHY=0

@@ -156,6 +156,39 @@ services:
       start_period: 120s
       retries: 3
 
+  # ── token-service ────────────────────────────────────────────────────────────
+  # Sole owner of Schwab OAuth refresh timers.  No other container schedules
+  # a refresh timer — this eliminates the invalid_grant race condition that
+  # occurred when web-api and market-data both called load_stored() on startup.
+  #
+  # Startup:  loads tokens from Valkey → PostgreSQL → disk file
+  # Refresh:  writes disk (atomic) + Valkey + PostgreSQL; publishes
+  #           schwab:tokens_refreshed so consumers reconnect automatically
+  # New auth: subscribes to schwab:new_auth:{app} — web-api publishes here
+  #           after a successful /schwab/callback OAuth exchange
+  token-service:
+    <<: *common
+    container_name: nasdaq-token-service
+    command: ["python", "-m", "services.token_service"]
+    volumes:
+      - tokens:/app/data/tokens   # read existing token files; write refreshed tokens
+      - logs:/app/logs
+    environment:
+      <<: [*db-env, *valkey-env, *schwab-env, *log-env]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: 128M
+        reservations:
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.token_healthcheck"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
   # ── market-data ──────────────────────────────────────────────────────────────
   # Schwab WebSocket streamer + REST MD poller.
   # Publishes every price tick to ElastiCache md:prices (<100ms latency).
@@ -305,7 +338,7 @@ services:
       WATCHDOG_UNHEALTHY_STRIKES: ${WATCHDOG_UNHEALTHY_STRIKES:-2}
       WATCHDOG_RESTART_TIMEOUT_S: ${WATCHDOG_RESTART_TIMEOUT_S:-10}
       # Comma-separated compose service names to watch.
-      WATCHDOG_SERVICES: "web-api,scanner,market-data,learner,scheduler,context-intel"
+      WATCHDOG_SERVICES: "web-api,token-service,scanner,market-data,learner,scheduler,context-intel"
     deploy:
       resources:
         limits:

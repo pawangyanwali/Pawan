@@ -984,7 +984,7 @@ async def lifespan(app: FastAPI):
         if os.getenv("SCHWAB_CLIENT_ID"):
             try:
                 from agent.broker.schwab_auth import load_stored_tokens as _load_at
-                if _load_at():
+                if _load_at(schedule_refresh=False):
                     start_streamer(list(_nq_tickers))
                     _ensure_tick_broadcast_registered()
                     _streamer_started = True
@@ -1004,7 +1004,7 @@ async def lifespan(app: FastAPI):
         # as a fallback for gaps (token expiry, market-hours-only streaming).
         if os.getenv("SCHWAB_MD_CLIENT_ID"):
             try:
-                ok_md = load_stored_md_tokens()
+                ok_md = load_stored_md_tokens(schedule_refresh=False)
                 if ok_md:
                     logging.getLogger(__name__).info(
                         "Schwab Market Data connected — starting parallel quote poller."

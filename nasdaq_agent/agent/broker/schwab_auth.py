@@ -235,6 +235,12 @@ class _TokenManager:
                 _sc._hash_last_attempt = 0.0
             except Exception:
                 pass
+        # Mirror to Valkey so token-service consumers can read without disk access.
+        try:
+            from agent.broker.token_store import put_token as _vk_put
+            _vk_put(self.name.lower(), snapshot)
+        except Exception:
+            pass
         logger.info(f"[Schwab/{self.name}] Tokens saved.")
 
     def _pg_save(self, tokens: dict) -> None:
@@ -492,7 +498,16 @@ class _TokenManager:
 
     # ── Load from disk (called at startup) ────────────────────────────────────
 
-    def load_stored(self) -> bool:
+    def load_stored(self, schedule_refresh: bool = True) -> bool:
+        """
+        Load tokens from disk (or PG/Valkey fallback).
+
+        schedule_refresh=True  — token-service only; schedules the background timer.
+        schedule_refresh=False — all other containers; load token into memory for
+                                 in-process use but leave refresh scheduling to
+                                 token-service so there is exactly one refresh timer
+                                 per app across the entire fleet.
+        """
         data = self._load_from_disk()
         if not data or "access_token" not in data:
             return False
@@ -509,6 +524,12 @@ class _TokenManager:
         stored_at  = data.get("stored_at", 0)
         expires_in = data.get("expires_in", 1800)
         remaining  = expires_in - (time.time() - stored_at)
+        if not schedule_refresh:
+            logger.info(
+                f"[Schwab/{self.name}] Token loaded (valid for {max(0, int(remaining))}s) "
+                f"— refresh timer owned by token-service."
+            )
+            return True
         if remaining < 60:
             logger.info(f"[Schwab/{self.name}] Stored token expired — refreshing…")
             return self.refresh()
@@ -553,7 +574,20 @@ class _TokenManager:
             # Store redirect_uri alongside tokens so refresh can reference it
             data["_redirect_uri"] = redirect_uri
             self._store(data)
-            self._schedule_refresh(data.get("expires_in", 1800))
+            # token-service owns the refresh timer — notify it via pub/sub so it
+            # adopts the new tokens and (re)schedules its timer.  Do NOT call
+            # _schedule_refresh() here; that would start a competing timer in web-api.
+            try:
+                from agent.valkey_client import _get_client as _vk_get
+                _vk = _vk_get()
+                if _vk:
+                    import json as _json
+                    _vk.publish(
+                        f"schwab:new_auth:{self.name.lower()}",
+                        _json.dumps({"ts": time.time(), "app": self.name.lower()}),
+                    )
+            except Exception:
+                pass
             logger.info(f"[Schwab/{self.name}] Web OAuth complete.")
             return True, ""
         except urllib.error.HTTPError as e:
@@ -613,15 +647,21 @@ _market_data = _TokenManager(
 
 # ── Public API (backwards-compatible names) ───────────────────────────────────
 
-def load_stored_tokens() -> bool:
-    """Load primary (Trader) tokens from disk. Called at startup."""
-    return _trader.load_stored()
+def load_stored_tokens(schedule_refresh: bool = True) -> bool:
+    """Load primary (Trader) tokens from disk. Called at startup.
 
-def load_stored_md_tokens() -> bool:
-    """Load Market Data tokens from disk. Called at startup."""
+    Pass schedule_refresh=False in all containers except token-service.
+    """
+    return _trader.load_stored(schedule_refresh=schedule_refresh)
+
+def load_stored_md_tokens(schedule_refresh: bool = True) -> bool:
+    """Load Market Data tokens from disk. Called at startup.
+
+    Pass schedule_refresh=False in all containers except token-service.
+    """
     if not _market_data.is_configured():
         return False
-    return _market_data.load_stored()
+    return _market_data.load_stored(schedule_refresh=schedule_refresh)
 
 def get_access_token() -> Optional[str]:
     """Primary (Accounts+Trading) access token."""

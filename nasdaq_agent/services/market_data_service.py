@@ -49,7 +49,7 @@ def _start(tickers: list[str]) -> None:
         try:
             from agent.broker.schwab_auth import load_stored_tokens
             from agent.broker.schwab_streamer import start_streamer
-            if load_stored_tokens():
+            if load_stored_tokens(schedule_refresh=False):
                 start_streamer(tickers)
                 _log.info("Schwab WebSocket streamer started (%d tickers)", len(tickers))
                 started = True
@@ -62,7 +62,7 @@ def _start(tickers: list[str]) -> None:
         try:
             from agent.broker.schwab_auth import load_stored_md_tokens
             from agent.broker.schwab_streamer import start_md_poller
-            if load_stored_md_tokens():
+            if load_stored_md_tokens(schedule_refresh=False):
                 delay = float(os.getenv("NASDAQ_MD_STARTUP_DELAY_S", "10"))
                 start_md_poller(
                     tickers, interval=1.0,
