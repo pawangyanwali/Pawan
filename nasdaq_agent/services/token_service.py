@@ -145,6 +145,35 @@ def main() -> None:
         "loaded" if md_ok else "missing",
     )
 
+    # Polling fallback: if the pub/sub message from exchange_code() is dropped
+    # (Valkey restart, network blip), token-service would never start a refresh
+    # timer.  This loop checks every 30s whether the disk token is newer than
+    # what's in memory — if so, it reloads and (re)schedules the timer.
+    def _disk_poll_loop() -> None:
+        while True:
+            time.sleep(30)
+            for mgr in (_trader, _market_data):
+                if not mgr.is_configured():
+                    continue
+                try:
+                    fresh = mgr._load_from_disk()
+                    if not fresh or not fresh.get("access_token"):
+                        continue
+                    disk_stored_at = fresh.get("stored_at", 0)
+                    with mgr._lock:
+                        mem_stored_at = mgr._tokens.get("stored_at", 0)
+                    if disk_stored_at > mem_stored_at + 5:
+                        logger.info(
+                            "[token-service] %s disk token is newer (stored_at %s > %s) "
+                            "— reloading and rescheduling timer.",
+                            mgr.name, disk_stored_at, mem_stored_at,
+                        )
+                        mgr.load_stored(schedule_refresh=True)
+                except Exception as exc:
+                    logger.debug("[token-service] disk poll error for %s: %s", mgr.name, exc)
+
+    threading.Thread(target=_disk_poll_loop, daemon=True, name="DiskPoll").start()
+
     # Listen for new OAuth tokens from web-api in the foreground.
     _new_auth_listener()
 

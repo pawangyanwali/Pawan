@@ -406,6 +406,33 @@ class _TokenManager:
         else:
             _lock_held = True   # No Valkey — proceed without distributed lock
 
+        # ── Post-lock disk check ───────────────────────────────────────────────
+        # Even after winning the lock, the peer may have finished its own
+        # refresh between when we read rt from memory and now (e.g. it held
+        # the lock, refreshed, released it, and we acquired it immediately
+        # after).  If the disk file is newer than our in-memory stored_at, the
+        # peer already refreshed — adopt the fresh token without calling Schwab.
+        with self._lock:
+            _mem_stored_at = self._tokens.get("stored_at", 0)
+        _disk_check = self._load_from_disk()
+        if _disk_check and _disk_check.get("access_token"):
+            _disk_stored_at = _disk_check.get("stored_at", 0)
+            if _disk_stored_at > _mem_stored_at + 5:  # disk is 5+ seconds newer
+                _disk_remaining = _disk_check.get("expires_in", 1800) - (
+                    time.time() - _disk_stored_at
+                )
+                if _disk_remaining > 60:
+                    with self._lock:
+                        self._tokens.update(_disk_check)
+                    self._schedule_refresh(int(_disk_remaining))
+                    _release_refresh_lock(_vk_client, _lock_key, _lock_token, _lock_held)
+                    logger.info(
+                        f"[Schwab/{self.name}] Post-lock: peer already refreshed "
+                        f"(disk stored_at={_disk_stored_at:.0f} > mem={_mem_stored_at:.0f}) "
+                        f"— adopted without Schwab call."
+                    )
+                    return True
+
         try:
             data = self._post_token({"grant_type": "refresh_token", "refresh_token": rt})
             self._store(data)
@@ -626,17 +653,12 @@ class _TokenManager:
             if code_verifier:
                 payload["code_verifier"] = code_verifier
             data = self._post_token(payload)
-            # Store redirect_uri alongside tokens so refresh can reference it
             data["_redirect_uri"] = redirect_uri
             self._store(data)
-            # Schedule a local refresh timer as a safety net — this container
-            # handles the refresh if token-service is not yet running or loses
-            # its Valkey subscription.  token-service will also receive the
-            # schwab:new_auth pub/sub below and schedule its own timer; the
-            # distributed Valkey lock in refresh() prevents both timers from
-            # calling Schwab simultaneously.
-            self._schedule_refresh(data.get("expires_in", 1800))
-            # Notify token-service and any market-data subscriber.
+            # token-service is the sole owner of refresh timers — notify it and
+            # all consumers via pub/sub.  Do NOT call _schedule_refresh() here:
+            # that would create a second timer competing with token-service's,
+            # and both would use the same refresh_token → 400 invalid_grant.
             try:
                 from agent.valkey_client import _get_client as _vk_get
                 _vk = _vk_get()
