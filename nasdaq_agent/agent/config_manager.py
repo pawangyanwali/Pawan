@@ -444,8 +444,40 @@ class ConfigManager:
             return
 
         logger.info("[ConfigManager] seed_defaults: seeded %d keys (ON CONFLICT DO NOTHING)", inserted)
+        self._apply_safety_migrations(now)
         # Reload cache so newly-inserted defaults are visible immediately in this process
         self.load()
+
+    def _apply_safety_migrations(self, now: str) -> None:
+        """Apply narrow one-time config repairs for unsafe legacy defaults."""
+        try:
+            from agent.db import get_conn
+            with get_conn() as c:
+                row = c.execute(
+                    "SELECT value FROM config_store WHERE key = ?",
+                    ("paper.t2_r_multiple",),
+                ).fetchone()
+                if not row:
+                    return
+                try:
+                    current_t2 = float(json.loads(row["value"]))
+                except Exception:
+                    return
+                if abs(current_t2 - 2.0) < 1e-9:
+                    c.execute(
+                        _UPSERT,
+                        (
+                            "paper.t2_r_multiple",
+                            json.dumps(1.5),
+                            now,
+                            "migration_t2_1_5",
+                        ),
+                    )
+                    logger.info(
+                        "[ConfigManager] Migrated paper.t2_r_multiple from legacy 2.0R to 1.5R"
+                    )
+        except Exception as exc:
+            logger.warning("[ConfigManager] safety migration failed: %s", exc)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Thread-safe read from in-memory cache."""
