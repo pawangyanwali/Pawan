@@ -1028,6 +1028,39 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).warning(
                 "No Schwab data source active — scanner will use Twelve Data / cache only."
             )
+
+        # Subscribe to schwab:tokens_refreshed so web-api reloads the in-memory
+        # token when token-service rotates it — otherwise web-api would keep the
+        # stale access token after each background refresh cycle.
+        def _web_api_token_reload_loop() -> None:
+            import time as _t
+            while True:
+                try:
+                    from agent.valkey_client import _get_client as _vk_get
+                    _vc = _vk_get()
+                    if _vc is None:
+                        _t.sleep(30)
+                        continue
+                    _ps = _vc.pubsub()
+                    _ps.subscribe("schwab:tokens_refreshed")
+                    for _msg in _ps.listen():
+                        if _msg and _msg.get("type") == "message":
+                            from agent.broker.schwab_auth import load_stored_tokens, load_stored_md_tokens
+                            load_stored_tokens(schedule_refresh=False)
+                            load_stored_md_tokens(schedule_refresh=False)
+                            logging.getLogger(__name__).info(
+                                "[web-api] Token refresh detected — in-memory tokens reloaded."
+                            )
+                except Exception as _exc:
+                    logging.getLogger(__name__).debug(
+                        "[web-api] token reload sub error: %s — retrying in 30s", _exc
+                    )
+                    _t.sleep(30)
+
+        import threading as _thr
+        _thr.Thread(target=_web_api_token_reload_loop, daemon=True,
+                    name="web-api-token-reload").start()
+
     else:
         logging.getLogger(__name__).info(
             "Schwab disabled (SCHWAB_ENABLED not set) — running on Twelve Data only."

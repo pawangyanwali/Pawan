@@ -244,23 +244,78 @@ class _TokenManager:
         logger.info(f"[Schwab/{self.name}] Tokens saved.")
 
     def _pg_save(self, tokens: dict) -> None:
-        """Mirror tokens to PostgreSQL service_state as a durable backup."""
+        """Mirror tokens to PostgreSQL — dedicated schwab_tokens table + service_state fallback."""
+        # ── 1. Dedicated schwab_tokens table (primary durable store) ──────────
+        try:
+            from agent.db import get_pool
+            pool = get_pool()
+            with pool.connection() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS schwab_tokens (
+                        app           TEXT PRIMARY KEY,
+                        access_token  TEXT,
+                        refresh_token TEXT,
+                        expires_in    INTEGER NOT NULL DEFAULT 1800,
+                        stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO schwab_tokens
+                        (app, access_token, refresh_token, expires_in, stored_at, refreshed_at)
+                    VALUES (%s, %s, %s, %s, to_timestamp(%s), now())
+                    ON CONFLICT (app) DO UPDATE SET
+                        access_token  = EXCLUDED.access_token,
+                        refresh_token = EXCLUDED.refresh_token,
+                        expires_in    = EXCLUDED.expires_in,
+                        stored_at     = EXCLUDED.stored_at,
+                        refreshed_at  = now()
+                """, (
+                    self.name.lower(),
+                    tokens.get("access_token"),
+                    tokens.get("refresh_token"),
+                    tokens.get("expires_in", 1800),
+                    tokens.get("stored_at", time.time()),
+                ))
+        except Exception as exc:
+            logger.debug(f"[Schwab/{self.name}] schwab_tokens PG write failed: {exc}")
+        # ── 2. service_state fallback (backward compat — keeps _pg_load working) ─
         try:
             from agent.service_state import set_state
-            # TTL = 8 days (Schwab refresh tokens last 7 days; +1 day buffer)
             set_state(f"schwab:tokens:{self.name.lower()}", tokens, ttl_s=8 * 86400)
         except Exception as exc:
-            logger.debug(f"[Schwab/{self.name}] PG token backup failed: {exc}")
+            logger.debug(f"[Schwab/{self.name}] service_state PG backup failed: {exc}")
 
     def _pg_load(self) -> dict:
-        """Load tokens from PostgreSQL backup (fallback when file is missing)."""
+        """Load tokens from PostgreSQL — schwab_tokens table first, then service_state."""
+        # ── 1. Dedicated table ────────────────────────────────────────────────
+        try:
+            from agent.db import get_pool
+            pool = get_pool()
+            with pool.connection() as conn:
+                row = conn.execute(
+                    """SELECT access_token, refresh_token, expires_in,
+                              EXTRACT(EPOCH FROM stored_at)::double precision AS stored_at
+                       FROM schwab_tokens WHERE app = %s""",
+                    (self.name.lower(),)
+                ).fetchone()
+                if row and row[0]:
+                    return {
+                        "access_token":  row[0],
+                        "refresh_token": row[1],
+                        "expires_in":    row[2],
+                        "stored_at":     float(row[3]),
+                    }
+        except Exception as exc:
+            logger.debug(f"[Schwab/{self.name}] schwab_tokens PG read failed: {exc}")
+        # ── 2. service_state fallback ─────────────────────────────────────────
         try:
             from agent.service_state import get_state
             data = get_state(f"schwab:tokens:{self.name.lower()}", ignore_expiry=False)
             if data and "access_token" in data:
                 return data
         except Exception as exc:
-            logger.debug(f"[Schwab/{self.name}] PG token restore failed: {exc}")
+            logger.debug(f"[Schwab/{self.name}] service_state PG restore failed: {exc}")
         return {}
 
     # ── Refresh ───────────────────────────────────────────────────────────────
@@ -574,17 +629,27 @@ class _TokenManager:
             # Store redirect_uri alongside tokens so refresh can reference it
             data["_redirect_uri"] = redirect_uri
             self._store(data)
-            # token-service owns the refresh timer — notify it via pub/sub so it
-            # adopts the new tokens and (re)schedules its timer.  Do NOT call
-            # _schedule_refresh() here; that would start a competing timer in web-api.
+            # Schedule a local refresh timer as a safety net — this container
+            # handles the refresh if token-service is not yet running or loses
+            # its Valkey subscription.  token-service will also receive the
+            # schwab:new_auth pub/sub below and schedule its own timer; the
+            # distributed Valkey lock in refresh() prevents both timers from
+            # calling Schwab simultaneously.
+            self._schedule_refresh(data.get("expires_in", 1800))
+            # Notify token-service and any market-data subscriber.
             try:
                 from agent.valkey_client import _get_client as _vk_get
                 _vk = _vk_get()
                 if _vk:
                     import json as _json
+                    _ts = time.time()
                     _vk.publish(
                         f"schwab:new_auth:{self.name.lower()}",
-                        _json.dumps({"ts": time.time(), "app": self.name.lower()}),
+                        _json.dumps({"ts": _ts, "app": self.name.lower()}),
+                    )
+                    _vk.publish(
+                        "schwab:tokens_refreshed",
+                        _json.dumps({"ts": _ts, "app": self.name.lower()}),
                     )
             except Exception:
                 pass
