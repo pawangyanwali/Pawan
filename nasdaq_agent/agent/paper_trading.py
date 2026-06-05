@@ -2631,3 +2631,216 @@ def get_ticker_pnl() -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+# ── Daily trade analysis ───────────────────────────────────────────────────────
+
+def _algo_family_label(algo_name: str | None) -> str:
+    """Normalise raw algo_name into a short family label."""
+    if not algo_name:
+        return "unknown"
+    n = algo_name.upper()
+    if "BB_MEAN_REV" in n or "BB_REV" in n: return "bb_rev"
+    if "MACD_ACC"   in n: return "macd_acc"
+    if "SUPERTREND" in n: return "supertrend"
+    if "ORB_ZV"     in n or "ORB5" in n or "ORB" in n: return "orb"
+    if "RSI2_SNAP"  in n or "RSI2" in n: return "rsi2_snap"
+    if "EMA_PULL"   in n or "EMA_PULLBACK" in n: return "ema_pull"
+    if "VWAP_OFI"   in n: return "vwap_ofi"
+    if "VWAP_TREND" in n or "VWAP_TOUCH" in n: return "vwap_trend"
+    if "DONCHIAN"   in n: return "donchian"
+    if "SQUEEZE"    in n: return "squeeze"
+    if "VOL_SHOCK"  in n: return "vol_shock"
+    if "KELTNER"    in n: return "keltner"
+    if "META_ENS"   in n: return "meta_ens"
+    if "PAIR_ARB"   in n: return "pair_arb"
+    if "OFI"        in n: return "ofi"
+    return algo_name.lower()[:20]
+
+
+def _group_stats(rows: list[dict]) -> dict:
+    n     = len(rows)
+    wins  = sum(1 for r in rows if (r.get("pnl_dollar") or 0) > 0)
+    pnls  = [float(r.get("pnl_dollar") or 0) for r in rows]
+    gross_w = sum(p for p in pnls if p > 0)
+    gross_l = sum(p for p in pnls if p <= 0)
+    win_pnls = [p for p in pnls if p > 0]
+    los_pnls = [p for p in pnls if p <= 0]
+    return {
+        "trades":    n,
+        "wins":      wins,
+        "losses":    n - wins,
+        "win_pct":   round(wins / n * 100, 1) if n else 0.0,
+        "total_pnl": round(sum(pnls), 2),
+        "avg_pnl":   round(sum(pnls) / n, 2) if n else 0.0,
+        "avg_win":   round(gross_w / len(win_pnls), 2) if win_pnls else 0.0,
+        "avg_loss":  round(gross_l / len(los_pnls), 2) if los_pnls else 0.0,
+        "profit_factor": round(abs(gross_w / gross_l), 3) if gross_l else None,
+    }
+
+
+def get_trade_analysis(date_str: str | None = None) -> dict:
+    """
+    Day-end trade diagnostic.  Returns breakdown of closed trades for a given
+    calendar date (ET timezone, defaults to today) across:
+      exit_reason · confidence_band · algo_family · session · direction · t1_hit
+      top 10 winning and losing tickers
+    """
+    import time as _time
+
+    # Build the WHERE clause for the target date
+    if date_str:
+        # Passed as YYYY-MM-DD in ET; compare with AT TIME ZONE cast
+        date_filter_pg = f"(closed_at::timestamptz AT TIME ZONE 'America/New_York')::date = '{date_str}'::date"
+        date_filter_sq = f"date(closed_at) = '{date_str}'"
+    else:
+        date_filter_pg = "(closed_at::timestamptz AT TIME ZONE 'America/New_York')::date = (NOW() AT TIME ZONE 'America/New_York')::date"
+        date_filter_sq = "date(closed_at) = date('now')"
+
+    conn = _conn_ro()
+    try:
+        # Detect dialect: psycopg2 rows have .description; sqlite3 rows too — use param style
+        try:
+            conn.execute("SELECT 1::int")          # PostgreSQL-only syntax
+            date_filter = date_filter_pg
+        except Exception:
+            date_filter = date_filter_sq
+
+        rows = conn.execute(f"""
+            SELECT
+                ticker, direction, pnl_dollar, pnl_pct,
+                exit_reason, confidence, session, regime,
+                algo_name, t1_hit, bars_held,
+                entry_price, exit_price
+            FROM paper_trades
+            WHERE status='CLOSED'
+              AND closed_at IS NOT NULL AND closed_at != ''
+              AND {date_filter}
+        """).fetchall()
+    except Exception as exc:
+        logger.warning("[trade_analysis] query failed: %s", exc)
+        return {"error": str(exc), "trades": 0}
+    finally:
+        conn.close()
+
+    if not rows:
+        label = date_str or "today"
+        return {"date": label, "trades": 0, "message": f"No closed trades found for {label}"}
+
+    all_rows = [dict(r) for r in rows]
+    resolved_date = date_str or __import__("datetime").date.today().isoformat()
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+    summary = _group_stats(all_rows)
+    summary["date"] = resolved_date
+
+    # ── By exit reason ─────────────────────────────────────────────────────────
+    exit_buckets: dict[str, list] = {}
+    for r in all_rows:
+        key = (r.get("exit_reason") or "unknown").strip()
+        exit_buckets.setdefault(key, []).append(r)
+
+    by_exit = sorted(
+        [{"exit_reason": k, **_group_stats(v)} for k, v in exit_buckets.items()],
+        key=lambda x: x["trades"], reverse=True,
+    )
+
+    # ── By confidence band ────────────────────────────────────────────────────
+    def _conf_band(conf):
+        if conf is None: return "unknown"
+        c = float(conf)
+        if c < 40:  return "<40%"
+        if c < 55:  return "40-55%"
+        if c < 70:  return "55-70%"
+        if c < 85:  return "70-85%"
+        return "85%+"
+
+    conf_buckets: dict[str, list] = {}
+    for r in all_rows:
+        conf_buckets.setdefault(_conf_band(r.get("confidence")), []).append(r)
+
+    band_order = ["<40%", "40-55%", "55-70%", "70-85%", "85%+", "unknown"]
+    by_confidence = [
+        {"band": band, **_group_stats(conf_buckets[band])}
+        for band in band_order if band in conf_buckets
+    ]
+
+    # ── By algo family ────────────────────────────────────────────────────────
+    algo_buckets: dict[str, list] = {}
+    for r in all_rows:
+        algo_buckets.setdefault(_algo_family_label(r.get("algo_name")), []).append(r)
+
+    by_algo = sorted(
+        [{"algo": k, **_group_stats(v)} for k, v in algo_buckets.items()],
+        key=lambda x: x["trades"], reverse=True,
+    )
+
+    # ── By session ────────────────────────────────────────────────────────────
+    sess_buckets: dict[str, list] = {}
+    for r in all_rows:
+        sess_buckets.setdefault((r.get("session") or "unknown").strip(), []).append(r)
+
+    by_session = sorted(
+        [{"session": k, **_group_stats(v)} for k, v in sess_buckets.items()],
+        key=lambda x: x["trades"], reverse=True,
+    )
+
+    # ── By direction ──────────────────────────────────────────────────────────
+    dir_buckets: dict[str, list] = {}
+    for r in all_rows:
+        dir_buckets.setdefault((r.get("direction") or "?").strip(), []).append(r)
+
+    by_direction = [
+        {"direction": k, **_group_stats(v)} for k, v in dir_buckets.items()
+    ]
+
+    # ── T1 hit vs pre-T1 ──────────────────────────────────────────────────────
+    t1_buckets: dict[str, list] = {
+        "T1 Reached (partial exit)": [],
+        "Pre-T1 stop / time":        [],
+    }
+    for r in all_rows:
+        if r.get("t1_hit"):
+            t1_buckets["T1 Reached (partial exit)"].append(r)
+        else:
+            t1_buckets["Pre-T1 stop / time"].append(r)
+
+    by_t1 = [
+        {"label": k, **_group_stats(v)} for k, v in t1_buckets.items() if v
+    ]
+
+    # ── By regime ─────────────────────────────────────────────────────────────
+    regime_buckets: dict[str, list] = {}
+    for r in all_rows:
+        regime_buckets.setdefault((r.get("regime") or "unknown").strip(), []).append(r)
+
+    by_regime = sorted(
+        [{"regime": k, **_group_stats(v)} for k, v in regime_buckets.items()],
+        key=lambda x: x["trades"], reverse=True,
+    )
+
+    # ── Top 10 worst and best tickers ─────────────────────────────────────────
+    ticker_buckets: dict[str, list] = {}
+    for r in all_rows:
+        ticker_buckets.setdefault(r.get("ticker", "?"), []).append(r)
+
+    ticker_stats = [
+        {"ticker": k, **_group_stats(v)} for k, v in ticker_buckets.items()
+        if len(v) >= 2
+    ]
+    top_losers  = sorted(ticker_stats, key=lambda x: x["total_pnl"])[:10]
+    top_winners = sorted(ticker_stats, key=lambda x: x["total_pnl"], reverse=True)[:10]
+
+    return {
+        "date":          resolved_date,
+        "summary":       summary,
+        "by_exit":       by_exit,
+        "by_confidence": by_confidence,
+        "by_algo":       by_algo,
+        "by_session":    by_session,
+        "by_direction":  by_direction,
+        "by_t1":         by_t1,
+        "by_regime":     by_regime,
+        "top_losers":    top_losers,
+        "top_winners":   top_winners,
+    }
