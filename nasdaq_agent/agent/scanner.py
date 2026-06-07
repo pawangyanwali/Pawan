@@ -1611,10 +1611,15 @@ def analyse_ticker(
                     else:
                         _asig_status: list = []
                         _algo_rr = float(_asig.get("rr", 0))
+                        try:
+                            from agent.config_manager import config as _cfg_algo_rr
+                            _algo_min_rr = float(_cfg_algo_rr.get("prediction.min_rr", 1.5))
+                        except Exception:
+                            _algo_min_rr = 1.5
                         _algo_rr_quality = (
-                            "EXCELLENT" if _algo_rr >= 3.0 else
-                            "GOOD" if _algo_rr >= 2.0 else
-                            "OK" if _algo_rr >= 1.5 else
+                            "EXCELLENT" if _algo_rr >= 4.0 else
+                            "GOOD" if _algo_rr >= 3.0 else
+                            "OK" if _algo_rr >= _algo_min_rr else
                             "LOW"
                         )
                         _trade_id = maybe_open_trade(
@@ -1624,7 +1629,7 @@ def analyse_ticker(
                             target            = float(_asig["target"]),
                             stop              = float(_asig["stop"]),
                             confidence        = float(_asig["confidence"]),
-                            rr_qualifies      = _algo_rr >= 1.5,
+                            rr_qualifies      = _algo_rr >= _algo_min_rr,
                             rr_ratio          = _algo_rr,
                             rr_quality        = _algo_rr_quality,
                             session           = sess_info.get("session", ""),

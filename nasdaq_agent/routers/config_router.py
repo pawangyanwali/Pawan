@@ -118,6 +118,35 @@ async def update_config(
             detail=f"Unknown config key(s): {unknown}. Must match a known _DEFAULTS key.",
         )
 
+    current_before = config.all()
+    updates = dict(updates)
+    use_atr_stops = bool(
+        updates.get(
+            "prediction.use_atr_stops",
+            current_before.get("prediction.use_atr_stops", True),
+        )
+    )
+    if use_atr_stops and (
+        "prediction.min_rr" in updates or "paper.t2_r_multiple" in updates
+    ):
+        try:
+            min_rr = float(
+                updates.get(
+                    "prediction.min_rr",
+                    current_before.get("prediction.min_rr", _DEFAULTS["prediction.min_rr"]()),
+                )
+            )
+            t2_mult = float(
+                updates.get(
+                    "paper.t2_r_multiple",
+                    current_before.get("paper.t2_r_multiple", _DEFAULTS["paper.t2_r_multiple"]()),
+                )
+            )
+            if t2_mult < min_rr:
+                updates["paper.t2_r_multiple"] = min_rr
+        except Exception:
+            pass
+
     try:
         config.set_many(updates, updated_by=user.username)
     except Exception as exc:

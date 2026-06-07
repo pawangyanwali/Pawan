@@ -462,10 +462,10 @@ def _evaluate_rr(
 
     ATR mode (prediction.use_atr_stops = true, default):
       Stop  = price ± N×ATR  (N = prediction.stop_atr_multiple, default 1.0)
-      Target= price ± T2×risk (T2 = paper.t2_r_multiple, default 1.5)
+      Target= price ± max(T2, min_rr)×risk
       Structure = FILTER only — trade rejected if resistance blocks path to target.
-      Result: T2 always equals the target → the gap that caused 62% of T1 winners
-              to reverse before T2 is eliminated.
+      Result: the displayed R:R, target, and paper T2 exit cannot sit below the
+              configured minimum R:R.
 
     Structural mode (prediction.use_atr_stops = false):
       Stop at nearest structural support/resistance.
@@ -477,6 +477,7 @@ def _evaluate_rr(
     _atr_mult     = float(_cfg_rr.get("prediction.stop_atr_multiple", 1.0))
     _t2_mult      = float(_cfg_rr.get("paper.t2_r_multiple",          1.5))
     _MIN_RR_RT    = float(_cfg_rr.get("prediction.min_rr",            _MIN_RR))
+    _effective_t2 = max(_t2_mult, _MIN_RR_RT)
     _TGT_PCT_RT   = float(_cfg_rr.get("prediction.min_target_pct",    _MIN_TARGET_PCT))
     MIN_STOP_DIST = float(_cfg_rr.get("prediction.min_stop_dist_pct", 0.004))
     MAX_RISK_PCT  = float(_cfg_rr.get("prediction.max_risk_pct",      0.020))
@@ -498,19 +499,19 @@ def _evaluate_rr(
 
         if is_bull:
             stop_loss = round(price - risk, 4)
-            target    = round(price + _t2_mult * risk, 4)
+            target    = round(price + _effective_t2 * risk, 4)
             # Filter: reject if any resistance sits between entry and 97% of target
             near_target = price + (target - price) * 0.97
             blocking  = [r for r in resistances if price < r < near_target]
         else:
             stop_loss = round(price + risk, 4)
-            target    = round(price - _t2_mult * risk, 4)
+            target    = round(price - _effective_t2 * risk, 4)
             near_target = price - (price - target) * 0.97
             blocking  = [s for s in supports if near_target < s < price]
 
-        rr           = _t2_mult   # always exactly T2:1 (e.g. 1.5:1)
+        rr           = _effective_t2
         quality      = "LOW" if blocking else "OK"
-        rr_qualifies = not blocking   # only trade when path is clear
+        rr_qualifies = (not blocking) and rr >= _MIN_RR_RT
 
         return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr_qualifies
 
@@ -1035,16 +1036,21 @@ def generate_prediction(
             )
 
     # R:R quality reason — always shown so trader knows if setup is worth taking
+    try:
+        from agent.config_manager import config as _cfg_rr_reason
+        _min_rr_reason = float(_cfg_rr_reason.get("prediction.min_rr", _MIN_RR))
+    except Exception:
+        _min_rr_reason = _MIN_RR
     if rr_qualifies:
-        rr_reason = f"R:R {rr_ratio:.1f}:1 ({rr_quality}) — risk/reward qualifies ≥ {_MIN_RR}:1 threshold"
-    elif rr_quality == "LOW" and rr_ratio >= _MIN_RR:
+        rr_reason = f"R:R {rr_ratio:.1f}:1 ({rr_quality}) — risk/reward qualifies ≥ {_min_rr_reason}:1 threshold"
+    elif rr_quality == "LOW" and rr_ratio >= _min_rr_reason:
         rr_reason = (
             f"R:R {rr_ratio:.1f}:1 (LOW) - support/resistance blocks the path "
             "before target. Skip execution or wait for a cleaner entry."
         )
     else:
         rr_reason = (
-            f"R:R {rr_ratio:.1f}:1 — below {_MIN_RR}:1 minimum. "
+            f"R:R {rr_ratio:.1f}:1 — below {_min_rr_reason}:1 minimum. "
             f"Target ${target:.2f} too close or stop ${stop_loss:.2f} too wide. "
             "Consider skipping or waiting for better entry."
         )

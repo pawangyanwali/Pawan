@@ -958,6 +958,8 @@ def maybe_open_trade(
     from agent.config_manager import config as _cfg_t
     _t1_mult  = float(_cfg_t.get("paper.t1_r_multiple", 1.0))
     _t2_mult  = float(_cfg_t.get("paper.t2_r_multiple", 1.5))
+    if bool(_cfg_t.get("prediction.use_atr_stops", True)):
+        _t2_mult = max(_t2_mult, float(_cfg_t.get("prediction.min_rr", 1.5)))
     risk_dist = abs(price - stop)
     if direction == "BUY":
         t1_price = round(price + _t1_mult * risk_dist, 4)

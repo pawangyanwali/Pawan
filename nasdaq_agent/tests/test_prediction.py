@@ -102,6 +102,32 @@ def test_rr_qualifies_threshold():
     )
     assert qualifies == (rr >= 1.5)
 
+def test_atr_rr_uses_min_rr_when_t2_is_lower(monkeypatch):
+    from agent.config_manager import config
+
+    values = {
+        "prediction.use_atr_stops": True,
+        "prediction.stop_atr_multiple": 1.0,
+        "paper.t2_r_multiple": 1.5,
+        "prediction.min_rr": 2.0,
+        "prediction.min_target_pct": 0.003,
+        "prediction.min_stop_dist_pct": 0.004,
+        "prediction.max_risk_pct": 0.020,
+    }
+    monkeypatch.setattr(config, "get", lambda key, default=None: values.get(key, default))
+
+    stop, target, rr, quality, qualifies = _evaluate_rr(
+        price=100.0,
+        sr={"supports": [96.0], "resistances": [103.0], "pivots": {}, "poc": 0.0},
+        direction="BUY",
+        atr=1.0,
+    )
+
+    assert stop == pytest.approx(99.0)
+    assert target == pytest.approx(102.0)
+    assert rr == pytest.approx(2.0)
+    assert qualifies is True
+
 def test_atr_buy_rr_blocks_resistance_inside_target_path():
     stop, target, rr, quality, qualifies = _evaluate_rr(
         price=100.0,

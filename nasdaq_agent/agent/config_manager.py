@@ -454,7 +454,7 @@ class ConfigManager:
             from agent.db import get_conn
             with get_conn() as c:
                 row = c.execute(
-                    "SELECT value FROM config_store WHERE key = ?",
+                    "SELECT value, updated_by FROM config_store WHERE key = ?",
                     ("paper.t2_r_multiple",),
                 ).fetchone()
                 if not row:
@@ -463,7 +463,8 @@ class ConfigManager:
                     current_t2 = float(json.loads(row["value"]))
                 except Exception:
                     return
-                if abs(current_t2 - 2.0) < 1e-9:
+                updated_by = str(row["updated_by"] or "")
+                if abs(current_t2 - 2.0) < 1e-9 and updated_by == "seed_defaults":
                     c.execute(
                         _UPSERT,
                         (
