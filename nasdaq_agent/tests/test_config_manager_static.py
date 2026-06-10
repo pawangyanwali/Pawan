@@ -10,6 +10,8 @@ def test_config_manager_does_not_override_user_t2_setting():
     assert "def _apply_safety_migrations" in src
     assert "paper.t2_r_multiple" in src
     assert "migration_t2_1_5" in src
+    assert "paper.t1_r_multiple" in src
+    assert "migration_t1_1_0" in src
     assert 'updated_by == "seed_defaults"' in src
 
 

@@ -479,6 +479,31 @@ class ConfigManager:
                     logger.info(
                         "[ConfigManager] Migrated paper.t2_r_multiple from legacy 2.0R to 1.5R"
                     )
+
+                row = c.execute(
+                    "SELECT value, updated_by FROM config_store WHERE key = ?",
+                    ("paper.t1_r_multiple",),
+                ).fetchone()
+                if not row:
+                    return
+                try:
+                    current_t1 = float(json.loads(row["value"]))
+                except Exception:
+                    return
+                updated_by = str(row["updated_by"] or "")
+                if abs(current_t1 - 1.5) < 1e-9 and updated_by == "seed_defaults":
+                    c.execute(
+                        _UPSERT,
+                        (
+                            "paper.t1_r_multiple",
+                            json.dumps(1.0),
+                            now,
+                            "migration_t1_1_0",
+                        ),
+                    )
+                    logger.info(
+                        "[ConfigManager] Migrated paper.t1_r_multiple from legacy 1.5R to 1.0R"
+                    )
         except Exception as exc:
             logger.warning("[ConfigManager] safety migration failed: %s", exc)
 
