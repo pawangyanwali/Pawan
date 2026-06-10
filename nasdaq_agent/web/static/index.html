@@ -5294,7 +5294,8 @@ const SETTINGS_FIELD_GUIDES = {
       ['Consecutive Loss Cooldown', 'risk.max_consecutive_losses, risk.cooldown_after_losses', 'Live-mode circuit breakers for repeated losses; paper mode records observability but avoids blocking learning flow.'],
       ['Pre-T1 Storm Circuit', 'risk.pre_t1_storm_*', 'Pauses a family/session when too many trades stop before T1. Example: 8 hits or $250 rolling loss in 30 minutes pauses that family.'],
       ['Flash-Stop Guard', 'risk.flash_stop_*', 'Catches immediate failures. Example: three stops within 60 seconds in 30 minutes pauses that family/session.'],
-      ['Rolling EV Gate', 'risk.rolling_ev_*', 'Raises execution confidence for losing family/direction/session combos. Example: average below -$2 over five trades adds a 15-point confidence bump.']
+      ['Rolling EV Gate', 'risk.rolling_ev_*', 'Raises execution confidence for losing family/direction/session combos. Example: average below -$2 over five trades adds a 15-point confidence bump.'],
+      ['Primary Immediate R:R Guard', 'risk.pred_immediate_*', 'Caps anonymous primary IMMEDIATE prediction trades when R:R is suspiciously high. Example: 2.5 blocks far-target primary trades unless a named algo owns the setup.']
     ],
   },
   learner: {
@@ -5959,6 +5960,23 @@ async function stLoadRiskTab() {
             </div>
           </div>
         </div>
+        <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+          <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:10px">PRIMARY IMMEDIATE R:R GUARD</div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:10px">Caps high-R:R primary prediction trades when no named algo owns the setup. This protects against far-target/tight-stop trades that look mathematically attractive but historically underperform.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">ENABLED</label>
+              <select id="st-rc-pred-rr-enabled" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+                <option value="true"  ${(rc['risk.pred_immediate_rr_guard_enabled'] ?? true)  ? 'selected' : ''}>Enabled</option>
+                <option value="false" ${!(rc['risk.pred_immediate_rr_guard_enabled'] ?? true) ? 'selected' : ''}>Disabled</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">MAX PRIMARY R:R</label>
+              <input id="st-rc-pred-max-rr" type="number" min="1.5" max="10" step="0.1" value="${rc['risk.pred_immediate_max_rr'] ?? 2.5}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
+            </div>
+          </div>
+        </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <button onclick="stSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Risk Config</button>
@@ -5998,6 +6016,8 @@ async function stSaveRiskConfig(btn) {
     "risk.rolling_ev_min_trades":           parseInt(get('st-rc-ev-trades'), 10),
     "risk.rolling_ev_suppress_threshold":   parseFloat(get('st-rc-ev-threshold')),
     "risk.rolling_ev_conf_bump":            parseFloat(get('st-rc-ev-bump')),
+    "risk.pred_immediate_rr_guard_enabled":  document.getElementById('st-rc-pred-rr-enabled')?.value === 'true',
+    "risk.pred_immediate_max_rr":            parseFloat(get('st-rc-pred-max-rr')),
   };
   // Booleans are not NaN — only validate numeric fields
   const numericUpdates = Object.entries(updates).filter(([, v]) => typeof v === 'number').map(([, v]) => v);

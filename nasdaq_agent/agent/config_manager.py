@@ -143,6 +143,8 @@ _DEFAULTS: dict[str, Any] = {
     "risk.rolling_ev_min_trades":           lambda: 5,      # min trades before suppression kicks in
     "risk.rolling_ev_suppress_threshold":   lambda: -2.0,   # avg $/trade below which to suppress
     "risk.rolling_ev_conf_bump":            lambda: 15.0,   # additional confidence pts required
+    "risk.pred_immediate_rr_guard_enabled":  lambda: True,   # cap high-R:R primary IMMEDIATE prediction trades
+    "risk.pred_immediate_max_rr":            lambda: 2.5,    # high R:R here usually means far target, not high quality
     # ── Flash-stop guard (sub-60-second stop hits) ────────────────────────────
     "risk.flash_stop_enabled":              lambda: True,
     "risk.flash_stop_seconds":              lambda: 60,     # stop within N seconds = flash stop

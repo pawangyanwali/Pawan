@@ -119,7 +119,13 @@ def init_db() -> None:
             order_flow_score    DOUBLE PRECISION DEFAULT 0,
             size_mult           DOUBLE PRECISION DEFAULT 1.0,
             cost_basis          DOUBLE PRECISION DEFAULT 0,
-            algo_name           TEXT    DEFAULT ''
+            algo_name           TEXT    DEFAULT '',
+            mfe_dollar          DOUBLE PRECISION DEFAULT 0,
+            mae_dollar          DOUBLE PRECISION DEFAULT 0,
+            mfe_pct             DOUBLE PRECISION DEFAULT 0,
+            mae_pct             DOUBLE PRECISION DEFAULT 0,
+            mfe_r               DOUBLE PRECISION DEFAULT 0,
+            mae_r               DOUBLE PRECISION DEFAULT 0
         )
     """ if using_postgres() else """
         CREATE TABLE IF NOT EXISTS paper_trades (
@@ -155,7 +161,13 @@ def init_db() -> None:
             order_flow_score    REAL    DEFAULT 0,
             size_mult           REAL    DEFAULT 1.0,
             cost_basis          REAL    DEFAULT 0,
-            algo_name           TEXT    DEFAULT ''
+            algo_name           TEXT    DEFAULT '',
+            mfe_dollar          REAL    DEFAULT 0,
+            mae_dollar          REAL    DEFAULT 0,
+            mfe_pct             REAL    DEFAULT 0,
+            mae_pct             REAL    DEFAULT 0,
+            mfe_r               REAL    DEFAULT 0,
+            mae_r               REAL    DEFAULT 0
         )
     """
 
@@ -336,6 +348,12 @@ _COLUMN_ADDITIONS = [
     ("entry_ideal_price",      "REAL DEFAULT 0"),  # signal price before slippage
     ("entry_slip_bps",         "REAL DEFAULT 0"),  # entry slippage in bps
     ("entry_spread_usd",       "REAL DEFAULT 0"),  # entry half-spread cost in dollars
+    ("mfe_dollar",             "REAL DEFAULT 0"),
+    ("mae_dollar",             "REAL DEFAULT 0"),
+    ("mfe_pct",                "REAL DEFAULT 0"),
+    ("mae_pct",                "REAL DEFAULT 0"),
+    ("mfe_r",                  "REAL DEFAULT 0"),
+    ("mae_r",                  "REAL DEFAULT 0"),
 ]
 
 # Additional columns for algo_signal_log (applied separately)
@@ -397,6 +415,16 @@ def _algo_family(algo_name: str) -> str:
         if upper.endswith(sfx):
             upper = upper[:-len(sfx)]
     return upper.lower()
+
+
+def _effective_algo_name(algo_name: str, entry_type: str) -> str:
+    """Return a non-empty trade family name for execution learning."""
+    raw = (algo_name or "").strip()
+    if raw:
+        return raw
+    entry = (entry_type or "IMMEDIATE").strip().upper().replace(" ", "_")
+    entry = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in entry) or "IMMEDIATE"
+    return f"PRED_{entry}"
 
 
 # ── Pre-T1 stop-hit storm circuit ─────────────────────────────────────────────
@@ -729,6 +757,8 @@ def maybe_open_trade(
     if direction not in ("BUY", "SELL"):
         return None
 
+    algo_name = _effective_algo_name(algo_name, entry_type)
+
     # Gate on actual R:R ratio, not the boolean flag.
     # rr_qualifies=False in ATR mode means the path has blocking resistance but
     # R:R is still 2:1 — those trades should open. rr_qualifies=False in structural
@@ -750,6 +780,21 @@ def maybe_open_trade(
         if _out_status is not None:
             _out_status.append("BLOCKED_LOW_RR")
         return None
+
+    try:
+        from agent.config_manager import config as _cfg_pred_rr
+        _pred_guard = bool(_cfg_pred_rr.get("risk.pred_immediate_rr_guard_enabled", True))
+        _pred_max_rr = float(_cfg_pred_rr.get("risk.pred_immediate_max_rr", 2.5))
+        if algo_name.upper() == "PRED_IMMEDIATE" and _pred_guard and rr_ratio > _pred_max_rr:
+            logger.info(
+                f"[PAPER] {ticker} skip: PRED_IMMEDIATE R:R {rr_ratio:.2f}:1 > "
+                f"max {_pred_max_rr:.1f}:1 (named algo required for far-target setup)"
+            )
+            if _out_status is not None:
+                _out_status.append("BLOCKED_PRED_IMMEDIATE_HIGH_RR")
+            return None
+    except Exception:
+        pass
 
     # Block paper execution during RESTRICTED session (9:30–9:44 ET price discovery).
     # Signals continue to algo_signal_log for learning.
@@ -1170,6 +1215,12 @@ def update_open_trades(ticker: str, df, current_price: float,
                        COALESCE(algo_name, '') as algo_name,
                        COALESCE(session, '') as session,
                        COALESCE(t1_water_mark, 0) as t1_water_mark,
+                       COALESCE(mfe_dollar, 0) as mfe_dollar,
+                       COALESCE(mae_dollar, 0) as mae_dollar,
+                       COALESCE(mfe_pct, 0) as mfe_pct,
+                       COALESCE(mae_pct, 0) as mae_pct,
+                       COALESCE(mfe_r, 0) as mfe_r,
+                       COALESCE(mae_r, 0) as mae_r,
                        COALESCE(entry_ideal_price, entry_price) as entry_ideal_price,
                        COALESCE(entry_slip_bps, 0) as entry_slip_bps,
                        COALESCE(entry_spread_usd, 0) as entry_spread_usd,
@@ -1222,6 +1273,44 @@ def update_open_trades(ticker: str, df, current_price: float,
                 # Fall back to ep (close) when bar data is unavailable.
                 _hi = bar_high if bar_high > 0 else ep
                 _lo = bar_low  if bar_low  > 0 else ep
+
+                _risk_ref = abs(t1_price - entry)
+                if _risk_ref <= 0 and t2_price > 0:
+                    try:
+                        from agent.config_manager import config as _cfg_exc
+                        _t2_ref = max(float(_cfg_exc.get("paper.t2_r_multiple", 1.5)), 0.01)
+                    except Exception:
+                        _t2_ref = 1.5
+                    _risk_ref = abs(t2_price - entry) / _t2_ref
+                if _risk_ref <= 0:
+                    _risk_ref = max(abs(entry - stop_current), 0.0001)
+                _notional_ref = max(entry * max(shares_total, 1), 0.01)
+                if direction == "BUY":
+                    _fav_px = max(0.0, _hi - entry)
+                    _adv_px = max(0.0, entry - _lo)
+                else:
+                    _fav_px = max(0.0, entry - _lo)
+                    _adv_px = max(0.0, _hi - entry)
+                _mfe_d = max(float(row["mfe_dollar"] or 0), _fav_px * shares_total)
+                _mae_d = max(float(row["mae_dollar"] or 0), _adv_px * shares_total)
+                if (
+                    _mfe_d > float(row["mfe_dollar"] or 0) + 0.005
+                    or _mae_d > float(row["mae_dollar"] or 0) + 0.005
+                ):
+                    c.execute(
+                        """UPDATE paper_trades
+                           SET mfe_dollar=?, mae_dollar=?, mfe_pct=?, mae_pct=?, mfe_r=?, mae_r=?
+                           WHERE id=?""",
+                        (
+                            round(_mfe_d, 2),
+                            round(_mae_d, 2),
+                            round(_mfe_d / _notional_ref * 100.0, 3),
+                            round(_mae_d / _notional_ref * 100.0, 3),
+                            round(_fav_px / _risk_ref, 3),
+                            round(_adv_px / _risk_ref, 3),
+                            row["id"],
+                        ),
+                    )
 
                 # unrealized P&L % for smart EOD decisions
                 pnl_pct_now = (

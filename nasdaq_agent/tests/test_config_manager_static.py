@@ -11,3 +11,10 @@ def test_config_manager_does_not_override_user_t2_setting():
     assert "paper.t2_r_multiple" in src
     assert "migration_t2_1_5" in src
     assert 'updated_by == "seed_defaults"' in src
+
+
+def test_primary_prediction_rr_guard_has_defaults():
+    src = (ROOT / "agent/config_manager.py").read_text(encoding="utf-8")
+
+    assert "risk.pred_immediate_rr_guard_enabled" in src
+    assert "risk.pred_immediate_max_rr" in src
