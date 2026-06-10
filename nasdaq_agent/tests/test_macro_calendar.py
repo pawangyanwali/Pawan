@@ -1,6 +1,8 @@
 """
 Tests for agent/macro_calendar.py — FOMC/CPI/NFP blackout logic.
 """
+from datetime import datetime, timezone
+
 import pytest
 from agent.macro_calendar import check_macro_event, get_upcoming_events
 
@@ -20,9 +22,33 @@ def test_impact_valid_value():
 
 def test_hours_away_non_negative():
     result = check_macro_event()
-    # hours_away is None when no event, otherwise float >= 0
-    if result["hours_away"] is not None:
+    # Active macro windows can be post-event and therefore negative; inactive
+    # upcoming events should remain non-negative.
+    if result["hours_away"] is not None and not (result["blocked"] or result.get("throttled")):
         assert result["hours_away"] >= 0
+
+
+def test_high_impact_macro_hard_blocks_only_tight_window():
+    result = check_macro_event(
+        check_dt=datetime(2026, 6, 10, 13, 45, tzinfo=timezone.utc)
+    )
+
+    assert result["event_name"] == "CPI Release"
+    assert result["blocked"] is True
+    assert result["throttled"] is False
+    assert result["size_mult"] == 0.0
+
+
+def test_high_impact_macro_throttles_outside_hard_window():
+    result = check_macro_event(
+        check_dt=datetime(2026, 6, 10, 16, 30, tzinfo=timezone.utc)
+    )
+
+    assert result["event_name"] == "CPI Release"
+    assert result["blocked"] is False
+    assert result["throttled"] is True
+    assert 0.0 < result["size_mult"] < 1.0
+    assert result["min_confidence"] >= 70.0
 
 def test_upcoming_events_is_list():
     events = get_upcoming_events(days=14)

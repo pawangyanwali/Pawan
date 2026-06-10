@@ -116,6 +116,25 @@ _HIGH_BLACKOUT_HOURS   = 4
 _MEDIUM_BLACKOUT_HOURS = 2
 
 
+def _cfg_float(key: str, default: float) -> float:
+    try:
+        from agent.config_manager import config
+        return float(config.get(key, default))
+    except Exception:
+        return default
+
+
+def _cfg_bool(key: str, default: bool) -> bool:
+    try:
+        from agent.config_manager import config
+        value = config.get(key, default)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    except Exception:
+        return default
+
+
 def _parse(d: str) -> date:
     return date.fromisoformat(d)
 
@@ -125,7 +144,7 @@ def _ev_dt(date_str: str, hour_utc: int, minute_utc: int) -> datetime:
     return datetime(d.year, d.month, d.day, hour_utc, minute_utc, tzinfo=timezone.utc)
 
 
-def check_macro_event(check_date: date | None = None) -> dict:
+def check_macro_event(check_date: date | None = None, check_dt: datetime | None = None) -> dict:
     """
     Check if now is within the blackout window of any macro event.
 
@@ -134,14 +153,34 @@ def check_macro_event(check_date: date | None = None) -> dict:
     """
     result = {
         "blocked":    False,
+        "throttled":  False,
         "impact":     "NONE",
         "event_name": "",
         "event_date": "",
         "hours_away": 0.0,
+        "hard_block_minutes": 0.0,
+        "throttle_hours": 0.0,
+        "size_mult": 1.0,
+        "confidence_bump": 0.0,
+        "min_confidence": 0.0,
         "description": "",
     }
 
-    now = datetime.now(timezone.utc)
+    now = check_dt.astimezone(timezone.utc) if check_dt is not None else datetime.now(timezone.utc)
+    if check_date is not None:
+        now = datetime(check_date.year, check_date.month, check_date.day, now.hour, now.minute, tzinfo=timezone.utc)
+    if not _cfg_bool("macro.enabled", True):
+        return result
+
+    high_hard_block_h = max(0.0, _cfg_float("macro.high_hard_block_minutes", 30.0) / 60.0)
+    high_throttle_h   = max(high_hard_block_h, _cfg_float("macro.high_throttle_hours", _HIGH_BLACKOUT_HOURS))
+    med_throttle_h    = max(0.0, _cfg_float("macro.medium_throttle_hours", _MEDIUM_BLACKOUT_HOURS))
+    high_size_mult    = max(0.0, min(1.0, _cfg_float("macro.high_throttle_size_mult", 0.35)))
+    med_size_mult     = max(0.0, min(1.0, _cfg_float("macro.medium_throttle_size_mult", 0.65)))
+    high_conf_bump    = max(0.0, _cfg_float("macro.high_throttle_conf_bump", 15.0))
+    med_conf_bump     = max(0.0, _cfg_float("macro.medium_throttle_conf_bump", 7.0))
+    high_min_conf     = max(0.0, _cfg_float("macro.high_throttle_min_conf", 72.0))
+    med_min_conf      = max(0.0, _cfg_float("macro.medium_throttle_min_conf", 62.0))
 
     # Collect all events currently inside their blackout window
     active_matches: list[tuple[int, dict]] = []  # (impact_rank, result_dict)
@@ -150,14 +189,19 @@ def check_macro_event(check_date: date | None = None) -> dict:
     for date_str, name, impact, h_utc, m_utc in _EVENTS:
         ev_dt      = _ev_dt(date_str, h_utc, m_utc)
         hours_away = (ev_dt - now).total_seconds() / 3600
-        blackout   = _HIGH_BLACKOUT_HOURS if impact == "HIGH" else _MEDIUM_BLACKOUT_HOURS
+        throttle_h = high_throttle_h if impact == "HIGH" else med_throttle_h
+        hard_h     = high_hard_block_h if impact == "HIGH" else 0.0
 
         # Track nearest future event for informational display
         if hours_away > 0:
             if nearest_future is None or hours_away < nearest_future[0]:
                 nearest_future = (hours_away, date_str, name, impact)
 
-        if abs(hours_away) <= blackout:
+        if abs(hours_away) <= throttle_h:
+            hard_block = impact == "HIGH" and abs(hours_away) <= hard_h
+            size_mult = high_size_mult if impact == "HIGH" else med_size_mult
+            conf_bump = high_conf_bump if impact == "HIGH" else med_conf_bump
+            min_conf  = high_min_conf if impact == "HIGH" else med_min_conf
             active_matches.append((_IMPACT_RANK.get(impact, 0), {
                 "blocked":     impact == "HIGH",
                 "impact":      impact,
@@ -170,6 +214,24 @@ def check_macro_event(check_date: date | None = None) -> dict:
                     f"{'Signals suppressed' if impact=='HIGH' else 'Reduce size'}"
                 ),
             }))
+            mode_desc = (
+                "Signals suppressed"
+                if hard_block
+                else "Macro throttle: reduced size and higher confidence required"
+            )
+            active_matches[-1][1].update({
+                "blocked": hard_block,
+                "throttled": not hard_block,
+                "hard_block_minutes": round(hard_h * 60, 1),
+                "throttle_hours": round(throttle_h, 1),
+                "size_mult": 0.0 if hard_block else size_mult,
+                "confidence_bump": 0.0 if hard_block else conf_bump,
+                "min_confidence": 0.0 if hard_block else min_conf,
+                "description": (
+                    f"{'BLOCK' if hard_block else 'THROTTLE'} {name} on {date_str} "
+                    f"({'+' if hours_away >= 0 else ''}{hours_away:.1f}h) - {mode_desc}"
+                ),
+            })
 
     if active_matches:
         # Return the highest-impact match (sort descending by rank)

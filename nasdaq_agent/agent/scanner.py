@@ -362,6 +362,9 @@ class StockSignal:
 
     # ── Macro calendar ────────────────────────────────────────────────────────
     macro_blocked:      bool  = False
+    macro_throttled:    bool  = False
+    macro_size_mult:    float = 1.0
+    macro_min_confidence: float = 0.0
     macro_event:        str   = ""
     macro_description:  str   = ""
 
@@ -822,7 +825,8 @@ def analyse_ticker(
         raw_score = round(float(np.clip(_blended, -1, 1)), 4)
         score     = round(float(np.clip(apply_regime(raw_score, regime), -1, 1)), 4)
 
-        # Override direction to NEUTRAL if earnings or macro blackout
+        # Override direction to NEUTRAL only during a true hard block.
+        # Wider macro windows throttle risk instead of suppressing all trades.
         if eb["blocked"] or macro_ev["blocked"]:
             pred["direction"] = "NEUTRAL"
 
@@ -1046,6 +1050,24 @@ def analyse_ticker(
                 pred["reasons"].append(
                     f"Market sentiment +{_mkt_sentiment:.2f} — broad positive bias, SHORT confidence reduced")
 
+        _macro_size_mult = 1.0
+        _macro_min_conf = 0.0
+        if macro_ev.get("throttled") and pred["direction"] in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+            _macro_size_mult = float(macro_ev.get("size_mult", 1.0) or 1.0)
+            _macro_min_conf = float(macro_ev.get("min_confidence", 0.0) or 0.0)
+            _macro_bump = float(macro_ev.get("confidence_bump", 0.0) or 0.0)
+            _pre_macro_conf = float(pred.get("confidence", 0.0) or 0.0)
+            if _pre_macro_conf < _macro_min_conf:
+                pred["direction"] = "NEUTRAL"
+                pred["reasons"] = [
+                    f"Macro throttle: confidence {_pre_macro_conf:.1f} < {_macro_min_conf:.1f} required"
+                ] + pred.get("reasons", [])
+            else:
+                pred["confidence"] = round(float(max(_pre_macro_conf - _macro_bump, 25.0)), 1)
+                pred["reasons"].append(
+                    f"Macro throttle: size x{_macro_size_mult:.2f}, confidence -{_macro_bump:.0f}"
+                )
+
         # Check if ticker already has an open paper trade
         _has_open_position = False
         try:
@@ -1066,6 +1088,7 @@ def analyse_ticker(
         _arb = get_signal_strength(pred["confidence"], _of_score, regime.regime)
         _sig_strength  = _arb["strength"]
         _sig_size_mult = float(_arb.get("size_mult", 1.0))
+        _sig_size_mult *= _macro_size_mult
         if pred["direction"] not in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
             _sig_size_mult = 0.0
 
@@ -1424,6 +1447,9 @@ def analyse_ticker(
             exit_summary      = exit_analysis.summary,
             # Macro
             macro_blocked     = bool(macro_ev["blocked"]),
+            macro_throttled   = bool(macro_ev.get("throttled", False)),
+            macro_size_mult   = float(macro_ev.get("size_mult", 1.0) or 1.0),
+            macro_min_confidence = float(macro_ev.get("min_confidence", 0.0) or 0.0),
             macro_event       = macro_ev["event_name"],
             macro_description = macro_ev["description"],
             # Trade plan
@@ -1493,6 +1519,28 @@ def analyse_ticker(
                         "[%s] %s algo signal skipped — market CLOSED", ticker, _asig["algo"]
                     )
                     continue
+
+                if macro_ev.get("blocked"):
+                    _asig["exec_status"] = "MACRO_BLOCKED"
+                    logger.debug(
+                        "[%s] %s algo signal skipped - macro hard block: %s",
+                        ticker, _asig["algo"], macro_ev.get("event_name", ""),
+                    )
+                    continue
+                if macro_ev.get("throttled"):
+                    _algo_conf = float(_asig.get("confidence", 0.0) or 0.0)
+                    _algo_min_conf = float(macro_ev.get("min_confidence", 0.0) or 0.0)
+                    if _algo_conf < _algo_min_conf:
+                        _asig["exec_status"] = "MACRO_THROTTLED"
+                        logger.debug(
+                            "[%s] %s algo skipped - macro throttle conf %.1f < %.1f",
+                            ticker, _asig["algo"], _algo_conf, _algo_min_conf,
+                        )
+                        continue
+                    _asig["confidence"] = round(float(max(
+                        _algo_conf - float(macro_ev.get("confidence_bump", 0.0) or 0.0),
+                        25.0,
+                    )), 1)
 
                 # Record algo signals in bt_signals for learning engine analysis
                 try:
@@ -1636,7 +1684,7 @@ def analyse_ticker(
                             regime            = regime.regime,
                             entry_type        = "ALGO",
                             order_flow_score  = _of_score,
-                            size_mult         = 1.0,
+                            size_mult         = float(macro_ev.get("size_mult", 1.0) or 1.0),
                             trading_tier      = _trading_tier,
                             algo_name         = _asig["algo"],
                             ml_scalp_prob     = ml_scalp,

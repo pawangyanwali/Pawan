@@ -7,6 +7,7 @@ Real-time streaming routes:
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
@@ -17,8 +18,8 @@ router = APIRouter(tags=["streaming"])
 
 logger = logging.getLogger(__name__)
 
-_PING_INTERVAL       = 20   # server sends a keepalive ping every N seconds
-_PING_TIMEOUT        = 10   # if we can't write the ping within N seconds → presumed busy
+_PING_INTERVAL       = 10   # server sends a keepalive ping every N seconds
+_PING_TIMEOUT        = 4    # if we can't write the ping within N seconds -> presumed busy
 _PING_RETRY_INTERVAL =  5   # after a timeout (event loop busy), retry after this many seconds
 
 # SSE support — gracefully degraded if sse-starlette is not installed
@@ -57,7 +58,11 @@ async def _ws_keepalive(ws: WebSocket) -> None:
         try:
             await asyncio.sleep(_PING_INTERVAL)
             await asyncio.wait_for(
-                ws.send_json({"type": "ping"}),
+                ws.send_json({
+                    "type": "ping",
+                    "server_ts": time.time(),
+                    "source": "backend_ws",
+                }),
                 timeout=float(_PING_TIMEOUT),
             )
         except asyncio.TimeoutError:

@@ -91,8 +91,20 @@ _DEFAULTS: dict[str, Any] = {
     # Clamped 1–32 to prevent a typo from oversubscribing the scanner's 2.5 vCPU.
     "scanner.pipeline_workers":            lambda: max(1, min(32, int(os.getenv("PIPELINE_WORKERS", "8")))),
     "scanner.ticker_timeout_s":            lambda: float(os.getenv("NASDAQ_SCAN_TICKER_TIMEOUT_S", "45")),
+    "scanner.cycle_budget_s":              lambda: float(os.getenv("NASDAQ_SCAN_CYCLE_BUDGET_S", "20")),
+    "scanner.slow_ticker_cooldown_s":      lambda: float(os.getenv("NASDAQ_SCAN_SLOW_TICKER_COOLDOWN_S", "300")),
     "scanner.pre_earnings_blackout_days":  lambda: 3,
     "scanner.post_earnings_cooldown_days": lambda: 1,
+    "macro.enabled":                       lambda: True,
+    "macro.high_hard_block_minutes":       lambda: 30.0,
+    "macro.high_throttle_hours":           lambda: 4.0,
+    "macro.high_throttle_size_mult":       lambda: 0.35,
+    "macro.high_throttle_conf_bump":       lambda: 15.0,
+    "macro.high_throttle_min_conf":        lambda: 72.0,
+    "macro.medium_throttle_hours":         lambda: 2.0,
+    "macro.medium_throttle_size_mult":     lambda: 0.65,
+    "macro.medium_throttle_conf_bump":     lambda: 7.0,
+    "macro.medium_throttle_min_conf":      lambda: 62.0,
     # ── Risk controls ──────────────────────────────────────────────────────────
     # Account size used for all risk-% math (daily-loss halt, portfolio heat,
     # drawdown throttle). Lives in PostgreSQL so it can be changed live and stays

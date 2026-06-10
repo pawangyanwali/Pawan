@@ -2220,9 +2220,9 @@ async function connectWS() {
       ws.send(JSON.stringify({ type: 'auth', token: _wsAt }));
     }
     document.getElementById('dot').classList.add('live');
-    document.getElementById('ws-status').textContent = 'Live';
+    document.getElementById('ws-status').textContent = 'WS Live';
     const chip = document.getElementById('ws-chip');
-    if (chip) { chip.className = 'ws-chip live'; chip.title = 'WebSocket connected — real-time data active'; }
+    if (chip) { chip.className = 'ws-chip live'; chip.title = 'Dashboard WebSocket connected. Schwab stream health is shown separately.'; }
     if (_wsDeadTimer) { clearTimeout(_wsDeadTimer); _wsDeadTimer = null; }
     _resetWatchdog();
     _wsSend({ type: 'pong' });
@@ -2552,9 +2552,9 @@ async function connectWS() {
     _wsAuthRetrying = false;
     _wsAuthRetryCount = 0;
     document.getElementById('dot').classList.remove('live');
-    document.getElementById('ws-status').textContent = 'Reconnecting…';
+    document.getElementById('ws-status').textContent = 'WS Reconnecting…';
     const chip = document.getElementById('ws-chip');
-    if (chip) { chip.className = 'ws-chip reconnecting'; chip.title = 'Reconnecting to backend…'; }
+    if (chip) { chip.className = 'ws-chip reconnecting'; chip.title = 'Dashboard WebSocket reconnecting. This is not the Schwab market-data connection.'; }
     if (_wsWatchdog) { clearTimeout(_wsWatchdog); _wsWatchdog = null; }
     // After 4s with no reconnect, escalate chip to "dead" so user can click
     _wsDeadTimer = setTimeout(() => {
@@ -2573,7 +2573,7 @@ async function connectWS() {
 function wsChipClick() {
   if (ws && ws.readyState === WebSocket.OPEN) return;   // already live, nothing to do
   if (_wsDeadTimer) { clearTimeout(_wsDeadTimer); _wsDeadTimer = null; }
-  document.getElementById('ws-status').textContent = 'Reconnecting…';
+  document.getElementById('ws-status').textContent = 'WS Reconnecting…';
   const chip = document.getElementById('ws-chip');
   if (chip) chip.className = 'ws-chip reconnecting';
   if (ws) { try { ws.close(); } catch(_){} }
@@ -2709,9 +2709,8 @@ setInterval(() => {
       el.title = `Last price update was ${age}s ago · ${staleTickers} of ${totalTickers} tickers stale · 1-min candle feed — normal inter-candle gap`;
     }
 
-    if (age > 45 && ws && ws.readyState === WebSocket.OPEN && wsSilent) {
-      console.warn(`[WS] Price stale ${age}s and socket silent - forcing reconnect`);
-      try { ws.close(); } catch(_) {}
+    if (wsSilent && ws && ws.readyState === WebSocket.OPEN) {
+      console.warn(`[WS] Backend heartbeat silent while price age is ${age}s; websocket watchdog owns reconnect`);
     }
   }
 }, 1000);
@@ -3055,6 +3054,7 @@ function buildSignalExplanation(s, trade) {
   if (s.earnings_blocked) gates.push(`Earnings block: ${s.earnings_reason || 'earnings blackout/cooldown'}`);
   else if (s.earnings_reason) gates.push(`Earnings context: ${s.earnings_reason}`);
   if (s.macro_blocked) gates.push(`Macro block: ${s.macro_description || s.macro_event || 'high-impact macro event'}`);
+  if (s.macro_throttled) gates.push(`Macro throttle: ${s.macro_description || s.macro_event || 'macro event nearby'}; size x${Number(s.macro_size_mult || 1).toFixed(2)}, min conf ${Number(s.macro_min_confidence || 0).toFixed(0)}%`);
   if (['PRE_MARKET', 'AFTER_HOURS'].includes(s.session || '') && (s.trading_tier || 'REGULAR') === 'REGULAR') {
     gates.push('Extended-hours gate: REGULAR-tier tickers are monitored only, not traded.');
   }
@@ -4456,11 +4456,12 @@ function populateExitSection(s) {
 
 function populateMacroSection(s) {
   const el = document.getElementById('dp-macro-content');
-  if (s.macro_blocked || s.macro_event) {
+  if (s.macro_blocked || s.macro_throttled || s.macro_event) {
     const color = s.macro_blocked ? 'var(--red)' : '#fbbf24';
+    const throttleText = s.macro_throttled ? ` · size x${Number(s.macro_size_mult || 1).toFixed(2)} · min confidence ${Number(s.macro_min_confidence || 0).toFixed(0)}%` : '';
     el.innerHTML = `<div style="border-left:3px solid ${color};padding:6px 10px;border-radius:4px;background:rgba(0,0,0,.2)">
       <div style="font-size:11px;font-weight:700;color:${color}">${s.macro_blocked?'🚫':'⚠'} ${s.macro_event||'Macro Event Nearby'}</div>
-      <div style="font-size:10px;color:var(--muted);margin-top:3px">${s.macro_description||''}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:3px">${s.macro_description||''}${throttleText}</div>
     </div>`;
   } else {
     el.innerHTML = '<div style="font-size:11px;color:var(--muted)">No macro events in blackout window.</div>';

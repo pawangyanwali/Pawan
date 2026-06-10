@@ -38,8 +38,8 @@ def test_dashboard_does_not_reconnect_websocket_for_price_staleness_only():
     src = _html()
 
     assert "const wsSilent = !_wsLastMsgAt || (Date.now() - _wsLastMsgAt > _WS_WATCHDOG_MS);" in src
-    assert "ws.readyState === WebSocket.OPEN && wsSilent" in src
-    assert "Price stale ${age}s and socket silent" in src
+    assert "Backend heartbeat silent while price age is" in src
+    assert "Price stale ${age}s and socket silent - forcing reconnect" not in src
 
 
 def test_dashboard_target_win_rate_not_hardcoded():
