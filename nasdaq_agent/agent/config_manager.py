@@ -41,6 +41,7 @@ _DEFAULTS: dict[str, Any] = {
     # Position sizing
     "paper.rr_size_mult_min":              lambda: 0.20,   # minimum size multiplier from R:R calculation
     "paper.rr_denominator":                lambda: 2.0,    # divisor in rr_ratio / N → size_mult
+    "paper.algo_min_rr":                   lambda: 1.0,    # fallback min R:R for algo-family paper trades; primary predictions use prediction.min_rr
     "paper.breakeven_stop_offset":         lambda: 0.02,   # $ offset above entry for T1 breakeven stop
     # EOD management
     "paper.eod_trail_stop_pct":            lambda: 0.003,  # 0.3% trailing stop for EOD winners
@@ -69,6 +70,7 @@ _DEFAULTS: dict[str, Any] = {
     # T2 exactly equal to the minimum R:R target — no gap between filter and exit.
     "paper.t1_r_multiple":                 lambda: 1.0,    # T1 = entry + 1× risk_dist
     "paper.t2_r_multiple":                 lambda: 1.5,    # T2 = 1.5R — more achievable in choppy sessions
+    "paper.algo_t2_r_multiple":            lambda: 1.5,    # T2 for named algo-family paper trades; primary predictions use paper.t2_r_multiple
     # Time stops: hard-close positions after N bars if still open
     "paper.max_bars_scalp":                lambda: 20,     # 20-min hard close for scalp trades
     "paper.max_bars_intraday":             lambda: 90,     # 90-min hard close for intraday trades
@@ -216,7 +218,7 @@ _DEFAULTS: dict[str, Any] = {
     # exec_enabled: allow paper trades from this family (signals still logged for learning)
     # exec_size_mult: family-level size multiplier applied on top of global sizing
     # exec_min_conf: family override for min confidence (0 = use global paper.min_confidence)
-    # exec_min_rr: family override for min R:R (0 = use global prediction.min_rr)
+    # exec_min_rr: family override for min R:R (0 = use paper.algo_min_rr)
     # exec_block_sessions: comma-separated sessions to block (e.g. "RESTRICTED,PRE_MARKET")
     "algos.bb_rev.exec_enabled":            lambda: True,
     "algos.bb_rev.exec_size_mult":          lambda: 0.15,   # de-risked: 15% size until positive expectancy proven
@@ -273,6 +275,11 @@ _DEFAULTS: dict[str, Any] = {
     "algos.meta_ens.exec_min_conf":         lambda: 0.0,
     "algos.meta_ens.exec_min_rr":           lambda: 0.0,
     "algos.meta_ens.exec_block_sessions":   lambda: "",
+    "algos.regime_sw.exec_enabled":         lambda: True,
+    "algos.regime_sw.exec_size_mult":       lambda: 1.0,
+    "algos.regime_sw.exec_min_conf":        lambda: 0.0,
+    "algos.regime_sw.exec_min_rr":          lambda: 0.0,
+    "algos.regime_sw.exec_block_sessions":  lambda: "",
     # ── Execution realism (Phase 6) ────────────────────────────────────────────
     # fill_model_enabled: set False to revert to ideal-price fills (for comparison)
     "execution.fill_model_enabled":         lambda: True,

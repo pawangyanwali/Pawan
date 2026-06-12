@@ -60,7 +60,7 @@ from agent.vwap import compute_vwap_signal
 from agent.sector_etf import get_sector_context, update_etf_cache
 from agent.trading_algos import evaluate_all as evaluate_trading_algos, detect_flag
 from agent.exit_signals import analyse_exits
-from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades, rt_check_positions as pt_rt_check, log_algo_signals
+from agent.paper_trading import init_db as pt_init_db, maybe_open_trade, update_open_trades, rt_check_positions as pt_rt_check, log_algo_signals, get_execution_min_rr
 from agent.macro_calendar import check_macro_event
 from agent.live_backtest import (
     init_db as bt_init_db,
@@ -1232,6 +1232,7 @@ def analyse_ticker(
             # gate and circuit breaker at the execution layer (defense-in-depth)
             # so a mid-scan halt can never be bypassed.
             # Extended-hours size caps: AH HIGH=50%, AH MODERATE=30%, PM HIGH=40%, PM MODERATE=25%.
+            _pred_exec_status: list = []
             maybe_open_trade(
                 ticker            = ticker,
                 direction         = _norm_direction,
@@ -1257,6 +1258,7 @@ def analyse_ticker(
                 ml_ensemble_score = int(round(ml_ensemble_p * 100)),
                 atr               = float(last.get("atr_14", 0.0)),
                 avg_daily_volume  = float(df_ind["Volume"].mean() * 390) if "Volume" in df_ind.columns else 0.0,
+                _out_status       = _pred_exec_status,
             )
 
         # Update open paper trades + live backtest tracking.
@@ -1515,6 +1517,7 @@ def analyse_ticker(
                 # sessions, but algo signals carry their own raw direction and bypass
                 # that gate.  Gate them here so maybe_open_trade is not even called.
                 if _session_now == "CLOSED":
+                    _asig["exec_status"] = "BLOCKED_CLOSED"
                     logger.debug(
                         "[%s] %s algo signal skipped — market CLOSED", ticker, _asig["algo"]
                     )
@@ -1577,6 +1580,7 @@ def analyse_ticker(
                     try:
                         _cg = float(_get_algo_params(_asig["algo"]).get("conf_gate", 55.0))
                         if float(_asig["confidence"]) < _cg:
+                            _asig["exec_status"] = "BLOCKED_CONF_GATE"
                             logger.debug(
                                 "[%s] %s conf %.1f < conf_gate %.1f — suppressed",
                                 ticker, _asig["algo"], _asig["confidence"], _cg,
@@ -1592,6 +1596,7 @@ def analyse_ticker(
                     try:
                         _ew = int(_get_algo_params(_asig["algo"]).get("entry_window_bars", 3))
                         if _consec > _ew:
+                            _asig["exec_status"] = "BLOCKED_STALE_SIGNAL"
                             logger.debug(
                                 "[%s] %s stale: cycle %d > entry_window %d — trade skipped",
                                 ticker, _asig["algo"], _consec, _ew,
@@ -1610,6 +1615,7 @@ def analyse_ticker(
 
                 _trade_id = None
                 if _routing == "SHADOW":
+                    _asig["exec_status"] = "SHADOW_ROUTING"
                     logger.debug(
                         "[%s] %s → SHADOW routing; signal recorded, paper trade skipped",
                         ticker, _asig["algo"],
@@ -1628,6 +1634,7 @@ def analyse_ticker(
                         confidence   = float(_asig["confidence"]),
                     )
                     if _algo_suppressed:
+                        _asig["exec_status"] = "FILTER_SUPPRESSED"
                         _asig["filter_reason"] = _algo_suppress_reason
                         logger.debug(
                             "[%s] %s suppressed by adaptive filter: %s",
@@ -1659,11 +1666,7 @@ def analyse_ticker(
                     else:
                         _asig_status: list = []
                         _algo_rr = float(_asig.get("rr", 0))
-                        try:
-                            from agent.config_manager import config as _cfg_algo_rr
-                            _algo_min_rr = float(_cfg_algo_rr.get("prediction.min_rr", 1.5))
-                        except Exception:
-                            _algo_min_rr = 1.5
+                        _algo_min_rr = get_execution_min_rr(_asig["algo"], "ALGO")
                         _algo_rr_quality = (
                             "EXCELLENT" if _algo_rr >= 4.0 else
                             "GOOD" if _algo_rr >= 3.0 else
@@ -1699,6 +1702,7 @@ def analyse_ticker(
                         _asig["exec_status"] = _asig_status[0] if _asig_status else (
                             "EXECUTED_PAPER" if _trade_id else "SHADOW_LEARN_ONLY"
                         )
+                        _asig["trade_opened"] = bool(_trade_id)
                 if _trade_id:
                     _algo_trade_opened = True
             try:

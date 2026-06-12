@@ -4,7 +4,7 @@ Tests for agent/paper_trading.py — simulated trade execution.
 import pytest
 from agent.paper_trading import (
     maybe_open_trade, update_open_trades, get_open_trades,
-    get_closed_trades, get_summary,
+    get_closed_trades, get_summary, get_execution_min_rr,
 )
 from tests.conftest import make_ohlcv
 
@@ -40,6 +40,82 @@ def test_post_fill_bad_rr_is_blocked():
         session="REGULAR",
     )
     assert tid is None, "post-fill R:R below min must not insert a paper trade"
+
+def test_primary_min_rr_does_not_starve_named_algo_family():
+    """Primary prediction can require 2R while named algo paper trades use paper.algo_min_rr."""
+    from agent.config_manager import config
+
+    config.set_many({
+        "prediction.min_rr": 2.0,
+        "paper.algo_min_rr": 1.0,
+        "paper.algo_t2_r_multiple": 1.5,
+        "algos.keltner.exec_min_rr": 0.0,
+    }, updated_by="test")
+
+    primary_status = []
+    primary_tid = maybe_open_trade(
+        "RRPRIM",
+        "BUY",
+        100.0,
+        101.5,
+        99.0,
+        confidence=80.0,
+        rr_qualifies=False,
+        rr_ratio=1.5,
+        session="REGULAR",
+        entry_type="IMMEDIATE",
+        _out_status=primary_status,
+    )
+    assert primary_tid is None
+    assert primary_status == ["BLOCKED_MIN_RR"]
+
+    algo_status = []
+    algo_tid = maybe_open_trade(
+        "RRALGO",
+        "BUY",
+        100.0,
+        105.0,
+        99.0,
+        confidence=80.0,
+        rr_qualifies=True,
+        rr_ratio=1.2,
+        session="REGULAR",
+        entry_type="ALGO",
+        algo_name="KC_FADE_BULL",
+        atr=1.0,
+        avg_daily_volume=10_000_000,
+        _out_status=algo_status,
+    )
+    assert algo_tid is not None, algo_status
+    assert algo_status == ["EXECUTED_PAPER"]
+
+def test_family_exec_min_rr_override_takes_precedence():
+    from agent.config_manager import config
+
+    config.set_many({
+        "prediction.min_rr": 2.0,
+        "paper.algo_min_rr": 1.0,
+        "algos.regime_sw.exec_min_rr": 1.4,
+    }, updated_by="test")
+
+    assert get_execution_min_rr("REGIME_FADE_BULL", "ALGO") == 1.4
+    status = []
+    tid = maybe_open_trade(
+        "RRREG",
+        "BUY",
+        100.0,
+        101.2,
+        99.0,
+        confidence=80.0,
+        rr_qualifies=False,
+        rr_ratio=1.2,
+        session="REGULAR",
+        entry_type="ALGO",
+        algo_name="REGIME_FADE_BULL",
+        _out_status=status,
+    )
+    assert tid is None
+    assert status == ["BLOCKED_MIN_RR"]
 
 def test_no_duplicate_open_trade():
     maybe_open_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True, session="REGULAR")

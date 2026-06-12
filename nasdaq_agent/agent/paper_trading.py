@@ -397,11 +397,14 @@ _ALGO_FAMILY_MAP = {
     "DONCHIAN":    "donchian",
     "SQUEEZE":     "squeeze",
     "VOL_SHOCK":   "vol_shock",
+    "KC_FADE":     "keltner",
     "KELTNER_FADE":"keltner",
     "KELTNER":     "keltner",
     "META_ENS":    "meta_ens",
     "PAIR_ARB":    "pair_arb",
     "REGIME_SW":   "regime_sw",
+    "REGIME_FADE": "regime_sw",
+    "REGIME_TREND":"regime_sw",
     "OFI":         "ofi",
 }
 
@@ -425,6 +428,33 @@ def _effective_algo_name(algo_name: str, entry_type: str) -> str:
     entry = (entry_type or "IMMEDIATE").strip().upper().replace(" ", "_")
     entry = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in entry) or "IMMEDIATE"
     return f"PRED_{entry}"
+
+
+def _append_status(out_status: Optional[list], status: str) -> None:
+    if out_status is not None and not out_status:
+        out_status.append(status)
+
+
+def get_execution_min_rr(algo_name: str = "", entry_type: str = "") -> float:
+    """
+    Return the R:R floor for this execution path.
+
+    Primary prediction trades intentionally use prediction.min_rr. Named algo
+    families use their own override, or the paper.algo_min_rr fallback, so a
+    2:1 primary rule does not starve scalp/fade learning algos.
+    """
+    try:
+        from agent.config_manager import config as _cfg
+        effective = _effective_algo_name(algo_name, entry_type)
+        if effective.upper().startswith("PRED_"):
+            return float(_cfg.get("prediction.min_rr", 1.5))
+        family = _algo_family(effective)
+        family_min = float(_cfg.get(f"algos.{family}.exec_min_rr", 0.0) or 0.0)
+        if family_min > 0:
+            return family_min
+        return float(_cfg.get("paper.algo_min_rr", 1.0))
+    except Exception:
+        return 1.5 if _effective_algo_name(algo_name, entry_type).upper().startswith("PRED_") else 1.0
 
 
 # ── Pre-T1 stop-hit storm circuit ─────────────────────────────────────────────
@@ -755,30 +785,30 @@ def maybe_open_trade(
     Returns trade id or None.
     """
     if direction not in ("BUY", "SELL"):
+        _append_status(_out_status, "BLOCKED_BAD_DIRECTION")
         return None
 
     algo_name = _effective_algo_name(algo_name, entry_type)
+    _min_rr_gate = get_execution_min_rr(algo_name, entry_type)
 
     # Gate on actual R:R ratio, not the boolean flag.
     # rr_qualifies=False in ATR mode means the path has blocking resistance but
     # R:R is still 2:1 — those trades should open. rr_qualifies=False in structural
     # mode means R:R < min_rr (genuine failure). Check the ratio directly.
     if rr_ratio > 0:
-        from agent.config_manager import config as _cfg_rr_gate
-        _min_rr_gate = float(_cfg_rr_gate.get("prediction.min_rr", 1.5))
         if rr_ratio < _min_rr_gate:
             logger.debug(
                 f"[PAPER] {ticker} skip: R:R {rr_ratio:.2f}:1 < min {_min_rr_gate:.1f}:1 "
                 f"(check Trade Rules min R:R setting)"
             )
+            _append_status(_out_status, "BLOCKED_MIN_RR")
             return None
 
     # Hard gate: LOW rr_quality = structural resistance blocks the path to target.
     # Signal is still logged for learning (caller sets exec_status before log_algo_signals).
     if rr_quality == "LOW":
         logger.debug(f"[PAPER] {ticker} skip: rr_quality=LOW — structural path blocked")
-        if _out_status is not None:
-            _out_status.append("BLOCKED_LOW_RR")
+        _append_status(_out_status, "BLOCKED_LOW_RR")
         return None
 
     try:
@@ -790,8 +820,7 @@ def maybe_open_trade(
                 f"[PAPER] {ticker} skip: PRED_IMMEDIATE R:R {rr_ratio:.2f}:1 > "
                 f"max {_pred_max_rr:.1f}:1 (named algo required for far-target setup)"
             )
-            if _out_status is not None:
-                _out_status.append("BLOCKED_PRED_IMMEDIATE_HIGH_RR")
+            _append_status(_out_status, "BLOCKED_PRED_IMMEDIATE_HIGH_RR")
             return None
     except Exception:
         pass
@@ -803,16 +832,14 @@ def maybe_open_trade(
         from agent.config_manager import config as _cfg_sess
         if _cfg_sess.get("paper.block_restricted_session", True):
             logger.debug(f"[PAPER] {ticker} skip: RESTRICTED session blocked for paper execution")
-            if _out_status is not None:
-                _out_status.append("BLOCKED_RESTRICTED")
+            _append_status(_out_status, "BLOCKED_RESTRICTED")
             return None
 
     # Ticker-level damage control — independent of algo-family controls.
     _tk_blocked, _tk_reason = check_ticker_cooldown(ticker)
     if _tk_blocked:
         logger.info(f"[PAPER] {ticker} skip: {_tk_reason}")
-        if _out_status is not None:
-            _out_status.append("BLOCKED_TICKER_COOLDOWN")
+        _append_status(_out_status, "BLOCKED_TICKER_COOLDOWN")
         return None
 
     # Per-family execution controls — check BEFORE circuit breaker for fast-path rejection.
@@ -826,38 +853,32 @@ def maybe_open_trade(
         _fam_block_sess   = str(_cfg_fam.get(f"algos.{_fam}.exec_block_sessions", "") or "")
         if not _fam_enabled:
             logger.debug(f"[PAPER] {ticker} skip: family {_fam} execution disabled")
-            if _out_status is not None:
-                _out_status.append("BLOCKED_FAMILY_DISABLED")
+            _append_status(_out_status, "BLOCKED_FAMILY_DISABLED")
             return None
         if _fam_min_conf > 0 and confidence < _fam_min_conf:
             logger.debug(f"[PAPER] {ticker} skip: {_fam} conf {confidence:.0f}% < family min {_fam_min_conf:.0f}%")
-            if _out_status is not None:
-                _out_status.append("BLOCKED_FAMILY_CONF")
+            _append_status(_out_status, "BLOCKED_FAMILY_CONF")
             return None
         if _fam_min_rr > 0 and rr_ratio > 0 and rr_ratio < _fam_min_rr:
             logger.debug(f"[PAPER] {ticker} skip: {_fam} R:R {rr_ratio:.2f} < family min {_fam_min_rr:.1f}")
-            if _out_status is not None:
-                _out_status.append("BLOCKED_FAMILY_RR")
+            _append_status(_out_status, "BLOCKED_FAMILY_RR")
             return None
         _sess_check = session or _live_session_early
         if _fam_block_sess and _sess_check and _sess_check in _fam_block_sess.split(","):
             logger.debug(f"[PAPER] {ticker} skip: {_fam} blocked in session {_sess_check}")
-            if _out_status is not None:
-                _out_status.append("BLOCKED_FAMILY_SESSION")
+            _append_status(_out_status, "BLOCKED_FAMILY_SESSION")
             return None
         # Pre-T1 storm circuit
         _storm_blocked, _storm_reason = check_pre_t1_storm(algo_name, session or "")
         if _storm_blocked:
             logger.info(f"[PAPER] {ticker} skip: {_storm_reason}")
-            if _out_status is not None:
-                _out_status.append("BLOCKED_FAMILY_STORM")
+            _append_status(_out_status, "BLOCKED_FAMILY_STORM")
             return None
         # Flash-stop guard — repeated sub-60s stops indicate bad entry timing
         _flash_blocked, _flash_reason = check_flash_stop_guard(algo_name, session or "")
         if _flash_blocked:
             logger.info(f"[PAPER] {ticker} skip: {_flash_reason}")
-            if _out_status is not None:
-                _out_status.append("BLOCKED_FLASH_STORM")
+            _append_status(_out_status, "BLOCKED_FLASH_STORM")
             return None
         # Rolling EV adaptive floor — raise confidence bar AND reduce size when combo is bleeding.
         # Two-tier response: if conf meets bumped floor → allow but halve size.
@@ -870,8 +891,7 @@ def maybe_open_trade(
                     f"[PAPER] {ticker} skip: {_algo_family(algo_name)}+{direction} rolling EV "
                     f"negative — conf {confidence:.0f}% < bumped floor {_ev_min_conf:.0f}%"
                 )
-                if _out_status is not None:
-                    _out_status.append("BLOCKED_EV_SUPPRESS")
+                _append_status(_out_status, "BLOCKED_EV_SUPPRESS")
                 return None
             else:
                 # Qualifies but combo is struggling — halve size as adaptive throttle
@@ -885,6 +905,7 @@ def maybe_open_trade(
 
     if price <= 0 or stop <= 0:
         logger.debug(f"[PAPER] {ticker} skip: invalid price ({price}) or stop ({stop})")
+        _append_status(_out_status, "BLOCKED_INVALID_PRICE")
         return None
 
     # ── Stop/target geometry validation ─────────────────────────────────────
@@ -897,17 +918,20 @@ def maybe_open_trade(
                 f"[PAPER] {ticker} BUY geometry invalid: "
                 f"entry={price:.2f} stop={stop:.2f} target={target:.2f}"
             )
+            _append_status(_out_status, "BLOCKED_BAD_GEOMETRY")
             return None
         if direction == "SELL" and (stop <= price or target >= price):
             logger.debug(
                 f"[PAPER] {ticker} SELL geometry invalid: "
                 f"entry={price:.2f} stop={stop:.2f} target={target:.2f}"
             )
+            _append_status(_out_status, "BLOCKED_BAD_GEOMETRY")
             return None
 
     min_conf = _get_min_confidence()
     if confidence < min_conf:
         logger.debug(f"[PAPER] {ticker} skip: conf {confidence:.0f}% < floor {min_conf:.0f}%")
+        _append_status(_out_status, "BLOCKED_CONFIDENCE")
         return None
 
     # ── Phase 3: Session gate — hard block for CLOSED, higher bar for extended hours ──
@@ -929,6 +953,7 @@ def maybe_open_trade(
     }
 
     if _live_session == "CLOSED":
+        _append_status(_out_status, "BLOCKED_CLOSED")
         logger.debug(f"[PAPER] {ticker} skip: market CLOSED — no trades on weekends/overnight")
         return None
 
@@ -945,6 +970,7 @@ def maybe_open_trade(
                                     and trading_tier in ("HIGH", "MODERATE")) else ""
     _cb_blocked, _cb_reason = check_circuit_breaker(_cb_session)
     if _cb_blocked:
+        _append_status(_out_status, "BLOCKED_CIRCUIT")
         logger.info(f"[PAPER] {ticker} BLOCKED at execution by circuit breaker: {_cb_reason}")
         return None
 
@@ -967,11 +993,13 @@ def maybe_open_trade(
     if _live_session in ("PRE_MARKET", "AFTER_HOURS"):
         _ext_floor = _EXT_CONF_FLOOR.get(trading_tier)
         if _ext_floor is None:
+            _append_status(_out_status, "BLOCKED_EXT_HOURS_TIER")
             logger.debug(
                 f"[PAPER] {ticker} skip: REGULAR-tier in {_live_session} — insufficient liquidity"
             )
             return None
         if confidence < _ext_floor:
+            _append_status(_out_status, "BLOCKED_EXT_HOURS_CONF")
             logger.debug(
                 f"[PAPER] {ticker} skip: conf {confidence:.0f}% < ext-hours floor {_ext_floor:.0f}%"
                 f" (tier={trading_tier}, sess={_live_session})"
@@ -1003,8 +1031,10 @@ def maybe_open_trade(
     from agent.config_manager import config as _cfg_t
     _t1_mult  = float(_cfg_t.get("paper.t1_r_multiple", 1.0))
     _t2_mult  = float(_cfg_t.get("paper.t2_r_multiple", 1.5))
+    if not algo_name.upper().startswith("PRED_"):
+        _t2_mult = float(_cfg_t.get("paper.algo_t2_r_multiple", _t2_mult))
     if bool(_cfg_t.get("prediction.use_atr_stops", True)):
-        _t2_mult = max(_t2_mult, float(_cfg_t.get("prediction.min_rr", 1.5)))
+        _t2_mult = max(_t2_mult, _min_rr_gate)
     risk_dist = abs(price - stop)
     if direction == "BUY":
         t1_price = round(price + _t1_mult * risk_dist, 4)
@@ -1019,6 +1049,7 @@ def maybe_open_trade(
                 "SELECT id FROM paper_trades WHERE ticker=? AND status='OPEN'", (ticker,)
             ).fetchone()
             if existing:
+                _append_status(_out_status, "BLOCKED_EXISTING_TRADE")
                 logger.debug(f"[PAPER] {ticker} skip: already has open trade #{existing['id']}")
                 return None
 
@@ -1034,6 +1065,7 @@ def maybe_open_trade(
             _max_open    = int(_cfg.get("paper.max_open_trades"))
 
             if open_count >= _max_open:
+                _append_status(_out_status, "BLOCKED_MAX_OPEN")
                 logger.debug(f"[PAPER] {ticker} skip: max concurrent trades ({_max_open}) reached")
                 return None
 
@@ -1054,9 +1086,11 @@ def maybe_open_trade(
 
             available = _budget + realized_pnl - allocated
             if available < price:
+                _append_status(_out_status, "BLOCKED_CAPITAL")
                 logger.debug(f"[PAPER] {ticker} skip: insufficient capital (avail ${available:.0f} < ${price:.2f})")
                 return None
             if allocated >= _max_alloc_v:
+                _append_status(_out_status, "BLOCKED_MAX_ALLOCATED")
                 logger.debug(f"[PAPER] {ticker} skip: max allocated capital reached (${allocated:.0f} >= ${_max_alloc_v:.0f})")
                 return None
 
@@ -1089,11 +1123,7 @@ def maybe_open_trade(
                     t2_price = round(actual_entry - _t2_mult * _actual_risk, 4)
                 _actual_reward = abs(target - actual_entry)
                 rr_ratio = round(_actual_reward / _actual_risk, 2)
-                try:
-                    from agent.config_manager import config as _cfg_fillrr
-                    _min_rr_fill = float(_cfg_fillrr.get("prediction.min_rr", 1.5))
-                except Exception:
-                    _min_rr_fill = 1.5
+                _min_rr_fill = get_execution_min_rr(algo_name, entry_type)
                 rr_qualifies = rr_ratio >= _min_rr_fill
                 if not rr_qualifies:
                     logger.info(
@@ -1101,8 +1131,7 @@ def maybe_open_trade(
                         "(actual entry/stop/target no longer qualifies)",
                         ticker, rr_ratio, _min_rr_fill,
                     )
-                    if _out_status is not None:
-                        _out_status.append("BLOCKED_POST_FILL_RR")
+                    _append_status(_out_status, "BLOCKED_POST_FILL_RR")
                     return None
 
             cur = c.execute("""
@@ -2588,7 +2617,8 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
                 _ml_daily = sig.get("ml_daily_prob")
                 _ml_swing = sig.get("ml_swing_prob")
                 _ml_deep  = sig.get("ml_deep_prob")
-                _exec_status = sig.get("exec_status") or ("EXECUTED_PAPER" if trade_opened else "SHADOW_LEARN_ONLY")
+                _trade_opened = bool(sig.get("trade_opened", trade_opened))
+                _exec_status = sig.get("exec_status") or ("EXECUTED_PAPER" if _trade_opened else "SHADOW_LEARN_ONLY")
                 c.execute(
                     """INSERT INTO algo_signal_log
                          (logged_at, ticker, algo, direction, confidence,
@@ -2605,7 +2635,7 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
                         float(sig.get("stop", 0)),
                         float(sig.get("target", 0)),
                         float(sig.get("rr", 0)),
-                        int(trade_opened),
+                        int(_trade_opened),
                         float(_ml_scalp) if _ml_scalp is not None else None,
                         float(_ml_daily) if _ml_daily is not None else None,
                         float(_ml_swing) if _ml_swing is not None else None,
