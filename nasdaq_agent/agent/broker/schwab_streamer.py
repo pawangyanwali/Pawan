@@ -904,7 +904,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
 
     def _poll_loop() -> None:
         import concurrent.futures as _cf
-        global _ws_connected, _ws_error, _mdpoller_running, _mdpoller_cycle, _mdpoller_last_ok, _mdpoller_error
+        global _mdpoller_running, _mdpoller_cycle, _mdpoller_last_ok, _mdpoller_error
         from agent.broker.schwab_market_data import _is_authorised
         _mdpoller_running = True
 
@@ -936,8 +936,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
             _cycle_start = time.time()
             try:
                 if not _is_authorised():
-                    _ws_connected = False
-                    _ws_error = "Schwab Market Data not authorized — visit /schwab/auth/md"
+                    _mdpoller_error = "Schwab Market Data not authorized — visit /schwab/auth/md"
                     auth_misses += 1
                     # Back off logging frequency after extended auth failures:
                     # first 5 min → every 30 s, first hour → every 5 min, after → every 50 min
@@ -986,8 +985,6 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     if not f.cancelled() and f.exception() is None and f.result()
                 )
                 if n_ok:
-                    _ws_connected = True
-                    _ws_error = None
                     _mdpoller_error = None
                     _mdpoller_last_ok = time.time()
                     consecutive_miss = 0
@@ -1048,34 +1045,35 @@ def start_streamer(tickers: list[str]) -> None:
     """
     global _streamer_thread, _event_loop, _subscribed_tickers
 
-    if _streamer_thread and _streamer_thread.is_alive():
-        logger.debug("[Streamer] Already running.")
-        return
+    with _streamer_start_lock:
+        if _streamer_thread and _streamer_thread.is_alive():
+            logger.debug("[Streamer] Already running.")
+            return
 
-    ts = get_token_status()
-    if not ts.get("connected"):
-        ttl = ts.get("refresh_token_ttl_s", 0)
-        logger.warning(
-            f"[Streamer] Schwab A+T not connected (refresh_token_ttl={ttl}s) — "
-            f"visit /schwab/auth/at to re-authenticate."
-        )
-        global _ws_error
-        _ws_error = "Schwab A+T not authenticated — visit /schwab/auth/at"
-        return
+        ts = get_token_status()
+        if not ts.get("connected"):
+            ttl = ts.get("refresh_token_ttl_s", 0)
+            logger.warning(
+                f"[Streamer] Schwab A+T not connected (refresh_token_ttl={ttl}s) — "
+                f"visit /schwab/auth/at to re-authenticate."
+            )
+            global _ws_error
+            _ws_error = "Schwab A+T not authenticated — visit /schwab/auth/at"
+            return
 
-    _subscribed_tickers = list(tickers)
-    _ensure_bar_persist_worker()
+        _subscribed_tickers = list(tickers)
+        _ensure_bar_persist_worker()
 
-    def _run():
-        global _event_loop
-        loop = asyncio.new_event_loop()
-        _event_loop = loop
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(_streamer_main(tickers))
+        def _run():
+            global _event_loop
+            loop = asyncio.new_event_loop()
+            _event_loop = loop
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_streamer_main(tickers))
 
-    _streamer_thread = threading.Thread(target=_run, daemon=True, name="SchwabStreamer")
-    _streamer_thread.start()
-    logger.info(f"[Streamer] WS streamer started for {len(tickers)} tickers.")
+        _streamer_thread = threading.Thread(target=_run, daemon=True, name="SchwabStreamer")
+        _streamer_thread.start()
+        logger.info(f"[Streamer] WS streamer started for {len(tickers)} tickers.")
 
 
 def stop_streamer() -> None:

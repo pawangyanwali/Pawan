@@ -145,6 +145,18 @@ async def websocket_endpoint(ws: WebSocket):
                 "n_total":    _get_universe_total(),
             }))
 
+        # Seed the tab with the current shared price bus immediately.  Pub/sub
+        # only delivers future messages, so a dashboard opened just after an
+        # auth/reconnect could otherwise show REST 0 / STALE until the next
+        # frame reaches this web-api worker.
+        try:
+            from agent.valkey_client import get_all_prices
+            prices = get_all_prices()
+            if prices:
+                await ws.send_text(_dumps({"type": "prices", "p": prices}))
+        except Exception:
+            pass
+
         # Drain incoming client messages.
         while True:
             await ws.receive_text()

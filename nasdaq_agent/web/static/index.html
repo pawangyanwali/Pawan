@@ -2220,7 +2220,7 @@ async function connectWS() {
       ws.send(JSON.stringify({ type: 'auth', token: _wsAt }));
     }
     document.getElementById('dot').classList.add('live');
-    document.getElementById('ws-status').textContent = 'WS Live';
+    document.getElementById('ws-status').textContent = 'UI Live';
     const chip = document.getElementById('ws-chip');
     if (chip) { chip.className = 'ws-chip live'; chip.title = 'Dashboard WebSocket connected. Schwab stream health is shown separately.'; }
     if (_wsDeadTimer) { clearTimeout(_wsDeadTimer); _wsDeadTimer = null; }
@@ -2552,7 +2552,7 @@ async function connectWS() {
     _wsAuthRetrying = false;
     _wsAuthRetryCount = 0;
     document.getElementById('dot').classList.remove('live');
-    document.getElementById('ws-status').textContent = 'WS Reconnecting…';
+    document.getElementById('ws-status').textContent = 'UI Reconnecting…';
     const chip = document.getElementById('ws-chip');
     if (chip) { chip.className = 'ws-chip reconnecting'; chip.title = 'Dashboard WebSocket reconnecting. This is not the Schwab market-data connection.'; }
     if (_wsWatchdog) { clearTimeout(_wsWatchdog); _wsWatchdog = null; }
@@ -2573,7 +2573,7 @@ async function connectWS() {
 function wsChipClick() {
   if (ws && ws.readyState === WebSocket.OPEN) return;   // already live, nothing to do
   if (_wsDeadTimer) { clearTimeout(_wsDeadTimer); _wsDeadTimer = null; }
-  document.getElementById('ws-status').textContent = 'WS Reconnecting…';
+  document.getElementById('ws-status').textContent = 'UI Reconnecting…';
   const chip = document.getElementById('ws-chip');
   if (chip) chip.className = 'ws-chip reconnecting';
   if (ws) { try { ws.close(); } catch(_){} }
@@ -2746,10 +2746,29 @@ function _setOpsSlaChip(sla) {
   el.title = lines.length ? lines.join('\n') : 'Runtime SLA healthy';
 }
 
+function _applyServerPriceCoverage(health) {
+  if (!health || !Number(health.total || 0)) return;
+  const newestAge = Number(health.newest_age_s);
+  _lastPriceCoverage = {
+    total: Number(health.total || 0),
+    live: Number(health.live || 0),
+    fallback: Number(health.fallback || 0),
+    snapshot: Number(health.snapshot || 0),
+    stale: Number(health.stale || 0),
+    fresh: Number(health.fresh || 0),
+  };
+  _lastPriceStatus = String(health.status || _lastPriceStatus || 'UNKNOWN').toUpperCase();
+  if (Number.isFinite(newestAge)) {
+    _lastPriceAt = Date.now() - newestAge * 1000;
+  }
+  _setPriceSourceBreakdown(_lastPriceCoverage, _lastPriceStatus);
+}
+
 async function pollRuntimeSla() {
   try {
     const d = await (await _authFetch(`${BACKEND_HTTP}/api/runtime-health`, {signal: AbortSignal.timeout(8000)})).json();
     _setOpsSlaChip(d.sla || {});
+    _applyServerPriceCoverage(d.price_2s || d.price_5s);
   } catch(e) {
     _setOpsSlaChip({
       status: 'CRITICAL',

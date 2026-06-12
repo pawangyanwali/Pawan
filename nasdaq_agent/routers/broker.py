@@ -102,11 +102,17 @@ def _get_cross_container_token_status(key: str) -> dict | None:
 
 def _start_md_poller_and_register(tickers):
     try:
-        from agent.broker.schwab_streamer import start_md_poller, is_streamer_ready
         from main import _ensure_tick_broadcast_registered
+        _ensure_tick_broadcast_registered()
+        if os.getenv("NASDAQ_MARKET_DATA_ENABLED", "1") == "0":
+            logger.info(
+                "Schwab Market Data OAuth complete; market-data container owns the REST poller."
+            )
+            return
+
+        from agent.broker.schwab_streamer import start_md_poller, is_streamer_ready
         if not is_streamer_ready():
             start_md_poller(list(tickers), interval=1.0, parallel_batches=2)
-        _ensure_tick_broadcast_registered()
     except Exception:
         pass
 

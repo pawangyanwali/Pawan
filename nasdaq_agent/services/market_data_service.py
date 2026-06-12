@@ -154,7 +154,8 @@ def _handle_token_event(payload: dict) -> None:
             return
 
         status = get_streamer_status()
-        if status.get("connected"):
+        ws_status = status.get("ws_streamer", {}) or {}
+        if ws_status.get("running") and ws_status.get("connected"):
             _log.info(
                 "[token_reload] Trader token loaded (generation=%s); WS already connected",
                 generation or "-",

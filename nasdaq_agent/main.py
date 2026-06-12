@@ -669,6 +669,10 @@ def _on_signals(signals: list[StockSignal]) -> None:
                 "last":       s.price,
                 "open":       getattr(s, "open_price", 0) or 0,
                 "pct_change": getattr(s, "change_pct",  0) or 0,
+                "updated_at":  time.time(),
+                "source":      "SCANNER",
+                "source_status": "SCAN_SNAPSHOT",
+                "is_live":     False,
             }
             for s in signals
             if s.price > 0
@@ -763,6 +767,10 @@ def _on_valkey_scan(snap: dict) -> None:
                     "last":       s.get("price", 0),
                     "open":       s.get("open_price", 0) or 0,
                     "pct_change": s.get("change_pct", 0) or 0,
+                    "updated_at":  time.time(),
+                    "source":      "SCANNER",
+                    "source_status": "SCAN_SNAPSHOT",
+                    "is_live":     False,
                 }
                 for s in sigs_dicts
                 if (s.get("price") or 0) > 0

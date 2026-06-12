@@ -314,7 +314,12 @@ async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
             containers=containers,
             valkey=vk,
         )
-        return {"sla": sla, "valkey": vk}
+        return {
+            "sla": sla,
+            "valkey": vk,
+            "price_2s": price_2s,
+            "price_5s": price_5s,
+        }
     except Exception as exc:
         return {
             "sla": {

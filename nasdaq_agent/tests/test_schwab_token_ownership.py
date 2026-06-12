@@ -55,6 +55,31 @@ def test_market_data_reacts_to_app_specific_token_events():
     assert "_handle_token_event(payload)" in service
     assert "_last_token_generation" in service
     assert "WS already connected" in service
+    assert 'ws_status = status.get("ws_streamer", {}) or {}' in service
+    assert 'ws_status.get("running") and ws_status.get("connected")' in service
+
+
+def test_rest_poller_never_sets_websocket_connected_flag():
+    streamer = _read("agent/broker/schwab_streamer.py")
+    start = streamer.index("def start_md_poller")
+    end = streamer.index("def start_streamer")
+    md_poller = streamer[start:end]
+
+    assert "_ws_connected = True" not in md_poller
+    assert "_ws_error = None" not in md_poller
+    assert "_mdpoller_last_ok = time.time()" in md_poller
+
+
+def test_web_oauth_callback_does_not_start_local_md_poller_in_split_mode():
+    broker = _read("routers/broker.py")
+    helper = broker[
+        broker.index("def _start_md_poller_and_register"):
+        broker.index("@router.get(\"/schwab/auth\")")
+    ]
+
+    assert 'os.getenv("NASDAQ_MARKET_DATA_ENABLED", "1") == "0"' in helper
+    assert "market-data container owns the REST poller" in helper
+    assert "start_md_poller" in helper
 
 
 def test_web_oauth_callback_does_not_start_streamer():
