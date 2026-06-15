@@ -39,7 +39,7 @@ def test_trade_rules_align_t2_to_min_rr_in_atr_mode() -> None:
     html = _index_text()
     assert 'payload["paper.t2_r_multiple"] < payload["prediction.min_rr"]' in html
     assert 'T2 aligned to Min R:R for ATR mode.' in html
-    assert 'below the configured minimum' in html
+    assert 'R:R geometry is incomplete' in html
 
 
 def test_visible_settings_have_defaults_and_runtime_consumers() -> None:

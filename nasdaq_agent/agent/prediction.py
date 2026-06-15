@@ -511,7 +511,7 @@ def _evaluate_rr(
 
         rr           = _effective_t2
         quality      = "LOW" if blocking else "OK"
-        rr_qualifies = (not blocking) and rr >= _MIN_RR_RT
+        rr_qualifies = rr > 0
 
         return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr_qualifies
 
@@ -579,7 +579,7 @@ def _evaluate_rr(
     if blocking and quality in ("EXCELLENT", "GOOD", "OK"):
         quality = {"EXCELLENT": "GOOD", "GOOD": "OK", "OK": "OK"}.get(quality, quality)
 
-    return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr >= _MIN_RR_RT
+    return round(stop_loss, 4), round(target, 4), round(rr, 2), quality, rr > 0
 
 
 def _detect_exhaustion(
@@ -901,19 +901,11 @@ def generate_prediction(
                 retest_entry, sr, direction, atr=_atr
             )
             if adj_rr > 0:
-                stop_loss = exhaustion["adjusted_stop"] or adj_stop
-                target    = exhaustion["adjusted_target"] or adj_target
-                # Recompute rr_ratio from the ACTUAL target/stop after any structural
-                # override — the stored ratio must reflect real geometry, not just t2_mult.
-                rr_ratio  = _compute_rr(price, target, stop_loss)
-                # Re-evaluate rr_qualifies against the true ratio so bad-geometry
-                # WAIT_RETEST trades are correctly blocked at execution time.
-                try:
-                    from agent.config_manager import config as _cfg_rr_wrt
-                    _min_rr_wrt = float(_cfg_rr_wrt.get("prediction.min_rr", 1.5))
-                except Exception:
-                    _min_rr_wrt = 1.5
-                rr_qualifies = rr_ratio >= _min_rr_wrt
+                stop_loss = adj_stop
+                target    = adj_target
+                # WAIT_RETEST changes entry style, not the configured stop/target plan.
+                rr_ratio  = adj_rr
+                rr_qualifies = True
 
     # ── 7c. Bounce setup check ────────────────────────────────────────────────
     bounce = _detect_bounce_setup(price, support, resistance, df, last_row)

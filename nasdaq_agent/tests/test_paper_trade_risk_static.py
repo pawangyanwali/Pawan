@@ -18,15 +18,6 @@ def test_primary_prediction_trades_are_attributed_for_learning():
     assert "check_rolling_ev_suppress(algo_name, direction, session or \"\")" in src
 
 
-def test_high_rr_primary_immediate_guard_exists():
-    src = _src()
-
-    assert "risk.pred_immediate_rr_guard_enabled" in src
-    assert "risk.pred_immediate_max_rr" in src
-    assert 'algo_name.upper() == "PRED_IMMEDIATE"' in src
-    assert "BLOCKED_PRED_IMMEDIATE_HIGH_RR" in src
-
-
 def test_mfe_mae_excursion_columns_are_persisted():
     src = _src()
 

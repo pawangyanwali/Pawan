@@ -26,10 +26,17 @@ def test_rr_not_qualifying_still_opens():
     tid = maybe_open_trade("NVDA", "BUY", 500.0, 510.0, 495.0, confidence=80.0, rr_qualifies=False, session="REGULAR")
     assert tid is not None, "rr_qualifies=False must still open a paper trade (data collection)"
 
-def test_post_fill_bad_rr_is_blocked():
-    """Actual executable R:R must be re-gated after fill/slippage/stop adjustments."""
+def test_post_fill_rebuilds_target_from_configured_reward():
+    """Configured R:R builds the executable target after fill/slippage."""
+    from agent.config_manager import config
+
+    config.set_many({
+        "prediction.min_rr": 2.0,
+        "paper.t2_r_multiple": 1.5,
+    }, updated_by="test")
+
     tid = maybe_open_trade(
-        "BADRR",
+        "CFG_RR",
         "BUY",
         100.0,
         100.2,
@@ -39,10 +46,13 @@ def test_post_fill_bad_rr_is_blocked():
         rr_ratio=2.0,
         session="REGULAR",
     )
-    assert tid is None, "post-fill R:R below min must not insert a paper trade"
+    assert tid is not None
+    trade = next(t for t in get_open_trades() if t["ticker"] == "CFG_RR")
+    assert trade["rr_ratio"] == pytest.approx(2.0)
+    assert trade["target"] == pytest.approx(trade["t2_price"])
 
-def test_primary_min_rr_does_not_starve_named_algo_family():
-    """Primary prediction can require 2R while named algo paper trades use paper.algo_min_rr."""
+def test_configured_reward_multiple_does_not_gate_primary_or_algo():
+    """The configured reward multiple builds targets instead of blocking trades."""
     from agent.config_manager import config
 
     config.set_many({
@@ -66,8 +76,10 @@ def test_primary_min_rr_does_not_starve_named_algo_family():
         entry_type="IMMEDIATE",
         _out_status=primary_status,
     )
-    assert primary_tid is None
-    assert primary_status == ["BLOCKED_MIN_RR"]
+    assert primary_tid is not None, primary_status
+    assert primary_status == ["EXECUTED_PAPER"]
+    primary_trade = next(t for t in get_open_trades() if t["ticker"] == "RRPRIM")
+    assert primary_trade["rr_ratio"] == pytest.approx(2.0)
 
     algo_status = []
     algo_tid = maybe_open_trade(
@@ -88,6 +100,8 @@ def test_primary_min_rr_does_not_starve_named_algo_family():
     )
     assert algo_tid is not None, algo_status
     assert algo_status == ["EXECUTED_PAPER"]
+    algo_trade = next(t for t in get_open_trades() if t["ticker"] == "RRALGO")
+    assert algo_trade["rr_ratio"] == pytest.approx(2.0)
 
 def test_family_exec_min_rr_override_takes_precedence():
     from agent.config_manager import config
@@ -95,10 +109,10 @@ def test_family_exec_min_rr_override_takes_precedence():
     config.set_many({
         "prediction.min_rr": 2.0,
         "paper.algo_min_rr": 1.0,
-        "algos.regime_sw.exec_min_rr": 1.4,
+        "algos.regime_sw.exec_min_rr": 2.4,
     }, updated_by="test")
 
-    assert get_execution_min_rr("REGIME_FADE_BULL", "ALGO") == 1.4
+    assert get_execution_min_rr("REGIME_FADE_BULL", "ALGO") == 2.4
     status = []
     tid = maybe_open_trade(
         "RRREG",
@@ -114,8 +128,10 @@ def test_family_exec_min_rr_override_takes_precedence():
         algo_name="REGIME_FADE_BULL",
         _out_status=status,
     )
-    assert tid is None
-    assert status == ["BLOCKED_MIN_RR"]
+    assert tid is not None, status
+    assert status == ["EXECUTED_PAPER"]
+    trade = next(t for t in get_open_trades() if t["ticker"] == "RRREG")
+    assert trade["rr_ratio"] == pytest.approx(2.4)
 
 def test_no_duplicate_open_trade():
     maybe_open_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True, session="REGULAR")

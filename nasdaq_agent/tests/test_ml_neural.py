@@ -339,7 +339,7 @@ class TestPredictionEngine:
     def test_evaluate_rr_qualifies_at_min_rr(self):
         sr = {"supports": [90.0], "resistances": [120.0]}
         stop, target, rr, quality, qualifies = _evaluate_rr(100.0, sr, "BUY")
-        if rr is not None and rr >= 1.5:
+        if rr is not None and rr > 0:
             assert qualifies is True
 
     def test_evaluate_rr_empty_sr_returns_gracefully(self):

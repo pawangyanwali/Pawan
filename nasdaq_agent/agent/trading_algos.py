@@ -452,8 +452,8 @@ def eval_ah_gap_fade(sig) -> Optional[AlgoResult]:
                 return None  # gap too small or already filled past entry
 
             rr = _rr(entry, stop, target)
-            if rr < 1.0:
-                return None  # skip if risk/reward is unfavourable
+            # R:R is used downstream to build/manage the bracket, not to veto
+            # an otherwise valid gap-fade signal.
 
             vwap_boost = (8.0 if vwap_event in ("EXTENDED_UP", "AT_2SD_UP") else
                           4.0 if vwap_event in ("AT_1SD_UP",   "ABOVE")      else 0.0)
@@ -500,8 +500,8 @@ def eval_ah_gap_fade(sig) -> Optional[AlgoResult]:
                 return None
 
             rr = _rr(entry, stop, target)
-            if rr < 1.0:
-                return None
+            # R:R is used downstream to build/manage the bracket, not to veto
+            # an otherwise valid gap-fade signal.
 
             vwap_boost = (8.0 if vwap_event in ("EXTENDED_DOWN", "AT_2SD_DOWN") else
                           4.0 if vwap_event in ("AT_1SD_DOWN",   "BELOW")        else 0.0)

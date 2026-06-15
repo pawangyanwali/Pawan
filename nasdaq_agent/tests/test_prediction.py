@@ -100,7 +100,7 @@ def test_rr_qualifies_threshold():
     stop, target, rr, quality, qualifies = _evaluate_rr(
         price=100.0, sr=_sr(96.0, 110.0), direction="BUY"
     )
-    assert qualifies == (rr >= 1.5)
+    assert qualifies is True
 
 def test_atr_rr_uses_min_rr_when_t2_is_lower(monkeypatch):
     from agent.config_manager import config
@@ -137,7 +137,7 @@ def test_atr_buy_rr_blocks_resistance_inside_target_path():
     )
     assert target > 100.0
     assert quality == "LOW"
-    assert qualifies is False
+    assert qualifies is True
 
 def test_atr_sell_rr_blocks_support_inside_target_path():
     stop, target, rr, quality, qualifies = _evaluate_rr(
@@ -148,7 +148,7 @@ def test_atr_sell_rr_blocks_support_inside_target_path():
     )
     assert target < 100.0
     assert quality == "LOW"
-    assert qualifies is False
+    assert qualifies is True
 
 def test_quality_labels():
     _, _, rr, quality, _ = _evaluate_rr(

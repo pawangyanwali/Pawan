@@ -437,24 +437,35 @@ def _append_status(out_status: Optional[list], status: str) -> None:
 
 def get_execution_min_rr(algo_name: str = "", entry_type: str = "") -> float:
     """
-    Return the R:R floor for this execution path.
+    Return the configured target reward multiple for this execution path.
 
-    Primary prediction trades intentionally use prediction.min_rr. Named algo
-    families use their own override, or the paper.algo_min_rr fallback, so a
-    2:1 primary rule does not starve scalp/fade learning algos.
+    This value builds stop/target geometry; it is not an execution gate. Family
+    overrides can raise the reward target, but named algos no longer inherit a
+    lower fallback that silently turns a global 1:2 plan into 1.5:1.
     """
     try:
         from agent.config_manager import config as _cfg
+        base_target = float(_cfg.get("prediction.min_rr", 1.5))
         effective = _effective_algo_name(algo_name, entry_type)
         if effective.upper().startswith("PRED_"):
-            return float(_cfg.get("prediction.min_rr", 1.5))
+            return base_target
         family = _algo_family(effective)
         family_min = float(_cfg.get(f"algos.{family}.exec_min_rr", 0.0) or 0.0)
         if family_min > 0:
-            return family_min
-        return float(_cfg.get("paper.algo_min_rr", 1.0))
+            return max(base_target, family_min)
+        return base_target
     except Exception:
-        return 1.5 if _effective_algo_name(algo_name, entry_type).upper().startswith("PRED_") else 1.0
+        return 1.5
+
+
+def _configured_target(entry: float, stop: float, direction: str, reward_r: float) -> float:
+    """Build the profit target from the configured reward multiple."""
+    risk_dist = abs(float(entry) - float(stop))
+    if risk_dist <= 0:
+        return 0.0
+    if direction == "BUY":
+        return round(float(entry) + float(reward_r) * risk_dist, 4)
+    return round(float(entry) - float(reward_r) * risk_dist, 4)
 
 
 # ── Pre-T1 stop-hit storm circuit ─────────────────────────────────────────────
@@ -789,41 +800,10 @@ def maybe_open_trade(
         return None
 
     algo_name = _effective_algo_name(algo_name, entry_type)
-    _min_rr_gate = get_execution_min_rr(algo_name, entry_type)
+    _target_rr = get_execution_min_rr(algo_name, entry_type)
+    rr_qualifies = True
 
-    # Gate on actual R:R ratio, not the boolean flag.
-    # rr_qualifies=False in ATR mode means the path has blocking resistance but
-    # R:R is still 2:1 — those trades should open. rr_qualifies=False in structural
-    # mode means R:R < min_rr (genuine failure). Check the ratio directly.
-    if rr_ratio > 0:
-        if rr_ratio < _min_rr_gate:
-            logger.debug(
-                f"[PAPER] {ticker} skip: R:R {rr_ratio:.2f}:1 < min {_min_rr_gate:.1f}:1 "
-                f"(check Trade Rules min R:R setting)"
-            )
-            _append_status(_out_status, "BLOCKED_MIN_RR")
-            return None
-
-    # Hard gate: LOW rr_quality = structural resistance blocks the path to target.
-    # Signal is still logged for learning (caller sets exec_status before log_algo_signals).
-    if rr_quality == "LOW":
-        logger.debug(f"[PAPER] {ticker} skip: rr_quality=LOW — structural path blocked")
-        _append_status(_out_status, "BLOCKED_LOW_RR")
-        return None
-
-    try:
-        from agent.config_manager import config as _cfg_pred_rr
-        _pred_guard = bool(_cfg_pred_rr.get("risk.pred_immediate_rr_guard_enabled", True))
-        _pred_max_rr = float(_cfg_pred_rr.get("risk.pred_immediate_max_rr", 2.5))
-        if algo_name.upper() == "PRED_IMMEDIATE" and _pred_guard and rr_ratio > _pred_max_rr:
-            logger.info(
-                f"[PAPER] {ticker} skip: PRED_IMMEDIATE R:R {rr_ratio:.2f}:1 > "
-                f"max {_pred_max_rr:.1f}:1 (named algo required for far-target setup)"
-            )
-            _append_status(_out_status, "BLOCKED_PRED_IMMEDIATE_HIGH_RR")
-            return None
-    except Exception:
-        pass
+    # R:R builds stop/target geometry; it does not hard-gate execution.
 
     # Block paper execution during RESTRICTED session (9:30–9:44 ET price discovery).
     # Signals continue to algo_signal_log for learning.
@@ -849,7 +829,6 @@ def maybe_open_trade(
         _fam_enabled      = _cfg_fam.get(f"algos.{_fam}.exec_enabled", True)
         _fam_size_mult    = float(_cfg_fam.get(f"algos.{_fam}.exec_size_mult", 1.0) or 1.0)
         _fam_min_conf     = float(_cfg_fam.get(f"algos.{_fam}.exec_min_conf",  0.0) or 0.0)
-        _fam_min_rr       = float(_cfg_fam.get(f"algos.{_fam}.exec_min_rr",    0.0) or 0.0)
         _fam_block_sess   = str(_cfg_fam.get(f"algos.{_fam}.exec_block_sessions", "") or "")
         if not _fam_enabled:
             logger.debug(f"[PAPER] {ticker} skip: family {_fam} execution disabled")
@@ -858,10 +837,6 @@ def maybe_open_trade(
         if _fam_min_conf > 0 and confidence < _fam_min_conf:
             logger.debug(f"[PAPER] {ticker} skip: {_fam} conf {confidence:.0f}% < family min {_fam_min_conf:.0f}%")
             _append_status(_out_status, "BLOCKED_FAMILY_CONF")
-            return None
-        if _fam_min_rr > 0 and rr_ratio > 0 and rr_ratio < _fam_min_rr:
-            logger.debug(f"[PAPER] {ticker} skip: {_fam} R:R {rr_ratio:.2f} < family min {_fam_min_rr:.1f}")
-            _append_status(_out_status, "BLOCKED_FAMILY_RR")
             return None
         _sess_check = session or _live_session_early
         if _fam_block_sess and _sess_check and _sess_check in _fam_block_sess.split(","):
@@ -907,6 +882,9 @@ def maybe_open_trade(
         logger.debug(f"[PAPER] {ticker} skip: invalid price ({price}) or stop ({stop})")
         _append_status(_out_status, "BLOCKED_INVALID_PRICE")
         return None
+
+    target = _configured_target(price, stop, direction, _target_rr)
+    rr_ratio = round(float(_target_rr), 2)
 
     # ── Stop/target geometry validation ─────────────────────────────────────
     # BUY:  stop must be BELOW entry, target must be ABOVE entry.
@@ -988,6 +966,8 @@ def maybe_open_trade(
             round(price - risk_dist_orig * _stop_mult, 4) if direction == "BUY"
             else round(price + risk_dist_orig * _stop_mult, 4)
         )
+        target = _configured_target(price, stop, direction, _target_rr)
+        rr_ratio = round(float(_target_rr), 2)
 
     # Tier gate: REGULAR-tier stocks lack liquidity for AH/PM trades.
     if _live_session in ("PRE_MARKET", "AFTER_HOURS"):
@@ -1030,11 +1010,11 @@ def maybe_open_trade(
     # ── T1 and T2 price levels (multiples read from config_store) ─────────────
     from agent.config_manager import config as _cfg_t
     _t1_mult  = float(_cfg_t.get("paper.t1_r_multiple", 1.0))
-    _t2_mult  = float(_cfg_t.get("paper.t2_r_multiple", 1.5))
+    _t2_mult  = max(float(_cfg_t.get("paper.t2_r_multiple", _target_rr)), _target_rr)
     if not algo_name.upper().startswith("PRED_"):
-        _t2_mult = float(_cfg_t.get("paper.algo_t2_r_multiple", _t2_mult))
+        _t2_mult = max(float(_cfg_t.get("paper.algo_t2_r_multiple", _t2_mult)), _target_rr)
     if bool(_cfg_t.get("prediction.use_atr_stops", True)):
-        _t2_mult = max(_t2_mult, _min_rr_gate)
+        _t2_mult = max(_t2_mult, _target_rr)
     risk_dist = abs(price - stop)
     if direction == "BUY":
         t1_price = round(price + _t1_mult * risk_dist, 4)
@@ -1110,6 +1090,21 @@ def maybe_open_trade(
             )
             actual_entry = _entry_fill.fill_price   # slippage-adjusted entry
 
+            if direction == "BUY" and stop >= actual_entry:
+                _append_status(_out_status, "BLOCKED_BAD_GEOMETRY")
+                logger.debug(
+                    "[PAPER] %s BUY geometry invalid after fill: entry=%.2f stop=%.2f",
+                    ticker, actual_entry, stop,
+                )
+                return None
+            if direction == "SELL" and stop <= actual_entry:
+                _append_status(_out_status, "BLOCKED_BAD_GEOMETRY")
+                logger.debug(
+                    "[PAPER] %s SELL geometry invalid after fill: entry=%.2f stop=%.2f",
+                    ticker, actual_entry, stop,
+                )
+                return None
+
             # Recompute T1, T2, and R:R from the actual fill price.
             # Stop stays at its signal level (structural anchor); the risk
             # distance naturally reflects actual execution cost.
@@ -1121,18 +1116,9 @@ def maybe_open_trade(
                 else:
                     t1_price = round(actual_entry - _t1_mult * _actual_risk, 4)
                     t2_price = round(actual_entry - _t2_mult * _actual_risk, 4)
-                _actual_reward = abs(target - actual_entry)
-                rr_ratio = round(_actual_reward / _actual_risk, 2)
-                _min_rr_fill = get_execution_min_rr(algo_name, entry_type)
-                rr_qualifies = rr_ratio >= _min_rr_fill
-                if not rr_qualifies:
-                    logger.info(
-                        "[PAPER] %s skip: post-fill R:R %.2f:1 < %.1f:1 "
-                        "(actual entry/stop/target no longer qualifies)",
-                        ticker, rr_ratio, _min_rr_fill,
-                    )
-                    _append_status(_out_status, "BLOCKED_POST_FILL_RR")
-                    return None
+                target = t2_price
+                rr_ratio = round(_t2_mult, 2)
+                rr_qualifies = True
 
             cur = c.execute("""
                 INSERT INTO paper_trades

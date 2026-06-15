@@ -87,10 +87,7 @@ def maybe_place_tos_order(signal) -> dict:
     if confidence < MIN_CONFIDENCE:
         return {"placed": False, "reason": f"Confidence {confidence:.0f}% < gate {MIN_CONFIDENCE:.0f}%"}
 
-    # ── Gate 3: R:R quality ───────────────────────────────────────────────────
-    rr = getattr(signal, "rr_quality", "LOW")
-    if rr == "LOW":
-        return {"placed": False, "reason": "R:R too low — skip"}
+    # R:R quality is setup context only; it does not veto an actionable signal.
 
     # ── Gate 4: earnings blackout ─────────────────────────────────────────────
     if getattr(signal, "earnings_blocked", False):

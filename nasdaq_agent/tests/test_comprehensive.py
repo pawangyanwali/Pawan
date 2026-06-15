@@ -1202,7 +1202,7 @@ class TestPredictionPipeline:
         from agent.support_resistance import get_all_sr_levels
         sr = get_all_sr_levels(df)
         _, _, rr, _, qualifies = _evaluate_rr(100.0, sr=sr, direction="BUY")
-        assert qualifies == (rr >= 1.5)
+        assert qualifies is True
 
     def test_quality_labels_valid(self):
         from agent.prediction import _evaluate_rr

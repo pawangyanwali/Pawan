@@ -41,7 +41,7 @@ _DEFAULTS: dict[str, Any] = {
     # Position sizing
     "paper.rr_size_mult_min":              lambda: 0.20,   # minimum size multiplier from R:R calculation
     "paper.rr_denominator":                lambda: 2.0,    # divisor in rr_ratio / N → size_mult
-    "paper.algo_min_rr":                   lambda: 1.0,    # fallback min R:R for algo-family paper trades; primary predictions use prediction.min_rr
+    "paper.algo_min_rr":                   lambda: 1.0,    # legacy; R:R no longer hard-gates algo-family paper trades
     "paper.breakeven_stop_offset":         lambda: 0.02,   # $ offset above entry for T1 breakeven stop
     # EOD management
     "paper.eod_trail_stop_pct":            lambda: 0.003,  # 0.3% trailing stop for EOD winners
@@ -53,7 +53,7 @@ _DEFAULTS: dict[str, Any] = {
     "paper.filter_feedback_min_trades":    lambda: 5,      # min closed trades before feeding back to filter
     # ── Prediction / R:R engine ────────────────────────────────────────────────
     # These control the trade-entry quality filter. All hot-reload — no restart needed.
-    "prediction.min_rr":                   lambda: 1.5,    # minimum R:R ratio to qualify a trade (e.g. 1.5 = 1.5:1)
+    "prediction.min_rr":                   lambda: 1.5,    # target reward multiple (e.g. 2.0 = risk 1, reward 2); not a signal gate
     "prediction.min_stop_dist_pct":        lambda: 0.004,  # stop must be ≥ this % from entry (avoids noise stops)
     "prediction.max_risk_pct":             lambda: 0.020,  # cap risk at this % of stock price per scalp
     "prediction.min_target_pct":           lambda: 0.003,  # target must be ≥ this % from entry
@@ -157,8 +157,6 @@ _DEFAULTS: dict[str, Any] = {
     "risk.rolling_ev_min_trades":           lambda: 5,      # min trades before suppression kicks in
     "risk.rolling_ev_suppress_threshold":   lambda: -2.0,   # avg $/trade below which to suppress
     "risk.rolling_ev_conf_bump":            lambda: 15.0,   # additional confidence pts required
-    "risk.pred_immediate_rr_guard_enabled":  lambda: True,   # cap high-R:R primary IMMEDIATE prediction trades
-    "risk.pred_immediate_max_rr":            lambda: 2.5,    # high R:R here usually means far target, not high quality
     # ── Flash-stop guard (sub-60-second stop hits) ────────────────────────────
     "risk.flash_stop_enabled":              lambda: True,
     "risk.flash_stop_seconds":              lambda: 60,     # stop within N seconds = flash stop
@@ -218,12 +216,12 @@ _DEFAULTS: dict[str, Any] = {
     # exec_enabled: allow paper trades from this family (signals still logged for learning)
     # exec_size_mult: family-level size multiplier applied on top of global sizing
     # exec_min_conf: family override for min confidence (0 = use global paper.min_confidence)
-    # exec_min_rr: family override for min R:R (0 = use paper.algo_min_rr)
+    # exec_min_rr: family target-R override (0 = use global prediction.min_rr)
     # exec_block_sessions: comma-separated sessions to block (e.g. "RESTRICTED,PRE_MARKET")
     "algos.bb_rev.exec_enabled":            lambda: True,
     "algos.bb_rev.exec_size_mult":          lambda: 0.15,   # de-risked: 15% size until positive expectancy proven
     "algos.bb_rev.exec_min_conf":           lambda: 88.0,   # higher bar than global (de-risked)
-    "algos.bb_rev.exec_min_rr":             lambda: 1.8,    # stricter R:R than global (de-risked)
+    "algos.bb_rev.exec_min_rr":             lambda: 1.8,    # higher target-R than global when configured lower
     "algos.bb_rev.exec_block_sessions":     lambda: "RESTRICTED",
     "algos.macd_acc.exec_enabled":          lambda: True,
     "algos.macd_acc.exec_size_mult":        lambda: 1.0,

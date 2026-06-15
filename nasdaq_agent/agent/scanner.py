@@ -1666,11 +1666,11 @@ def analyse_ticker(
                     else:
                         _asig_status: list = []
                         _algo_rr = float(_asig.get("rr", 0))
-                        _algo_min_rr = get_execution_min_rr(_asig["algo"], "ALGO")
+                        _algo_target_rr = get_execution_min_rr(_asig["algo"], "ALGO")
                         _algo_rr_quality = (
                             "EXCELLENT" if _algo_rr >= 4.0 else
                             "GOOD" if _algo_rr >= 3.0 else
-                            "OK" if _algo_rr >= _algo_min_rr else
+                            "OK" if _algo_rr > 0 else
                             "LOW"
                         )
                         _trade_id = maybe_open_trade(
@@ -1680,8 +1680,8 @@ def analyse_ticker(
                             target            = float(_asig["target"]),
                             stop              = float(_asig["stop"]),
                             confidence        = float(_asig["confidence"]),
-                            rr_qualifies      = _algo_rr >= _algo_min_rr,
-                            rr_ratio          = _algo_rr,
+                            rr_qualifies      = True,
+                            rr_ratio          = max(_algo_rr, _algo_target_rr),
                             rr_quality        = _algo_rr_quality,
                             session           = sess_info.get("session", ""),
                             regime            = regime.regime,

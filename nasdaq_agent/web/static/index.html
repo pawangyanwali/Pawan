@@ -3027,12 +3027,12 @@ function buildRrTooltip(s) {
   const rr = `${fmt(s.rr_ratio, 1)}:1`;
   const q = s.rr_quality || 'LOW';
   if (q === 'LOW') {
-    return `R:R ${rr} (${q})\nNumeric R:R may look acceptable, but nearby support/resistance blocks the path to target.\nPaper execution treats LOW quality as a hard no-trade gate.`;
+    return `R:R ${rr} (${q})\nNearby support/resistance sits before the configured target.\nThis is context only; paper execution still builds the bracket from the configured reward multiple.`;
   }
   if (!s.rr_qualifies) {
-    return `R:R ${rr} (${q})\nBelow the configured minimum R:R or does not pass structural trade-quality checks.`;
+    return `R:R ${rr} (${q})\nStop/target geometry is incomplete or unavailable.`;
   }
-  return `R:R ${rr} (${q})\nRisk/reward geometry qualifies for execution if all other gates also pass.`;
+  return `R:R ${rr} (${q})\nTarget is built from the configured reward multiple if all other execution gates pass.`;
 }
 function buildRsiTooltip(s) {
   const z = s.rsi_zone || 'NEUTRAL';
@@ -3066,8 +3066,8 @@ function buildSignalExplanation(s, trade) {
   } else if (!dir) {
     gates.push('No trade: composite prediction is NEUTRAL, so execution is not called.');
   }
-  if ((s.rr_quality || 'LOW') === 'LOW') gates.push('No trade: LOW R:R quality means structure blocks the path to target.');
-  if (s.rr_ratio > 0 && !s.rr_qualifies) gates.push('Reduced/no trade: R:R did not pass the configured quality threshold.');
+  if ((s.rr_quality || 'LOW') === 'LOW') gates.push('Context: LOW R:R quality means structure sits before the configured target.');
+  if (s.rr_ratio > 0 && !s.rr_qualifies) gates.push('Context: R:R geometry is incomplete; execution gates are handled separately.');
   if (s.rsi_gated) gates.push('RSI gate changed or blocked direction due to overbought/oversold risk.');
   if (s.ctx_stale) gates.push('Context-intel stale or unavailable.');
   if (s.earnings_blocked) gates.push(`Earnings block: ${s.earnings_reason || 'earnings blackout/cooldown'}`);
@@ -3227,8 +3227,8 @@ function renderTable() {
         <div style="font-size:11px;font-weight:700;color:${pnlCol}" data-rt-pnl>${pnl>=0?'+':''}${pnl.toFixed(2)}% <span style="font-size:9px;color:var(--muted);font-weight:400">· Bar ${bars}</span></div>
       </div>`;
     } else if (s.prediction === 'BUY' || s.prediction === 'SELL' || s.prediction === 'STRONG BUY' || s.prediction === 'STRONG SELL') {
-      const rrNote = s.rr_qualifies ? 'Full size' : 'Half size (low R:R)';
-      const watchCol = s.rr_qualifies ? 'var(--green)' : 'var(--yellow)';
+      const rrNote = `${fmt(s.rr_ratio || 0, 1)}R target`;
+      const watchCol = 'var(--green)';
       statusCell = `<div title="${explainTitle}" style="padding:5px 7px;background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.25);border-radius:6px;font-size:9px">
         <div style="color:var(--green);font-weight:700">✅ SIGNAL LIVE</div>
         <div style="color:${watchCol};margin-top:2px">${rrNote}</div>
@@ -3587,7 +3587,7 @@ function openDetail(ticker) {
         <div style="border-top:1px solid rgba(34,197,94,.2);padding-top:7px">
           ${(s.bounce_signals||[]).map(f=>`<div class="bounce-signal">✓ ${f}</div>`).join('')}
         </div>
-        ${!s.rr_qualifies ? `<div style="margin-top:6px;font-size:10px;color:var(--red)">⚠ R:R ${fmt(s.rr_ratio,1)}:1 is below the configured minimum — consider skipping or tightening stop</div>` : ''}
+        ${!s.rr_qualifies ? `<div style="margin-top:6px;font-size:10px;color:var(--yellow)">R:R geometry is incomplete; execution uses the configured stop/target when geometry is valid.</div>` : ''}
       </div>`;
   }
 
@@ -5282,11 +5282,10 @@ const SETTINGS_FIELD_GUIDES = {
     title: 'Trade Rules: stop, target, R:R, T1/T2, and sizing math',
     subtitle: 'prediction.* is read by prediction.py; paper.* exit settings are read by paper_trading.py; sizing.* is read by position_sizing.py.',
     items: [
-      ['Stop / Target Mode', 'prediction.use_atr_stops', 'ATR mode uses stop = ATR x multiplier and target = max(T2, Min R:R) x risk. Structure mode uses support/resistance directly. Example: if Min R:R is 2.0 and T2 is 1.5, ATR mode lifts the target/T2 to 2.0R.'],
+      ['Stop / Target Mode', 'prediction.use_atr_stops', 'ATR mode uses stop = ATR x multiplier and target = configured reward multiple x risk. Structure mode uses support/resistance directly. Example: if target reward is 2.0, a $1 stop creates a $2 profit target.'],
       ['ATR Stop Multiple', 'prediction.stop_atr_multiple', 'Initial stop width in 1-minute ATR units. Example: 1.2 gives volatile stocks more room than 1.0.'],
       ['Daily ATR Stop Floor', 'prediction.min_stop_daily_atr_pct', 'Minimum stop as percent of daily ATR. Example: 5% prevents tiny 1-minute ATR stops in pre-market.'],
-      ['Primary Minimum R:R', 'prediction.min_rr', 'Minimum acceptable reward/risk for primary prediction signals. Example: 2.0 means qualifying primary signals must support at least 2R reward for 1R risk.'],
-      ['Algo Paper Minimum R:R', 'paper.algo_min_rr', 'Fallback R:R floor for named algo-family paper trades when the family has no override. Keeps scalp/fade algos from inheriting the primary prediction threshold.'],
+      ['Target Reward Multiple', 'prediction.min_rr', 'Configured profit target multiple. Example: 2.0 means risk 1 to make 2; it builds the bracket target and is not a signal gate.'],
       ['Stop/Target Floors', 'prediction.min_stop_dist_pct, prediction.max_risk_pct, prediction.min_target_pct', 'Bounds degenerate trades. Example: min target 0.3% blocks trades where the computed target is only a few cents away.'],
       ['T1/T2 Exit Levels', 'paper.t1_r_multiple, paper.t2_r_multiple', 'Partial and final exits as multiples of initial risk. Example: T1=1.0 and T2=1.5 exits half at 1R and the rest at 1.5R.'],
       ['Post-T1 Management', 'paper.t1_profit_lock_r, paper.post_t1_trail_r', 'After T1, the stop locks profit and then trails the water mark. Example: 0.20R lock prevents breakeven exits on the remaining half.'],
@@ -5315,8 +5314,7 @@ const SETTINGS_FIELD_GUIDES = {
       ['Consecutive Loss Cooldown', 'risk.max_consecutive_losses, risk.cooldown_after_losses', 'Live-mode circuit breakers for repeated losses; paper mode records observability but avoids blocking learning flow.'],
       ['Pre-T1 Storm Circuit', 'risk.pre_t1_storm_*', 'Pauses a family/session when too many trades stop before T1. Example: 8 hits or $250 rolling loss in 30 minutes pauses that family.'],
       ['Flash-Stop Guard', 'risk.flash_stop_*', 'Catches immediate failures. Example: three stops within 60 seconds in 30 minutes pauses that family/session.'],
-      ['Rolling EV Gate', 'risk.rolling_ev_*', 'Raises execution confidence for losing family/direction/session combos. Example: average below -$2 over five trades adds a 15-point confidence bump.'],
-      ['Primary Immediate R:R Guard', 'risk.pred_immediate_*', 'Caps anonymous primary IMMEDIATE prediction trades when R:R is suspiciously high. Example: 2.5 blocks far-target primary trades unless a named algo owns the setup.']
+      ['Rolling EV Gate', 'risk.rolling_ev_*', 'Raises execution confidence for losing family/direction/session combos. Example: average below -$2 over five trades adds a 15-point confidence bump.']
     ],
   },
   learner: {
@@ -5336,7 +5334,7 @@ const SETTINGS_FIELD_GUIDES = {
       ['Learned Parameters', 'algo parameter tables', 'Per-family gates such as rvol_gate, conf_gate, and target_mult are tuned from outcomes. Example: a weak family can learn a higher confidence gate.'],
       ['Execution Enabled', 'algos.<family>.exec_enabled', 'Controls whether the family can open paper trades. Signals still display and feed learning when disabled.'],
       ['Size Multiplier', 'algos.<family>.exec_size_mult', 'Family-level size haircut or boost. Example: BB_REV at 0.15 means only 15% of normal size.'],
-      ['Min Confidence / R:R', 'algos.<family>.exec_min_conf, exec_min_rr', 'Family overrides for execution floors. Example: setting min confidence 88 forces only very strong BB_REV trades.'],
+      ['Min Confidence / Target R', 'algos.<family>.exec_min_conf, exec_min_rr', 'Family confidence can gate execution; family R:R only raises the target reward multiple. Example: 2.4 makes that family target 2.4R instead of the global value.'],
       ['Blocked Sessions', 'algos.<family>.exec_block_sessions', 'Comma-separated sessions to block. Example: RESTRICTED prevents price-discovery trades for that family.']
     ],
   },
@@ -5473,8 +5471,7 @@ async function stLoadTradeRulesTab() {
         </div>` +
         _row('st-tr-atr-mult',    'ATR STOP MULTIPLE',         pc['prediction.stop_atr_multiple']  ?? 1.0,   0.2,  3,    0.1, 'Stop distance = this × ATR(14). 1.0 = standard scalp stop. Increase for wider stops on volatile stocks.') +
         _row('st-tr-daily-atr-floor', 'MIN STOP (% of daily ATR)', (pc['prediction.min_stop_daily_atr_pct'] ?? 0.05)*100, 1, 30, 1, 'Floor: stop ≥ this % of the 14-day daily ATR. Prevents 6-cent pre/after-market stops when 1-min ATR is tiny. 5% of daily ATR ≈ $0.15 for a $65 stock.') +
-        _row('st-tr-min-rr',      'PRIMARY MINIMUM R:R RATIO', pc['prediction.min_rr']            ?? 1.5,   0.5,  10,   0.1, 'Primary prediction trades use this floor. In ATR mode: primary target/T2 is kept at or above this value and structure-blocked paths are rejected.') +
-        _row('st-tr-algo-min-rr', 'ALGO PAPER MINIMUM R:R',    pp['paper.algo_min_rr']            ?? 1.0,   0.2,  5,    0.1, 'Named algo-family paper trades use this fallback when the family has no specific exec_min_rr override. Example: 1.0 allows 1R scalp/fade learning while primary predictions can stay at 2R.') +
+        _row('st-tr-min-rr',      'TARGET REWARD MULTIPLE (R)', pc['prediction.min_rr']            ?? 1.5,   0.5,  10,   0.1, 'Builds profit targets from risk. Example: 2.0 means risk $1 to target $2. This does not block BUY/SELL signals by itself.') +
         _row('st-tr-min-stop',    'MIN STOP DISTANCE (% of price)', (pc['prediction.min_stop_dist_pct'] ?? 0.004)*100, 0.1, 5, 0.05, 'Floor on stop distance. Prevents stops too close to entry that trigger on normal noise.') +
         _row('st-tr-max-risk',    'MAX RISK PER TRADE (% of price)', (pc['prediction.max_risk_pct']      ?? 0.020)*100, 0.1, 10, 0.1, 'Cap on stop distance. Prevents oversized risk on volatile stocks.') +
         _row('st-tr-min-target',  'MIN TARGET DISTANCE (% of price)', (pc['prediction.min_target_pct']    ?? 0.003)*100, 0.05, 5, 0.05, 'Target must be at least this far from entry. Prevents degenerate micro-targets.')
@@ -5524,7 +5521,6 @@ async function stSaveTradeRules(btn) {
     "prediction.stop_atr_multiple":        _v('st-tr-atr-mult'),
     "prediction.min_stop_daily_atr_pct":  _v('st-tr-daily-atr-floor') / 100,
     "prediction.min_rr":                  _v('st-tr-min-rr'),
-    "paper.algo_min_rr":                  _v('st-tr-algo-min-rr'),
     "prediction.min_stop_dist_pct":       _v('st-tr-min-stop') / 100,
     "prediction.max_risk_pct":        _v('st-tr-max-risk')    / 100,
     "prediction.min_target_pct":      _v('st-tr-min-target')  / 100,
@@ -5983,23 +5979,6 @@ async function stLoadRiskTab() {
             </div>
           </div>
         </div>
-        <div style="margin-top:14px;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
-          <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:10px">PRIMARY IMMEDIATE R:R GUARD</div>
-          <div style="font-size:9px;color:var(--muted);margin-bottom:10px">Caps high-R:R primary prediction trades when no named algo owns the setup. This protects against far-target/tight-stop trades that look mathematically attractive but historically underperform.</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-            <div>
-              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">ENABLED</label>
-              <select id="st-rc-pred-rr-enabled" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
-                <option value="true"  ${(rc['risk.pred_immediate_rr_guard_enabled'] ?? true)  ? 'selected' : ''}>Enabled</option>
-                <option value="false" ${!(rc['risk.pred_immediate_rr_guard_enabled'] ?? true) ? 'selected' : ''}>Disabled</option>
-              </select>
-            </div>
-            <div>
-              <label style="font-size:9px;color:var(--muted);display:block;margin-bottom:3px">MAX PRIMARY R:R</label>
-              <input id="st-rc-pred-max-rr" type="number" min="1.5" max="10" step="0.1" value="${rc['risk.pred_immediate_max_rr'] ?? 2.5}" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-size:12px;font-family:inherit">
-            </div>
-          </div>
-        </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <button onclick="stSaveRiskConfig(this)" style="background:var(--accent);border:none;color:white;border-radius:6px;padding:8px 20px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700">Save Risk Config</button>
@@ -6039,8 +6018,6 @@ async function stSaveRiskConfig(btn) {
     "risk.rolling_ev_min_trades":           parseInt(get('st-rc-ev-trades'), 10),
     "risk.rolling_ev_suppress_threshold":   parseFloat(get('st-rc-ev-threshold')),
     "risk.rolling_ev_conf_bump":            parseFloat(get('st-rc-ev-bump')),
-    "risk.pred_immediate_rr_guard_enabled":  document.getElementById('st-rc-pred-rr-enabled')?.value === 'true',
-    "risk.pred_immediate_max_rr":            parseFloat(get('st-rc-pred-max-rr')),
   };
   // Booleans are not NaN — only validate numeric fields
   const numericUpdates = Object.entries(updates).filter(([, v]) => typeof v === 'number').map(([, v]) => v);
@@ -6435,7 +6412,7 @@ function _renderAlgoFamilyCard(family, params, execCfg) {
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:3px 6px;color:var(--text);font-size:11px;font-family:inherit">
         </div>
         <div>
-          <label style="font-size:8px;color:var(--muted);display:block;margin-bottom:2px">MIN R:R OVERRIDE</label>
+          <label style="font-size:8px;color:var(--muted);display:block;margin-bottom:2px">TARGET R OVERRIDE</label>
           <input id="exec-rr-${family}" type="number" min="0" max="5" step="0.1" value="${execCfg[family]?.min_rr ?? 0}" placeholder="0 = global"
             style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:3px 6px;color:var(--text);font-size:11px;font-family:inherit">
         </div>
