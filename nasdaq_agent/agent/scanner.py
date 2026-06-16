@@ -432,6 +432,135 @@ class StockSignal:
         return d
 
 
+def _positive_float(value, default: float = 0.0) -> float:
+    try:
+        v = float(value)
+        if np.isfinite(v) and v > 0:
+            return v
+    except Exception:
+        pass
+    return default
+
+
+def _last_positive_close(df: Optional[pd.DataFrame]) -> float:
+    if df is None or df.empty or "Close" not in df.columns:
+        return 0.0
+    try:
+        closes = df["Close"].dropna()
+        closes = closes[closes > 0]
+        if not closes.empty:
+            return float(closes.iloc[-1])
+    except Exception:
+        pass
+    return 0.0
+
+
+def _session_open_from_1m(df: Optional[pd.DataFrame]) -> float:
+    if df is None or df.empty or "Open" not in df.columns:
+        return 0.0
+    try:
+        today = pd.Timestamp.now(tz="America/New_York").date()
+        today_df = df[df.index.date == today]
+        if not today_df.empty:
+            return _positive_float(today_df.iloc[0].get("Open"))
+    except Exception:
+        pass
+    try:
+        return _positive_float(df.iloc[0].get("Open"))
+    except Exception:
+        return 0.0
+
+
+def _previous_close_from_1d(df_1d: Optional[pd.DataFrame]) -> float:
+    if df_1d is None or df_1d.empty or "Close" not in df_1d.columns:
+        return 0.0
+    try:
+        today = pd.Timestamp.now(tz="America/New_York").date()
+        last_date = df_1d.index[-1].date()
+        if last_date >= today and len(df_1d) >= 2:
+            return _positive_float(df_1d.iloc[-2].get("Close"))
+        return _positive_float(df_1d.iloc[-1].get("Close"))
+    except Exception:
+        return _positive_float(df_1d.iloc[-1].get("Close"))
+
+
+def _observation_signal(
+    ticker: str,
+    df_1m: Optional[pd.DataFrame],
+    df_1d: Optional[pd.DataFrame],
+    session: Optional[dict] = None,
+    quote: Optional[dict] = None,
+    reason: str = "Scan deferred this cycle",
+) -> Optional[StockSignal]:
+    """
+    Build a lightweight dashboard row when the heavy analysis path is deferred.
+
+    A cycle-budget timeout should not make a ticker vanish from the production
+    dashboard. These rows are neutral/watch-only and are not recorded as model
+    training observations; they simply preserve visibility until the next full
+    analysis for that ticker completes.
+    """
+    if quote is None:
+        try:
+            from agent.valkey_client import get_all_prices
+            quote = (get_all_prices() or {}).get(ticker, {}) or {}
+        except Exception:
+            quote = {}
+
+    price = _last_positive_close(df_1m) or _positive_float(quote.get("last"))
+    if price <= 0:
+        return None
+
+    prev_close = _previous_close_from_1d(df_1d) or _positive_float(quote.get("prev_close"))
+    if prev_close <= 0:
+        prev_close = price
+    change_pct = float(quote.get("pct_change") or quote.get("net_pct_change") or 0.0)
+    if not change_pct and prev_close > 0:
+        change_pct = round((price - prev_close) / prev_close * 100.0, 3)
+
+    open_price = (
+        _session_open_from_1m(df_1m)
+        or _positive_float(quote.get("open"))
+        or _positive_float(quote.get("regularMarketOpen"))
+    )
+
+    sess = session or {}
+    return StockSignal(
+        ticker=ticker,
+        name=ticker,
+        price=round(price, 4),
+        change_pct=round(change_pct, 3),
+        open_price=round(open_price, 4),
+        technical=0.0,
+        volume=0.0,
+        ml_prob=0.5,
+        ml_daily_prob=0.5,
+        sentiment=0.0,
+        score=0.0,
+        signal="NEUTRAL",
+        rel_volume=0.0,
+        unusual_vol=False,
+        prediction="NEUTRAL",
+        confidence=0.0,
+        trend="SIDEWAYS",
+        trend_probability=0.5,
+        ml_trained=False,
+        target_price=0.0,
+        stop_loss=0.0,
+        rr_ratio=float(get_execution_min_rr()),
+        patterns=["OBSERVATION"],
+        reasons=[reason],
+        session=sess.get("session", "UNKNOWN"),
+        session_label=sess.get("label", ""),
+        session_color=sess.get("color", "#94a3b8"),
+        session_mult=float(sess.get("size_mult", 1.0) or 1.0),
+        session_advice=sess.get("advice", ""),
+        signal_strength="NO_SIGNAL",
+        rr_quality="OBSERVE",
+        rr_qualifies=False,
+    )
+
+
 # ── Ticker metadata cache ─────────────────────────────────────────────────────
 
 _info_cache:    dict[str, dict]         = {}
@@ -1738,6 +1867,7 @@ class Scanner:
         self._first_scan_done:    threading.Event   = threading.Event()
         self._second_scan_done:   threading.Event   = threading.Event()
         self._scan_count:         int               = 0
+        self._scan_cursor:        int               = 0
         self._last_training_defer_log: float        = 0.0
 
     def register_callback(self, fn: Callable) -> None:
@@ -1947,6 +2077,16 @@ class Scanner:
         except Exception:
             pass
 
+        # Cycle-budgeted scans must not starve the tail of the active universe.
+        # Rotate the start point each cycle; completed rows are merged back into
+        # the prior dashboard snapshot below, so high-priority names remain
+        # visible while the scan cursor works through the full active set.
+        _scan_cursor = 0
+        if active_tickers:
+            _scan_cursor = self._scan_cursor % len(active_tickers)
+            if _scan_cursor:
+                active_tickers = active_tickers[_scan_cursor:] + active_tickers[:_scan_cursor]
+
         logger.info(f"Scan starting — {len(active_tickers)} tickers…")
 
         # Detect session once so the data fetch uses the right mode
@@ -2062,7 +2202,47 @@ class Scanner:
         except Exception as _lr_err:
             logger.debug(f"learning_rank error: {_lr_err}")
 
-        self.signals   = results
+        # A partial scan must never replace the full dashboard with only the
+        # tickers that completed inside the cycle budget. Merge completed rows
+        # into the previous snapshot, and create lightweight watch-only rows for
+        # active tickers that have price data but no completed analysis yet.
+        _actual_by_ticker = {s.ticker: s for s in results}
+        _previous_by_ticker = {s.ticker: s for s in self.signals}
+        _merged_by_ticker: dict[str, StockSignal] = {}
+        try:
+            from agent.valkey_client import get_all_prices as _get_all_prices
+            _latest_quotes = _get_all_prices() or {}
+        except Exception:
+            _latest_quotes = {}
+        _fallback_count = 0
+        _preserved_count = 0
+        for _ticker in active_tickers:
+            if _ticker in _actual_by_ticker:
+                _merged_by_ticker[_ticker] = _actual_by_ticker[_ticker]
+            elif _ticker in _previous_by_ticker:
+                _merged_by_ticker[_ticker] = _previous_by_ticker[_ticker]
+                _preserved_count += 1
+            else:
+                _fallback = _observation_signal(
+                    _ticker,
+                    batch_1m.get(_ticker),
+                    batch_1d.get(_ticker),
+                    session=_sess,
+                    quote=_latest_quotes.get(_ticker, {}) if isinstance(_latest_quotes, dict) else {},
+                    reason="Analysis deferred by scanner cycle budget",
+                )
+                if _fallback is not None:
+                    _merged_by_ticker[_ticker] = _fallback
+                    _fallback_count += 1
+
+        for _ticker, _sig in _previous_by_ticker.items():
+            if _ticker not in _merged_by_ticker:
+                _merged_by_ticker[_ticker] = _sig
+
+        merged_results = list(_merged_by_ticker.values())
+        merged_results.sort(key=lambda s: abs(s.score), reverse=True)
+
+        self.signals   = merged_results
         self.last_scan = datetime.now(timezone.utc).isoformat()
 
         # Market-observation learning: record all signals with full context,
@@ -2088,14 +2268,26 @@ class Scanner:
         except Exception as _af_live_err:
             logger.debug(f"live adaptive filter update error: {_af_live_err}")
 
-        self._notify(results)
+        self._notify(merged_results)
         elapsed = round(time.time() - t0, 1)
         self._scan_count += 1
+        if active_tickers:
+            self._scan_cursor = (_scan_cursor + max(len(results), _pipeline_workers(), 1)) % len(active_tickers)
         if self._scan_count == 1:
             self._first_scan_done.set()   # unblock _train_ml_background
         if self._scan_count >= 2:
             self._second_scan_done.set()
-        logger.info(f"Scan complete in {elapsed}s | {len(results)}/{len(active_tickers)} active (universe: {len(NASDAQ_TICKERS)})")
+        logger.info(
+            "Scan complete in %ss | %d/%d analyzed, %d rows published "
+            "(%d preserved, %d observation fallback; universe: %d)",
+            elapsed,
+            len(results),
+            len(active_tickers),
+            len(merged_results),
+            _preserved_count,
+            _fallback_count,
+            len(NASDAQ_TICKERS),
+        )
 
         # Clear the active-scan marker now that the cycle completed cleanly.
         try:

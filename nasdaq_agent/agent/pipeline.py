@@ -243,13 +243,8 @@ class ScanPipeline:
                 for future in pending:
                     future.cancel()
                 timeouts = len(timed_out)
-                if slow_cooldown_s > 0:
-                    until = time.time() + slow_cooldown_s
-                    with _slow_skip_lock:
-                        for ticker in timed_out:
-                            _slow_skip_until[ticker] = until
                 logger.warning(
-                    "ScanPipeline cycle budget %.1fs reached; timed out %d ticker(s): %s",
+                    "ScanPipeline cycle budget %.1fs reached; deferred %d ticker(s): %s",
                     cycle_budget_s,
                     timeouts,
                     ", ".join(timed_out[:10]),

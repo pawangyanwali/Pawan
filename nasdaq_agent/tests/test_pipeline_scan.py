@@ -54,7 +54,7 @@ def test_scan_records_slow_ticker_metrics(monkeypatch):
     assert metrics["slow_tickers_last_cycle"][0]["elapsed_s"] >= 0.005
 
 
-def test_scan_cycle_budget_marks_slow_ticker_for_cooldown(monkeypatch):
+def test_scan_cycle_budget_defers_without_slow_cooldown(monkeypatch):
     fake_scanner = types.ModuleType("agent.scanner")
 
     class StockSignal:
@@ -96,4 +96,5 @@ def test_scan_cycle_budget_marks_slow_ticker_for_cooldown(monkeypatch):
     metrics = pipeline.get_metrics()
 
     assert [sig.ticker for sig in results] == ["FAST"]
-    assert metrics["skipped_slow_cooldown"] == 1
+    assert metrics["timeouts_last_cycle"] == 1
+    assert metrics["skipped_slow_cooldown"] == 0
