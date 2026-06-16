@@ -37,6 +37,7 @@ def write_latest(
     regime:        dict[str, Any],
     session:       dict[str, Any],
     scanned_count: int,
+    scan_meta:     Optional[dict[str, Any]] = None,
 ) -> bool:
     """
     Persist the latest scan result to PostgreSQL (durable) and publish a
@@ -51,6 +52,8 @@ def write_latest(
         "session":       session,
         "scanned_count": scanned_count,
     }
+    if scan_meta:
+        snapshot.update(scan_meta)
 
     pg_ok = False
     vk_ok = False

@@ -123,6 +123,20 @@ async def websocket_endpoint(ws: WebSocket):
 
         # Choose best available signals: live > loaded persisted snapshot
         live_sigs, _last_scan, from_cache = _current_signal_snapshot()
+        try:
+            from agent.signal_snapshot import read_latest as _snap_read
+            _snap = _snap_read() or {}
+        except Exception:
+            _snap = {}
+        _scan_meta = {
+            "universe_total": int(_snap.get("universe_total") or _get_universe_total()),
+            "monitored_count": int(_snap.get("monitored_count") or len(live_sigs)),
+            "active_scan_count": int(_snap.get("active_scan_count") or _snap.get("scanned_count") or len(live_sigs)),
+            "analysis_batch_count": int(_snap.get("analysis_batch_count") or _snap.get("deep_analyzed_count") or _snap.get("scanned_count") or len(live_sigs)),
+            "deep_analyzed_count": int(_snap.get("deep_analyzed_count") or _snap.get("scanned_count") or len(live_sigs)),
+            "preserved_count": int(_snap.get("preserved_count") or 0),
+            "observation_count": int(_snap.get("observation_count") or 0),
+        }
 
         if live_sigs:
             # Full update so the tab is immediately usable
@@ -132,7 +146,14 @@ async def websocket_endpoint(ws: WebSocket):
                 "regime":        regime.to_dict(),
                 "session":       session,
                 "from_cache":    from_cache,
-                "scanned_count": len(live_sigs),
+                "universe_total": _scan_meta["universe_total"],
+                "monitored_count": _scan_meta["monitored_count"],
+                "active_scan_count": _scan_meta["active_scan_count"],
+                "analysis_batch_count": _scan_meta["analysis_batch_count"],
+                "deep_analyzed_count": _scan_meta["deep_analyzed_count"],
+                "preserved_count": _scan_meta["preserved_count"],
+                "observation_count": _scan_meta["observation_count"],
+                "scanned_count": _scan_meta["active_scan_count"],
             }))
         else:
             # No data yet (cold start) — send a status frame so the loading

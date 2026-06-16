@@ -2272,7 +2272,7 @@ async function connectWS() {
       else allSignals.push(sig);
       // Update scan progress chip immediately (no render needed for this)
       const sc = document.getElementById('scan-count');
-      if (sc) sc.textContent = `${m.n_done}/${m.n_total} scanned`;
+      if (sc) sc.textContent = `${m.n_done}/${m.n_total} deep analyzed`;
       // Update loading sub-text with scan progress
       const sub = document.getElementById('loading-sub');
       if (sub) sub.textContent = `Scanning… ${m.n_done}/${m.n_total} tickers complete`;
@@ -2294,7 +2294,7 @@ async function connectWS() {
       }
       if (lastTotal) {
         const sc = document.getElementById('scan-count');
-        if (sc) sc.textContent = `${lastDone}/${lastTotal} scanned`;
+        if (sc) sc.textContent = `${lastDone}/${lastTotal} deep analyzed`;
         const sub = document.getElementById('loading-sub');
         if (sub) sub.textContent = `Scanning… ${lastDone}/${lastTotal} tickers complete`;
       }
@@ -2960,6 +2960,12 @@ function _applySignalPayload(d) {
   }
   if (d.universe_total) window._universeTotal = d.universe_total;
   if (d.count != null) window._scannedCount = d.count;
+  if (d.monitored_count != null) window._monitoredCount = d.monitored_count;
+  if (d.active_scan_count != null) window._activeScanCount = d.active_scan_count;
+  if (d.analysis_batch_count != null) window._analysisBatchCount = d.analysis_batch_count;
+  if (d.deep_analyzed_count != null) window._deepAnalyzedCount = d.deep_analyzed_count;
+  if (d.preserved_count != null) window._preservedCount = d.preserved_count;
+  if (d.observation_count != null) window._observationCount = d.observation_count;
   renderAll();
   hideLoading();
   return allSignals.length > 0;
@@ -3117,6 +3123,24 @@ function updateSummary() {
     _uni > _act
       ? `${_act} analyzed · ${_uni} in universe`
       : `${_act} stocks scanned`;
+  {
+    const _mon = window._monitoredCount || allSignals.length;
+    const _sched = window._analysisBatchCount || 0;
+    const _deep = window._deepAnalyzedCount ?? window._scannedCount ?? allSignals.length;
+    const _pres = window._preservedCount || 0;
+    const _obs = window._observationCount || 0;
+    const _scanText = document.getElementById('scan-count');
+    if (_scanText) {
+      const parts = [`${_mon} monitored`];
+      if (_sched) parts.push(`${_deep}/${_sched} deep this cycle`);
+      else parts.push(`${_deep} deep this cycle`);
+      if (_pres) parts.push(`${_pres} preserved`);
+      if (_obs) parts.push(`${_obs} price-only`);
+      parts.push(`${_uni} universe`);
+      _scanText.textContent = parts.join(' · ');
+      _scanText.title = 'Monitored rows stay visible for the full universe. Deep analysis is CPU-heavy and rotates through the universe without dropping prior rows.';
+    }
+  }
   if (allSignals[0]?.scanned_at) {
     const rawTs = allSignals[0].scanned_at;
     // isoformat() from Python already includes +00:00 — don't append Z again

@@ -609,6 +609,15 @@ def _on_signals(signals: list[StockSignal]) -> None:
             )
 
     sigs_dicts = [s.to_dict() for s in signals]
+    _scan_meta = {
+        "universe_total": _get_universe_total(),
+        "monitored_count": len(sigs_dicts),
+        "active_scan_count": int(getattr(scanner, "_last_active_count", len(signals)) or len(signals)),
+        "analysis_batch_count": int(getattr(scanner, "_last_analysis_batch_count", len(signals)) or len(signals)),
+        "deep_analyzed_count": int(getattr(scanner, "_last_deep_analyzed_count", len(signals)) or len(signals)),
+        "preserved_count": int(getattr(scanner, "_last_preserved_count", 0) or 0),
+        "observation_count": int(getattr(scanner, "_last_observation_count", 0) or 0),
+    }
 
     # Write durable snapshot to Valkey — web-api reads this on restart instead
     # of waiting for the next scan cycle (Step 3 of the containerisation plan).
@@ -619,6 +628,7 @@ def _on_signals(signals: list[StockSignal]) -> None:
             regime        = regime.to_dict(),
             session       = session,
             scanned_count = len(signals),
+            scan_meta     = _scan_meta,
         )
     except Exception:
         pass
@@ -638,8 +648,14 @@ def _on_signals(signals: list[StockSignal]) -> None:
         "open_trades":   open_trades,
         "pt_stats":      pt_stats,
         "breadth":       breadth,
-        "universe_total": _get_universe_total(),
-        "scanned_count": len(signals),
+        "universe_total": _scan_meta["universe_total"],
+        "monitored_count": _scan_meta["monitored_count"],
+        "active_scan_count": _scan_meta["active_scan_count"],
+        "analysis_batch_count": _scan_meta["analysis_batch_count"],
+        "deep_analyzed_count": _scan_meta["deep_analyzed_count"],
+        "preserved_count": _scan_meta["preserved_count"],
+        "observation_count": _scan_meta["observation_count"],
+        "scanned_count": _scan_meta["active_scan_count"],
     })
     asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 
@@ -690,6 +706,15 @@ def _on_valkey_scan(snap: dict) -> None:
         sigs_dicts = snap.get("signals", [])
         regime     = snap.get("regime", {})
         session    = snap.get("session", {})
+        _scan_meta = {
+            "universe_total": int(snap.get("universe_total") or _get_universe_total()),
+            "monitored_count": int(snap.get("monitored_count") or len(sigs_dicts)),
+            "active_scan_count": int(snap.get("active_scan_count") or snap.get("scanned_count") or len(sigs_dicts)),
+            "analysis_batch_count": int(snap.get("analysis_batch_count") or snap.get("deep_analyzed_count") or snap.get("scanned_count") or len(sigs_dicts)),
+            "deep_analyzed_count": int(snap.get("deep_analyzed_count") or snap.get("scanned_count") or len(sigs_dicts)),
+            "preserved_count": int(snap.get("preserved_count") or 0),
+            "observation_count": int(snap.get("observation_count") or 0),
+        }
 
         _above_vwap      = sum(1 for s in sigs_dicts if s.get("vwap_event") in ("ABOVE", "RECLAIM", "EXTENDED_UP"))
         _below_vwap      = sum(1 for s in sigs_dicts if s.get("vwap_event") in ("BELOW", "REJECTION", "EXTENDED_DOWN"))
@@ -755,8 +780,14 @@ def _on_valkey_scan(snap: dict) -> None:
             "open_trades":    open_trades,
             "pt_stats":       pt_stats,
             "breadth":        breadth,
-            "universe_total": _get_universe_total(),
-            "scanned_count":  len(sigs_dicts),
+            "universe_total": _scan_meta["universe_total"],
+            "monitored_count": _scan_meta["monitored_count"],
+            "active_scan_count": _scan_meta["active_scan_count"],
+            "analysis_batch_count": _scan_meta["analysis_batch_count"],
+            "deep_analyzed_count": _scan_meta["deep_analyzed_count"],
+            "preserved_count": _scan_meta["preserved_count"],
+            "observation_count": _scan_meta["observation_count"],
+            "scanned_count":  _scan_meta["active_scan_count"],
         })
         asyncio.run_coroutine_threadsafe(manager.broadcast(payload), _event_loop)
 

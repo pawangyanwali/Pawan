@@ -147,7 +147,7 @@ class UniverseManager:
     """
 
     HOT_CACHE_TTL    = 300   # refresh bulk quotes every 5 min
-    N_TIER2_ACTIVE   = 150   # how many Tier 2/3 tickers to include when active
+    N_TIER2_ACTIVE   = len(FULL_UNIVERSE)   # legacy name; all tracked tickers remain active
 
     def __init__(self) -> None:
         self._hot:      list[str] = []
@@ -198,9 +198,11 @@ class UniverseManager:
 
         if quotes:
             scored = []
+            quoted = set()
             for sym in broader:
                 if sym not in quotes:
                     continue
+                quoted.add(sym)
                 q   = quotes[sym]
                 vol = float(q.get("volume") or 0)
                 pct = abs(float(q.get("pct_change") or 0))
@@ -209,9 +211,10 @@ class UniverseManager:
                 scored.append((sym, score))
             scored.sort(key=lambda x: x[1], reverse=True)
             result += [sym for sym, _ in scored[:self.N_TIER2_ACTIVE]]
+            result += [sym for sym in broader if sym not in quoted]
         else:
             # Schwab not available yet — fall back to static Tier 2
-            result += list(TIER2[:self.N_TIER2_ACTIVE])
+            result += broader
 
         # Always include user watchlist items
         try:
@@ -234,7 +237,7 @@ class UniverseManager:
         except Exception:
             pass
 
-        return result
+        return list(dict.fromkeys(result))
 
     def universe_size(self) -> int:
         return len(FULL_UNIVERSE)

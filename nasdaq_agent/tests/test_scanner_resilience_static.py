@@ -24,9 +24,9 @@ def test_scanner_full_cycle_preserves_previous_signals_on_zero_result_scan():
     zero_guard = src.index("if not results:")
     assign = src.index("_actual_by_ticker = {s.ticker: s for s in results}")
     assert zero_guard < assign
-    assert "preserving previous" in src[zero_guard:assign]
-    assert "return list(self.signals)" in src[zero_guard:assign]
-    assert "leaving the dashboard snapshot unchanged" in src[zero_guard:assign]
+    assert "publishing monitored" in src[zero_guard:assign]
+    assert "return list(self.signals)" not in src[zero_guard:assign]
+    assert "return []" not in src[zero_guard:assign]
 
 
 def test_scanner_merges_partial_results_before_publishing():
@@ -39,12 +39,35 @@ def test_scanner_merges_partial_results_before_publishing():
     assert "self._notify(merged_results)" in src
 
 
+def test_scanner_monitors_full_universe_but_limits_deep_analysis_batch():
+    src = _src("agent/scanner.py")
+
+    assert "def _analysis_batch_size()" in src
+    assert "analysis_tickers = active_tickers[:analysis_limit]" in src
+    assert 'fetch_batch_realtime(active_tickers, extended_hours=_is_extended)' in src
+    assert 'fetch_batch_interval(analysis_tickers, "5min"' in src
+    assert 'fetch_batch_interval(analysis_tickers, "1h"' in src
+    assert 'fetch_batch_interval(analysis_tickers, "1day"' in src
+    assert "get_pipeline(n_workers=_pipeline_workers()).scan(\n            analysis_tickers" in src
+    assert "for _ticker in active_tickers:" in src
+    assert "_last_analysis_batch_count" in src
+
+
 def test_pipeline_does_not_slow_cooldown_cycle_budget_deferrals():
     src = _src("agent/pipeline.py")
     pending_block = src[src.index("if pending:"):src.index("finally:", src.index("if pending:"))]
 
     assert "deferred %d ticker" in pending_block
     assert "_slow_skip_until" not in pending_block
+
+
+def test_universe_manager_keeps_full_tracked_universe_visible():
+    src = _src("agent/ticker_universe.py")
+
+    assert "N_TIER2_ACTIVE   = len(FULL_UNIVERSE)" in src
+    assert "result += [sym for sym in broader if sym not in quoted]" in src
+    assert "result += broader" in src
+    assert "return list(dict.fromkeys(result))" in src
 
 
 def test_scanner_closed_session_uses_5min_cache_as_proxy_when_1min_unavailable():

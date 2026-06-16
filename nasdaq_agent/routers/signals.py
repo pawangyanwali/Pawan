@@ -28,13 +28,29 @@ async def get_signals(_user: AuthenticatedUser = Depends(require_viewer)):
     """REST endpoint: returns the latest cached scan results."""
     from main import _current_signal_snapshot, _get_universe_total
     from agent.scanner import scanner
+    try:
+        from agent.signal_snapshot import read_latest as _snap_read
+        snap = _snap_read() or {}
+    except Exception:
+        snap = {}
     sigs, last_scan, from_cache = _current_signal_snapshot()
+    universe_total = int(snap.get("universe_total") or _get_universe_total())
+    monitored_count = int(snap.get("monitored_count") or len(sigs))
+    active_scan_count = int(snap.get("active_scan_count") or snap.get("scanned_count") or len(sigs))
+    analysis_batch_count = int(snap.get("analysis_batch_count") or snap.get("deep_analyzed_count") or snap.get("scanned_count") or len(sigs))
+    deep_analyzed_count = int(snap.get("deep_analyzed_count") or snap.get("scanned_count") or len(sigs))
     return {
         "last_scan":  last_scan,
-        "count":      len(sigs),
+        "count":      active_scan_count,
         "signals":    sigs,
         "from_cache": from_cache,
-        "universe_total": _get_universe_total(),
+        "universe_total": universe_total,
+        "monitored_count": monitored_count,
+        "active_scan_count": active_scan_count,
+        "analysis_batch_count": analysis_batch_count,
+        "deep_analyzed_count": deep_analyzed_count,
+        "preserved_count": int(snap.get("preserved_count") or 0),
+        "observation_count": int(snap.get("observation_count") or 0),
         "empty_reason": None if sigs else "no_scanner_signal_cache_or_quote_data",
         "scanning":   scanner.is_running and not sigs,
     }

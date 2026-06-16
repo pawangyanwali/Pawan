@@ -54,6 +54,13 @@ def _on_signals(signals: list) -> None:
         from agent.market_regime import get_regime
         from agent.market_hours import get_session_info
         from agent.signal_snapshot import read_latest, write_latest
+        from agent.scanner import scanner
+        try:
+            from agent.ticker_universe import FULL_UNIVERSE
+            _universe_total = len(FULL_UNIVERSE)
+        except Exception:
+            from config import NASDAQ_TICKERS
+            _universe_total = len(NASDAQ_TICKERS)
 
         sigs_dicts = [s.to_dict() for s in signals]
         if not sigs_dicts:
@@ -76,9 +83,25 @@ def _on_signals(signals: list) -> None:
             signals       = sigs_dicts,
             regime        = get_regime().to_dict(),
             session       = get_session_info(),
-            scanned_count = len(signals),
+            scanned_count = int(getattr(scanner, "_last_active_count", len(signals)) or len(signals)),
+            scan_meta     = {
+                "universe_total": max(len(sigs_dicts), _universe_total),
+                "monitored_count": len(sigs_dicts),
+                "active_scan_count": int(getattr(scanner, "_last_active_count", len(signals)) or len(signals)),
+                "analysis_batch_count": int(getattr(scanner, "_last_analysis_batch_count", len(signals)) or 0),
+                "deep_analyzed_count": int(getattr(scanner, "_last_deep_analyzed_count", len(signals)) or 0),
+                "preserved_count": int(getattr(scanner, "_last_preserved_count", 0) or 0),
+                "observation_count": int(getattr(scanner, "_last_observation_count", 0) or 0),
+            },
         )
-        _log.info("Published %d signals to Valkey", len(signals))
+        _log.info(
+            "Published %d rows to Valkey (%d scheduled, %d deep analyzed, %d preserved, %d observation)",
+            len(signals),
+            int(getattr(scanner, "_last_analysis_batch_count", len(signals)) or 0),
+            int(getattr(scanner, "_last_deep_analyzed_count", len(signals)) or 0),
+            int(getattr(scanner, "_last_preserved_count", 0) or 0),
+            int(getattr(scanner, "_last_observation_count", 0) or 0),
+        )
     except Exception as exc:
         _log.warning("write_latest failed: %s", exc)
 

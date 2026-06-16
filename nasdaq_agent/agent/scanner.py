@@ -113,6 +113,24 @@ def _pipeline_workers() -> int:
         return PIPELINE_WORKERS
 
 
+def _analysis_batch_size() -> int:
+    """Maximum tickers to run through full ML/technical analysis per cycle.
+
+    The dashboard monitors the full universe every cycle with lightweight price
+    rows, while this cap bounds expensive 5m/1h/1d history fetches and model
+    inference. The scan cursor rotates so every ticker receives deep analysis
+    over successive cycles without dropping from the UI.
+    """
+    try:
+        from agent.config_manager import config as _cfg
+        return max(1, min(600, int(_cfg.get("scanner.analysis_batch_size"))))
+    except Exception:
+        try:
+            return max(1, min(600, int(os.getenv("NASDAQ_SCAN_ANALYSIS_BATCH_SIZE", "96"))))
+        except Exception:
+            return 96
+
+
 def _scanner_training_enabled() -> bool:
     """
     Heavy model training must not compete with the scanner in production.
@@ -1868,6 +1886,12 @@ class Scanner:
         self._second_scan_done:   threading.Event   = threading.Event()
         self._scan_count:         int               = 0
         self._scan_cursor:        int               = 0
+        self._last_active_count:  int               = 0
+        self._last_published_count: int             = 0
+        self._last_analysis_batch_count: int        = 0
+        self._last_deep_analyzed_count: int         = 0
+        self._last_preserved_count: int             = 0
+        self._last_observation_count: int           = 0
         self._last_training_defer_log: float        = 0.0
 
     def register_callback(self, fn: Callable) -> None:
@@ -2087,6 +2111,14 @@ class Scanner:
             if _scan_cursor:
                 active_tickers = active_tickers[_scan_cursor:] + active_tickers[:_scan_cursor]
 
+        analysis_limit = min(len(active_tickers), _analysis_batch_size()) if active_tickers else 0
+        analysis_tickers = active_tickers[:analysis_limit]
+        logger.info(
+            "Deep analysis batch: %d/%d monitored tickers scheduled this cycle.",
+            len(analysis_tickers),
+            len(active_tickers),
+        )
+
         logger.info(f"Scan starting — {len(active_tickers)} tickers…")
 
         # Detect session once so the data fetch uses the right mode
@@ -2104,7 +2136,7 @@ class Scanner:
         # calls alongside the MD poller, exceeding the 120 req/min rate limit
         # and triggering 429 storms.  Sequential keeps peak concurrency at ≤10.
         batch_1m = fetch_batch_realtime(active_tickers, extended_hours=_is_extended)
-        batch_5m = fetch_batch_interval(active_tickers, "5min", 500, CACHE_TTL_5M)
+        batch_5m = fetch_batch_interval(analysis_tickers, "5min", 500, CACHE_TTL_5M)
         if _sess.get("session", "").upper() == "CLOSED":
             restored_from_5m: list[str] = []
             try:
@@ -2112,7 +2144,7 @@ class Scanner:
                 _latest_prices = _vk_all_prices()
             except Exception:
                 _latest_prices = {}
-            for _ticker in active_tickers:
+            for _ticker in analysis_tickers:
                 if _ticker in batch_1m:
                     continue
                 _df5 = batch_5m.get(_ticker)
@@ -2137,14 +2169,14 @@ class Scanner:
                     "for %d tickers because live/REST 1min data is unavailable.",
                     len(restored_from_5m),
                 )
-        batch_1h = fetch_batch_interval(active_tickers, "1h",   500, CACHE_TTL_1H)
+        batch_1h = fetch_batch_interval(analysis_tickers, "1h",   500, CACHE_TTL_1H)
         # On cold start (first scan), all three prior fetches made real API calls.
         # A brief pause lets Schwab's per-minute bucket partially refill before
         # the 1day sweep, preventing the 429 storm seen in production logs.
         # On warm scans (cache hits), this branch is never reached.
         if self._scan_count == 0:
             time.sleep(8)
-        batch_1d = fetch_batch_interval(active_tickers, "1day", 500, CACHE_TTL_1D)
+        batch_1d = fetch_batch_interval(analysis_tickers, "1day", 500, CACHE_TTL_1D)
 
         # Fetch SPY/QQQ + sector ETFs for regime, RS and sector context
         etf_1m = fetch_batch_realtime(SECTOR_ETF_TICKERS, extended_hours=_is_extended)
@@ -2160,30 +2192,18 @@ class Scanner:
         # Parallel scan — ThreadPoolExecutor runs analyse_ticker() concurrently
         # across all tickers. 8× faster than the old sequential for-loop.
         from agent.pipeline import get_pipeline
-        _n_total = len(active_tickers)
+        _n_total = len(analysis_tickers)
         results = get_pipeline(n_workers=_pipeline_workers()).scan(
-            active_tickers, batch_1m, batch_5m, batch_1h, batch_1d,
+            analysis_tickers, batch_1m, batch_5m, batch_1h, batch_1d,
             on_ticker_done=lambda sig, n, t: self._notify_ticker(sig, n, _n_total),
         )
 
         if not results:
-            self.last_scan = datetime.now(timezone.utc).isoformat()
-            self._scan_count += 1
-            if self.signals:
-                logger.warning(
-                    "Scan produced 0/%d active tickers; preserving previous "
-                    "%d in-memory signals instead of clearing the dashboard.",
-                    len(active_tickers),
-                    len(self.signals),
-                )
-                self._notify(self.signals)
-                return list(self.signals)
             logger.warning(
-                "Scan produced 0/%d active tickers and no previous in-memory "
-                "signals are available; leaving the dashboard snapshot unchanged.",
-                len(active_tickers),
+                "Scan produced 0/%d deep-analysis rows; publishing monitored "
+                "price-only/preserved rows instead of clearing the dashboard.",
+                len(analysis_tickers),
             )
-            return []
 
         # Attach per-ticker learning scores and compute learning_rank.
         # Fetched once per scan cycle (single DB query for all tickers).
@@ -2244,6 +2264,12 @@ class Scanner:
 
         self.signals   = merged_results
         self.last_scan = datetime.now(timezone.utc).isoformat()
+        self._last_active_count = len(active_tickers)
+        self._last_published_count = len(merged_results)
+        self._last_analysis_batch_count = len(analysis_tickers)
+        self._last_deep_analyzed_count = len(results)
+        self._last_preserved_count = _preserved_count
+        self._last_observation_count = _fallback_count
 
         # Market-observation learning: record all signals with full context,
         # then check short-term price accuracy against previous scan's signals.
@@ -2272,18 +2298,19 @@ class Scanner:
         elapsed = round(time.time() - t0, 1)
         self._scan_count += 1
         if active_tickers:
-            self._scan_cursor = (_scan_cursor + max(len(results), _pipeline_workers(), 1)) % len(active_tickers)
+            self._scan_cursor = (_scan_cursor + max(len(analysis_tickers), len(results), _pipeline_workers(), 1)) % len(active_tickers)
         if self._scan_count == 1:
             self._first_scan_done.set()   # unblock _train_ml_background
         if self._scan_count >= 2:
             self._second_scan_done.set()
         logger.info(
-            "Scan complete in %ss | %d/%d analyzed, %d rows published "
+            "Scan complete in %ss | %d/%d deep analyzed, %d/%d monitored rows published "
             "(%d preserved, %d observation fallback; universe: %d)",
             elapsed,
             len(results),
-            len(active_tickers),
+            len(analysis_tickers),
             len(merged_results),
+            len(active_tickers),
             _preserved_count,
             _fallback_count,
             len(NASDAQ_TICKERS),
