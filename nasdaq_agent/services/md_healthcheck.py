@@ -59,8 +59,8 @@ def main() -> int:
     # When tokens are expired/missing the streamer can't connect — the staleness
     # is expected and will be surfaced as a SCHWAB_AUTH alert, not a health failure.
     try:
-        schwab_tokens_present = bool(client.get("schwab:tokens:trader") or
-                                     client.exists("schwab:tokens:trader"))
+        schwab_tokens_present = bool(client.get("schwab:token:trader") or
+                                     client.exists("schwab:token:trader"))
     except Exception:
         schwab_tokens_present = True  # assume present if Valkey check fails
 

@@ -1,4 +1,12 @@
 from services import md_healthcheck
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _src(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
 
 
 def test_regular_session_keeps_strict_default_threshold(monkeypatch):
@@ -28,3 +36,12 @@ def test_bad_env_value_falls_back_safely(monkeypatch):
     monkeypatch.setenv("MD_HEALTH_MIN_FRESH_PCT_EXTENDED", "bad-value")
 
     assert md_healthcheck._min_fresh_pct_for_session("AFTER_HOURS") == 60.0
+
+
+def test_healthcheck_uses_canonical_schwab_token_valkey_key():
+    healthcheck = _src("services/md_healthcheck.py")
+    token_store = _src("agent/broker/token_store.py")
+
+    assert '_VALKEY_PREFIX = "schwab:token:"' in token_store
+    assert '"schwab:token:trader"' in healthcheck
+    assert '"schwab:tokens:trader"' not in healthcheck

@@ -236,17 +236,15 @@ def _token_reload_loop() -> None:
                             raw = raw.decode()
                         payload = json.loads(raw)
                         _handle_token_event(payload)
+                        _log.info("[token_reload] Token refresh detected - restarting data sources")
+                        try:
+                            from config import NASDAQ_TICKERS
+                            _start(list(NASDAQ_TICKERS))
+                        except Exception as exc:
+                            _log.warning("[token_reload] Restart after token refresh failed: %s", exc)
                     except Exception as exc:
                         _log.warning("[token_reload] Token event handling failed: %s", exc)
                     continue
-                    _log.info(
-                        "[token_reload] Token refresh detected — restarting data sources"
-                    )
-                    try:
-                        from config import NASDAQ_TICKERS
-                        _start(list(NASDAQ_TICKERS))
-                    except Exception as exc:
-                        _log.warning("[token_reload] Restart after token refresh failed: %s", exc)
 
         except Exception as exc:
             _log.debug("[token_reload] pub/sub error: %s — retrying in 30 s", exc)

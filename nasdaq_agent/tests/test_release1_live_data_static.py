@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 import time
 
 
@@ -159,6 +160,31 @@ def test_market_data_healthcheck_uses_price_bus_coverage_thresholds():
     assert "MD_HEALTH_MAX_PRICE_AGE_S" in src
     assert 'MD_HEALTH_MIN_FRESH_PCT:     "80"' in compose
     assert 'MD_HEALTH_MIN_FRESH_PCT_EXTENDED: "60"' in compose
+
+
+def test_market_data_token_reload_restart_is_reachable_before_continue():
+    src = _src("services/market_data_service.py")
+    tree = ast.parse(src)
+    fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_token_reload_loop"
+    )
+
+    token_event_ifs = [
+        node for node in ast.walk(fn)
+        if isinstance(node, ast.If)
+        and "message.get('type') == 'message'" in ast.unparse(node.test)
+    ]
+    assert token_event_ifs
+
+    body = token_event_ifs[0].body
+    start_index = next(
+        i for i, node in enumerate(body)
+        if "_start(list(NASDAQ_TICKERS))" in ast.unparse(node)
+    )
+    continue_index = next(i for i, node in enumerate(body) if isinstance(node, ast.Continue))
+
+    assert start_index < continue_index
 
 
 def test_watchdog_service_restarts_stopped_or_unhealthy_containers():
