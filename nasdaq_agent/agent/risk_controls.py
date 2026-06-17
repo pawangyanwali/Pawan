@@ -81,6 +81,15 @@ def _account_size() -> float:
     except Exception:
         return float(DEFAULT_ACCOUNT_SIZE)
 
+
+def _is_paper_mode() -> bool:
+    return bool(_rcfg("trading.is_paper", IS_PAPER_TRADING))
+
+
+def _paper_risk_enforced() -> bool:
+    """Return True when paper mode should behave like real execution."""
+    return bool(_rcfg("paper.enforce_risk_controls", True))
+
 # ── State — resets each trading day ──────────────────────────────────────────
 _circuit_open:        bool  = False
 _circuit_reason:      str   = ""
@@ -169,7 +178,7 @@ def record_trade_outcome(won: bool) -> None:
             _consecutive_losses += 1
             logger.info(f"[RiskControls] Consecutive losses: {_consecutive_losses}")
 
-            if _rcfg("trading.is_paper", IS_PAPER_TRADING):
+            if _is_paper_mode() and not _paper_risk_enforced():
                 # Paper mode: log streaks for observability but never block trading.
                 # Blocking reduces training data volume without protecting real capital.
                 if _consecutive_losses >= _rcfg("risk.max_consecutive_losses", MAX_CONSECUTIVE_LOSSES):
@@ -322,8 +331,9 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
             if _circuit_open:
                 return True, _circuit_reason
 
-            # Active cooldown from consecutive losses (live trading only)
-            if not _rcfg("trading.is_paper", IS_PAPER_TRADING) and _cooldown_until > 0 and _time.time() < _cooldown_until:
+            # Active cooldown from consecutive losses. Realistic paper mode
+            # enforces this; legacy data-collection mode can still bypass it.
+            if (not _is_paper_mode() or _paper_risk_enforced()) and _cooldown_until > 0 and _time.time() < _cooldown_until:
                 remaining = int((_cooldown_until - _time.time()) / 60) + 1
                 return True, f"Cooldown active ({remaining} min remaining after consecutive losses)"
 
@@ -340,6 +350,25 @@ def check_circuit_breaker(session: str = "") -> tuple[bool, str]:
 
         # Track peak daily P&L for Profit Protect Mode drawdown check
         _peak_daily_pnl = max(_peak_daily_pnl, pnl_dollar)
+
+        if _is_paper_mode() and _paper_risk_enforced() and pnl_dollar < 0:
+            _paper_halt_usd = abs(float(_rcfg("paper.daily_loss_halt_usd", 300.0) or 0.0))
+            _paper_halt_pct = abs(float(_rcfg("paper.daily_loss_halt_pct", 0.25) or 0.0))
+            if (
+                (_paper_halt_usd > 0 and abs(pnl_dollar) >= _paper_halt_usd)
+                or (_paper_halt_pct > 0 and acct_loss_pct <= -_paper_halt_pct)
+            ):
+                reason = (
+                    f"Paper daily loss halt: today -${abs(pnl_dollar):,.0f} "
+                    f"({acct_loss_pct:+.2f}% of paper budget). "
+                    "Simulated execution paused; shadow learning continues."
+                )
+                _circuit_open      = True
+                _circuit_pnl_based = True
+                _circuit_reason    = reason
+                _circuit_date      = date.today()
+                logger.warning(f"[RiskControls] {reason}")
+                return True, reason
 
         # Profit-aware loss cap: max daily loss = min(halt_usd, fraction × trailing profit)
         # Prevents one bad day from wiping multi-day profit cushion.
@@ -631,13 +660,16 @@ def check_max_daily_trades() -> tuple[bool, str]:
     In paper-trading mode this check is skipped entirely — paper mode maximises
     training-data volume the same way consecutive-loss cooldowns are skipped.
     """
-    if _rcfg("trading.is_paper", IS_PAPER_TRADING):
+    if _is_paper_mode() and not _paper_risk_enforced():
         return False, ""
     try:
         from agent.paper_trading import get_today_pnl
         today_stats = get_today_pnl()
         total_today = int(today_stats.get("total", 0) or 0)
-        _max_trades = _rcfg("risk.max_daily_trades", MAX_DAILY_TRADES)
+        _max_trades = int(_rcfg("risk.max_daily_trades", MAX_DAILY_TRADES))
+        if _is_paper_mode():
+            _paper_max = int(_rcfg("paper.max_daily_trades", _max_trades) or _max_trades)
+            _max_trades = min(_max_trades, _paper_max)
         if total_today >= _max_trades:
             reason = (
                 f"Max daily trades reached: {total_today}/{_max_trades}. "

@@ -51,6 +51,13 @@ _DEFAULTS: dict[str, Any] = {
     "paper.eod_loss_threshold_pct":        lambda: -0.3,   # P&L% below which position is a "meaningful loss"
     # Adaptive filter feedback
     "paper.filter_feedback_min_trades":    lambda: 5,      # min closed trades before feeding back to filter
+    # Realistic paper execution guardrails. Paper mode still logs blocked signals
+    # for learning, but simulated capital must obey the same brakes live trading
+    # would use.
+    "paper.enforce_risk_controls":         lambda: True,
+    "paper.daily_loss_halt_usd":           lambda: 300.0,
+    "paper.daily_loss_halt_pct":           lambda: 0.25,
+    "paper.max_daily_trades":              lambda: 75,
     # ── Prediction / R:R engine ────────────────────────────────────────────────
     # These control the trade-entry quality filter. All hot-reload — no restart needed.
     "prediction.min_rr":                   lambda: 1.5,    # target reward multiple (e.g. 2.0 = risk 1, reward 2); not a signal gate
@@ -158,6 +165,16 @@ _DEFAULTS: dict[str, Any] = {
     "risk.rolling_ev_min_trades":           lambda: 5,      # min trades before suppression kicks in
     "risk.rolling_ev_suppress_threshold":   lambda: -2.0,   # avg $/trade below which to suppress
     "risk.rolling_ev_conf_bump":            lambda: 15.0,   # additional confidence pts required
+    "risk.rolling_ev_hard_block":           lambda: True,   # negative EV blocks, not just confidence-bumps
+    # Family-level damage stop: DB-backed intraday kill switch. Signals continue
+    # to be logged for learning, but new paper executions stop once a family proves
+    # it is hurting the session.
+    "risk.family_damage_enabled":           lambda: True,
+    "risk.family_damage_min_trades":        lambda: 3,
+    "risk.family_damage_max_losses":        lambda: 3,
+    "risk.family_damage_loss_usd":          lambda: 100.0,
+    "risk.family_damage_min_win_rate":      lambda: 30.0,
+    "risk.family_damage_scope_session":     lambda: False,
     # ── Flash-stop guard (sub-60-second stop hits) ────────────────────────────
     "risk.flash_stop_enabled":              lambda: True,
     "risk.flash_stop_seconds":              lambda: 60,     # stop within N seconds = flash stop

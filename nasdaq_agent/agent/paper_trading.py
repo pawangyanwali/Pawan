@@ -430,6 +430,95 @@ def _effective_algo_name(algo_name: str, entry_type: str) -> str:
     return f"PRED_{entry}"
 
 
+def _family_prefixes(algo_name: str) -> list[str]:
+    """SQL LIKE prefixes that identify all algo names in the same family."""
+    family = _algo_family(algo_name)
+    prefixes = [prefix for prefix, fam in _ALGO_FAMILY_MAP.items() if fam == family]
+    if prefixes:
+        return prefixes
+    upper = (algo_name or "").upper()
+    for sfx in ("_BULL", "_BEAR", "_LONG", "_SHORT"):
+        if upper.endswith(sfx):
+            upper = upper[:-len(sfx)]
+    return [upper] if upper else []
+
+
+def check_family_damage_stop(algo_name: str, session: str = "") -> tuple[bool, str]:
+    """DB-backed intraday kill switch for a losing execution family."""
+    if not algo_name:
+        return False, ""
+    try:
+        from agent.config_manager import config as _cfg
+        if not _cfg.get("risk.family_damage_enabled", True):
+            return False, ""
+        min_trades = int(_cfg.get("risk.family_damage_min_trades", 3))
+        max_losses = int(_cfg.get("risk.family_damage_max_losses", 3))
+        loss_usd = abs(float(_cfg.get("risk.family_damage_loss_usd", 100.0)))
+        min_wr = float(_cfg.get("risk.family_damage_min_win_rate", 30.0))
+        scope_session = bool(_cfg.get("risk.family_damage_scope_session", False))
+    except Exception:
+        return False, ""
+
+    prefixes = _family_prefixes(algo_name)
+    if not prefixes:
+        return False, ""
+
+    try:
+        from agent.db import using_postgres
+        date_filter = (
+            "(closed_at::timestamptz AT TIME ZONE 'America/New_York')::date = "
+            "(NOW() AT TIME ZONE 'America/New_York')::date"
+            if using_postgres()
+            else "date(closed_at) = date('now')"
+        )
+        prefix_clause = " OR ".join("UPPER(algo_name) LIKE ?" for _ in prefixes)
+        params: list = [f"{prefix}%" for prefix in prefixes]
+        session_clause = ""
+        if scope_session and session:
+            session_clause = " AND session = ?"
+            params.append(session)
+        with _conn_ro() as c:
+            row = c.execute(f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN COALESCE(pnl_dollar,0) > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                    COALESCE(SUM(CASE WHEN COALESCE(pnl_dollar,0) <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+                    COALESCE(SUM(COALESCE(pnl_dollar,0)), 0) AS pnl
+                FROM paper_trades
+                WHERE status='CLOSED'
+                  AND closed_at IS NOT NULL AND closed_at != ''
+                  AND {date_filter}
+                  AND ({prefix_clause})
+                  {session_clause}
+            """, tuple(params)).fetchone()
+    except Exception as exc:
+        logger.debug("[PAPER] family damage check failed for %s: %s", algo_name, exc)
+        return False, ""
+
+    total = int(row["total"] or 0) if row else 0
+    wins = int(row["wins"] or 0) if row else 0
+    losses = int(row["losses"] or 0) if row else 0
+    pnl = float(row["pnl"] or 0.0) if row else 0.0
+    win_rate = (wins / total * 100.0) if total else 0.0
+    family = _algo_family(algo_name)
+    if losses >= max_losses:
+        return True, (
+            f"Family damage stop [{family}]: {losses} losing trades today "
+            f"(limit {max_losses}). Shadow learning continues."
+        )
+    if loss_usd > 0 and pnl <= -loss_usd:
+        return True, (
+            f"Family damage stop [{family}]: today P&L ${pnl:.0f} "
+            f"(loss limit -${loss_usd:.0f}). Shadow learning continues."
+        )
+    if total >= min_trades and pnl < 0 and win_rate < min_wr:
+        return True, (
+            f"Family damage stop [{family}]: {win_rate:.0f}% WR over {total} trades "
+            f"below {min_wr:.0f}% floor. Shadow learning continues."
+        )
+    return False, ""
+
+
 def _append_status(out_status: Optional[list], status: str) -> None:
     if out_status is not None and not out_status:
         out_status.append(status)
@@ -843,6 +932,11 @@ def maybe_open_trade(
             logger.debug(f"[PAPER] {ticker} skip: {_fam} blocked in session {_sess_check}")
             _append_status(_out_status, "BLOCKED_FAMILY_SESSION")
             return None
+        _damage_blocked, _damage_reason = check_family_damage_stop(algo_name, session or "")
+        if _damage_blocked:
+            logger.info(f"[PAPER] {ticker} skip: {_damage_reason}")
+            _append_status(_out_status, "BLOCKED_FAMILY_DAMAGE")
+            return None
         # Pre-T1 storm circuit
         _storm_blocked, _storm_reason = check_pre_t1_storm(algo_name, session or "")
         if _storm_blocked:
@@ -860,6 +954,13 @@ def maybe_open_trade(
         #                    if conf below bumped floor → block entirely.
         _ev_blocked, _ev_conf_bump = check_rolling_ev_suppress(algo_name, direction, session or "")
         if _ev_blocked and _ev_conf_bump > 0:
+            if bool(_cfg_fam.get("risk.rolling_ev_hard_block", True)):
+                logger.info(
+                    f"[PAPER] {ticker} skip: {_algo_family(algo_name)}+{direction} rolling EV "
+                    "negative — routed to shadow learning"
+                )
+                _append_status(_out_status, "BLOCKED_EV_SUPPRESS")
+                return None
             _ev_min_conf = _get_min_confidence() + _ev_conf_bump
             if confidence < _ev_min_conf:
                 logger.info(
@@ -1043,6 +1144,9 @@ def maybe_open_trade(
             _max_trade_v = _budget * float(_cfg.get("paper.max_trade_pct"))  / 100.0
             _max_alloc_v = _budget * float(_cfg.get("paper.max_allocated_pct")) / 100.0
             _max_open    = int(_cfg.get("paper.max_open_trades"))
+            if bool(_cfg.get("paper.enforce_risk_controls", True)):
+                _risk_max_open = int(_cfg.get("risk.max_concurrent_trades", _max_open) or _max_open)
+                _max_open = min(_max_open, _risk_max_open)
 
             if open_count >= _max_open:
                 _append_status(_out_status, "BLOCKED_MAX_OPEN")

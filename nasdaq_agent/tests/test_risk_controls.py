@@ -507,14 +507,16 @@ class TestMaxDailyTrades:
     def test_not_blocked_when_below_limit(self):
         """Trade count below MAX_DAILY_TRADES → not blocked."""
         mock_stats = {"total": MAX_DAILY_TRADES - 1, "total_pnl_dollar": 0, "total_pnl_pct": 0}
-        with patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
+        with patch("agent.risk_controls._is_paper_mode", return_value=False), \
+             patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
             blocked, _ = rc.check_max_daily_trades()
         assert blocked is False
 
     def test_blocked_at_limit(self):
         """Trade count == MAX_DAILY_TRADES → blocked."""
         mock_stats = {"total": MAX_DAILY_TRADES, "total_pnl_dollar": 0, "total_pnl_pct": 0}
-        with patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
+        with patch("agent.risk_controls._is_paper_mode", return_value=False), \
+             patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
             blocked, reason = rc.check_max_daily_trades()
         assert blocked is True
         assert str(MAX_DAILY_TRADES) in reason
@@ -522,14 +524,16 @@ class TestMaxDailyTrades:
     def test_blocked_above_limit(self):
         """Trade count above limit → blocked."""
         mock_stats = {"total": MAX_DAILY_TRADES + 5, "total_pnl_dollar": 0, "total_pnl_pct": 0}
-        with patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
+        with patch("agent.risk_controls._is_paper_mode", return_value=False), \
+             patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
             blocked, _ = rc.check_max_daily_trades()
         assert blocked is True
 
     def test_returns_tuple(self):
         """Return type is (bool, str)."""
         mock_stats = {"total": 0, "total_pnl_dollar": 0, "total_pnl_pct": 0}
-        with patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
+        with patch("agent.risk_controls._is_paper_mode", return_value=False), \
+             patch("agent.paper_trading.get_today_pnl", return_value=mock_stats):
             result = rc.check_max_daily_trades()
         assert isinstance(result, tuple)
         assert len(result) == 2
