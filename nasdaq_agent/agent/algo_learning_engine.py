@@ -402,9 +402,30 @@ class ParameterControlRegistry:
         self._log_tune(family, param, current, new_val, reason, source="auto")
         return True
 
+    def rollback_param(self, family: str, param: str, reason: str) -> bool:
+        """Rollback one active parameter candidate to its previous value."""
+        if family not in _ALL_FAMILIES or param not in _PARAM_SPEC:
+            return False
+        with self._lock:
+            entry = self._state[family][param]
+            current = float(entry["current"])
+            previous = float(entry["previous"])
+            if abs(current - previous) < 1e-9:
+                return False
+            entry["rollback"] = current
+            entry["current"] = previous
+            entry["last_reason"] = reason
+            entry["last_updated_cycle"] = 0
+        self._log_tune(family, param, current, previous, reason, source="rollback")
+        logger.warning(
+            "[ParamRegistry] Rolled back %s.%s: %.4f -> %.4f (%s)",
+            family, param, current, previous, reason,
+        )
+        return True
+
     def get_all_params(self, algo_name: str) -> dict:
         """Return all current params for the algo's family. Falls back to defaults."""
-        family = _ALGO_FAMILY_MAP.get(algo_name, "")
+        family = algo_name if algo_name in _ALL_FAMILIES else _ALGO_FAMILY_MAP.get(algo_name, "")
         if not family:
             return {p: s["default"] for p, s in _PARAM_SPEC.items()}
         with self._lock:
@@ -917,6 +938,229 @@ class ParameterAdapter:
 
 # ── 7. CounterfactualSimulator ────────────────────────────────────────────────
 
+class EconomicParameterGovernor:
+    """Paper-only champion/challenger lifecycle for adaptive parameters.
+
+    One bounded candidate per family is activated at a time. Its baseline is
+    captured before activation, then actual paper outcomes after activation are
+    evaluated economically. Candidates are kept only when expectancy and profit
+    factor improve without unacceptable drawdown; otherwise the registry rolls
+    the parameter back automatically.
+    """
+
+    _KV_KEY = "ale_parameter_candidates"
+
+    def __init__(self, registry: ParameterControlRegistry, loss_analyzer: LossAnalyzer):
+        self._registry = registry
+        self._loss = loss_analyzer
+        self._lock = threading.Lock()
+        self._state = {"active": {}, "history": []}
+
+    def load(self) -> None:
+        raw = _kv_load(self._KV_KEY)
+        if isinstance(raw, dict):
+            with self._lock:
+                self._state.update(raw)
+
+    def save(self) -> None:
+        with self._lock:
+            payload = {
+                "active": dict(self._state.get("active", {})),
+                "history": list(self._state.get("history", []))[-200:],
+            }
+        _kv_save(self._KV_KEY, payload)
+
+    @staticmethod
+    def _family_algos(family: str) -> list[str]:
+        return [algo for algo, fam in _ALGO_FAMILY_MAP.items() if fam == family]
+
+    def _metrics(self, family: str, since: str = "", limit: int = 100) -> dict:
+        algos = self._family_algos(family)
+        if not algos:
+            return {}
+        placeholders = ",".join("?" for _ in algos)
+        params: list = list(algos)
+        since_clause = ""
+        if since:
+            since_clause = " AND closed_at >= ?"
+            params.append(since)
+        params.append(int(limit))
+        try:
+            from agent.db import get_conn
+            with get_conn(read_only=True) as c:
+                rows = c.execute(f"""
+                    SELECT pnl_dollar
+                    FROM paper_trades
+                    WHERE status='CLOSED'
+                      AND algo_name IN ({placeholders})
+                      AND pnl_dollar IS NOT NULL
+                      {since_clause}
+                    ORDER BY closed_at DESC
+                    LIMIT ?
+                """, tuple(params)).fetchall()
+        except Exception as exc:
+            logger.debug("[ParamGovernor] metrics query failed for %s: %s", family, exc)
+            return {}
+
+        pnls = [float(r["pnl_dollar"] or 0.0) for r in reversed(rows)]
+        if not pnls:
+            return {"n_trades": 0, "expectancy": 0.0, "profit_factor": 0.0,
+                    "win_rate": 0.0, "max_drawdown": 0.0}
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for pnl in pnls:
+            equity += pnl
+            peak = max(peak, equity)
+            max_dd = max(max_dd, peak - equity)
+        return {
+            "n_trades": len(pnls),
+            "expectancy": round(sum(pnls) / len(pnls), 4),
+            "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else (9.99 if gross_profit > 0 else 0.0),
+            "win_rate": round(len(wins) / len(pnls), 4),
+            "max_drawdown": round(max_dd, 4),
+            "net_pnl": round(sum(pnls), 2),
+        }
+
+    def _suggest(self, family: str, algo_name: str) -> Optional[tuple[str, float, str]]:
+        cause = self._loss.get_dominant_cause(algo_name)
+        if not cause:
+            return None
+        alpha = 0.10
+        if cause in ("WRONG_DIRECTION", "REGIME_MISMATCH"):
+            param = "conf_gate"
+            value = self._registry.get(family, param) + 1.0
+        elif cause == "TIMING_LATE":
+            param = "entry_window_bars"
+            value = self._registry.get(family, param) - 1.0
+        elif cause == "VWAP_CONFLICT":
+            param = "rvol_gate"
+            value = self._registry.get(family, param) + 0.05
+        elif cause == "TIMEOUT_DRIFT":
+            param = "target_mult"
+            value = self._registry.get(family, param) * (1 - alpha)
+        elif cause in ("STOP_TOO_TIGHT", "VOLATILITY_SPIKE"):
+            param = "stop_mult"
+            value = self._registry.get(family, param) * (1 + alpha)
+        else:
+            return None
+        return param, value, f"{cause}: economic paper canary"
+
+    def _can_activate(self) -> bool:
+        try:
+            from agent.config_manager import config as cfg
+            if not cfg.get("learner.param_canary_enabled", True):
+                return False
+            from agent.algo_learning_p2 import get_phase2_engine
+            return get_phase2_engine().get_current_mode() in ("SHADOW", "PAPER_ONLY")
+        except Exception:
+            return True
+
+    def process_family(self, family: str, algo_name: str, cycle_num: int) -> dict:
+        try:
+            from agent.config_manager import config as cfg
+            min_baseline = int(cfg.get("learner.param_canary_min_baseline", 15))
+            min_outcomes = int(cfg.get("learner.param_canary_min_outcomes", 10))
+            min_pf = float(cfg.get("learner.param_canary_min_pf", 1.05))
+            min_exp = float(cfg.get("learner.param_canary_min_expectancy", 0.0))
+            min_improvement = float(cfg.get("learner.param_canary_min_improvement", 0.05))
+            max_dd_mult = float(cfg.get("learner.param_canary_max_drawdown_mult", 1.25))
+        except Exception:
+            min_baseline, min_outcomes = 15, 10
+            min_pf, min_exp, min_improvement, max_dd_mult = 1.05, 0.0, 0.05, 1.25
+
+        with self._lock:
+            active = dict(self._state.get("active", {}).get(family, {}))
+
+        if active:
+            candidate = self._metrics(family, since=active["activated_at"], limit=200)
+            if candidate.get("n_trades", 0) < min_outcomes:
+                return {"status": "COLLECTING", "family": family, "candidate": candidate}
+
+            baseline = active.get("baseline", {})
+            base_exp = float(baseline.get("expectancy", 0.0) or 0.0)
+            cand_exp = float(candidate.get("expectancy", 0.0) or 0.0)
+            required_exp = max(min_exp, base_exp + max(0.01, abs(base_exp) * min_improvement))
+            base_dd = float(baseline.get("max_drawdown", 0.0) or 0.0)
+            dd_ok = base_dd <= 0 or candidate.get("max_drawdown", 0.0) <= base_dd * max_dd_mult
+            passed = (
+                cand_exp >= required_exp
+                and candidate.get("profit_factor", 0.0) >= min_pf
+                and dd_ok
+            )
+            final_status = "PROMOTED" if passed else "ROLLED_BACK"
+            if not passed:
+                self._registry.rollback_param(
+                    family, active["param"],
+                    f"canary rejected: exp={cand_exp:.2f}, PF={candidate.get('profit_factor', 0):.2f}",
+                )
+            active.update({
+                "status": final_status,
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                "candidate_metrics": candidate,
+            })
+            with self._lock:
+                self._state["history"].append(active)
+                self._state["active"].pop(family, None)
+            self.save()
+            logger.warning(
+                "[ParamGovernor] %s %s.%s candidate %.4f | baseline=%s candidate=%s",
+                final_status, family, active["param"], active["candidate_val"],
+                baseline, candidate,
+            )
+            return active
+
+        if not self._can_activate():
+            return {"status": "INACTIVE_LIVE_MODE", "family": family}
+
+        baseline = self._metrics(family, limit=100)
+        if baseline.get("n_trades", 0) < min_baseline:
+            return {"status": "INSUFFICIENT_BASELINE", "family": family, "baseline": baseline}
+        if baseline.get("expectancy", 0.0) >= 0 and baseline.get("profit_factor", 0.0) >= 1.0:
+            return {"status": "HEALTHY", "family": family, "baseline": baseline}
+
+        suggestion = self._suggest(family, algo_name)
+        if not suggestion:
+            return {"status": "NO_SUGGESTION", "family": family}
+        param, new_val, reason = suggestion
+        old_val = self._registry.get(family, param)
+        if not self._registry.update(family, param, new_val, reason, cycle_num):
+            return {"status": "UPDATE_DEFERRED", "family": family, "param": param}
+
+        candidate = {
+            "candidate_id": uuid.uuid4().hex,
+            "family": family,
+            "algo_name": algo_name,
+            "param": param,
+            "old_val": old_val,
+            "candidate_val": self._registry.get(family, param),
+            "reason": reason,
+            "status": "ACTIVE",
+            "cycle_num": cycle_num,
+            "activated_at": datetime.now(timezone.utc).isoformat(),
+            "baseline": baseline,
+        }
+        with self._lock:
+            self._state["active"][family] = candidate
+        self.save()
+        logger.warning(
+            "[ParamGovernor] Activated paper canary %s.%s %.4f -> %.4f | baseline=%s",
+            family, param, old_val, candidate["candidate_val"], baseline,
+        )
+        return candidate
+
+    def get_status(self) -> dict:
+        with self._lock:
+            return {
+                "active": dict(self._state.get("active", {})),
+                "history": list(self._state.get("history", []))[-20:],
+            }
+
+
 class CounterfactualSimulator:
     """
     Records suppressed signals as shadow trades in bt_signals (is_counterfactual=1).
@@ -1071,31 +1315,54 @@ class ModelVersionRegistry:
         m = challenger.get("metrics", {})
         reasons: list[str] = []
         gates_pass = True
+        try:
+            from agent.config_manager import config as cfg
+            min_trades = int(cfg.get("learner.model_min_trades", 30))
+            min_pf = float(cfg.get("learner.model_min_profit_factor", 1.10))
+            min_expectancy = float(cfg.get("learner.model_min_expectancy", 0.0))
+            min_sharpe_improvement = float(
+                cfg.get("learner.model_min_sharpe_improvement", 0.05)
+            )
+            max_drawdown_mult = float(
+                cfg.get("learner.model_max_drawdown_mult", 2.0)
+            )
+        except Exception:
+            min_trades, min_pf, min_expectancy = 30, 1.10, 0.0
+            min_sharpe_improvement, max_drawdown_mult = 0.05, 2.0
 
-        if m.get("n_trades", 0) < 30:
-            reasons.append(f"n_trades {m.get('n_trades')} < 30")
+        if m.get("n_trades", 0) < min_trades:
+            reasons.append(f"n_trades {m.get('n_trades')} < {min_trades}")
             gates_pass = False
 
-        if m.get("profit_factor", 0) < 1.10:
-            reasons.append(f"profit_factor {m.get('profit_factor'):.2f} < 1.10")
+        if m.get("profit_factor", 0) < min_pf:
+            reasons.append(f"profit_factor {m.get('profit_factor'):.2f} < {min_pf:.2f}")
             gates_pass = False
 
-        if m.get("expectancy", 0) <= 0:
-            reasons.append(f"expectancy {m.get('expectancy'):.4f} <= 0")
+        if m.get("expectancy", 0) <= min_expectancy:
+            reasons.append(
+                f"expectancy {m.get('expectancy'):.4f} <= {min_expectancy:.4f}"
+            )
             gates_pass = False
 
         if champion:
             cm = champion.get("metrics", {})
             champ_sharpe = float(cm.get("sharpe", 0) or 0)
             chal_sharpe  = float(m.get("sharpe", 0) or 0)
-            if champ_sharpe > 0 and chal_sharpe < champ_sharpe * 1.05:
-                reasons.append(f"sharpe {chal_sharpe:.2f} not 5%+ vs champion {champ_sharpe:.2f}")
+            required_sharpe = champ_sharpe * (1.0 + min_sharpe_improvement)
+            if champ_sharpe > 0 and chal_sharpe < required_sharpe:
+                reasons.append(
+                    f"sharpe {chal_sharpe:.2f} not "
+                    f"{min_sharpe_improvement:.0%}+ vs champion {champ_sharpe:.2f}"
+                )
                 gates_pass = False
 
             champ_dd = float(cm.get("max_drawdown", 0) or 0)
             chal_dd  = float(m.get("max_drawdown", 0) or 0)
-            if champ_dd > 0 and chal_dd > champ_dd * 2:
-                reasons.append(f"max_drawdown {chal_dd:.4f} > 2x champion {champ_dd:.4f}")
+            if champ_dd > 0 and chal_dd > champ_dd * max_drawdown_mult:
+                reasons.append(
+                    f"max_drawdown {chal_dd:.4f} > {max_drawdown_mult:.2f}x "
+                    f"champion {champ_dd:.4f}"
+                )
                 gates_pass = False
 
         if gates_pass:
@@ -1307,27 +1574,51 @@ class AlgoLearningEngine:
         self._win_reinforce = WinReinforcer()
         self._selector      = AlgoSelector()
         self._adapter       = ParameterAdapter(self._registry, self._loss_analyzer)
+        self._governor      = EconomicParameterGovernor(self._registry, self._loss_analyzer)
         self._counterfact   = CounterfactualSimulator()
         self._model_reg     = ModelVersionRegistry()
         self._regime_handler = RegimeTransitionHandler(self._audit)
+        self._processed_outcomes: list[str] = []
+        self._processed_set: set[str] = set()
 
     def load(self) -> None:
         """Load all persistent components."""
         for comp in (self._registry, self._loss_analyzer, self._win_reinforce,
-                     self._selector, self._model_reg):
+                     self._selector, self._governor, self._model_reg):
             try:
                 comp.load()
             except Exception as exc:
                 logger.warning(f"[AlgoLearningEngine] load error ({type(comp).__name__}): {exc}")
+        try:
+            processed = _kv_load("ale_processed_outcomes") or []
+            self._processed_outcomes = [str(x) for x in processed][-10000:]
+            self._processed_set = set(self._processed_outcomes)
+        except Exception:
+            self._processed_outcomes = []
+            self._processed_set = set()
 
     def save(self) -> None:
         """Save all persistent components."""
         for comp in (self._registry, self._loss_analyzer, self._win_reinforce,
-                     self._selector, self._model_reg):
+                     self._selector, self._governor, self._model_reg):
             try:
                 comp.save()
             except Exception as exc:
                 logger.warning(f"[AlgoLearningEngine] save error ({type(comp).__name__}): {exc}")
+        try:
+            _kv_save("ale_processed_outcomes", self._processed_outcomes[-10000:])
+        except Exception:
+            pass
+
+    def _mark_processed(self, outcome_id: str) -> None:
+        if not outcome_id or outcome_id in self._processed_set:
+            return
+        self._processed_set.add(outcome_id)
+        self._processed_outcomes.append(outcome_id)
+        if len(self._processed_outcomes) > 10000:
+            removed = self._processed_outcomes[:-10000]
+            self._processed_outcomes = self._processed_outcomes[-10000:]
+            self._processed_set.difference_update(removed)
 
     def run_cycle(self, new_outcomes_df, cycle_num: int) -> None:
         """
@@ -1350,9 +1641,14 @@ class AlgoLearningEngine:
             wins_count   = 0
             losses_count = 0
             algos_seen   = set()
+            processed_count = 0
+            processed_rows: list[dict] = []
 
             for _, row in new_outcomes_df.iterrows():
                 try:
+                    outcome_id = str(row.get("outcome_id", "") or "")
+                    if outcome_id and outcome_id in self._processed_set:
+                        continue
                     pnl_pct     = float(row.get("pnl_pct", 0) or 0)
                     exit_reason = str(row.get("exit_reason", "") or "")
                     status      = str(row.get("status", "") or "")
@@ -1389,18 +1685,25 @@ class AlgoLearningEngine:
 
                     if algo_name:
                         algos_seen.add(algo_name)
+                    if outcome_id:
+                        self._mark_processed(outcome_id)
+                    processed_count += 1
+                    processed_rows.append(dict(row))
 
                 except Exception as row_exc:
                     logger.debug(f"[ALE] row processing error: {row_exc}")
 
             # ── 4. Parameter adaptation ──────────────────────────────────────
+            if processed_count == 0:
+                return
+
             param_changes: dict[str, dict] = {}
             for algo_name in algos_seen:
                 family = _ALGO_FAMILY_MAP.get(algo_name, "")
                 if family:
-                    changes = self._adapter.adapt(family, algo_name, cycle_num)
-                    if changes:
-                        param_changes[algo_name] = changes
+                    result = self._governor.process_family(family, algo_name, cycle_num)
+                    if result:
+                        param_changes[algo_name] = result
 
             # ── 6. Counterfactual check ──────────────────────────────────────
             should_relax, cf_reason = self._counterfact.should_relax_filter("", min_cf_trades=10)
@@ -1416,9 +1719,9 @@ class AlgoLearningEngine:
                 "cycle_num":    cycle_num,
                 "wins":         wins_count,
                 "losses":       losses_count,
+                "processed":    processed_count,
                 "algos_seen":   list(algos_seen),
-                "param_changes": {k: {p: list(v) for p, v in ch.items()}
-                                  for k, ch in param_changes.items()},
+                "param_changes": param_changes,
                 "cf_relax":     should_relax,
             })
 
@@ -1428,7 +1731,7 @@ class AlgoLearningEngine:
             # ── Phase 2: drift detection, walk-forward, transfer, deployment ──
             try:
                 from agent.algo_learning_p2 import get_phase2_engine as _get_p2
-                _get_p2().run_cycle(new_outcomes_df, cycle_num)
+                _get_p2().run_cycle(pd.DataFrame(processed_rows), cycle_num)
             except Exception as _p2_err:
                 logger.warning(f"[AlgoLearningEngine] Phase 2 error: {_p2_err}")
 
@@ -1480,6 +1783,13 @@ class AlgoLearningEngine:
             return _get_p2().get_drift_summary()
         except Exception:
             return {}
+
+    def get_parameter_governor_status(self) -> dict:
+        """Return active paper canaries and recent promotion/rollback history."""
+        try:
+            return self._governor.get_status()
+        except Exception:
+            return {"active": {}, "history": []}
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

@@ -51,15 +51,18 @@ def test_realistic_paper_daily_loss_halt_blocks_execution():
         "paper.daily_loss_halt_usd": 300.0,
         "paper.daily_loss_halt_pct": 0.25,
     }
-    with patch("agent.risk_controls._is_paper_mode", return_value=True), \
-         patch("agent.risk_controls._paper_risk_enforced", return_value=True), \
-         patch("agent.risk_controls._rcfg", side_effect=lambda k, d=None: cfg.get(k, d)), \
-         patch("agent.risk_controls._account_size", return_value=150000.0), \
-         patch("agent.risk_controls._get_today_pnl", return_value=(-350.0, -0.23)):
-        blocked, reason = rc.check_circuit_breaker()
+    try:
+        with patch("agent.risk_controls._is_paper_mode", return_value=True), \
+             patch("agent.risk_controls._paper_risk_enforced", return_value=True), \
+             patch("agent.risk_controls._rcfg", side_effect=lambda k, d=None: cfg.get(k, d)), \
+             patch("agent.risk_controls._account_size", return_value=150000.0), \
+             patch("agent.risk_controls._get_today_pnl", return_value=(-350.0, -0.23)):
+            blocked, reason = rc.check_circuit_breaker()
 
-    assert blocked is True
-    assert "Paper daily loss halt" in reason
+        assert blocked is True
+        assert "Paper daily loss halt" in reason
+    finally:
+        _reset_risk_state()
 
 
 def test_realistic_paper_max_daily_trades_uses_paper_cap():
@@ -94,4 +97,3 @@ def test_family_damage_stop_blocks_losing_family_from_today_ledger():
 
     assert blocked is True
     assert "Family damage stop [meta_ens]" in reason
-

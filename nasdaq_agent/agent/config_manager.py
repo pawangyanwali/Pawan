@@ -201,6 +201,23 @@ _DEFAULTS: dict[str, Any] = {
     # the scanner (2.5 CPU) on the 4-vCPU host.
     "learner.deep_market_interval_s":      lambda: max(0, int(os.getenv("LEARNER_DEEP_MARKET_INTERVAL_S", "1800"))),
     "learner.deep_ticker_limit":           lambda: max(1, int(os.getenv("LEARNER_DEEP_TICKER_LIMIT", "100"))),
+    "learner.feedback_retrain_min_new":     lambda: 15,
+    "learner.feedback_retrain_cooldown_s":  lambda: 600,
+    # Outcome-driven parameter canaries. A bounded candidate is tested in paper
+    # execution, then promoted or rolled back using actual post-activation P&L.
+    "learner.param_canary_enabled":         lambda: True,
+    "learner.param_canary_min_baseline":    lambda: 15,
+    "learner.param_canary_min_outcomes":    lambda: 10,
+    "learner.param_canary_min_pf":          lambda: 1.05,
+    "learner.param_canary_min_expectancy":  lambda: 0.0,
+    "learner.param_canary_min_improvement": lambda: 0.05,
+    "learner.param_canary_max_drawdown_mult": lambda: 1.25,
+    # Model champion/challenger economic gates.
+    "learner.model_min_trades":             lambda: 30,
+    "learner.model_min_profit_factor":      lambda: 1.10,
+    "learner.model_min_expectancy":         lambda: 0.0,
+    "learner.model_min_sharpe_improvement": lambda: 0.05,
+    "learner.model_max_drawdown_mult":      lambda: 2.0,
     # ── Adaptive filter ────────────────────────────────────────────────────────
     "filter.throttle_start_wr":            lambda: 0.50,
     "filter.max_penalty_pts":              lambda: 35,

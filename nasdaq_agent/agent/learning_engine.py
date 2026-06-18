@@ -267,10 +267,13 @@ class LearningEngine:
 
             # Build a single-row outcomes dataframe for this trade
             row = {
+                "outcome_id":  trade_data.get("outcome_id") or f"paper:{trade_data.get('trade_id', '')}",
                 "pnl_pct":     trade_data.get("pnl_pct", 0.0),
+                "pnl_dollar":  trade_data.get("pnl_dollar", 0.0),
                 "exit_reason": trade_data.get("exit_reason", ""),
-                "status":      "CLOSED",
+                "status":      "WIN" if float(trade_data.get("pnl_dollar", 0.0) or 0.0) > 0 else "LOSS",
                 "algo_name":   algo,
+                "direction":   trade_data.get("direction", ""),
                 "regime":      trade_data.get("regime", ""),
                 "session":     trade_data.get("session", ""),
                 "vwap_event":  "",
@@ -292,6 +295,17 @@ class LearningEngine:
         self._running = False
 
     def get_status(self) -> dict:
+        try:
+            from agent.config_manager import config as _cfg
+            retrain_cooldown = int(
+                _cfg.get("learner.feedback_retrain_cooldown_s", RETRAIN_COOLDOWN_SECS)
+            )
+            retrain_min_new = int(
+                _cfg.get("learner.feedback_retrain_min_new", RETRAIN_MIN_NEW)
+            )
+        except Exception:
+            retrain_cooldown = RETRAIN_COOLDOWN_SECS
+            retrain_min_new = RETRAIN_MIN_NEW
         return {
             "running":        self._running,
             "cycle_count":    self._cycle_count,
@@ -300,8 +314,8 @@ class LearningEngine:
             "last_threshold": round(self._last_threshold, 1),
             "interval_secs":  LEARN_INTERVAL_SECS,
             "last_retrain_at": self._last_retrain_t or None,
-            "retrain_cooldown_secs": RETRAIN_COOLDOWN_SECS,
-            "retrain_min_new": RETRAIN_MIN_NEW,
+            "retrain_cooldown_secs": retrain_cooldown,
+            "retrain_min_new": retrain_min_new,
             "active_session_retrain_enabled": RETRAIN_ACTIVE_SESSIONS,
             "deep_retrain_enabled": RETRAIN_INCLUDE_DEEP,
             "feedback_loop_active": (
@@ -405,9 +419,20 @@ class LearningEngine:
         new_bt_outcomes = bt_count - self._last_bt_count
         new_pt_outcomes = pt_count - self._last_pt_count
         total_new       = new_bt_outcomes + new_pt_outcomes
-        cooldown_ok     = (time.time() - self._last_retrain_t) > RETRAIN_COOLDOWN_SECS
+        try:
+            from agent.config_manager import config as _cfg
+            retrain_min_new = int(
+                _cfg.get("learner.feedback_retrain_min_new", RETRAIN_MIN_NEW)
+            )
+            retrain_cooldown = int(
+                _cfg.get("learner.feedback_retrain_cooldown_s", RETRAIN_COOLDOWN_SECS)
+            )
+        except Exception:
+            retrain_min_new = RETRAIN_MIN_NEW
+            retrain_cooldown = RETRAIN_COOLDOWN_SECS
+        cooldown_ok = (time.time() - self._last_retrain_t) > retrain_cooldown
 
-        if total_new >= RETRAIN_MIN_NEW and cooldown_ok:
+        if total_new >= retrain_min_new and cooldown_ok:
             self._last_bt_count  = bt_count
             self._last_pt_count  = pt_count
             # Startup grace: suppress retrain until the scanner has warmed SQLite.

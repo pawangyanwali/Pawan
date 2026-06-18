@@ -651,16 +651,18 @@ def get_outcomes_for_ml(min_count: int = 30) -> Optional[pd.DataFrame]:
     """
     Return a DataFrame of resolved signals suitable for ML retraining feedback.
 
-    Columns:  signal_id, ticker, direction, confidence, session, regime,
-              vwap_event, rsi_zone, rsi_value, entry_type, mtf_alignment,
-              rr_ratio, outcome (1=WIN, 0=LOSS/TIMEOUT)
+    Includes a stable outcome_id plus the economic and attribution fields used
+    by the adaptive learner. Callers may poll this repeatedly; outcome_id lets
+    the learner process every resolved signal exactly once.
     """
     with _lock:
         with _conn() as c:
             rows = c.execute("""
                 SELECT signal_id, ticker, direction, confidence, session, regime,
                        vwap_event, rsi_zone, rsi_value, entry_type, mtf_alignment,
-                       rr_ratio, status
+                       rr_ratio, status, exit_reason, pnl_pct, r_multiple,
+                       bars_tracked, max_favorable_r, algo_name, resolved_at,
+                       sector_etf
                 FROM bt_signals
                 WHERE status IN ('WIN','LOSS','TIMEOUT')
                 ORDER BY fired_at DESC LIMIT 500
@@ -671,5 +673,7 @@ def get_outcomes_for_ml(min_count: int = 30) -> Optional[pd.DataFrame]:
 
     data = [dict(r) for r in rows]
     df   = pd.DataFrame(data)
+    df["outcome_id"] = "bt:" + df["signal_id"].astype(str)
     df["outcome"] = (df["status"] == "WIN").astype(int)
-    return df.drop(columns=["status"])
+    df["won"] = df["outcome"].astype(bool)
+    return df

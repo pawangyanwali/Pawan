@@ -492,9 +492,15 @@ def _publish_status_loop() -> None:
             from agent.adaptive_filter import get_status as af_status
 
             phase2_status: dict = {}
+            parameter_governor: dict = {}
             try:
                 from agent.algo_learning_p2 import get_phase2_engine
                 phase2_status = get_phase2_engine().get_status()
+            except Exception:
+                pass
+            try:
+                from agent.algo_learning_engine import get_engine
+                parameter_governor = get_engine().get_parameter_governor_status()
             except Exception:
                 pass
 
@@ -504,6 +510,7 @@ def _publish_status_loop() -> None:
                 "adaptive_filter": af_status(),
                 "log":             get_learning_log(limit=50),
                 "phase2":          phase2_status,
+                "parameter_governor": parameter_governor,
                 "deep":            _deep_state_snapshot(),
                 "service": {
                     "mode": "continuous",

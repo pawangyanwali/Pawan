@@ -1790,10 +1790,12 @@ def _record_close(
                 (trade_id,),
             ).fetchone()
             _vc.publish("trade:closed", _json.dumps({
+                "outcome_id": f"paper:{trade_id}",
                 "trade_id":   trade_id,
                 "ticker":     ticker,
                 "algo":       (_row_extra["algo_name"] if _row_extra else "") or "",
                 "direction":  direction,
+                "pnl_dollar": round(pnl_dollar, 2),
                 "pnl_pct":    round(pnl_pct, 4),
                 "exit_reason": exit_reason,
                 "session":    (_row_extra["session"]  if _row_extra else "") or "",
