@@ -15,9 +15,10 @@ import collections
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from agent.exit_signals import analyse_exits, ExitAnalysis
 from agent.db import get_conn
@@ -519,6 +520,265 @@ def check_family_damage_stop(algo_name: str, session: str = "") -> tuple[bool, s
     return False, ""
 
 
+def check_family_open_exposure(algo_name: str, direction: str, session: str = "") -> tuple[bool, str]:
+    """Prevent clustered same-family entries before the first loss can close."""
+    if not algo_name:
+        return False, ""
+    try:
+        from agent.config_manager import config as _cfg
+        max_open = int(_cfg.get("risk.family_max_open_per_direction", 1))
+        scope_session = bool(_cfg.get("risk.family_open_scope_session", False))
+    except Exception:
+        return False, ""
+    if max_open <= 0:
+        return False, ""
+
+    prefixes = _family_prefixes(algo_name)
+    if not prefixes:
+        return False, ""
+    try:
+        prefix_clause = " OR ".join("UPPER(algo_name) LIKE ?" for _ in prefixes)
+        params: list = [direction] + [f"{prefix}%" for prefix in prefixes]
+        session_clause = ""
+        if scope_session and session:
+            session_clause = " AND session = ?"
+            params.append(session)
+        with _conn_ro() as c:
+            row = c.execute(f"""
+                SELECT COUNT(*) AS n
+                FROM paper_trades
+                WHERE status='OPEN'
+                  AND direction=?
+                  AND ({prefix_clause})
+                  {session_clause}
+            """, tuple(params)).fetchone()
+        n_open = int(row["n"] or 0) if row else 0
+    except Exception as exc:
+        logger.debug("[PAPER] family open exposure check failed for %s: %s", algo_name, exc)
+        return False, ""
+
+    if n_open >= max_open:
+        family = _algo_family(algo_name)
+        return True, (
+            f"Family exposure cap [{family} {direction}]: {n_open} open "
+            f"(limit {max_open}). Shadow learning continues."
+        )
+    return False, ""
+
+
+def check_fast_family_damage_stop(algo_name: str, direction: str, session: str = "") -> tuple[bool, str]:
+    """Short-window DB-backed damage stop that reacts after the first clustered losses."""
+    if not algo_name:
+        return False, ""
+    try:
+        from agent.config_manager import config as _cfg
+        if not _cfg.get("risk.fast_family_damage_enabled", True):
+            return False, ""
+        window_min = int(_cfg.get("risk.fast_family_loss_window_min", 20))
+        max_losses = int(_cfg.get("risk.fast_family_max_losses", 2))
+        loss_usd = abs(float(_cfg.get("risk.fast_family_loss_usd", 75.0)))
+        scope_session = bool(_cfg.get("risk.family_damage_scope_session", False))
+    except Exception:
+        return False, ""
+    if window_min <= 0:
+        return False, ""
+
+    prefixes = _family_prefixes(algo_name)
+    if not prefixes:
+        return False, ""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_min)).isoformat()
+    try:
+        prefix_clause = " OR ".join("UPPER(algo_name) LIKE ?" for _ in prefixes)
+        params: list = [direction, cutoff] + [f"{prefix}%" for prefix in prefixes]
+        session_clause = ""
+        if scope_session and session:
+            session_clause = " AND session = ?"
+            params.append(session)
+        with _conn_ro() as c:
+            row = c.execute(f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN COALESCE(pnl_dollar,0) <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+                    COALESCE(SUM(COALESCE(pnl_dollar,0)), 0) AS pnl
+                FROM paper_trades
+                WHERE status='CLOSED'
+                  AND direction=?
+                  AND closed_at IS NOT NULL AND closed_at != ''
+                  AND closed_at >= ?
+                  AND ({prefix_clause})
+                  {session_clause}
+            """, tuple(params)).fetchone()
+    except Exception as exc:
+        logger.debug("[PAPER] fast family damage check failed for %s: %s", algo_name, exc)
+        return False, ""
+
+    total = int(row["total"] or 0) if row else 0
+    losses = int(row["losses"] or 0) if row else 0
+    pnl = float(row["pnl"] or 0.0) if row else 0.0
+    if total <= 0:
+        return False, ""
+    family = _algo_family(algo_name)
+    if losses >= max_losses:
+        return True, (
+            f"Fast family damage [{family} {direction}]: {losses} losses in "
+            f"{window_min}min (limit {max_losses}). Shadow learning continues."
+        )
+    if loss_usd > 0 and pnl <= -loss_usd:
+        return True, (
+            f"Fast family damage [{family} {direction}]: ${pnl:.0f} in "
+            f"{window_min}min (limit -${loss_usd:.0f}). Shadow learning continues."
+        )
+    return False, ""
+
+
+def check_post_auth_quarantine(session: str = "") -> tuple[bool, str]:
+    """Block fresh entries briefly after Schwab auth recovery while data warms up."""
+    try:
+        from agent.config_manager import config as _cfg
+        quarantine_min = int(_cfg.get("risk.post_auth_quarantine_min", 20))
+    except Exception:
+        return False, ""
+    if quarantine_min <= 0 or session == "CLOSED":
+        return False, ""
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=quarantine_min)
+        with _conn_ro() as c:
+            row = c.execute("""
+                SELECT MAX(resolved_at) AS resolved_at
+                FROM system_alerts
+                WHERE alert_type='SCHWAB_AUTH'
+                  AND severity='CRITICAL'
+                  AND resolved_at IS NOT NULL
+            """).fetchone()
+        raw = (row["resolved_at"] if row else None)
+        if not raw:
+            return False, ""
+        resolved_at = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if resolved_at.tzinfo is None:
+            resolved_at = resolved_at.replace(tzinfo=timezone.utc)
+        if resolved_at >= cutoff:
+            age_min = max(0.0, (datetime.now(timezone.utc) - resolved_at).total_seconds() / 60.0)
+            return True, (
+                f"Post-auth quarantine: Schwab auth recovered {age_min:.1f}min ago; "
+                f"paper entries pause for {quarantine_min}min while live data stabilizes."
+            )
+    except Exception as exc:
+        logger.debug("[PAPER] post-auth quarantine check skipped: %s", exc)
+    return False, ""
+
+
+def _check_intraday_geometry_cap(
+    ticker: str,
+    direction: str,
+    price: float,
+    stop: float,
+    target: float,
+) -> tuple[bool, str]:
+    """Reject setups whose stop/target geometry is too wide for scalping."""
+    try:
+        from agent.config_manager import config as _cfg
+        max_stop_pct = float(_cfg.get("risk.intraday_max_stop_pct", 2.0))
+        max_target_pct = float(_cfg.get("risk.intraday_max_target_pct", 4.0))
+    except Exception:
+        return False, ""
+    if price <= 0:
+        return False, ""
+    stop_pct = abs(price - stop) / price * 100.0
+    target_pct = abs(target - price) / price * 100.0 if target > 0 else 0.0
+    if max_stop_pct > 0 and stop_pct > max_stop_pct:
+        return True, f"{ticker} stop distance {stop_pct:.1f}% exceeds {max_stop_pct:.1f}% intraday cap"
+    if max_target_pct > 0 and target_pct > max_target_pct:
+        return True, f"{ticker} target distance {target_pct:.1f}% exceeds {max_target_pct:.1f}% intraday cap"
+    return False, ""
+
+
+def _minutes_to_regular_close() -> float:
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    return max(0.0, (close_et - now_et).total_seconds() / 60.0)
+
+
+def _check_target_reachability(
+    ticker: str,
+    price: float,
+    target: float,
+    atr: float,
+    session: str,
+) -> tuple[bool, str]:
+    """Late-day guard: don't open targets that cannot reasonably travel before close."""
+    if session not in ("PRIME", "STANDARD", "LUNCH_BLOCK", "CLOSING_CAUTION"):
+        return False, ""
+    try:
+        from agent.config_manager import config as _cfg
+        min_minutes = float(_cfg.get("risk.late_day_min_minutes_to_eod", 35))
+        atr_fraction = float(_cfg.get("risk.target_reach_atr_fraction", 0.35))
+    except Exception:
+        return False, ""
+    if min_minutes <= 0 or target <= 0 or price <= 0:
+        return False, ""
+    minutes_left = _minutes_to_regular_close()
+    if minutes_left <= 0:
+        return False, ""
+    target_dist = abs(target - price)
+    atr_eff = max(float(atr or 0.0), price * 0.005)
+    expected_5m_move = max(atr_eff * max(atr_fraction, 0.05), price * 0.001)
+    estimated_minutes = target_dist / expected_5m_move * 5.0
+    required = max(min_minutes, estimated_minutes)
+    if minutes_left < required:
+        return True, (
+            f"{ticker} target needs about {estimated_minutes:.0f}min of travel; "
+            f"only {minutes_left:.0f}min remain before regular close"
+        )
+    return False, ""
+
+
+def _deep_saturation_block(
+    ticker: str,
+    ml_deep_prob: Optional[float],
+    ml_ensemble_score: Optional[int],
+) -> tuple[bool, str]:
+    """Block deep-model saturation when the ensemble does not confirm it."""
+    try:
+        from agent.config_manager import config as _cfg
+        if not _cfg.get("risk.deep_saturation_guard_enabled", True):
+            return False, ""
+        saturation = float(_cfg.get("risk.deep_saturation_prob", 0.98))
+        min_ensemble = int(_cfg.get("risk.deep_saturation_min_ensemble", 60))
+    except Exception:
+        return False, ""
+    if ml_deep_prob is None or ml_ensemble_score is None:
+        return False, ""
+    try:
+        deep = float(ml_deep_prob)
+        ensemble = int(ml_ensemble_score)
+    except Exception:
+        return False, ""
+    if deep >= saturation and ensemble < min_ensemble:
+        return True, (
+            f"{ticker} deep model saturated ({deep:.2f}) but ensemble={ensemble} "
+            f"< {min_ensemble}; routed to shadow learning"
+        )
+    return False, ""
+
+
+def _entry_spread_to_risk_block(ticker: str, spread_dollar: float, actual_risk: float) -> tuple[bool, str]:
+    """Reject fills where modeled spread consumes too much of the stop risk."""
+    try:
+        from agent.config_manager import config as _cfg
+        max_ratio = float(_cfg.get("risk.max_entry_spread_to_risk", 0.35))
+    except Exception:
+        return False, ""
+    if max_ratio <= 0 or actual_risk <= 0 or spread_dollar <= 0:
+        return False, ""
+    ratio = float(spread_dollar) / float(actual_risk)
+    if ratio > max_ratio:
+        return True, (
+            f"{ticker} entry spread is {ratio:.0%} of stop risk "
+            f"(limit {max_ratio:.0%}); routed to shadow learning"
+        )
+    return False, ""
+
+
 def _append_status(out_status: Optional[list], status: str) -> None:
     if out_status is not None and not out_status:
         out_status.append(status)
@@ -905,6 +1165,12 @@ def maybe_open_trade(
             return None
 
     # Ticker-level damage control — independent of algo-family controls.
+    _auth_blocked, _auth_reason = check_post_auth_quarantine(_live_session_early)
+    if _auth_blocked:
+        logger.info(f"[PAPER] {ticker} skip: {_auth_reason}")
+        _append_status(_out_status, "BLOCKED_POST_AUTH_QUARANTINE")
+        return None
+
     _tk_blocked, _tk_reason = check_ticker_cooldown(ticker)
     if _tk_blocked:
         logger.info(f"[PAPER] {ticker} skip: {_tk_reason}")
@@ -931,6 +1197,20 @@ def maybe_open_trade(
         if _fam_block_sess and _sess_check and _sess_check in _fam_block_sess.split(","):
             logger.debug(f"[PAPER] {ticker} skip: {_fam} blocked in session {_sess_check}")
             _append_status(_out_status, "BLOCKED_FAMILY_SESSION")
+            return None
+        _family_exposure_blocked, _family_exposure_reason = check_family_open_exposure(
+            algo_name, direction, session or ""
+        )
+        if _family_exposure_blocked:
+            logger.info(f"[PAPER] {ticker} skip: {_family_exposure_reason}")
+            _append_status(_out_status, "BLOCKED_FAMILY_EXPOSURE")
+            return None
+        _fast_damage_blocked, _fast_damage_reason = check_fast_family_damage_stop(
+            algo_name, direction, session or ""
+        )
+        if _fast_damage_blocked:
+            logger.info(f"[PAPER] {ticker} skip: {_fast_damage_reason}")
+            _append_status(_out_status, "BLOCKED_FAST_FAMILY_DAMAGE")
             return None
         _damage_blocked, _damage_reason = check_family_damage_stop(algo_name, session or "")
         if _damage_blocked:
@@ -1006,6 +1286,26 @@ def maybe_open_trade(
             )
             _append_status(_out_status, "BLOCKED_BAD_GEOMETRY")
             return None
+
+    _wide_blocked, _wide_reason = _check_intraday_geometry_cap(ticker, direction, price, stop, target)
+    if _wide_blocked:
+        logger.info(f"[PAPER] {ticker} skip: {_wide_reason}")
+        _append_status(_out_status, "BLOCKED_WIDE_GEOMETRY")
+        return None
+
+    _reach_blocked, _reach_reason = _check_target_reachability(
+        ticker, price, target, atr, session or _live_session_early
+    )
+    if _reach_blocked:
+        logger.info(f"[PAPER] {ticker} skip: {_reach_reason}")
+        _append_status(_out_status, "BLOCKED_TARGET_REACHABILITY")
+        return None
+
+    _deep_blocked, _deep_reason = _deep_saturation_block(ticker, ml_deep_prob, ml_ensemble_score)
+    if _deep_blocked:
+        logger.info(f"[PAPER] {ticker} skip: {_deep_reason}")
+        _append_status(_out_status, "BLOCKED_DEEP_SATURATION")
+        return None
 
     min_conf = _get_min_confidence()
     if confidence < min_conf:
@@ -1213,6 +1513,13 @@ def maybe_open_trade(
             # Stop stays at its signal level (structural anchor); the risk
             # distance naturally reflects actual execution cost.
             _actual_risk = abs(actual_entry - stop)
+            _spread_blocked, _spread_reason = _entry_spread_to_risk_block(
+                ticker, float(_entry_fill.spread_dollar or 0.0) / max(shares, 1), _actual_risk
+            )
+            if _spread_blocked:
+                _append_status(_out_status, "BLOCKED_SPREAD_RISK")
+                logger.info(f"[PAPER] {ticker} skip: {_spread_reason}")
+                return None
             if _actual_risk > 0:
                 if direction == "BUY":
                     t1_price = round(actual_entry + _t1_mult * _actual_risk, 4)
@@ -1802,6 +2109,11 @@ def _record_close(
                 "regime":     (_row_extra["regime"]   if _row_extra else "") or "",
                 "ts":         _time.time(),
             }))
+            c.execute(
+                "UPDATE paper_trades SET feedback_triggered_at=? "
+                "WHERE id=? AND feedback_triggered_at IS NULL",
+                (datetime.now(timezone.utc).isoformat(), trade_id),
+            )
     except Exception:
         pass
 

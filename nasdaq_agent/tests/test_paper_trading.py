@@ -152,8 +152,8 @@ def test_trade_closed_on_target():
 
 def test_trade_closed_on_stop():
     # Set df last Close below stop so STOP_HIT fires
-    df = make_ohlcv(start_price=95.0)  # last Close ~95, stop=97
-    maybe_open_trade("COIN", "BUY", 100.0, 108.0, 97.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    df = make_ohlcv(start_price=95.0)  # last Close ~95, stop=98
+    maybe_open_trade("COIN", "BUY", 100.0, 108.0, 98.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     update_open_trades("COIN", df, current_price=95.0)
     closed = get_closed_trades()
     assert any(t["ticker"] == "COIN" for t in closed)
@@ -169,7 +169,7 @@ def test_sell_trade_pnl_direction():
         assert meta_trade["pnl_pct"] is not None
 
 def test_summary_counts():
-    maybe_open_trade("T1", "BUY", 50.0, 55.0, 48.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    maybe_open_trade("T1", "BUY", 50.0, 55.0, 49.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     s = get_summary()
     assert s["open"] >= 1
     assert "wins" in s and "losses" in s and "win_rate" in s
