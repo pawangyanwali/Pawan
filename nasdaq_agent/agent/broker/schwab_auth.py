@@ -24,6 +24,7 @@ Environment variables (.env):
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import logging
@@ -86,6 +87,34 @@ def _row_value(row, key: str, index: int, default=None):
         return row[index]
     except Exception:
         return default
+
+
+def _decode_http_error_body(err: urllib.error.HTTPError) -> tuple[str, dict]:
+    """Return a readable Schwab error body even when the response is gzip encoded."""
+    try:
+        raw = err.read() or b""
+    except Exception:
+        return "<unreadable>", {}
+    if isinstance(raw, str):
+        text = raw
+    else:
+        try:
+            encoding = ""
+            try:
+                encoding = (err.headers.get("Content-Encoding") or "").lower()
+            except Exception:
+                encoding = ""
+            if encoding == "gzip" or raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            text = repr(raw[:500])
+    parsed = {}
+    try:
+        parsed = json.loads(text) if text else {}
+    except Exception:
+        parsed = {}
+    return text[:2000], parsed if isinstance(parsed, dict) else {}
 
 
 def init_schwab_token_store() -> bool:
@@ -252,12 +281,15 @@ class _TokenManager:
             with urllib.request.urlopen(req, timeout=15) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
-            # Log the full response body so we can see the actual Schwab error
-            # (e.g. "invalid_grant" = expired refresh token, "invalid_client" = wrong credentials)
+            # Log the full response body so we can see the actual Schwab error.
+            # Schwab sometimes gzip-encodes OAuth errors even when urllib leaves
+            # the body compressed, which made prior incident logs unreadable.
+            body, parsed = _decode_http_error_body(e)
             try:
-                body = e.read().decode("utf-8", errors="replace")
+                setattr(e, "schwab_error_body", body)
+                setattr(e, "schwab_error_json", parsed)
             except Exception:
-                body = "<unreadable>"
+                pass
             logger.error(
                 f"[Schwab/{self.name}] Token endpoint {e.code}: {body}"
             )
@@ -367,6 +399,21 @@ class _TokenManager:
             from agent.valkey_client import _get_client as _vk_get
             client = _vk_get()
             if client:
+                status_payload = {
+                    "connected": False,
+                    "app": self.name,
+                    "access_token_ttl_s": 0,
+                    "refresh_token_ttl_s": 0,
+                    "refresh_token_expires": None,
+                    "status": "AUTH_REQUIRED",
+                    "reason": reason,
+                    "updated_at": time.time(),
+                }
+                client.setex(
+                    f"schwab:token_status:{self.name.lower()}",
+                    8 * 86400,
+                    json.dumps(status_payload, separators=(",", ":")),
+                )
                 payload = {
                     "ts": time.time(),
                     "app": self.name.lower(),
@@ -595,9 +642,14 @@ class _TokenManager:
                 # 400 = invalid_grant (expired/revoked refresh token) or bad credentials.
                 # Do not retry — clear tokens and require re-auth.
                 _auth_url = "/schwab/auth/md" if self.name.lower() == "marketdata" else "/schwab/auth/at"
+                _body = str(getattr(e, "schwab_error_body", "") or "")
+                _parsed = getattr(e, "schwab_error_json", {}) or {}
+                _err = str(_parsed.get("error") or "invalid_grant")
+                _desc = str(_parsed.get("error_description") or _body or "refresh token rejected")
+                _reason = f"{_err}: {_desc}"[:500]
                 logger.error(
                     f"[Schwab/{self.name}] Refresh token rejected (400) — "
-                    f"tokens cleared. Re-authenticate via {_auth_url}"
+                    f"tokens cleared. Re-authenticate via {_auth_url}. Schwab said: {_reason}"
                 )
                 # CRITICAL: re-auth required — surface to dashboard, not just logs.
                 # This blocks live quotes/trading until an operator re-authenticates.
@@ -609,11 +661,16 @@ class _TokenManager:
                         source=self.name.lower(),
                         title=f"Schwab {self.name} re-authentication required",
                         message=(
-                            "Refresh token was rejected (HTTP 400 invalid_grant). "
+                            f"Refresh token was rejected (HTTP 400 {_err}). "
                             f"Tokens cleared — re-authenticate via {_auth_url} to "
-                            "restore live market data and trading."
+                            f"restore live market data and trading. Schwab response: {_desc[:300]}"
                         ),
-                        metadata={"http_code": 400, "app": self.name.lower()},
+                        metadata={
+                            "http_code": 400,
+                            "app": self.name.lower(),
+                            "schwab_error": _err,
+                            "schwab_error_description": _desc[:1000],
+                        },
                     )
                 except Exception:
                     pass
@@ -622,7 +679,7 @@ class _TokenManager:
                 # lock already gone; it will then re-read the (now-deleted) file
                 # and skip a second Schwab call.
                 _release_refresh_lock(_vk_client, _lock_key, _lock_token, _lock_held)
-                self._invalidate_all_stores(reason="refresh_token_rejected")
+                self._invalidate_all_stores(reason=_reason)
             else:
                 # 403 = Akamai WAF transient block; 5xx = Schwab outage.
                 # Retry with exponential backoff (2, 4, 8, 16 … up to 30 min).

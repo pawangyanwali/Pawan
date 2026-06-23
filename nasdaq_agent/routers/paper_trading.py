@@ -13,6 +13,7 @@ Paper-trading routes:
 
 import asyncio
 import logging
+import time
 
 from fastapi import APIRouter, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -38,6 +39,69 @@ from agent.paper_trading import (
 router = APIRouter(tags=["paper_trading"])
 
 
+def _latest_prices_for_open_trades(open_trades: list[dict]) -> dict[str, dict]:
+    """Read current open-trade prices from Valkey without calling Schwab REST."""
+    tickers = {str(t.get("ticker") or "").upper() for t in open_trades}
+    tickers.discard("")
+    if not tickers:
+        return {}
+    try:
+        from agent.valkey_client import get_price
+        prices: dict[str, dict] = {}
+        for ticker in tickers:
+            quote = get_price(ticker)
+            if not quote:
+                continue
+            last = float(quote.get("last") or quote.get("mark") or 0)
+            if last <= 0:
+                continue
+            prices[ticker] = {
+                "last": last,
+                "source": quote.get("source") or quote.get("source_status") or "VALKEY",
+                "updated_at": float(quote.get("updated_at") or 0),
+            }
+        return prices
+    except Exception as exc:
+        logging.getLogger(__name__).debug("[PT] price enrichment skipped: %s", exc)
+        return {}
+
+
+def _enrich_open_trades_with_unrealized(open_trades: list[dict]) -> tuple[list[dict], float]:
+    """Add current_price and unrealized P&L fields for the paper modal."""
+    prices = _latest_prices_for_open_trades(open_trades)
+    now = time.time()
+    total_unrealized = 0.0
+    enriched: list[dict] = []
+    for trade in open_trades:
+        t = dict(trade)
+        ticker = str(t.get("ticker") or "").upper()
+        quote = prices.get(ticker)
+        if quote:
+            try:
+                current = float(quote["last"])
+                entry = float(t.get("entry_price") or 0)
+                shares = int(t.get("shares_remaining") or t.get("shares") or 0)
+                direction = str(t.get("direction") or "BUY").upper()
+                if current > 0 and entry > 0 and shares > 0:
+                    pnl = ((current - entry) * shares
+                           if direction == "BUY"
+                           else (entry - current) * shares)
+                    denom = entry * shares
+                    t["current_price"] = round(current, 4)
+                    t["unrealized_pnl_dollar"] = round(pnl, 2)
+                    t["unrealized_pnl_pct"] = round((pnl / denom * 100) if denom else 0.0, 3)
+                    t["unrealized_price_source"] = quote.get("source")
+                    if quote.get("updated_at"):
+                        t["unrealized_price_age_s"] = round(max(0.0, now - quote["updated_at"]), 1)
+                    total_unrealized += pnl
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "[PT] unrealized P&L failed for %s", ticker, exc_info=True
+                )
+        enriched.append(t)
+    return enriched, round(total_unrealized, 2)
+
+
 @router.get("/api/paper-trading")
 async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_viewer)):
     """Return paper trading summary, open and recent closed trades."""
@@ -59,6 +123,8 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
             "win_rate": 0.0, "avg_pnl": 0.0, "total_dollar_pnl": 0.0,
             "display_period": "all-time",
         }, "open_trades": [], "closed_trades": []})
+
+    open_trades, _open_unrealized = _enrich_open_trades_with_unrealized(open_trades)
 
     # today_db comes directly from a COUNT(*) SQL query — always accurate regardless
     # of how many trades exist. Do not derive today's count from the display list.
@@ -112,6 +178,8 @@ async def paper_trading_endpoint(_user: AuthenticatedUser = Depends(require_view
         "today_closed":         _today_total,
         "today_wins":           _today_wins,
         "today_losses":         _today_losses,
+        "open_unrealized_pnl":  _open_unrealized,
+        "today_total_with_unrealized": round(_today_dollar + _open_unrealized, 2),
         "display_period":       display_period,
         "daily_trades_allowed": _max_daily,
         "budget":               _budget,
@@ -129,8 +197,12 @@ async def api_account_state():
     try:
         loop = asyncio.get_running_loop()
         try:
-            from agent.broker.schwab_market_data import get_live_quotes
-            prices = {t: q.get("last", 0) for t, q in get_live_quotes().items() if q.get("last")}
+            from agent.valkey_client import get_all_prices
+            prices = {
+                ticker: float(q.get("last") or q.get("mark") or 0)
+                for ticker, q in get_all_prices().items()
+                if float(q.get("last") or q.get("mark") or 0) > 0
+            }
         except Exception:
             prices = {}
         state = await loop.run_in_executor(None, lambda: get_account_state(prices))
