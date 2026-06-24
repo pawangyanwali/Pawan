@@ -5453,16 +5453,26 @@ async function stLoadTradeRulesTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const [predResp, paperResp, sizingResp, riskResp] = await Promise.all([
+    const [predResp, paperResp, sizingResp] = await Promise.all([
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=prediction.`, {signal: AbortSignal.timeout(12000)}),
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`,      {signal: AbortSignal.timeout(12000)}),
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=sizing.`,     {signal: AbortSignal.timeout(12000)}),
-      _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`,       {signal: AbortSignal.timeout(12000)}),
     ]);
     const pc = (await predResp.json()).config  || {};
     const pp = (await paperResp.json()).config || {};
     const ps = (await sizingResp.json()).config || {};
-    const rc = (await riskResp.json()).config || {};
+    let rc = {};
+    try {
+      const riskResp = await _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`, {signal: AbortSignal.timeout(12000)});
+      const contentType = (riskResp.headers.get('content-type') || '').toLowerCase();
+      if (riskResp.ok && contentType.includes('application/json')) {
+        rc = (await riskResp.json()).config || {};
+      } else {
+        console.warn('[Settings] risk config unavailable for Trade Rules tab', riskResp.status, contentType);
+      }
+    } catch (e) {
+      console.warn('[Settings] risk config unavailable for Trade Rules tab', e);
+    }
 
     const _row = (id, label, val, min, max, step, hint) => `
       <div>
