@@ -1404,6 +1404,9 @@ def analyse_ticker(
                 ml_deep_prob      = ml_deep_p,
                 ml_ensemble_score = int(round(ml_ensemble_p * 100)),
                 atr               = float(last.get("atr_14", 0.0)),
+                rsi_value         = float(pred.get("rsi_value", last.get("rsi_14", 50.0))),
+                macd_hist         = float(last.get("macd_hist", 0.0)),
+                macd_hist_prev    = float(last.get("macd_hist_prev", 0.0)),
                 avg_daily_volume  = float(df_ind["Volume"].mean() * 390) if "Volume" in df_ind.columns else 0.0,
                 _out_status       = _pred_exec_status,
             )
@@ -1843,6 +1846,9 @@ def analyse_ticker(
                             ml_deep_prob      = ml_deep_p,
                             ml_ensemble_score = int(round(ml_ensemble_p * 100)),
                             atr               = float(last.get("atr_14", 0.0)),
+                            rsi_value         = float(pred.get("rsi_value", last.get("rsi_14", 50.0))),
+                            macd_hist         = float(last.get("macd_hist", 0.0)),
+                            macd_hist_prev    = float(last.get("macd_hist_prev", 0.0)),
                             avg_daily_volume  = float(df_ind["Volume"].mean() * 390) if "Volume" in df_ind.columns else 0.0,
                             _out_status       = _asig_status,
                         )

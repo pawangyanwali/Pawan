@@ -252,6 +252,82 @@ def test_entry_spread_to_risk_blocks_expensive_fill():
     assert "spread is 56%" in reason
 
 
+def test_technical_entry_gate_blocks_buy_when_rsi_not_oversold():
+    cfg = _Cfg({
+        "risk.technical_entry_gate_enabled": True,
+        "risk.technical_entry_gate_missing_data_block": True,
+        "risk.technical_entry_gate_require_atr": True,
+        "risk.technical_entry_gate_require_rsi": True,
+        "risk.technical_entry_gate_require_macd": True,
+        "risk.technical_entry_gate_buy_rsi_zones": "OS,EXTREME_OS",
+        "risk.technical_entry_gate_sell_rsi_zones": "OB,EXTREME_OB",
+    })
+    with patch("agent.config_manager.config", cfg):
+        blocked, reason = pt._technical_entry_gate(
+            "AAPL", "BUY", "NEUTRAL", 48.0, macd_hist=0.02, macd_hist_prev=0.01, atr=1.2
+        )
+
+    assert blocked is True
+    assert "not an oversold buy zone" in reason
+
+
+def test_technical_entry_gate_blocks_buy_when_macd_does_not_confirm():
+    cfg = _Cfg({
+        "risk.technical_entry_gate_enabled": True,
+        "risk.technical_entry_gate_missing_data_block": True,
+        "risk.technical_entry_gate_require_atr": True,
+        "risk.technical_entry_gate_require_rsi": True,
+        "risk.technical_entry_gate_require_macd": True,
+        "risk.technical_entry_gate_buy_rsi_zones": "OS,EXTREME_OS",
+        "risk.technical_entry_gate_sell_rsi_zones": "OB,EXTREME_OB",
+    })
+    with patch("agent.config_manager.config", cfg):
+        blocked, reason = pt._technical_entry_gate(
+            "AAPL", "BUY", "OS", 28.0, macd_hist=-0.03, macd_hist_prev=-0.02, atr=1.2
+        )
+
+    assert blocked is True
+    assert "MACD does not confirm BUY" in reason
+
+
+def test_technical_entry_gate_allows_oversold_buy_with_macd_turning_and_atr():
+    cfg = _Cfg({
+        "risk.technical_entry_gate_enabled": True,
+        "risk.technical_entry_gate_missing_data_block": True,
+        "risk.technical_entry_gate_require_atr": True,
+        "risk.technical_entry_gate_require_rsi": True,
+        "risk.technical_entry_gate_require_macd": True,
+        "risk.technical_entry_gate_buy_rsi_zones": "OS,EXTREME_OS",
+        "risk.technical_entry_gate_sell_rsi_zones": "OB,EXTREME_OB",
+    })
+    with patch("agent.config_manager.config", cfg):
+        blocked, reason = pt._technical_entry_gate(
+            "AAPL", "BUY", "OS", 28.0, macd_hist=-0.01, macd_hist_prev=-0.03, atr=1.2
+        )
+
+    assert blocked is False
+    assert reason == ""
+
+
+def test_technical_entry_gate_blocks_sell_when_rsi_not_overbought():
+    cfg = _Cfg({
+        "risk.technical_entry_gate_enabled": True,
+        "risk.technical_entry_gate_missing_data_block": True,
+        "risk.technical_entry_gate_require_atr": True,
+        "risk.technical_entry_gate_require_rsi": True,
+        "risk.technical_entry_gate_require_macd": True,
+        "risk.technical_entry_gate_buy_rsi_zones": "OS,EXTREME_OS",
+        "risk.technical_entry_gate_sell_rsi_zones": "OB,EXTREME_OB",
+    })
+    with patch("agent.config_manager.config", cfg):
+        blocked, reason = pt._technical_entry_gate(
+            "MSFT", "SELL", "NEUTRAL", 50.0, macd_hist=-0.02, macd_hist_prev=-0.01, atr=1.0
+        )
+
+    assert blocked is True
+    assert "not an overbought sell zone" in reason
+
+
 def test_algo_signal_log_does_not_mark_blocked_sibling_as_opened():
     pt.log_algo_signals("PAIR", [
         {"algo": "KC_FADE_BEAR", "direction": "SELL", "confidence": 50, "entry": 100, "stop": 101, "target": 98, "rr": 2,

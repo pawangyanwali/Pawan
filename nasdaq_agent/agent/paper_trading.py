@@ -914,6 +914,108 @@ def check_first_loss_probation(
     ), max(0.05, min(1.0, size_mult))
 
 
+def _zone_from_rsi_value(rsi_value: Optional[float]) -> str:
+    if rsi_value is None:
+        return ""
+    try:
+        rsi = float(rsi_value)
+    except (TypeError, ValueError):
+        return ""
+    if rsi >= 80:
+        return "EXTREME_OB"
+    if rsi >= 70:
+        return "OB"
+    if rsi <= 20:
+        return "EXTREME_OS"
+    if rsi <= 30:
+        return "OS"
+    return "NEUTRAL"
+
+
+def _macd_confirms_direction(
+    direction: str,
+    macd_hist: Optional[float],
+    macd_hist_prev: Optional[float],
+) -> tuple[bool, str]:
+    try:
+        hist = float(macd_hist)
+    except (TypeError, ValueError):
+        return False, "missing MACD histogram"
+
+    try:
+        prev = float(macd_hist_prev) if macd_hist_prev is not None else None
+    except (TypeError, ValueError):
+        prev = None
+
+    if direction == "BUY":
+        confirmed = hist > 0 or (prev is not None and hist > prev)
+        suffix = f", prev={prev:.4f})" if prev is not None else ")"
+        if confirmed:
+            return True, f"MACD confirms BUY (hist={hist:.4f}{suffix}"
+        return False, f"MACD does not confirm BUY (hist={hist:.4f}{suffix}"
+
+    if direction == "SELL":
+        confirmed = hist < 0 or (prev is not None and hist < prev)
+        suffix = f", prev={prev:.4f})" if prev is not None else ")"
+        if confirmed:
+            return True, f"MACD confirms SELL (hist={hist:.4f}{suffix}"
+        return False, f"MACD does not confirm SELL (hist={hist:.4f}{suffix}"
+
+    return False, "unsupported direction"
+
+
+def _technical_entry_gate(
+    ticker: str,
+    direction: str,
+    rsi_zone: str,
+    rsi_value: Optional[float],
+    macd_hist: Optional[float],
+    macd_hist_prev: Optional[float],
+    atr: Optional[float],
+) -> tuple[bool, str]:
+    """Final execution gate: RSI zone + MACD confirmation + ATR sanity."""
+    try:
+        from agent.config_manager import config as _cfg
+        if not bool(_cfg.get("risk.technical_entry_gate_enabled", True)):
+            return False, ""
+        missing_blocks = bool(_cfg.get("risk.technical_entry_gate_missing_data_block", False))
+        require_atr = bool(_cfg.get("risk.technical_entry_gate_require_atr", True))
+        require_rsi = bool(_cfg.get("risk.technical_entry_gate_require_rsi", True))
+        require_macd = bool(_cfg.get("risk.technical_entry_gate_require_macd", True))
+        buy_zones = _csv_set(_cfg.get("risk.technical_entry_gate_buy_rsi_zones", "OS,EXTREME_OS"))
+        sell_zones = _csv_set(_cfg.get("risk.technical_entry_gate_sell_rsi_zones", "OB,EXTREME_OB"))
+    except Exception:
+        return False, ""
+
+    if require_atr:
+        try:
+            atr_f = float(atr or 0.0)
+        except (TypeError, ValueError):
+            atr_f = 0.0
+        if atr_f <= 0:
+            if missing_blocks:
+                return True, f"{ticker} blocked: ATR unavailable for stop/target validation"
+
+    if require_rsi:
+        zone = (rsi_zone or "").upper().strip() or _zone_from_rsi_value(rsi_value)
+        if not zone:
+            if missing_blocks:
+                return True, f"{ticker} blocked: RSI unavailable for direction gate"
+        elif direction == "BUY" and zone not in buy_zones:
+            return True, f"{ticker} BUY blocked: RSI zone {zone} is not an oversold buy zone"
+        elif direction == "SELL" and zone not in sell_zones:
+            return True, f"{ticker} SELL blocked: RSI zone {zone} is not an overbought sell zone"
+
+    if require_macd:
+        macd_ok, macd_reason = _macd_confirms_direction(direction, macd_hist, macd_hist_prev)
+        if not macd_ok:
+            if macd_reason.startswith("missing") and not missing_blocks:
+                return False, ""
+            return True, f"{ticker} blocked: {macd_reason}"
+
+    return False, ""
+
+
 def get_execution_min_rr(algo_name: str = "", entry_type: str = "") -> float:
     """
     Return the configured target reward multiple for this execution path.
@@ -1267,6 +1369,9 @@ def maybe_open_trade(
     ml_ensemble_score: Optional[int] = None,
     rr_quality:       str   = "",
     atr:              float = 0.0,           # ATR(14) at time of signal — used for fill model
+    rsi_value:        Optional[float] = None,
+    macd_hist:        Optional[float] = None,
+    macd_hist_prev:   Optional[float] = None,
     avg_daily_volume: float = 0.0,           # avg daily shares — used for liquidity penalty
     _out_status:      Optional[list] = None,
 ) -> Optional[int]:
@@ -1305,6 +1410,14 @@ def maybe_open_trade(
     if _tk_blocked:
         logger.info(f"[PAPER] {ticker} skip: {_tk_reason}")
         _append_status(_out_status, "BLOCKED_TICKER_COOLDOWN")
+        return None
+
+    _tech_blocked, _tech_reason = _technical_entry_gate(
+        ticker, direction, rsi_zone, rsi_value, macd_hist, macd_hist_prev, atr
+    )
+    if _tech_blocked:
+        logger.info(f"[PAPER] {ticker} skip: {_tech_reason}")
+        _append_status(_out_status, "BLOCKED_TECHNICAL_GATE")
         return None
 
     # Per-family execution controls — check BEFORE circuit breaker for fast-path rejection.
