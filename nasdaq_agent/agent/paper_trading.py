@@ -287,6 +287,13 @@ def init_db() -> None:
             c.execute(create_balance_snapshots)
             c.execute(create_algo_signal_log)
             _migrate_columns(c)
+            try:
+                existing_algo = {row[1] for row in c.execute("PRAGMA table_info(algo_signal_log)").fetchall()}
+                for col, definition in _ALGO_SIGNAL_LOG_ADDITIONS:
+                    if col not in existing_algo:
+                        c.execute(f"ALTER TABLE algo_signal_log ADD COLUMN {col} {definition}")
+            except Exception:
+                pass
             # Ensure default config row
             try:
                 row = c.execute("SELECT id FROM account_config WHERE id=1").fetchone()
@@ -784,6 +791,129 @@ def _append_status(out_status: Optional[list], status: str) -> None:
         out_status.append(status)
 
 
+def _csv_set(value: object) -> set[str]:
+    return {
+        part.strip().upper()
+        for part in str(value or "").split(",")
+        if part and part.strip()
+    }
+
+
+def _targeted_pattern_block(
+    ticker: str,
+    algo_name: str,
+    direction: str,
+    session: str,
+    confidence: float,
+    ml_ensemble_score: Optional[int],
+) -> tuple[bool, str]:
+    """Block specific production-proven weak execution patterns."""
+    if not algo_name:
+        return False, ""
+    try:
+        from agent.config_manager import config as _cfg
+        upper = algo_name.upper()
+        sess = (session or "").upper()
+        ens = int(ml_ensemble_score or 0)
+
+        if (
+            bool(_cfg.get("risk.kc_fade_bear_lunch_block", True))
+            and sess == "LUNCH_BLOCK"
+            and direction == "SELL"
+            and upper.startswith(("KC_FADE", "KELTNER_FADE", "KELTNER"))
+        ):
+            return True, (
+                f"{ticker} {algo_name} SELL blocked in LUNCH_BLOCK: "
+                "recent outcomes show negative follow-through in midday chop"
+            )
+
+        if upper.startswith("PRED_IMMEDIATE") and sess == "PRE_MARKET":
+            min_ens = int(_cfg.get("risk.pred_immediate_premarket_min_ensemble", 55))
+            min_conf = float(_cfg.get("risk.pred_immediate_premarket_min_conf", 80.0))
+            if ens < min_ens or float(confidence or 0.0) < min_conf:
+                return True, (
+                    f"{ticker} PRED_IMMEDIATE pre-market blocked: "
+                    f"ensemble={ens} conf={float(confidence or 0):.0f}% "
+                    f"requires ensemble>={min_ens} and conf>={min_conf:.0f}%"
+                )
+    except Exception as exc:
+        logger.debug("[PAPER] targeted pattern check skipped for %s: %s", ticker, exc)
+    return False, ""
+
+
+def check_first_loss_probation(
+    algo_name: str,
+    direction: str,
+    session: str,
+    confidence: float,
+    ml_ensemble_score: Optional[int],
+) -> tuple[bool, str, float]:
+    """After one recent same-context loss, require stronger evidence or cut size."""
+    if not algo_name:
+        return False, "", 1.0
+    try:
+        from agent.config_manager import config as _cfg
+        if not bool(_cfg.get("risk.first_loss_probation_enabled", True)):
+            return False, "", 1.0
+        sess = (session or "").upper()
+        sessions = _csv_set(_cfg.get("risk.first_loss_probation_sessions", "PRE_MARKET,LUNCH_BLOCK"))
+        if sessions and sess not in sessions:
+            return False, "", 1.0
+        window_min = int(_cfg.get("risk.first_loss_probation_window_min", 60))
+        min_ens = int(_cfg.get("risk.first_loss_probation_min_ensemble", 55))
+        conf_bump = float(_cfg.get("risk.first_loss_probation_conf_bump", 8.0))
+        size_mult = float(_cfg.get("risk.first_loss_probation_size_mult", 0.50))
+    except Exception:
+        return False, "", 1.0
+    if window_min <= 0:
+        return False, "", 1.0
+
+    prefixes = _family_prefixes(algo_name)
+    if not prefixes:
+        return False, "", 1.0
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_min)).isoformat()
+    try:
+        prefix_clause = " OR ".join("UPPER(algo_name) LIKE ?" for _ in prefixes)
+        params: list = [direction, session, cutoff] + [f"{prefix}%" for prefix in prefixes]
+        with _conn_ro() as c:
+            row = c.execute(f"""
+                SELECT
+                    COUNT(*) AS losses,
+                    COALESCE(SUM(COALESCE(pnl_dollar,0)), 0) AS pnl
+                FROM paper_trades
+                WHERE status='CLOSED'
+                  AND direction=?
+                  AND session=?
+                  AND closed_at IS NOT NULL AND closed_at != ''
+                  AND closed_at >= ?
+                  AND COALESCE(pnl_dollar,0) <= 0
+                  AND ({prefix_clause})
+            """, tuple(params)).fetchone()
+    except Exception as exc:
+        logger.debug("[PAPER] first-loss probation check failed for %s: %s", algo_name, exc)
+        return False, "", 1.0
+
+    losses = int(row["losses"] or 0) if row else 0
+    if losses <= 0:
+        return False, "", 1.0
+
+    ens = int(ml_ensemble_score or 0)
+    conf_floor = _get_min_confidence() + conf_bump
+    family = _algo_family(algo_name)
+    if ens < min_ens or float(confidence or 0.0) < conf_floor:
+        return True, (
+            f"First-loss probation [{family} {direction} {session}]: "
+            f"{losses} recent loss in {window_min}min; ensemble={ens} "
+            f"conf={float(confidence or 0):.0f}% requires ensemble>={min_ens} "
+            f"and conf>={conf_floor:.0f}%"
+        ), 1.0
+
+    return False, (
+        f"First-loss probation [{family} {direction} {session}]: "
+        f"{losses} recent loss; stronger signal allowed at {size_mult:.0%} size"
+    ), max(0.05, min(1.0, size_mult))
+
+
 def get_execution_min_rr(algo_name: str = "", entry_type: str = "") -> float:
     """
     Return the configured target reward multiple for this execution path.
@@ -1198,6 +1328,13 @@ def maybe_open_trade(
             logger.debug(f"[PAPER] {ticker} skip: {_fam} blocked in session {_sess_check}")
             _append_status(_out_status, "BLOCKED_FAMILY_SESSION")
             return None
+        _targeted_blocked, _targeted_reason = _targeted_pattern_block(
+            ticker, algo_name, direction, session or "", confidence, ml_ensemble_score
+        )
+        if _targeted_blocked:
+            logger.info(f"[PAPER] {ticker} skip: {_targeted_reason}")
+            _append_status(_out_status, "BLOCKED_PATTERN_CONTEXT")
+            return None
         _family_exposure_blocked, _family_exposure_reason = check_family_open_exposure(
             algo_name, direction, session or ""
         )
@@ -1205,6 +1342,16 @@ def maybe_open_trade(
             logger.info(f"[PAPER] {ticker} skip: {_family_exposure_reason}")
             _append_status(_out_status, "BLOCKED_FAMILY_EXPOSURE")
             return None
+        _prob_blocked, _prob_reason, _prob_size_mult = check_first_loss_probation(
+            algo_name, direction, session or "", confidence, ml_ensemble_score
+        )
+        if _prob_blocked:
+            logger.info(f"[PAPER] {ticker} skip: {_prob_reason}")
+            _append_status(_out_status, "BLOCKED_FIRST_LOSS_PROBATION")
+            return None
+        if _prob_size_mult < 1.0:
+            size_mult = round(size_mult * _prob_size_mult, 4)
+            logger.info(f"[PAPER] {ticker} probation throttle: {_prob_reason}")
         _fast_damage_blocked, _fast_damage_reason = check_fast_family_damage_stop(
             algo_name, direction, session or ""
         )
@@ -1369,6 +1516,11 @@ def maybe_open_trade(
         )
         target = _configured_target(price, stop, direction, _target_rr)
         rr_ratio = round(float(_target_rr), 2)
+        _wide_blocked, _wide_reason = _check_intraday_geometry_cap(ticker, direction, price, stop, target)
+        if _wide_blocked:
+            logger.info(f"[PAPER] {ticker} skip after extended-hours stop widening: {_wide_reason}")
+            _append_status(_out_status, "BLOCKED_WIDE_GEOMETRY")
+            return None
 
     # Tier gate: REGULAR-tier stocks lack liquidity for AH/PM trades.
     if _live_session in ("PRE_MARKET", "AFTER_HOURS"):
@@ -1530,6 +1682,13 @@ def maybe_open_trade(
                 target = t2_price
                 rr_ratio = round(_t2_mult, 2)
                 rr_qualifies = True
+                _wide_blocked, _wide_reason = _check_intraday_geometry_cap(
+                    ticker, direction, actual_entry, stop, target
+                )
+                if _wide_blocked:
+                    _append_status(_out_status, "BLOCKED_WIDE_GEOMETRY")
+                    logger.info(f"[PAPER] {ticker} skip after fill: {_wide_reason}")
+                    return None
 
             cur = c.execute("""
                 INSERT INTO paper_trades
@@ -3014,6 +3173,7 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
     now = datetime.now(timezone.utc).isoformat()
     try:
         with _conn() as c:
+            single_signal = len(algo_signals) == 1
             for sig in algo_signals:
                 # ML scores + filter_reason persist the full ML decision behind
                 # every signal (the columns existed but were previously unwritten).
@@ -3021,8 +3181,15 @@ def log_algo_signals(ticker: str, algo_signals: list, trade_opened: bool = False
                 _ml_daily = sig.get("ml_daily_prob")
                 _ml_swing = sig.get("ml_swing_prob")
                 _ml_deep  = sig.get("ml_deep_prob")
-                _trade_opened = bool(sig.get("trade_opened", trade_opened))
-                _exec_status = sig.get("exec_status") or ("EXECUTED_PAPER" if _trade_opened else "SHADOW_LEARN_ONLY")
+                _exec_status = sig.get("exec_status")
+                if "trade_opened" in sig:
+                    _trade_opened = bool(sig.get("trade_opened"))
+                else:
+                    _trade_opened = bool(trade_opened and single_signal)
+                if _trade_opened:
+                    _exec_status = "EXECUTED_PAPER"
+                else:
+                    _exec_status = _exec_status or "SHADOW_LEARN_ONLY"
                 c.execute(
                     """INSERT INTO algo_signal_log
                          (logged_at, ticker, algo, direction, confidence,

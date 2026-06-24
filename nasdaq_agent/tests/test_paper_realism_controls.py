@@ -131,6 +131,80 @@ def test_fast_family_damage_blocks_after_two_recent_losses():
     assert "Fast family damage [meta_ens BUY]" in reason
 
 
+def test_first_loss_probation_blocks_weak_repeat_context():
+    cfg = _Cfg({
+        "risk.first_loss_probation_enabled": True,
+        "risk.first_loss_probation_window_min": 60,
+        "risk.first_loss_probation_sessions": "PRE_MARKET,LUNCH_BLOCK",
+        "risk.first_loss_probation_min_ensemble": 55,
+        "risk.first_loss_probation_conf_bump": 8.0,
+        "risk.first_loss_probation_size_mult": 0.5,
+    })
+    row = {"losses": 1, "pnl": -12.0}
+    with patch("agent.config_manager.config", cfg), \
+         patch("agent.paper_trading._conn_ro", return_value=_FakeConn(row)), \
+         patch("agent.paper_trading._get_min_confidence", return_value=25.0):
+        blocked, reason, size_mult = pt.check_first_loss_probation(
+            "KC_FADE_BEAR", "SELL", "LUNCH_BLOCK", confidence=48.0, ml_ensemble_score=50
+        )
+
+    assert blocked is True
+    assert size_mult == 1.0
+    assert "First-loss probation [keltner SELL LUNCH_BLOCK]" in reason
+
+
+def test_first_loss_probation_allows_stronger_repeat_at_reduced_size():
+    cfg = _Cfg({
+        "risk.first_loss_probation_enabled": True,
+        "risk.first_loss_probation_window_min": 60,
+        "risk.first_loss_probation_sessions": "PRE_MARKET,LUNCH_BLOCK",
+        "risk.first_loss_probation_min_ensemble": 55,
+        "risk.first_loss_probation_conf_bump": 8.0,
+        "risk.first_loss_probation_size_mult": 0.5,
+    })
+    row = {"losses": 1, "pnl": -12.0}
+    with patch("agent.config_manager.config", cfg), \
+         patch("agent.paper_trading._conn_ro", return_value=_FakeConn(row)), \
+         patch("agent.paper_trading._get_min_confidence", return_value=25.0):
+        blocked, reason, size_mult = pt.check_first_loss_probation(
+            "KC_FADE_BEAR", "SELL", "LUNCH_BLOCK", confidence=70.0, ml_ensemble_score=60
+        )
+
+    assert blocked is False
+    assert size_mult == 0.5
+    assert "stronger signal allowed" in reason
+
+
+def test_targeted_pattern_block_rejects_kc_fade_bear_lunch_block():
+    cfg = _Cfg({"risk.kc_fade_bear_lunch_block": True})
+    with patch("agent.config_manager.config", cfg):
+        blocked, reason = pt._targeted_pattern_block(
+            "ENPH", "KC_FADE_BEAR", "SELL", "LUNCH_BLOCK", confidence=50.0, ml_ensemble_score=50
+        )
+
+    assert blocked is True
+    assert "LUNCH_BLOCK" in reason
+
+
+def test_targeted_pattern_block_rejects_weak_premarket_immediate_prediction():
+    cfg = _Cfg({
+        "risk.kc_fade_bear_lunch_block": True,
+        "risk.pred_immediate_premarket_min_ensemble": 55,
+        "risk.pred_immediate_premarket_min_conf": 80.0,
+    })
+    with patch("agent.config_manager.config", cfg):
+        blocked, reason = pt._targeted_pattern_block(
+            "MSFT", "PRED_IMMEDIATE", "SELL", "PRE_MARKET", confidence=77.0, ml_ensemble_score=50
+        )
+        allowed, _ = pt._targeted_pattern_block(
+            "MSFT", "PRED_IMMEDIATE", "SELL", "PRE_MARKET", confidence=82.0, ml_ensemble_score=56
+        )
+
+    assert blocked is True
+    assert "pre-market blocked" in reason
+    assert allowed is False
+
+
 def test_post_auth_quarantine_blocks_immediately_after_schwab_recovery():
     cfg = _Cfg({"risk.post_auth_quarantine_min": 20})
     row = {"resolved_at": datetime.now(timezone.utc)}
@@ -176,3 +250,27 @@ def test_entry_spread_to_risk_blocks_expensive_fill():
 
     assert blocked is True
     assert "spread is 56%" in reason
+
+
+def test_algo_signal_log_does_not_mark_blocked_sibling_as_opened():
+    pt.log_algo_signals("PAIR", [
+        {"algo": "KC_FADE_BEAR", "direction": "SELL", "confidence": 50, "entry": 100, "stop": 101, "target": 98, "rr": 2,
+         "exec_status": "BLOCKED_CONF_GATE"},
+        {"algo": "RSI2_SNAP_BEAR", "direction": "SELL", "confidence": 80, "entry": 100, "stop": 101, "target": 98, "rr": 2,
+         "exec_status": "EXECUTED_PAPER", "trade_opened": True},
+    ], trade_opened=True)
+
+    with pt._conn_ro() as c:
+        rows = c.execute("""
+            SELECT algo, trade_opened, exec_status
+            FROM algo_signal_log
+            WHERE ticker='PAIR'
+            ORDER BY id
+        """).fetchall()
+
+    assert rows[0]["algo"] == "KC_FADE_BEAR"
+    assert int(rows[0]["trade_opened"]) == 0
+    assert rows[0]["exec_status"] == "BLOCKED_CONF_GATE"
+    assert rows[1]["algo"] == "RSI2_SNAP_BEAR"
+    assert int(rows[1]["trade_opened"]) == 1
+    assert rows[1]["exec_status"] == "EXECUTED_PAPER"

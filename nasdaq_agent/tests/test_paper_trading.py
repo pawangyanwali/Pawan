@@ -133,6 +133,37 @@ def test_family_exec_min_rr_override_takes_precedence():
     trade = next(t for t in get_open_trades() if t["ticker"] == "RRREG")
     assert trade["rr_ratio"] == pytest.approx(2.4)
 
+def test_premarket_widened_stop_is_rechecked_against_intraday_cap():
+    from agent.config_manager import config
+
+    config.set_many({
+        "prediction.min_rr": 2.0,
+        "paper.pre_market_stop_mult": 1.5,
+        "risk.intraday_max_stop_pct": 2.0,
+        "risk.intraday_max_target_pct": 4.0,
+    }, updated_by="test")
+
+    status = []
+    tid = maybe_open_trade(
+        "WIDEPM",
+        "SELL",
+        100.0,
+        97.0,
+        101.5,
+        confidence=90.0,
+        rr_qualifies=True,
+        rr_ratio=2.0,
+        session="PRE_MARKET",
+        entry_type="BOUNCE",
+        trading_tier="HIGH",
+        atr=1.0,
+        avg_daily_volume=10_000_000,
+        _out_status=status,
+    )
+
+    assert tid is None
+    assert status == ["BLOCKED_WIDE_GEOMETRY"]
+
 def test_no_duplicate_open_trade():
     maybe_open_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     tid2 = maybe_open_trade("TSLA", "SELL", 250.0, 240.0, 255.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -143,6 +174,11 @@ def test_no_trade_neutral_direction():
     assert tid is None
 
 def test_trade_closed_on_target():
+    from agent.config_manager import config
+    config.set_many({
+        "risk.intraday_max_stop_pct": 10.0,
+        "risk.intraday_max_target_pct": 10.0,
+    }, updated_by="test")
     # exit_signals reads df.iloc[-1]["Close"] — set it above target so TARGET_HIT fires
     df = make_ohlcv(start_price=107.0)  # last Close ~107, target=105
     maybe_open_trade("HOOD", "BUY", 100.0, 105.0, 98.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -151,6 +187,11 @@ def test_trade_closed_on_target():
     assert any(t["ticker"] == "HOOD" for t in closed), "trade should have closed on TARGET_HIT"
 
 def test_trade_closed_on_stop():
+    from agent.config_manager import config
+    config.set_many({
+        "risk.intraday_max_stop_pct": 10.0,
+        "risk.intraday_max_target_pct": 10.0,
+    }, updated_by="test")
     # Set df last Close below stop so STOP_HIT fires
     df = make_ohlcv(start_price=95.0)  # last Close ~95, stop=98
     maybe_open_trade("COIN", "BUY", 100.0, 108.0, 98.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
@@ -159,6 +200,11 @@ def test_trade_closed_on_stop():
     assert any(t["ticker"] == "COIN" for t in closed)
 
 def test_sell_trade_pnl_direction():
+    from agent.config_manager import config
+    config.set_many({
+        "risk.intraday_max_stop_pct": 10.0,
+        "risk.intraday_max_target_pct": 10.0,
+    }, updated_by="test")
     df = make_ohlcv(start_price=200.0)
     maybe_open_trade("META", "SELL", 200.0, 190.0, 205.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     # price drops — SELL trade should be profitable
