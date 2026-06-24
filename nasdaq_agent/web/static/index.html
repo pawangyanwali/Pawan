@@ -5453,19 +5453,41 @@ async function stLoadTradeRulesTab() {
   if (!el) return;
   el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:12px 0">Loading config…</div>';
   try {
-    const [predResp, paperResp, sizingResp] = await Promise.all([
+    const [predResp, paperResp, sizingResp, riskResp] = await Promise.all([
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=prediction.`, {signal: AbortSignal.timeout(12000)}),
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=paper.`,      {signal: AbortSignal.timeout(12000)}),
       _authFetch(`${BACKEND_HTTP}/api/config?prefix=sizing.`,     {signal: AbortSignal.timeout(12000)}),
+      _authFetch(`${BACKEND_HTTP}/api/config?prefix=risk.`,       {signal: AbortSignal.timeout(12000)}),
     ]);
     const pc = (await predResp.json()).config  || {};
     const pp = (await paperResp.json()).config || {};
     const ps = (await sizingResp.json()).config || {};
+    const rc = (await riskResp.json()).config || {};
 
     const _row = (id, label, val, min, max, step, hint) => `
       <div>
         <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">${label}</label>
         <input id="${id}" type="number" min="${min}" max="${max}" step="${step}" value="${val}"
+          style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+        <div style="font-size:9px;color:var(--muted);margin-top:3px">${hint}</div>
+      </div>`;
+
+    const _boolVal = v => v === true || v === 'true' || v === 1 || v === '1';
+    const _select = (id, label, val, hint) => `
+      <div>
+        <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">${label}</label>
+        <select id="${id}"
+          style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
+          <option value="true" ${_boolVal(val) ? 'selected' : ''}>Enabled</option>
+          <option value="false" ${!_boolVal(val) ? 'selected' : ''}>Disabled</option>
+        </select>
+        <div style="font-size:9px;color:var(--muted);margin-top:3px">${hint}</div>
+      </div>`;
+
+    const _text = (id, label, val, hint) => `
+      <div>
+        <label style="font-size:10px;color:var(--muted);display:block;margin-bottom:4px;font-weight:600">${label}</label>
+        <input id="${id}" type="text" value="${String(val ?? '').replace(/"/g, '&quot;')}"
           style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;font-family:inherit">
         <div style="font-size:9px;color:var(--muted);margin-top:3px">${hint}</div>
       </div>`;
@@ -5499,6 +5521,15 @@ async function stLoadTradeRulesTab() {
         _row('st-tr-min-stop',    'MIN STOP DISTANCE (% of price)', (pc['prediction.min_stop_dist_pct'] ?? 0.004)*100, 0.1, 5, 0.05, 'Floor on stop distance. Prevents stops too close to entry that trigger on normal noise.') +
         _row('st-tr-max-risk',    'MAX RISK PER TRADE (% of price)', (pc['prediction.max_risk_pct']      ?? 0.020)*100, 0.1, 10, 0.1, 'Cap on stop distance. Prevents oversized risk on volatile stocks.') +
         _row('st-tr-min-target',  'MIN TARGET DISTANCE (% of price)', (pc['prediction.min_target_pct']    ?? 0.003)*100, 0.05, 5, 0.05, 'Target must be at least this far from entry. Prevents degenerate micro-targets.')
+      )}
+      ${_section('Technical Entry Gate', 'Controls whether paper trades may open only when RSI, MACD, and ATR confirm the direction. These rules apply after a BUY/SELL signal exists; they do not change the displayed signal classification.',
+        _select('st-tr-tech-enabled', 'ENABLE TECHNICAL ENTRY GATE', rc['risk.technical_entry_gate_enabled'] ?? true, 'When enabled, paper trades must pass the technical confirmation checks below before opening.') +
+        _select('st-tr-tech-rsi', 'REQUIRE RSI ZONE CONFIRMATION', rc['risk.technical_entry_gate_require_rsi'] ?? true, 'BUY requires an oversold RSI zone. SELL requires an overbought RSI zone. This is the main anti-chase guard.') +
+        _text('st-tr-tech-buy-zones', 'BUY ALLOWED RSI ZONES', rc['risk.technical_entry_gate_buy_rsi_zones'] ?? 'OS,EXTREME_OS', 'Comma-separated RSI zones that allow BUY execution. Default: OS,EXTREME_OS.') +
+        _text('st-tr-tech-sell-zones', 'SELL ALLOWED RSI ZONES', rc['risk.technical_entry_gate_sell_rsi_zones'] ?? 'OB,EXTREME_OB', 'Comma-separated RSI zones that allow SELL execution. Default: OB,EXTREME_OB.') +
+        _select('st-tr-tech-macd', 'REQUIRE MACD CONFIRMATION', rc['risk.technical_entry_gate_require_macd'] ?? true, 'BUY requires MACD histogram positive or improving. SELL requires MACD histogram negative or weakening.') +
+        _select('st-tr-tech-atr', 'REQUIRE ATR AVAILABLE', rc['risk.technical_entry_gate_require_atr'] ?? true, 'When enabled, strict mode can block trades if ATR is missing or non-positive.') +
+        _select('st-tr-tech-missing', 'BLOCK WHEN TECHNICAL DATA IS MISSING', rc['risk.technical_entry_gate_missing_data_block'] ?? false, 'Disabled by default. When disabled, missing data is logged but does not block by itself; present RSI/MACD values still must pass.')
       )}
       ${_section('T1 / T2 Execution Rules', 'Controls where partial exits fire and how stop management works. T1 and T2 are expressed as multiples of the initial risk distance (1R = stop distance from entry). In ATR mode, T2 is automatically kept at or above Min R:R so the filter, dashboard ratio, and exit target stay aligned.',
         _row('st-tr-t1-mult',     'T1 EXIT LEVEL (× risk)',     pp['paper.t1_r_multiple']           ?? 1.0,   0.5,  3,    0.1,  'Partial exit (50% of position) fires when price reaches entry + T1 × risk. At 1.0: exits half at exactly 1R profit.') +
@@ -5539,6 +5570,8 @@ async function stLoadTradeRulesTab() {
 async function stSaveTradeRules(btn) {
   const _v = id => parseFloat(document.getElementById(id)?.value);
   const _i = id => parseInt(document.getElementById(id)?.value, 10);
+  const _b = id => document.getElementById(id)?.value === 'true';
+  const _s = id => (document.getElementById(id)?.value || '').trim();
   const status = document.getElementById('st-tr-status');
   const payload = {
     "prediction.use_atr_stops":        document.getElementById('st-tr-mode-atr')?.checked ?? true,
@@ -5548,6 +5581,13 @@ async function stSaveTradeRules(btn) {
     "prediction.min_stop_dist_pct":       _v('st-tr-min-stop') / 100,
     "prediction.max_risk_pct":        _v('st-tr-max-risk')    / 100,
     "prediction.min_target_pct":      _v('st-tr-min-target')  / 100,
+    "risk.technical_entry_gate_enabled":            _b('st-tr-tech-enabled'),
+    "risk.technical_entry_gate_require_rsi":        _b('st-tr-tech-rsi'),
+    "risk.technical_entry_gate_buy_rsi_zones":      _s('st-tr-tech-buy-zones'),
+    "risk.technical_entry_gate_sell_rsi_zones":     _s('st-tr-tech-sell-zones'),
+    "risk.technical_entry_gate_require_macd":       _b('st-tr-tech-macd'),
+    "risk.technical_entry_gate_require_atr":        _b('st-tr-tech-atr'),
+    "risk.technical_entry_gate_missing_data_block": _b('st-tr-tech-missing'),
     "paper.t1_r_multiple":            _v('st-tr-t1-mult'),
     "paper.t2_r_multiple":            _v('st-tr-t2-mult'),
     "paper.t1_profit_lock_r":         _v('st-tr-profit-lock'),
@@ -5564,8 +5604,15 @@ async function stSaveTradeRules(btn) {
     "sizing.conf_low_mult":           _v('st-tr-conf-low-mult'),
     "sizing.conf_default_mult":       _v('st-tr-conf-def-mult'),
   };
-  if (Object.values(payload).some(v => v === null || isNaN(v))) {
+  const numericKeys = Object.keys(payload).filter(k =>
+    k.startsWith('prediction.') || k.startsWith('paper.') || k.startsWith('sizing.')
+  );
+  if (numericKeys.some(k => payload[k] === null || Number.isNaN(payload[k]))) {
     if (status) { status.textContent = 'All fields must be valid numbers.'; status.style.color = 'var(--red)'; }
+    return;
+  }
+  if (!payload["risk.technical_entry_gate_buy_rsi_zones"] || !payload["risk.technical_entry_gate_sell_rsi_zones"]) {
+    if (status) { status.textContent = 'RSI zone lists cannot be empty.'; status.style.color = 'var(--red)'; }
     return;
   }
   let alignedT2 = false;
