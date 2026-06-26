@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Settings | NASDAQ Scalping Agent</title>
+  <style>
+    :root {
+      --bg:#090d12; --surface:#111720; --surface2:#171e29; --border:#293241;
+      --text:#edf4f7; --muted:#8b9bad; --green:#22e58b; --cyan:#4dd7e8;
+      --amber:#ffbd45; --red:#ff5b68; --focus:#7be7f2;
+    }
+    *{box-sizing:border-box;letter-spacing:0}
+    html{background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    body{margin:0;min-height:100vh;background:var(--bg)}
+    button,input{font:inherit}
+    button:focus-visible,input:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+    .topbar{height:64px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;background:var(--bg);z-index:20}
+    .brand{display:flex;align-items:center;gap:12px;font-weight:800}
+    .brand-mark{width:10px;height:10px;background:var(--green);border-radius:50%;box-shadow:0 0 12px rgba(34,229,139,.7)}
+    .brand small{display:block;color:var(--muted);font-weight:500;margin-top:2px}
+    .back{display:inline-flex;align-items:center;gap:8px;color:var(--text);text-decoration:none;border:1px solid var(--border);padding:8px 12px;border-radius:5px;background:var(--surface)}
+    .layout{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 64px)}
+    aside{border-right:1px solid var(--border);padding:20px 14px;position:sticky;top:64px;height:calc(100vh - 64px);overflow:auto}
+    .search{width:100%;height:38px;border:1px solid var(--border);border-radius:5px;background:var(--surface);color:var(--text);padding:0 11px;margin-bottom:14px}
+    .nav-btn{width:100%;border:0;border-left:3px solid transparent;background:transparent;color:var(--muted);padding:9px 10px;text-align:left;cursor:pointer;border-radius:0 4px 4px 0;margin:1px 0}
+    .nav-btn:hover{color:var(--text);background:var(--surface)}
+    .nav-btn.active{color:var(--green);border-left-color:var(--green);background:rgba(34,229,139,.07)}
+    .advanced-row{display:flex;align-items:center;justify-content:space-between;margin-top:18px;padding:12px 8px;border-top:1px solid var(--border);color:var(--muted);font-size:12px}
+    main{padding:28px clamp(18px,4vw,56px) 100px;max-width:1380px;width:100%;margin:0 auto}
+    .page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:30px}
+    h1{font-size:28px;margin:0 0 6px;font-weight:800}
+    .subtitle{color:var(--muted);font-size:13px}
+    .count{color:var(--cyan);font-size:12px;white-space:nowrap}
+    .group{border-top:1px solid var(--border);padding:26px 0 10px;scroll-margin-top:84px}
+    .group:first-of-type{border-top:0;padding-top:0}
+    .group-title{display:grid;grid-template-columns:minmax(190px,260px) 1fr;gap:24px;margin-bottom:18px}
+    h2{font-size:18px;margin:0}
+    .group-description{color:var(--muted);font-size:13px;line-height:1.55}
+    .fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .field{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:15px;min-width:0}
+    .field.dirty{border-color:var(--amber)}
+    .field-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:9px}
+    .field-label{font-size:13px;font-weight:750}
+    .field-key{font:11px ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--cyan);overflow-wrap:anywhere;margin-top:3px}
+    .reset{width:30px;height:30px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);border-radius:4px;cursor:pointer;font-size:16px;flex:0 0 auto}
+    .description{font-size:12px;line-height:1.55;color:#b5c0cb;min-height:38px}
+    .example{font-size:11px;line-height:1.5;color:var(--muted);margin:8px 0 12px;padding-left:10px;border-left:2px solid var(--border)}
+    .control{display:flex;align-items:center;gap:10px}
+    .value-input{width:100%;height:38px;border:1px solid var(--border);border-radius:5px;background:var(--surface2);color:var(--text);padding:0 10px}
+    .switch{position:relative;width:44px;height:24px;display:inline-block;flex:0 0 auto}
+    .switch input{opacity:0;width:0;height:0}
+    .slider{position:absolute;inset:0;background:#303948;border:1px solid #455064;border-radius:12px;cursor:pointer}
+    .slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;background:#d7e0e7;border-radius:50%;transition:transform .18s}
+    .switch input:checked + .slider{background:rgba(34,229,139,.2);border-color:var(--green)}
+    .switch input:checked + .slider:before{transform:translateX(20px);background:var(--green)}
+    .bool-state{font-size:12px;color:var(--muted)}
+    .danger-note{color:var(--amber);font-size:11px;margin-top:9px;line-height:1.45}
+    .savebar{position:fixed;left:250px;right:0;bottom:0;min-height:64px;background:var(--surface);border-top:1px solid var(--border);display:none;align-items:center;justify-content:space-between;padding:10px clamp(18px,4vw,56px);z-index:30}
+    .savebar.visible{display:flex}
+    .save-state{font-size:13px;color:var(--amber)}
+    .actions{display:flex;gap:8px}
+    .btn{height:38px;padding:0 15px;border-radius:5px;border:1px solid var(--border);cursor:pointer}
+    .btn-secondary{background:var(--surface2);color:var(--text)}
+    .btn-primary{background:var(--green);border-color:var(--green);color:#04120c;font-weight:800}
+    .empty,.loading{padding:50px 0;color:var(--muted);text-align:center}
+    .toast{position:fixed;right:20px;top:78px;background:var(--surface2);border:1px solid var(--border);padding:11px 14px;border-radius:5px;display:none;z-index:50;max-width:420px;font-size:13px}
+    .toast.show{display:block}.toast.error{border-color:var(--red);color:#ffadb4}.toast.ok{border-color:var(--green);color:var(--green)}
+    @media(max-width:900px){.layout{grid-template-columns:1fr}aside{position:relative;top:0;height:auto;border-right:0;border-bottom:1px solid var(--border);display:block;padding:12px}.search{margin-bottom:8px}#group-nav{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px}.advanced-row{margin-top:4px;padding:8px 2px;border-top:0}.nav-btn{width:auto;white-space:nowrap;border-left:0;border-bottom:2px solid transparent;border-radius:4px}.nav-btn.active{border-left:0;border-bottom-color:var(--green)}main{padding-top:20px}.fields{grid-template-columns:1fr}.group-title{grid-template-columns:1fr;gap:6px}.savebar{left:0}.topbar{padding:0 14px}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark"></span><div>NASDAQ Scalping Agent<small>Runtime Settings</small></div></div>
+    <a class="back" href="/" aria-label="Back to trading dashboard">&larr; Dashboard</a>
+  </header>
+  <div class="layout">
+    <aside>
+      <input id="search" class="search" type="search" placeholder="Search settings" aria-label="Search settings">
+      <nav id="group-nav" aria-label="Settings sections"></nav>
+      <div class="advanced-row"><span>Advanced controls</span><label class="switch"><input id="advanced" type="checkbox"><span class="slider"></span></label></div>
+    </aside>
+    <main>
+      <div class="page-head"><div><h1>Settings</h1><div class="subtitle">PostgreSQL-backed configuration with service hot reload.</div></div><div id="count" class="count"></div></div>
+      <div id="content" class="loading">Loading runtime configuration...</div>
+    </main>
+  </div>
+  <div id="savebar" class="savebar"><div id="save-state" class="save-state"></div><div class="actions"><button id="discard" class="btn btn-secondary">Discard</button><button id="save" class="btn btn-primary">Save changes</button></div></div>
+  <div id="toast" class="toast" role="status"></div>
+  <script>
+    const state={catalog:null,values:{},original:{},defaults:{},changes:{},advanced:false,query:''};
+    const token=()=>sessionStorage.getItem('access_token')||'';
+    async function refreshToken(){const rt=localStorage.getItem('refresh_token');if(!rt)return false;const r=await fetch('/auth/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:rt})});if(!r.ok)return false;const d=await r.json();sessionStorage.setItem('access_token',d.access_token);return true}
+    async function authFetch(url,opts={}){opts.headers=Object.assign({},opts.headers||{},token()?{Authorization:`Bearer ${token()}`}:{}) ;let r=await fetch(url,opts);if(r.status===401&&await refreshToken()){opts.headers.Authorization=`Bearer ${token()}`;r=await fetch(url,opts)}if(r.status===401){location.href='/login';throw new Error('Authentication required')}return r}
+    const escapeHtml=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    function same(a,b){return JSON.stringify(a)===JSON.stringify(b)}
+    function parseValue(field,input){if(field.type==='boolean')return input.checked;if(field.type==='integer'){const n=Number(input.value);if(!Number.isInteger(n))throw new Error(`${field.label} must be a whole number`);return n}if(field.type==='number'){const n=Number(input.value);if(!Number.isFinite(n))throw new Error(`${field.label} must be numeric`);return n}if(field.type==='array'){try{const v=JSON.parse(input.value);if(!Array.isArray(v))throw 0;return v}catch{throw new Error(`${field.label} must be a JSON list`)}}return input.value}
+    function control(field){const value=state.values[field.key];if(field.type==='boolean')return `<div class="control"><label class="switch"><input data-key="${escapeHtml(field.key)}" type="checkbox" ${value?'checked':''}><span class="slider"></span></label><span class="bool-state">${value?'Enabled':'Disabled'}</span></div>`;const type=(field.type==='integer'||field.type==='number')?'number':'text';const val=field.type==='array'?JSON.stringify(value):value;return `<input class="value-input" data-key="${escapeHtml(field.key)}" type="${type}" ${type==='number'?'step="any"':''} value="${escapeHtml(val)}">`}
+    function render(){if(!state.catalog)return;const q=state.query.toLowerCase();const groups=state.catalog.groups.map(g=>{const fields=state.catalog.fields.filter(f=>f.group===g.id&&(!f.advanced||state.advanced)&&(!q||`${f.label} ${f.key} ${f.description}`.toLowerCase().includes(q)));if(!fields.length)return '';return `<section class="group" id="group-${g.id}"><div class="group-title"><h2>${escapeHtml(g.label)}</h2><div class="group-description">${escapeHtml(g.description)}</div></div><div class="fields">${fields.map(f=>`<article class="field ${Object.hasOwn(state.changes,f.key)?'dirty':''}" data-field="${escapeHtml(f.key)}"><div class="field-head"><div><div class="field-label">${escapeHtml(f.label)}</div><div class="field-key">${escapeHtml(f.key)}</div></div><button class="reset" data-reset="${escapeHtml(f.key)}" title="Reset to default" aria-label="Reset ${escapeHtml(f.label)} to default">&#8634;</button></div><div class="description">${escapeHtml(f.description)}</div><div class="example">${escapeHtml(f.example)}</div>${control(f)}${f.key==='scalp.execution_enabled'?'<div class="danger-note">Cutover control: enabling this makes a valid scalp plan mandatory for every new paper trade.</div>':''}</article>`).join('')}</div></section>`}).join('');document.getElementById('content').className=groups?'':'empty';document.getElementById('content').innerHTML=groups||'No settings match this search.';document.getElementById('count').textContent=`${state.catalog.fields.length} runtime settings`;bindControls();updateSavebar()}
+    function setChange(key,value){state.values[key]=value;if(same(value,state.original[key]))delete state.changes[key];else state.changes[key]=value}
+    function bindControls(){document.querySelectorAll('[data-key]').forEach(input=>{const onEdit=()=>{const field=state.catalog.fields.find(f=>f.key===input.dataset.key);try{const v=parseValue(field,input);setChange(field.key,v);if(field.type==='boolean')input.closest('.control').querySelector('.bool-state').textContent=v?'Enabled':'Disabled';input.closest('.field').classList.toggle('dirty',Object.hasOwn(state.changes,field.key));updateSavebar()}catch(e){showToast(e.message,true)}};input.addEventListener(input.type==='checkbox'?'change':'input',onEdit)});document.querySelectorAll('[data-reset]').forEach(b=>b.addEventListener('click',()=>{const k=b.dataset.reset;setChange(k,state.defaults[k]);render()}))}
+    function updateSavebar(){const n=Object.keys(state.changes).length;document.getElementById('savebar').classList.toggle('visible',n>0);document.getElementById('save-state').textContent=n?`${n} unsaved change${n===1?'':'s'}`:''}
+    function showToast(message,error=false){const t=document.getElementById('toast');t.textContent=message;t.className=`toast show ${error?'error':'ok'}`;setTimeout(()=>t.className='toast',4000)}
+    async function load(){const r=await authFetch('/api/config-catalog');if(!r.ok)throw new Error(`Configuration request failed (${r.status})`);state.catalog=await r.json();state.catalog.fields.forEach(f=>{state.values[f.key]=f.value;state.original[f.key]=f.value;state.defaults[f.key]=f.default});document.getElementById('group-nav').innerHTML=state.catalog.groups.map((g,i)=>`<button class="nav-btn ${i===0?'active':''}" data-group="${g.id}">${escapeHtml(g.label)}</button>`).join('');document.querySelectorAll('[data-group]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nav-btn').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.getElementById(`group-${b.dataset.group}`)?.scrollIntoView({behavior:'smooth'})}));render()}
+    document.getElementById('search').addEventListener('input',e=>{state.query=e.target.value;render()});document.getElementById('advanced').addEventListener('change',e=>{state.advanced=e.target.checked;render()});document.getElementById('discard').addEventListener('click',()=>{Object.keys(state.changes).forEach(k=>state.values[k]=state.original[k]);state.changes={};render()});document.getElementById('save').addEventListener('click',async()=>{const button=document.getElementById('save');button.disabled=true;try{const r=await authFetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.changes)});const body=await r.json();if(!r.ok)throw new Error(body.detail||'Save failed');Object.entries(state.changes).forEach(([k,v])=>state.original[k]=v);state.changes={};render();showToast(`Saved ${body.updated} setting${body.updated===1?'':'s'}`)}catch(e){showToast(e.message,true)}finally{button.disabled=false}});
+    load().catch(e=>{document.getElementById('content').className='empty';document.getElementById('content').textContent=e.message;showToast(e.message,true)});
+  </script>
+</body>
+</html>

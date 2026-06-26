@@ -17,11 +17,14 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from agent.exit_signals import analyse_exits, ExitAnalysis
 from agent.db import get_conn
+
+if TYPE_CHECKING:
+    from agent.scalp.models import ScalpSignalPlan
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +365,8 @@ _COLUMN_ADDITIONS = [
     ("mae_pct",                "REAL DEFAULT 0"),
     ("mfe_r",                  "REAL DEFAULT 0"),
     ("mae_r",                  "REAL DEFAULT 0"),
+    ("scalp_plan_id",          "TEXT"),
+    ("execution_contract",     "TEXT DEFAULT 'LEGACY_V1'"),
 ]
 
 # Additional columns for algo_signal_log (applied separately)
@@ -789,6 +794,29 @@ def _entry_spread_to_risk_block(ticker: str, spread_dollar: float, actual_risk: 
 def _append_status(out_status: Optional[list], status: str) -> None:
     if out_status is not None and not out_status:
         out_status.append(status)
+
+
+class _ScalpDecisionStatus(list):
+    """Mirror one execution status to the caller and durable decision log."""
+
+    def __init__(self, plan_id: str, external: Optional[list]):
+        super().__init__()
+        self.plan_id = plan_id
+        self.external = external
+
+    def append(self, status: str) -> None:
+        if self:
+            return
+        super().append(status)
+        if self.external is not None and not self.external:
+            self.external.append(status)
+        if status == "EXECUTED_PAPER":
+            return
+        try:
+            from agent.scalp.store import record_execution_decision
+            record_execution_decision(self.plan_id, "BLOCKED", reason=status)
+        except Exception as exc:
+            logger.warning("[ScalpPlan] decision audit failed: %s", exc)
 
 
 def _csv_set(value: object) -> set[str]:
@@ -1371,18 +1399,70 @@ def maybe_open_trade(
     macd_hist:        Optional[float] = None,
     macd_hist_prev:   Optional[float] = None,
     avg_daily_volume: float = 0.0,           # avg daily shares — used for liquidity penalty
+    scalp_plan:       Optional["ScalpSignalPlan"] = None,
     _out_status:      Optional[list] = None,
 ) -> Optional[int]:
     """
     Open a paper trade when all PRD entry gates pass.
     Returns trade id or None.
     """
+    from agent.config_manager import config as _cfg_scalp
+    _scalp_enforced = bool(_cfg_scalp.get("scalp.execution_enabled", False))
+    _scalp_plan_id = ""
+    _scalp_signal_entry = price
+    _fill_reference_price = price
+    _scalp_bid = 0.0
+    _scalp_ask = 0.0
+    if _scalp_enforced:
+        if scalp_plan is None:
+            _append_status(_out_status, "BLOCKED_SCALP_PLAN_REQUIRED")
+            return None
+        _scalp_plan_id = str(scalp_plan.plan_id or "")
+        _out_status = _ScalpDecisionStatus(_scalp_plan_id, _out_status)
+        try:
+            from agent.scalp.store import save_plan
+            save_plan(scalp_plan)
+        except Exception as exc:
+            logger.error("[ScalpPlan] %s persistence failed: %s", ticker, exc)
+            _append_status(_out_status, "BLOCKED_SCALP_PLAN_PERSIST_FAILED")
+            return None
+        if not scalp_plan.valid:
+            _append_status(_out_status, "BLOCKED_INVALID_SCALP_PLAN")
+            return None
+        if scalp_plan.ticker.upper() != ticker.upper():
+            _append_status(_out_status, "BLOCKED_SCALP_PLAN_TICKER_MISMATCH")
+            return None
+        expected_direction = "BUY" if scalp_plan.side.value == "LONG" else "SELL"
+        if direction != expected_direction:
+            _append_status(_out_status, "BLOCKED_SCALP_PLAN_DIRECTION_MISMATCH")
+            return None
+        _fill_reference_price = float(scalp_plan.price)
+        price = float(scalp_plan.entry)
+        target = float(scalp_plan.tp2)
+        stop = float(scalp_plan.stop_loss)
+        confidence = float(scalp_plan.confidence)
+        rr_ratio = float(scalp_plan.rr_ratio)
+        rr_qualifies = True
+        vwap_event = scalp_plan.vwap_event
+        rsi_zone = scalp_plan.rsi_zone
+        rsi_value = scalp_plan.rsi_14
+        macd_hist = scalp_plan.macd_hist
+        macd_hist_prev = scalp_plan.macd_hist_prev
+        atr = scalp_plan.atr_14
+        _scalp_signal_entry = float(scalp_plan.entry)
+        _scalp_bid = float(scalp_plan.bid)
+        _scalp_ask = float(scalp_plan.ask)
+
     if direction not in ("BUY", "SELL"):
         _append_status(_out_status, "BLOCKED_BAD_DIRECTION")
         return None
 
     algo_name = _effective_algo_name(algo_name, entry_type)
-    _target_rr = get_execution_min_rr(algo_name, entry_type)
+    _target_rr = (
+        float(scalp_plan.reward_r)
+        if _scalp_enforced and scalp_plan is not None
+        else get_execution_min_rr(algo_name, entry_type)
+    )
     rr_qualifies = True
 
     # R:R builds stop/target geometry; it does not hard-gate execution.
@@ -1524,7 +1604,8 @@ def maybe_open_trade(
         _append_status(_out_status, "BLOCKED_INVALID_PRICE")
         return None
 
-    target = _configured_target(price, stop, direction, _target_rr)
+    if not _scalp_enforced:
+        target = _configured_target(price, stop, direction, _target_rr)
     rr_ratio = round(float(_target_rr), 2)
 
     # ── Stop/target geometry validation ─────────────────────────────────────
@@ -1621,7 +1702,7 @@ def maybe_open_trade(
         float(_cfg_pt.get("paper.pre_market_stop_mult",  1.5)) if _live_session == "PRE_MARKET"  else
         1.0
     )
-    if _stop_mult != 1.0:
+    if _stop_mult != 1.0 and not _scalp_enforced:
         risk_dist_orig = abs(price - stop)
         stop = (
             round(price - risk_dist_orig * _stop_mult, 4) if direction == "BUY"
@@ -1753,9 +1834,11 @@ def maybe_open_trade(
             from agent.execution.fill_model import compute_entry_fill as _cef
             _atr_eff  = atr if atr > 0 else price * 0.01   # fallback: 1% ATR estimate
             _entry_fill = _cef(
-                direction, price, _atr_eff,
+                direction, _fill_reference_price, _atr_eff,
                 _live_session or session or "REGULAR",
                 shares, avg_daily_volume,
+                bid=_scalp_bid,
+                ask=_scalp_ask,
             )
             actual_entry = _entry_fill.fill_price   # slippage-adjusted entry
 
@@ -1774,9 +1857,9 @@ def maybe_open_trade(
                 )
                 return None
 
-            # Recompute T1, T2, and R:R from the actual fill price.
-            # Stop stays at its signal level (structural anchor); the risk
-            # distance naturally reflects actual execution cost.
+            # Legacy trades rebuild targets from their actual fill. Scalp-plan
+            # trades preserve the canonical bracket and report the realized R:R
+            # after spread/slippage; execution must not rewrite the signal plan.
             _actual_risk = abs(actual_entry - stop)
             _spread_blocked, _spread_reason = _entry_spread_to_risk_block(
                 ticker, float(_entry_fill.spread_dollar or 0.0) / max(shares, 1), _actual_risk
@@ -1785,7 +1868,28 @@ def maybe_open_trade(
                 _append_status(_out_status, "BLOCKED_SPREAD_RISK")
                 logger.info(f"[PAPER] {ticker} skip: {_spread_reason}")
                 return None
-            if _actual_risk > 0:
+            if _actual_risk > 0 and _scalp_enforced and scalp_plan is not None:
+                t1_price = float(scalp_plan.tp1)
+                t2_price = float(scalp_plan.tp2)
+                target = t2_price
+                _actual_reward = (
+                    t2_price - actual_entry
+                    if direction == "BUY"
+                    else actual_entry - t2_price
+                )
+                if _actual_reward <= 0:
+                    _append_status(_out_status, "BLOCKED_BAD_GEOMETRY")
+                    return None
+                rr_ratio = round(_actual_reward / _actual_risk, 2)
+                rr_qualifies = True
+                _wide_blocked, _wide_reason = _check_intraday_geometry_cap(
+                    ticker, direction, actual_entry, stop, target
+                )
+                if _wide_blocked:
+                    _append_status(_out_status, "BLOCKED_WIDE_GEOMETRY")
+                    logger.info(f"[PAPER] {ticker} skip after fill: {_wide_reason}")
+                    return None
+            elif _actual_risk > 0:
                 if direction == "BUY":
                     t1_price = round(actual_entry + _t1_mult * _actual_risk, 4)
                     t2_price = round(actual_entry + _t2_mult * _actual_risk, 4)
@@ -1812,8 +1916,9 @@ def maybe_open_trade(
                    algo_name,
                    ml_scalp_prob, ml_daily_prob, ml_swing_prob, ml_deep_prob,
                    ml_ensemble_score,
-                   entry_ideal_price, entry_slip_bps, entry_spread_usd)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   entry_ideal_price, entry_slip_bps, entry_spread_usd,
+                   scalp_plan_id, execution_contract)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 datetime.now(timezone.utc).isoformat(),
                 ticker, direction,
@@ -1830,9 +1935,11 @@ def maybe_open_trade(
                 round(ml_swing_prob, 4) if ml_swing_prob is not None else None,
                 round(ml_deep_prob, 4) if ml_deep_prob is not None else None,
                 ml_ensemble_score,
-                round(price, 4),                              # entry_ideal_price = signal close
+                round(_scalp_signal_entry, 4),                # executable signal entry
                 round(_entry_fill.slippage_bps, 2),           # entry_slip_bps
                 round(_entry_fill.spread_dollar, 4),          # entry_spread_usd
+                _scalp_plan_id or None,
+                "SCALP_PLAN_V1" if _scalp_enforced else "LEGACY_V1",
             ))
             c.commit()
             logger.info(
@@ -1851,6 +1958,16 @@ def maybe_open_trade(
             _fire_trade_event("open", ticker)
             if _out_status is not None:
                 _out_status.append("EXECUTED_PAPER")
+            if _scalp_enforced:
+                try:
+                    from agent.scalp.store import record_execution_decision
+                    record_execution_decision(
+                        _scalp_plan_id,
+                        "EXECUTED_PAPER",
+                        trade_id=cur.lastrowid,
+                    )
+                except Exception as exc:
+                    logger.warning("[ScalpPlan] execution audit failed: %s", exc)
             return cur.lastrowid
 
 
@@ -2358,6 +2475,21 @@ def _record_close(
         )
     except Exception as _ae:
         logger.debug("[PAPER] attribution record error: %s", _ae)
+    # Greenfield outcome learning is written in the same transaction as the
+    # paper close. Legacy trades are ignored by execution_contract, and a
+    # learning failure never rolls back the authoritative trade outcome.
+    try:
+        from agent.scalp.learning import record_closed_trade
+        c.execute("SAVEPOINT scalp_learning_close")
+        record_closed_trade(c, trade_id)
+        c.execute("RELEASE SAVEPOINT scalp_learning_close")
+    except Exception as _sle:
+        try:
+            c.execute("ROLLBACK TO SAVEPOINT scalp_learning_close")
+            c.execute("RELEASE SAVEPOINT scalp_learning_close")
+        except Exception:
+            pass
+        logger.warning("[ScalpLearning] close feedback failed for trade %s: %s", trade_id, _sle)
     # Publish immediate trade-close event for algo feedback loop
     try:
         import json as _json, time as _time

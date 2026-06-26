@@ -89,7 +89,8 @@ def test_scanner_skips_deep_inference_while_market_closed():
 def test_algo_paper_entries_include_technical_context_for_attribution():
     src = _src("agent/scanner.py")
 
-    start = src.index("_trade_id = maybe_open_trade(")
+    algo_section = src.index("_algo_rr_quality = (")
+    start = src.index("_trade_id = maybe_open_trade(", algo_section)
     algo_call = src[start:src.index("_asig[\"exec_status\"]", start)]
     assert "vwap_event        = vwap_sig.get(\"event\", \"\")" in algo_call
     assert "rsi_zone          = pred.get(\"rsi_zone\", \"\")" in algo_call

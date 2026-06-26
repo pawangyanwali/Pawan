@@ -52,6 +52,25 @@ async def get_config(
     return {"count": len(merged), "config": merged}
 
 
+@router.get("/api/config-catalog")
+async def get_config_catalog(
+    _user: AuthenticatedUser = Depends(require_analyst),
+):
+    """Return every runtime key with UI metadata and its effective value."""
+    from agent.config_catalog import build_catalog
+    from agent.config_manager import config, _DEFAULTS
+
+    defaults: dict[str, Any] = {}
+    for key, factory in _DEFAULTS.items():
+        try:
+            defaults[key] = factory()
+        except Exception:
+            continue
+    values = dict(defaults)
+    values.update(config.all())
+    return build_catalog(values, defaults)
+
+
 # ── /api/config/{key} GET ─────────────────────────────────────────────────────
 
 @router.get("/api/config/{key:path}")
@@ -105,7 +124,7 @@ async def update_config(
 
     if not updates:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail="Request body must be a non-empty key-value object",
         )
 
@@ -120,6 +139,46 @@ async def update_config(
 
     current_before = config.all()
     updates = dict(updates)
+
+    # Validate the complete scalp configuration before persisting any part of it.
+    # Several fields have cross-key constraints (for example TP1 <= TP2 and
+    # min_stop_pct <= max_stop_pct), so validating keys independently is unsafe.
+    if any(key.startswith("scalp.") for key in updates):
+        from agent.scalp.models import ScalpSignalConfig
+
+        candidate: dict[str, Any] = {}
+        for key, factory in _DEFAULTS.items():
+            try:
+                candidate[key] = factory()
+            except Exception:
+                continue
+        candidate.update(current_before)
+        candidate.update(updates)
+        try:
+            ScalpSignalConfig.from_runtime(candidate)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid scalp configuration: {exc}",
+            ) from exc
+
+    if any(key.startswith("scalp_learn.") for key in updates):
+        candidate: dict[str, Any] = {}
+        for key, factory in _DEFAULTS.items():
+            try:
+                candidate[key] = factory()
+            except Exception:
+                continue
+        candidate.update(current_before)
+        candidate.update(updates)
+        try:
+            _validate_scalp_learning(candidate)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid scalp learning configuration: {exc}",
+            ) from exc
+
     use_atr_stops = bool(
         updates.get(
             "prediction.use_atr_stops",
@@ -163,6 +222,37 @@ async def update_config(
             for k in sorted(updates)
         ],
     }
+
+
+def _validate_scalp_learning(values: dict[str, Any]) -> None:
+    window = int(values["scalp_learn.rolling_window_min"])
+    min_adjust = int(values["scalp_learn.min_samples_to_adjust"])
+    min_block = int(values["scalp_learn.min_samples_to_block"])
+    alpha = float(values["scalp_learn.ewma_alpha"])
+    reduce_r = float(values["scalp_learn.negative_reduce_r"])
+    block_r = float(values["scalp_learn.negative_block_r"])
+    block_wr = float(values["scalp_learn.block_win_rate"])
+    confidence_wr = float(values["scalp_learn.confidence_win_rate"])
+    base_floor = float(values["scalp_learn.base_confidence_floor"])
+    raise_step = float(values["scalp_learn.confidence_raise_step"])
+    size_mult = float(values["scalp_learn.size_reduce_mult"])
+    ttl = int(values["scalp_learn.action_ttl_min"])
+    if window <= 0 or min_adjust <= 0 or ttl <= 0:
+        raise ValueError("window, sample floor, and action lifetime must be positive")
+    if min_block < min_adjust:
+        raise ValueError("min_samples_to_block cannot be below min_samples_to_adjust")
+    if not 0 < alpha <= 1:
+        raise ValueError("ewma_alpha must be greater than 0 and no greater than 1")
+    if not block_r <= reduce_r <= 0:
+        raise ValueError("negative_block_r must be no greater than negative_reduce_r, and both must be non-positive")
+    if not 0 <= block_wr <= confidence_wr <= 1:
+        raise ValueError("learning win-rate thresholds must be ordered between 0 and 1")
+    if not 0 <= base_floor <= 100 or not 0 <= raise_step <= 100:
+        raise ValueError("confidence floor and raise step must be between 0 and 100")
+    if base_floor + raise_step > 100:
+        raise ValueError("base confidence floor plus raise step cannot exceed 100")
+    if not 0 < size_mult <= 1:
+        raise ValueError("size_reduce_mult must be greater than 0 and no greater than 1")
 
 
 # ── /api/position-size GET ────────────────────────────────────────────────────

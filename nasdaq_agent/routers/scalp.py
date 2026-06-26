@@ -1,0 +1,216 @@
+"""Read-only command-center API for the greenfield scalping platform."""
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import APIRouter, Depends
+
+from auth.dependencies import AuthenticatedUser, require_viewer
+
+router = APIRouter(tags=["scalp"])
+
+_cache_lock = threading.Lock()
+_cache_ts = 0.0
+_cache_value: dict[str, Any] | None = None
+_CACHE_TTL_S = 0.75
+
+
+@router.get("/api/scalp/dashboard")
+async def scalp_dashboard(_user: AuthenticatedUser = Depends(require_viewer)):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _dashboard_snapshot)
+
+
+@router.get("/api/scalp/learning")
+async def scalp_learning(_user: AuthenticatedUser = Depends(require_viewer)):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _learning_snapshot)
+
+
+def _dashboard_snapshot() -> dict[str, Any]:
+    global _cache_ts, _cache_value
+    now = time.time()
+    with _cache_lock:
+        if _cache_value is not None and now - _cache_ts <= _CACHE_TTL_S:
+            return _cache_value
+
+    from agent.config_manager import config
+    from agent.paper_trading import get_open_trades, get_today_pnl
+    from agent.signal_snapshot import read_latest
+    from agent.valkey_client import get_all_prices, price_bus_health
+
+    snapshot = read_latest() or {}
+    plans = []
+    for signal in snapshot.get("signals") or []:
+        plan = dict(signal.get("scalp_plan") or {})
+        if not plan:
+            continue
+        plans.append(_enrich_plan(plan))
+    plans.sort(
+        key=lambda plan: (
+            plan["state"] != "ACTIONABLE",
+            plan["state"] != "WATCH",
+            -float(plan.get("confidence") or 0.0),
+            str(plan.get("ticker") or ""),
+        )
+    )
+
+    prices = get_all_prices()
+    positions = [_enrich_position(row, prices) for row in get_open_trades()]
+    today = get_today_pnl()
+    budget = float(config.get("paper.budget", 50000.0))
+    open_risk = sum(
+        abs(float(row.get("entry_price") or 0) - float(row.get("stop") or 0))
+        * int(row.get("shares_remaining") or row.get("shares") or 0)
+        for row in positions
+    )
+    allocated = sum(
+        float(row.get("entry_price") or 0)
+        * int(row.get("shares_remaining") or row.get("shares") or 0)
+        for row in positions
+    )
+    learning = _learning_snapshot()
+    health = price_bus_health(max_age_s=2.0)
+    counts = {
+        "actionable": sum(plan["state"] == "ACTIONABLE" for plan in plans),
+        "watch": sum(plan["state"] == "WATCH" for plan in plans),
+        "blocked": sum(plan["state"] == "BLOCKED" for plan in plans),
+        "data_gap": sum(plan["state"] == "DATA_GAP" for plan in plans),
+        "long": sum(plan.get("side") == "LONG" and plan["state"] == "ACTIONABLE" for plan in plans),
+        "short": sum(plan.get("side") == "SHORT" and plan["state"] == "ACTIONABLE" for plan in plans),
+    }
+    result = {
+        "schema_version": 1,
+        "asof_ts": datetime.now(timezone.utc).isoformat(),
+        "scan_ts": snapshot.get("ts"),
+        "session": snapshot.get("session") or {},
+        "regime": snapshot.get("regime") or {},
+        "market_data_health": health,
+        "counts": counts,
+        "plans": plans,
+        "positions": positions,
+        "risk": {
+            "budget": round(budget, 2),
+            "realized_pnl": round(float(today.get("total_pnl_dollar") or 0.0), 2),
+            "open_unrealized_pnl": round(sum(float(row.get("unrealized_pnl") or 0.0) for row in positions), 2),
+            "open_risk": round(open_risk, 2),
+            "open_risk_pct": round(open_risk / budget * 100, 3) if budget else 0.0,
+            "allocated": round(allocated, 2),
+            "allocated_pct": round(allocated / budget * 100, 2) if budget else 0.0,
+            "open_positions": len(positions),
+            "max_open_positions": int(config.get("paper.max_open_trades", 10)),
+            "execution_enabled": bool(config.get("scalp.execution_enabled", False)),
+        },
+        "learning": learning,
+    }
+    with _cache_lock:
+        _cache_ts = now
+        _cache_value = result
+    return result
+
+
+def _learning_snapshot() -> dict[str, Any]:
+    from agent.scalp.store import learning_dashboard_data
+
+    data = learning_dashboard_data(
+        context_limit=100, action_limit=30, outcome_limit=30
+    )
+    stats = data["contexts"]
+    now = datetime.now(timezone.utc)
+    active = [
+        row for row in stats
+        if row.get("gate_state") != "ALLOW" and not _expired(row.get("expires_at"), now)
+    ]
+    gates = {row.get("context_key"): row.get("gate_state", "ALLOW") for row in stats}
+    outcomes = [
+        {**row, "context_gate": gates.get(row.get("context_key"), "ALLOW")}
+        for row in data["recent_outcomes"]
+    ]
+    return {
+        "active_actions": active,
+        "recent_actions": data["recent_actions"],
+        "recent_outcomes": outcomes,
+        "contexts": stats,
+    }
+
+
+def _enrich_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    result = dict(plan)
+    entry = float(result.get("entry") or 0.0)
+    stop = float(result.get("stop_loss") or 0.0)
+    tp1 = float(result.get("tp1") or 0.0)
+    tp2 = float(result.get("tp2") or 0.0)
+    risk = float(result.get("risk_per_share") or abs(entry - stop))
+    result.update(
+        state=_plan_state(result),
+        display_reason=_plan_reason(result),
+        stop_r=round(abs(stop - entry) / risk, 4) if risk > 0 else 0.0,
+        tp1_r=round(abs(tp1 - entry) / risk, 4) if risk > 0 else 0.0,
+        tp2_r=round(abs(tp2 - entry) / risk, 4) if risk > 0 else 0.0,
+    )
+    return result
+
+
+def _plan_state(plan: dict[str, Any]) -> str:
+    blockers = [str(item) for item in plan.get("blockers") or []]
+    if any("MISSING" in item or "STALE" in item or "SOURCE" in item for item in blockers):
+        return "DATA_GAP"
+    if bool(plan.get("valid")) and plan.get("side") in {"LONG", "SHORT"}:
+        return "ACTIONABLE"
+    hard_prefixes = (
+        "SESSION_", "EARNINGS_", "MACRO_", "LEARNING_", "BRACKET_",
+        "REQUIRED_", "SPREAD_", "RVOL_", "BLOCKED_BY_",
+    )
+    if blockers and any(item.startswith(hard_prefixes) for item in blockers):
+        return "BLOCKED"
+    if plan.get("side") in {"LONG", "SHORT"}:
+        return "WATCH"
+    return "BLOCKED"
+
+
+def _plan_reason(plan: dict[str, Any]) -> str:
+    if plan.get("valid"):
+        reasons = plan.get("reasons") or []
+        return str(reasons[0] if reasons else "VALID_SETUP")
+    return str(plan.get("invalid_reason") or "NO_VALID_SETUP")
+
+
+def _enrich_position(row: dict[str, Any], prices: dict[str, dict]) -> dict[str, Any]:
+    position = dict(row)
+    ticker = str(position.get("ticker") or "").upper()
+    quote = prices.get(ticker) or {}
+    current = float(quote.get("last") or quote.get("mark") or 0.0)
+    entry = float(position.get("entry_price") or 0.0)
+    shares = int(position.get("shares_remaining") or position.get("shares") or 0)
+    direction = str(position.get("direction") or "BUY").upper()
+    unrealized = 0.0
+    if current > 0 and entry > 0 and shares > 0:
+        unrealized = (
+            (current - entry) * shares
+            if direction == "BUY"
+            else (entry - current) * shares
+        )
+    position.update(
+        current_price=round(current, 4),
+        unrealized_pnl=round(unrealized, 2),
+        price_source=str(quote.get("source_status") or "UNKNOWN"),
+        price_age_s=round(max(0.0, time.time() - float(quote.get("updated_at") or 0)), 2) if quote.get("updated_at") else None,
+    )
+    return position
+
+
+def _expired(value: Any, now: datetime) -> bool:
+    if not value:
+        return False
+    if isinstance(value, datetime):
+        expiry = value
+    else:
+        try:
+            expiry = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return True
+    return expiry.replace(tzinfo=expiry.tzinfo or timezone.utc) <= now

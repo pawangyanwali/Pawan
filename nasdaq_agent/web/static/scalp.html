@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Scalp Command Center | NASDAQ Scalping Agent</title>
+  <style>
+    :root{
+      --bg:#080c11;--surface:#10161e;--surface2:#151d27;--border:#283342;
+      --text:#eef4f7;--muted:#8293a7;--green:#25e58c;--cyan:#4bd5e7;
+      --amber:#ffbd45;--red:#ff5b68;--blue:#6f8cff;--focus:#8ceaf3;
+    }
+    *{box-sizing:border-box;letter-spacing:0}
+    html{background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    body{margin:0;min-height:100vh;background:var(--bg)}
+    button{font:inherit}button:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+    a{color:inherit;text-decoration:none}
+    .topbar{height:62px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:20px;padding:0 20px;position:sticky;top:0;background:rgba(8,12,17,.98);z-index:20}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:850;white-space:nowrap}.brand-dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 12px rgba(37,229,140,.7)}
+    .brand small{display:block;color:var(--muted);font-size:10px;font-weight:550;margin-top:1px}
+    .health-strip{display:flex;align-items:center;gap:7px;min-width:0;overflow-x:auto;scrollbar-width:none}.health-strip::-webkit-scrollbar{display:none}
+    .chip{height:28px;display:inline-flex;align-items:center;gap:6px;padding:0 9px;border:1px solid var(--border);border-radius:4px;background:var(--surface);font-size:11px;white-space:nowrap;color:var(--muted)}
+    .chip strong{color:var(--text)}.chip.good{border-color:rgba(37,229,140,.55);color:var(--green)}.chip.warn{border-color:rgba(255,189,69,.55);color:var(--amber)}.chip.bad{border-color:rgba(255,91,104,.6);color:var(--red)}
+    .topnav{margin-left:auto;display:flex;gap:6px}.nav-link{height:34px;display:inline-flex;align-items:center;padding:0 11px;border:1px solid var(--border);border-radius:5px;background:var(--surface);font-size:11px;color:var(--muted)}.nav-link:hover{color:var(--text);border-color:#425166}
+    .page{padding:16px 18px 80px;max-width:1920px;margin:0 auto}
+    .metrics{display:grid;grid-template-columns:repeat(8,minmax(100px,1fr));border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--surface);margin-bottom:14px}
+    .metric{padding:12px 13px;border-right:1px solid var(--border);min-width:0}.metric:last-child{border-right:0}.metric-label{font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:750;margin-bottom:5px}.metric-value{font-size:20px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.metric-note{font-size:10px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.positive{color:var(--green)}.negative{color:var(--red)}.caution{color:var(--amber)}
+    .toolbar{min-height:45px;display:flex;align-items:center;gap:9px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:14px;overflow-x:auto;scrollbar-width:none}.toolbar::-webkit-scrollbar{display:none}.segmented{display:flex;gap:2px;padding:3px;background:var(--surface);border:1px solid var(--border);border-radius:5px;white-space:nowrap}.segmented button{height:29px;border:0;background:transparent;color:var(--muted);border-radius:3px;padding:0 10px;cursor:pointer;font-size:11px}.segmented button.active{background:var(--surface2);color:var(--text)}.toolbar-meta{margin-left:auto;font-size:10px;color:var(--muted);white-space:nowrap}
+    .workspace{display:grid;grid-template-columns:340px minmax(460px,1fr) 330px;gap:14px;align-items:start}
+    .panel{border:1px solid var(--border);border-radius:6px;background:var(--surface);min-width:0;overflow:hidden}.panel-head{min-height:46px;padding:10px 13px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px}.panel-title{font-size:12px;font-weight:850}.panel-subtitle{font-size:9px;color:var(--muted);margin-top:2px}.panel-body{padding:12px}
+    .opportunity-list{max-height:690px;overflow:auto}.opp{width:100%;display:grid;grid-template-columns:48px minmax(0,1fr) 58px;gap:9px;align-items:center;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--text);padding:11px 12px;text-align:left;cursor:pointer}.opp:hover,.opp.selected{background:var(--surface2)}.opp.selected{box-shadow:inset 3px 0 var(--cyan)}.side{font-size:10px;font-weight:850}.side.long{color:var(--green)}.side.short{color:var(--red)}.ticker{font-size:13px;font-weight:850}.setup{font-size:9px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.conf{text-align:right;font-size:12px;font-weight:800}.state-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px}.state-ACTIONABLE{background:var(--green)}.state-WATCH{background:var(--amber)}.state-BLOCKED{background:var(--red)}.state-DATA_GAP{background:#8792a3}
+    .empty{padding:38px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6}
+    .selected-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.selected-symbol{font-size:25px;font-weight:900}.selected-setup{font-size:11px;color:var(--muted);margin-top:3px}.state-label{font-size:10px;font-weight:800;padding:5px 7px;border:1px solid var(--border);border-radius:4px}
+    .geometry{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--border);border:1px solid var(--border);border-radius:5px;overflow:hidden;margin-top:13px}.level{background:var(--surface2);padding:11px}.level-name{font-size:9px;color:var(--muted);text-transform:uppercase}.level-price{font-size:16px;font-weight:850;margin-top:4px}.level-distance{font-size:9px;color:var(--muted);margin-top:2px}
+    .plan-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:12px}.data-cell{border-top:1px solid var(--border);padding-top:9px;min-width:0}.data-label{font-size:9px;color:var(--muted);text-transform:uppercase}.data-value{font-size:12px;font-weight:750;margin-top:3px;overflow-wrap:anywhere}
+    .reason-block{margin-top:14px;border-top:1px solid var(--border);padding-top:12px}.reason-title{font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:7px}.reason-list{display:flex;flex-wrap:wrap;gap:6px}.reason{font-size:9px;border:1px solid var(--border);border-radius:3px;padding:4px 6px;color:#b9c5d1}.reason.blocker{border-color:rgba(255,91,104,.45);color:#ff98a2}.reason.learning{border-color:rgba(75,213,231,.4);color:var(--cyan)}
+    .side-stack{display:grid;gap:14px}.risk-row,.learning-row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px}.risk-row:last-child,.learning-row:last-child{border-bottom:0}.row-label{color:var(--muted)}.row-value{text-align:right;font-weight:750}.bar{height:5px;background:#26313f;border-radius:3px;overflow:hidden;margin-top:5px}.bar span{height:100%;display:block;background:var(--cyan);max-width:100%}
+    .section{margin-top:14px}.section-head{display:flex;align-items:end;justify-content:space-between;margin-bottom:8px}.section-title{font-size:13px;font-weight:850}.section-note{font-size:9px;color:var(--muted)}
+    .data-table{width:100%;border-collapse:collapse;border:1px solid var(--border);background:var(--surface);table-layout:fixed}.data-table th{height:34px;text-align:left;color:var(--muted);font-size:9px;text-transform:uppercase;background:var(--surface2);padding:0 10px;border-bottom:1px solid var(--border)}.data-table td{height:38px;padding:0 10px;border-bottom:1px solid var(--border);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.data-table tr:last-child td{border-bottom:0}
+    .footer-status{position:fixed;left:0;right:0;bottom:0;height:40px;border-top:1px solid var(--border);background:rgba(16,22,30,.98);display:flex;align-items:center;padding:0 18px;gap:14px;font-size:10px;color:var(--muted);z-index:15}.footer-status strong{color:var(--text)}.footer-error{color:var(--red);margin-left:auto}
+    @media(max-width:1250px){.metrics{grid-template-columns:repeat(4,1fr)}.metric:nth-child(4){border-right:0}.metric:nth-child(-n+4){border-bottom:1px solid var(--border)}.workspace{grid-template-columns:300px minmax(420px,1fr)}.side-stack{grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:820px){.topbar{height:auto;min-height:62px;padding:10px 12px;flex-wrap:wrap}.health-strip{order:3;width:100%}.topnav{margin-left:auto}.nav-link{padding:0 8px;font-size:10px}.page{padding:12px 10px 70px}.metrics{grid-template-columns:repeat(2,1fr)}.metric{border-bottom:1px solid var(--border)}.metric:nth-child(2n){border-right:0}.workspace{grid-template-columns:1fr}.side-stack{grid-column:auto;grid-template-columns:1fr}.opportunity-list{max-height:360px}.geometry{grid-template-columns:repeat(2,1fr)}.plan-grid{grid-template-columns:repeat(2,1fr)}.toolbar-meta{display:none}.data-table{min-width:700px}.table-scroll{overflow-x:auto}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-dot"></span><div>NASDAQ Scalping Agent<small>Scalp Command Center</small></div></a>
+    <div class="health-strip" aria-label="Live system health">
+      <span id="md-chip" class="chip">Market data <strong>Loading</strong></span>
+      <span id="session-chip" class="chip">Session <strong>--</strong></span>
+      <span id="scan-chip" class="chip">Scan <strong>--</strong></span>
+      <span id="execution-chip" class="chip">Execution <strong>--</strong></span>
+    </div>
+    <nav class="topnav"><a class="nav-link" href="/"><span>Dashboard</span></a><a class="nav-link" href="/settings"><span>Settings</span></a></nav>
+  </header>
+
+  <main class="page">
+    <section class="metrics" aria-label="Scalp summary">
+      <div class="metric"><div class="metric-label">Actionable</div><div id="m-actionable" class="metric-value positive">0</div><div id="m-direction" class="metric-note">0 long / 0 short</div></div>
+      <div class="metric"><div class="metric-label">Watch</div><div id="m-watch" class="metric-value caution">0</div><div class="metric-note">Near-valid setups</div></div>
+      <div class="metric"><div class="metric-label">Blocked</div><div id="m-blocked" class="metric-value">0</div><div id="m-data-gap" class="metric-note">0 data gaps</div></div>
+      <div class="metric"><div class="metric-label">Open Positions</div><div id="m-open" class="metric-value">0</div><div id="m-open-max" class="metric-note">Limit --</div></div>
+      <div class="metric"><div class="metric-label">Realized P&amp;L</div><div id="m-realized" class="metric-value">$0.00</div><div class="metric-note">Today</div></div>
+      <div class="metric"><div class="metric-label">Unrealized P&amp;L</div><div id="m-unrealized" class="metric-value">$0.00</div><div class="metric-note">Live positions</div></div>
+      <div class="metric"><div class="metric-label">Open Risk</div><div id="m-risk" class="metric-value">0.00%</div><div id="m-allocated" class="metric-note">0% allocated</div></div>
+      <div class="metric"><div class="metric-label">Learning Actions</div><div id="m-learning" class="metric-value">0</div><div class="metric-note">Active, expiring controls</div></div>
+    </section>
+
+    <div class="toolbar">
+      <div id="state-filter" class="segmented" aria-label="Plan status filter"><button data-value="ALL" class="active">All</button><button data-value="ACTIONABLE">Actionable</button><button data-value="WATCH">Watch</button><button data-value="BLOCKED">Blocked</button><button data-value="DATA_GAP">Data gaps</button></div>
+      <div id="side-filter" class="segmented" aria-label="Signal side filter"><button data-value="ALL" class="active">Both</button><button data-value="LONG">Long</button><button data-value="SHORT">Short</button></div>
+      <div id="toolbar-meta" class="toolbar-meta">Waiting for first snapshot</div>
+    </div>
+
+    <section class="workspace">
+      <article class="panel">
+        <div class="panel-head"><div><div class="panel-title">Opportunities</div><div class="panel-subtitle">Independent canonical scalp plans</div></div><span id="plan-count" class="chip">0</span></div>
+        <div id="opportunities" class="opportunity-list"><div class="empty">Loading signal plans...</div></div>
+      </article>
+
+      <article class="panel">
+        <div id="plan-detail" class="panel-body"><div class="empty">Select a plan to inspect its bracket, telemetry, and decision path.</div></div>
+      </article>
+
+      <div class="side-stack">
+        <article class="panel"><div class="panel-head"><div><div class="panel-title">Risk Envelope</div><div class="panel-subtitle">Computed by the server</div></div></div><div id="risk-panel" class="panel-body"></div></article>
+        <article class="panel"><div class="panel-head"><div><div class="panel-title">Learning Guard</div><div class="panel-subtitle">Risk-tightening only; bracket immutable</div></div></div><div id="learning-panel" class="panel-body"></div></article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head"><div class="section-title">Open Positions</div><div class="section-note">Marked from the live Valkey price bus</div></div>
+      <div class="table-scroll"><table class="data-table"><thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Unrealized</th><th>Stop</th><th>TP1</th><th>TP2</th><th>Source</th></tr></thead><tbody id="positions-body"></tbody></table></div>
+    </section>
+    <section class="section">
+      <div class="section-head"><div class="section-title">Recent Learned Outcomes</div><div class="section-note">Each closed SCALP_PLAN_V1 trade updates its context immediately</div></div>
+      <div class="table-scroll"><table class="data-table"><thead><tr><th>Closed</th><th>Ticker</th><th>Side</th><th>Setup</th><th>Result</th><th>P&amp;L R</th><th>P&amp;L $</th><th>Context Gate</th><th>Exit</th></tr></thead><tbody id="outcomes-body"></tbody></table></div>
+    </section>
+  </main>
+  <div class="footer-status"><span>Snapshot <strong id="snapshot-time">--</strong></span><span>Refresh <strong>1 second</strong></span><span>Schema <strong>v1</strong></span><span id="footer-error" class="footer-error"></span></div>
+
+  <script>
+    const state={data:null,selected:null,status:'ALL',side:'ALL',timer:null,failures:0};
+    const token=()=>sessionStorage.getItem('access_token')||'';
+    async function refreshToken(){const rt=localStorage.getItem('refresh_token');if(!rt)return false;const r=await fetch('/auth/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:rt})});if(!r.ok)return false;const d=await r.json();sessionStorage.setItem('access_token',d.access_token);return true}
+    async function authFetch(url){let h=token()?{Authorization:`Bearer ${token()}`}:{},r=await fetch(url,{headers:h,cache:'no-store'});if(r.status===401&&await refreshToken())r=await fetch(url,{headers:{Authorization:`Bearer ${token()}`},cache:'no-store'});if(r.status===401){location.href='/login';throw new Error('Authentication required')}return r}
+    const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const num=(v,d=2)=>Number(v||0).toFixed(d);const money=v=>`${Number(v||0)<0?'-$':'$'}${Math.abs(Number(v||0)).toFixed(2)}`;const pct=v=>`${num(v,2)}%`;
+    const age=ts=>{if(!ts)return '--';const n=typeof ts==='number'?ts*1000:Date.parse(ts);if(!Number.isFinite(n))return '--';const s=Math.max(0,Math.round((Date.now()-n)/1000));return s<60?`${s}s`:s<3600?`${Math.floor(s/60)}m`:`${Math.floor(s/3600)}h`};
+    const pnlClass=v=>Number(v||0)>0?'positive':Number(v||0)<0?'negative':'';
+    function chip(id,label,value,tone=''){const e=document.getElementById(id);e.className=`chip ${tone}`;e.innerHTML=`${label} <strong>${esc(value)}</strong>`}
+    function render(){const d=state.data;if(!d)return;renderHealth(d);renderMetrics(d);renderOpportunities(d);renderRisk(d.risk||{});renderLearning(d.learning||{});renderPositions(d.positions||[]);renderOutcomes(d.learning?.recent_outcomes||[]);document.getElementById('snapshot-time').textContent=new Date(d.asof_ts).toLocaleTimeString();document.getElementById('toolbar-meta').textContent=`${d.plans.length} plans · scan ${age(d.scan_ts)} ago`;document.getElementById('footer-error').textContent=''}
+    function renderHealth(d){const h=d.market_data_health||{},status=h.status||'NO_DATA',tone=(status==='LIVE'||status==='HEALTHY')?'good':status==='NO_DATA'?'bad':'warn';chip('md-chip','Market data',`${status} · ${h.live||0} WS · ${h.fallback||0} REST · ${h.stale||0} stale`,tone);const session=d.session?.session||d.session?.name||'UNKNOWN';chip('session-chip','Session',session,session==='CLOSED'?'warn':'good');const scanAge=age(d.scan_ts);chip('scan-chip','Scan',`${scanAge} ago`,scanAge.endsWith('s')?'good':'warn');chip('execution-chip','Execution',d.risk?.execution_enabled?'PAPER ON':'SHADOW',d.risk?.execution_enabled?'good':'warn')}
+    function renderMetrics(d){const c=d.counts||{},r=d.risk||{},l=d.learning||{};setText('m-actionable',c.actionable||0);setText('m-direction',`${c.long||0} long / ${c.short||0} short`);setText('m-watch',c.watch||0);setText('m-blocked',c.blocked||0);setText('m-data-gap',`${c.data_gap||0} data gaps`);setText('m-open',r.open_positions||0);setText('m-open-max',`Limit ${r.max_open_positions||0}`);setMoney('m-realized',r.realized_pnl);setMoney('m-unrealized',r.open_unrealized_pnl);setText('m-risk',pct(r.open_risk_pct));setText('m-allocated',`${pct(r.allocated_pct)} allocated`);setText('m-learning',(l.active_actions||[]).length)}
+    function filteredPlans(){return(state.data?.plans||[]).filter(p=>(state.status==='ALL'||p.state===state.status)&&(state.side==='ALL'||p.side===state.side))}
+    function renderOpportunities(){const plans=filteredPlans();document.getElementById('plan-count').textContent=plans.length;if(!plans.length){document.getElementById('opportunities').innerHTML='<div class="empty">No plans match this view.</div>';renderPlan(null);return}if(!plans.some(p=>p.plan_id===state.selected))state.selected=plans[0].plan_id;document.getElementById('opportunities').innerHTML=plans.map(p=>`<button class="opp ${p.plan_id===state.selected?'selected':''}" data-plan="${esc(p.plan_id)}"><div class="side ${String(p.side).toLowerCase()}">${esc(p.side)}</div><div><div class="ticker"><span class="state-dot state-${esc(p.state)}"></span>${esc(p.ticker)}</div><div class="setup">${esc(p.setup_type||p.display_reason)}</div></div><div class="conf">${num(p.confidence,0)}%<div class="setup">${esc(p.state)}</div></div></button>`).join('');document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>{state.selected=b.dataset.plan;renderOpportunities();renderPlan(plans.find(p=>p.plan_id===state.selected))});renderPlan(plans.find(p=>p.plan_id===state.selected))}
+    function renderPlan(p){const el=document.getElementById('plan-detail');if(!p){el.innerHTML='<div class="empty">No plan selected.</div>';return}const reasons=[...(p.reasons||[])];const blockers=[...(p.blockers||[])];el.innerHTML=`<div class="selected-head"><div><div class="selected-symbol">${esc(p.ticker)} <span class="side ${String(p.side).toLowerCase()}">${esc(p.side)}</span></div><div class="selected-setup">${esc(p.setup_type||'No setup')} · ${esc(p.display_reason||'')}</div></div><span class="state-label"><span class="state-dot state-${esc(p.state)}"></span>${esc(p.state)}</span></div><div class="geometry"><div class="level"><div class="level-name">Entry</div><div class="level-price">$${num(p.entry)}</div><div class="level-distance">${esc(p.source||'UNKNOWN')} quote</div></div><div class="level"><div class="level-name">Stop</div><div class="level-price negative">$${num(p.stop_loss)}</div><div class="level-distance">-${num(p.stop_r,2)}R</div></div><div class="level"><div class="level-name">TP1</div><div class="level-price positive">$${num(p.tp1)}</div><div class="level-distance">+${num(p.tp1_r,2)}R</div></div><div class="level"><div class="level-name">TP2</div><div class="level-price positive">$${num(p.tp2)}</div><div class="level-distance">+${num(p.tp2_r,2)}R</div></div></div><div class="plan-grid">${cell('Confidence',`${num(p.confidence,0)}%`)}${cell('Risk / Reward',`${num(p.rr_ratio,2)} : 1`)}${cell('Path quality',p.tp2_path||'UNKNOWN')}${cell('RSI 14 / 7 / 2',`${num(p.rsi_14,1)} / ${num(p.rsi_7,1)} / ${num(p.rsi_2,1)}`)}${cell('MACD slope',num(p.macd_slope,5))}${cell('VWAP event',p.vwap_event||'UNKNOWN')}${cell('Relative volume',`${num(p.rvol,2)}x`)}${cell('Spread / risk',pct(Number(p.spread_to_risk||0)*100))}${cell('Quote / bar age',`${num(Number(p.data_age_ms||0)/1000,1)}s / ${num(Number(p.bar_age_ms||0)/1000,1)}s`)}${cell('Learning gate',p.learning_gate||'ALLOW')}${cell('Learned expectancy',`${num(p.learned_expectancy_r,3)}R`)}${cell('Learned win rate',pct(Number(p.learned_win_rate||0)*100))}</div><div class="reason-block"><div class="reason-title">Decision evidence</div><div class="reason-list">${reasons.map(x=>`<span class="reason ${String(x).startsWith('LEARNING')?'learning':''}">${esc(x)}</span>`).join('')||'<span class="reason">No positive evidence recorded</span>'}</div></div><div class="reason-block"><div class="reason-title">Blockers</div><div class="reason-list">${blockers.map(x=>`<span class="reason blocker">${esc(x)}</span>`).join('')||'<span class="reason">None</span>'}</div></div>`}
+    function renderRisk(r){const max=Number(r.max_open_positions||0),open=Number(r.open_positions||0);document.getElementById('risk-panel').innerHTML=`${row('Budget',money(r.budget))}${row('Allocated',`${money(r.allocated)} · ${pct(r.allocated_pct)}`)}${row('Open risk',`${money(r.open_risk)} · ${pct(r.open_risk_pct)}`)}${row('Position slots',`${open} / ${max}`)}<div class="bar"><span style="width:${max?Math.min(100,open/max*100):0}%"></span></div>${row('Execution contract',r.execution_enabled?'SCALP_PLAN_V1':'Shadow only')}`}
+    function renderLearning(l){const actions=l.active_actions||[],contexts=l.contexts||[];let body=`${row('Active actions',actions.length)}${row('Observed contexts',contexts.length)}`;if(actions.length)body+=actions.slice(0,5).map(a=>`<div class="learning-row"><div><div class="row-value">${esc(a.gate_state)}</div><div class="setup">${esc(a.context_key)}</div></div><div class="row-value">${num(a.ewma_expectancy_r,2)}R<div class="setup">${a.sample_count} samples</div></div></div>`).join('');else body+='<div class="empty">No active tightening. Learning is observing outcomes.</div>';document.getElementById('learning-panel').innerHTML=body}
+    function renderPositions(rows){document.getElementById('positions-body').innerHTML=rows.length?rows.map(p=>`<tr><td><strong>${esc(p.ticker)}</strong></td><td>${esc(p.direction)}</td><td>$${num(p.entry_price)}</td><td>$${num(p.current_price)}</td><td class="${pnlClass(p.unrealized_pnl)}">${money(p.unrealized_pnl)}</td><td>$${num(p.stop)}</td><td>$${num(p.t1_price)}</td><td>$${num(p.t2_price)}</td><td>${esc(p.price_source)} · ${p.price_age_s??'--'}s</td></tr>`).join(''):'<tr><td colspan="9" class="empty">No open scalp positions.</td></tr>'}
+    function renderOutcomes(rows){document.getElementById('outcomes-body').innerHTML=rows.length?rows.map(o=>`<tr><td>${esc(new Date(o.closed_at).toLocaleTimeString())}</td><td><strong>${esc(o.ticker)}</strong></td><td>${esc(o.side)}</td><td>${esc(o.setup_type)}</td><td class="${pnlClass(o.pnl_r)}">${Number(o.pnl_r)>0?'WIN':'LOSS'}</td><td class="${pnlClass(o.pnl_r)}">${num(o.pnl_r,2)}R</td><td class="${pnlClass(o.pnl_dollar)}">${money(o.pnl_dollar)}</td><td>${esc(o.context_gate||'ALLOW')}</td><td>${esc(o.exit_reason)}</td></tr>`).join(''):'<tr><td colspan="9" class="empty">No closed SCALP_PLAN_V1 outcomes yet.</td></tr>'}
+    function row(label,value){return`<div class="risk-row"><span class="row-label">${esc(label)}</span><span class="row-value">${esc(value)}</span></div>`}function cell(label,value){return`<div class="data-cell"><div class="data-label">${esc(label)}</div><div class="data-value">${esc(value)}</div></div>`}function setText(id,v){document.getElementById(id).textContent=v}function setMoney(id,v){const e=document.getElementById(id);e.textContent=money(v);e.className=`metric-value ${pnlClass(v)}`}
+    async function load(){try{const r=await authFetch('/api/scalp/dashboard');if(!r.ok)throw new Error(`Snapshot failed (${r.status})`);state.data=await r.json();state.failures=0;render()}catch(e){state.failures++;document.getElementById('footer-error').textContent=`${e.message} · retrying`;if(state.failures>2)chip('md-chip','Command center','DISCONNECTED','bad')}finally{clearTimeout(state.timer);state.timer=setTimeout(load,1000)}}
+    document.querySelectorAll('.segmented').forEach(group=>group.querySelectorAll('button').forEach(button=>button.onclick=()=>{group.querySelectorAll('button').forEach(x=>x.classList.remove('active'));button.classList.add('active');if(group.id==='state-filter')state.status=button.dataset.value;else state.side=button.dataset.value;renderOpportunities()}));
+    load();
+  </script>
+</body>
+</html>

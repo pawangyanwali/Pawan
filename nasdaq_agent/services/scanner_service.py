@@ -209,6 +209,10 @@ def main() -> None:
     _cfg.start_listener(_runner)
     _log.info("Runtime config loaded (%d keys)", len(_cfg.all()))
 
+    from agent.scalp.store import init_scalp_tables
+    init_scalp_tables()
+    _log.info("Scalp plan persistence initialized")
+
     start_service_heartbeat("scanner", _runner)
 
     # Warm market-hours cache without blocking startup

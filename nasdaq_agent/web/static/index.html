@@ -542,7 +542,8 @@
     NASDAQ<span>&nbsp;Scalping Agent</span>
   </div>
   <div class="header-right">
-    <button onclick="openSignalDashboard()" id="signal-dashboard-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Actionable LONG/SHORT signal plans">Signals</button>
+    <button onclick="window.location.href='/scalp'" id="scalp-command-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Canonical scalp plans, risk, positions, and learning">Scalp</button>
+    <button onclick="openSignalDashboard()" id="signal-dashboard-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Legacy actionable LONG/SHORT signal plans">Signals</button>
     <!-- WebSocket status chip — clickable to force-reconnect when down -->
     <button id="ws-chip" class="ws-chip" onclick="wsChipClick()" title="WebSocket connection to backend">
       <span id="dot" class="status-dot"></span>
@@ -568,7 +569,7 @@
     <button onclick="openBroker()" id="broker-header-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Schwab connections &amp; data sources">🏦 Schwab <span id="schwab-hdr-dot" style="font-size:9px;transition:color .3s">○</span></button>
     <button onclick="openWatchlist()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px">📋 Watchlist</button>
     <button id="alert-toggle" onclick="openAlertModal()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Alert settings">🔔 Alerts</button>
-    <button onclick="openSettings('paper')" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="System settings">⚙️ Settings</button>
+    <button onclick="window.location.href='/settings'" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="System settings">⚙️ Settings</button>
     <button class="hamburger" onclick="toggleMobileNav()" title="Menu">☰</button>
   </div>
 </header>
@@ -587,7 +588,7 @@
   <button onclick="openBroker();toggleMobileNav()">🏦 TOS Broker</button>
   <button onclick="openWatchlist();toggleMobileNav()">📋 Watchlist</button>
   <button onclick="openAlertModal();toggleMobileNav()" id="alert-toggle-mobile">🔔 Alerts</button>
-  <button onclick="openSettings('paper');toggleMobileNav()">⚙️ Settings</button>
+  <button onclick="window.location.href='/settings'">⚙️ Settings</button>
 </div>
 
 <!-- Macro Event Banner (hidden by default) -->
@@ -986,7 +987,7 @@
       <button id="pt-tab-account"  onclick="ptTab('account')"  class="pt-tab">Account</button>
       <button id="pt-tab-learn"    onclick="ptTab('learn')"    class="pt-tab">What We're Learning</button>
       <button id="pt-tab-analysis" onclick="ptTab('analysis')" class="pt-tab">📊 Analysis</button>
-      <button onclick="openSettings('paper')" class="pt-tab" style="border-color:var(--accent);color:var(--accent)" title="Open Settings panel">⚙️ Settings</button>
+      <button onclick="window.location.href='/settings'" class="pt-tab" style="border-color:var(--accent);color:var(--accent)" title="Open settings page">⚙️ Settings</button>
     </div>
 
     <div id="pt-panel-open"     style="display:block"></div>
@@ -1520,45 +1521,6 @@ TRADING_MAX_POSITION_PCT=10
     <div id="wl-custom" style="margin-bottom:12px"></div>
     <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Base Universe (50 tickers)</div>
     <div id="wl-base" style="line-height:2"></div>
-  </div>
-</div>
-
-<!-- Settings Page -->
-<div class="settings-page" id="settings-modal" aria-hidden="true">
-  <div class="settings-shell">
-    <div class="settings-page-header">
-      <div>
-        <div class="settings-page-title">System Settings</div>
-        <div class="settings-page-subtitle">Runtime configuration backed by PostgreSQL config_store. Changes are hot-reloaded by the service that owns each setting.</div>
-      </div>
-      <button onclick="closeSettings()" class="settings-back-btn">Back to Dashboard</button>
-    </div>
-    <!-- Tab bar -->
-    <div class="settings-body">
-    <div class="settings-nav">
-      <button id="st-tab-paper"      onclick="settingsTab('paper')"      class="pt-tab pt-tab-active">Paper Trading</button>
-      <button id="st-tab-traderules" onclick="settingsTab('traderules')" class="pt-tab">Trade Rules</button>
-      <button id="st-tab-signal"  onclick="settingsTab('signal')"  class="pt-tab">Signal Config</button>
-      <button id="st-tab-risk"    onclick="settingsTab('risk')"    class="pt-tab">Risk Controls</button>
-      <button id="st-tab-learner" onclick="settingsTab('learner')" class="pt-tab">Learner</button>
-      <button id="st-tab-algos"   onclick="settingsTab('algos')"   class="pt-tab">Algo Params</button>
-      <button id="st-tab-sr"      onclick="settingsTab('sr')"      class="pt-tab">S&amp;R Tuning</button>
-      <button id="st-tab-execution" onclick="settingsTab('execution')" class="pt-tab">Execution</button>
-      <button id="st-tab-system"    onclick="settingsTab('system')"    class="pt-tab">System</button>
-    </div>
-    <div class="settings-content">
-    <div id="settings-field-guide" class="settings-field-guide"></div>
-    <div id="st-panel-paper"      class="settings-panel" style="display:block"></div>
-    <div id="st-panel-traderules" class="settings-panel" style="display:none"></div>
-    <div id="st-panel-signal"     class="settings-panel" style="display:none"></div>
-    <div id="st-panel-risk"       class="settings-panel" style="display:none"></div>
-    <div id="st-panel-learner"    class="settings-panel" style="display:none"></div>
-    <div id="st-panel-algos"      class="settings-panel" style="display:none"></div>
-    <div id="st-panel-sr"         class="settings-panel" style="display:none"></div>
-    <div id="st-panel-execution"  class="settings-panel" style="display:none"></div>
-    <div id="st-panel-system"     class="settings-panel" style="display:none"></div>
-    </div>
-    </div>
   </div>
 </div>
 
@@ -5581,16 +5543,11 @@ function renderSettingsFieldGuide(name) {
     </div>`;
 }
 
-function openSettings(tab) {
-  const page = document.getElementById('settings-modal');
-  page.classList.add('open');
-  page.setAttribute('aria-hidden', 'false');
-  settingsTab(tab || 'paper');
+function openSettings() {
+  window.location.href = '/settings';
 }
 function closeSettings() {
-  const page = document.getElementById('settings-modal');
-  page.classList.remove('open');
-  page.setAttribute('aria-hidden', 'true');
+  window.location.href = '/';
 }
 function settingsTab(name) {
   ['paper','traderules','signal','risk','learner','algos','sr','execution','system'].forEach(t => {

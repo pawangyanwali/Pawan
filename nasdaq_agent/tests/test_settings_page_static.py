@@ -1,79 +1,48 @@
 from pathlib import Path
-import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "web" / "static" / "index.html"
-CONFIG_MANAGER = ROOT / "agent" / "config_manager.py"
+SETTINGS = ROOT / "web" / "static" / "settings.html"
+SYSTEM_ROUTER = ROOT / "routers" / "system.py"
 
 
-def _index_text() -> str:
-    return INDEX.read_text(encoding="utf-8", errors="ignore")
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def test_settings_is_full_page_not_modal() -> None:
-    html = _index_text()
-    settings_open = '<div class="settings-page" id="settings-modal" aria-hidden="true">'
-    assert settings_open in html
-    assert '<div class="history-modal" id="settings-modal">' not in html
-    assert "max-height:72vh;overflow-y:auto" not in html
-    assert 'id="settings-field-guide"' in html
-    assert "Back to Dashboard" in html
+def test_settings_is_a_dedicated_page() -> None:
+    dashboard = _read(INDEX)
+    settings = _read(SETTINGS)
+    routes = _read(SYSTEM_ROUTER)
+
+    assert 'id="settings-modal"' not in dashboard
+    assert "document.getElementById('settings-modal')" not in dashboard
+    assert dashboard.count("window.location.href='/settings'") == 3
+    assert '@router.get("/settings"' in routes
+    assert 'FileResponse(os.path.join(STATIC_DIR, "settings.html"))' in routes
+    assert "Runtime Settings" in settings
+    assert 'href="/"' in settings
 
 
-def test_duplicate_or_unwired_settings_not_exposed() -> None:
-    html = _index_text()
-    hidden_keys = {
-        "broker.auto_trade",
-        "broker.paper_trading",
-        "trading.account_size",
-        "trading.risk_pct",
-        "trading.max_position_pct",
-        "risk.pre_t1_storm_rate",
-    }
-    for key in hidden_keys:
-        assert f'"{key}"' not in html
+def test_settings_page_is_catalog_driven_and_uncluttered() -> None:
+    html = _read(SETTINGS)
+
+    assert "authFetch('/api/config-catalog')" in html
+    assert "authFetch('/api/config'" in html
+    assert 'id="group-nav"' in html
+    assert 'id="search"' in html
+    assert 'id="advanced"' in html
+    assert 'id="savebar"' in html
+    assert "state.original" in html
+    assert "state.defaults[f.key]=f.default" in html
+    assert 'class="history-modal"' not in html
+    assert 'id="settings-modal"' not in html
 
 
-def test_trade_rules_align_t2_to_min_rr_in_atr_mode() -> None:
-    html = _index_text()
-    assert 'payload["paper.t2_r_multiple"] < payload["prediction.min_rr"]' in html
-    assert 'T2 aligned to Min R:R for ATR mode.' in html
-    assert 'R:R geometry is incomplete' in html
+def test_settings_page_explains_the_scalp_cutover() -> None:
+    html = _read(SETTINGS)
 
-
-def test_visible_settings_have_defaults_and_runtime_consumers() -> None:
-    html = _index_text()
-    defaults = CONFIG_MANAGER.read_text(encoding="utf-8", errors="ignore")
-    ui_keys = set(
-        re.findall(
-            r'"((?:paper|prediction|sizing|scanner|filter|learner|algos|sr|execution|risk|trading|broker|audit)\.[A-Za-z0-9_${}.-]+)"\s*:',
-            html,
-        )
-    )
-    default_keys = set(
-        re.findall(
-            r'"((?:paper|prediction|sizing|scanner|filter|learner|algos|sr|execution|risk|trading|broker|audit)\.[A-Za-z0-9_.-]+)"\s*:',
-            defaults,
-        )
-    )
-    missing_defaults = sorted(k for k in ui_keys if "${family}" not in k and k not in default_keys)
-    assert missing_defaults == []
-
-    runtime_files = [
-        p
-        for p in ROOT.rglob("*.py")
-        if "tests" not in p.parts
-        and p.name not in {"config_manager.py", "config_router.py"}
-    ]
-    runtime_text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in runtime_files)
-    missing_consumers: list[str] = []
-    for key in sorted(ui_keys):
-        if "${family}" in key:
-            continue
-        if key.startswith("execution.slip_base_"):
-            assert 'f"execution.slip_base_{session.lower()}"' in runtime_text
-            continue
-        if key not in runtime_text:
-            missing_consumers.append(key)
-    assert missing_consumers == []
+    assert "scalp.execution_enabled" in html
+    assert "valid scalp plan mandatory" in html
+    assert "Reset to default" in html

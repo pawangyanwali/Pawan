@@ -11,7 +11,7 @@ import logging
 import os
 import time
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 from typing import Optional, Callable
 
@@ -435,6 +435,7 @@ class StockSignal:
 
     # ── Algorithm signals (Phase 1+ trading algos) ────────────────────────────
     algo_signals: list = field(default_factory=list)  # list of AlgoResult dicts
+    scalp_plan: dict = field(default_factory=dict)    # greenfield scalp plan (shadow/execution)
 
     def to_dict(self) -> dict:
         import math
@@ -711,6 +712,69 @@ def _ml_pred_cache_get(ticker: str, bar_ts_ns: int) -> tuple | None:
 
 def _ml_pred_cache_put(ticker: str, bar_ts_ns: int, *vals) -> None:
     _ML_PRED_CACHE[ticker] = (bar_ts_ns, *vals, time.time())
+
+
+def _build_scalp_plan(
+    ticker: str,
+    df_ind: pd.DataFrame,
+    *,
+    rvol: float,
+    vwap_event: str,
+    session: str,
+    supports: list,
+    resistances: list,
+    earnings_blocked: bool,
+    macro_blocked: bool,
+):
+    """Build the independent scalping plan without consulting legacy direction."""
+    from agent.config_manager import config as _cfg
+
+    if not (
+        bool(_cfg.get("scalp.shadow_enabled", True))
+        or bool(_cfg.get("scalp.execution_enabled", False))
+    ):
+        return None
+    from agent.scalp import (
+        ScalpSignalConfig,
+        detect_scalp_signal_plan,
+        indicator_snapshot_from_frame,
+        quote_snapshot_from_price_bus,
+    )
+
+    cfg = ScalpSignalConfig.from_runtime(_cfg)
+    quote = quote_snapshot_from_price_bus(ticker)
+    indicators = indicator_snapshot_from_frame(df_ind)
+    indicators = replace(
+        indicators,
+        rvol=float(rvol) if np.isfinite(rvol) else None,
+        vwap_event=str(vwap_event or ""),
+    )
+    plan = detect_scalp_signal_plan(
+        quote=quote,
+        indicators=indicators,
+        session=session,
+        config=cfg,
+        supports=supports,
+        resistances=resistances,
+    )
+    external_blockers = []
+    if earnings_blocked:
+        external_blockers.append("EARNINGS_BLACKOUT")
+    if macro_blocked:
+        external_blockers.append("MACRO_EVENT_BLOCK")
+    if session == "CLOSED":
+        external_blockers.append("SESSION_CLOSED")
+    if session == "RESTRICTED" and bool(_cfg.get("paper.block_restricted_session", True)):
+        external_blockers.append("SESSION_RESTRICTED")
+    for blocker in external_blockers:
+        if blocker not in plan.blockers:
+            plan.blockers.append(blocker)
+    if external_blockers:
+        plan.valid = False
+        plan.invalid_reason = plan.blockers[0]
+    from agent.scalp.learning import apply_context_gate
+    apply_context_gate(plan)
+    return plan
 
 
 # ── Single ticker analysis ────────────────────────────────────────────────────
@@ -1329,6 +1393,22 @@ def analyse_ticker(
             _raw_direction
         )
 
+        _scalp_plan = _build_scalp_plan(
+            ticker,
+            df_ind,
+            rvol=rvol,
+            vwap_event=vwap_sig.get("event", ""),
+            session=sess_info.get("session", ""),
+            supports=list(pred.get("supports", [])),
+            resistances=list(pred.get("resistances", [])),
+            earnings_blocked=bool(eb.get("blocked")),
+            macro_blocked=bool(macro_ev.get("blocked")),
+        )
+        from agent.config_manager import config as _cfg_scalp_exec
+        _scalp_execution_enabled = bool(
+            _cfg_scalp_exec.get("scalp.execution_enabled", False)
+        )
+
         # Per-ticker cooldown: only record a new signal if 15 min have passed
         # since the same ticker+direction was last recorded. This prevents the
         # signal tracker from counting a single setup 15 times in 15 minutes.
@@ -1343,7 +1423,13 @@ def analyse_ticker(
         # Earnings/macro blackouts are the only exception (no valid prediction).
         if _norm_direction in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"]:
             resolve_pending(ticker, price)
-        if _norm_direction in ("BUY", "SELL") and not eb["blocked"] and not macro_ev["blocked"] and _cooldown_ok:
+        if (
+            _norm_direction in ("BUY", "SELL")
+            and not eb["blocked"]
+            and not macro_ev["blocked"]
+            and _cooldown_ok
+            and not _scalp_execution_enabled
+        ):
             _last_signal_ts[_cooldown_key] = _now_ts
             record_signal(
                 ticker=ticker, direction=_norm_direction, entry=price,
@@ -1410,6 +1496,60 @@ def analyse_ticker(
                 avg_daily_volume  = float(df_ind["Volume"].mean() * 390) if "Volume" in df_ind.columns else 0.0,
                 _out_status       = _pred_exec_status,
             )
+
+        # Greenfield execution path. It is independent of the legacy composite
+        # prediction and becomes the sole paper-entry publisher when enabled.
+        if _scalp_execution_enabled and _scalp_plan is not None:
+            _scalp_direction = (
+                "BUY" if _scalp_plan.side.value == "LONG" else
+                "SELL" if _scalp_plan.side.value == "SHORT" else ""
+            )
+            _scalp_key = (ticker, f"SCALP_{_scalp_direction}")
+            _scalp_cooldown_ok = (
+                time.time() - _last_signal_ts.get(_scalp_key, 0.0)
+            ) >= _SIGNAL_COOLDOWN_SECS
+            if _scalp_direction and _scalp_cooldown_ok:
+                _scalp_exec_status: list = []
+                _trade_id = maybe_open_trade(
+                    ticker=ticker,
+                    direction=_scalp_direction,
+                    price=_scalp_plan.price,
+                    target=_scalp_plan.tp2,
+                    stop=_scalp_plan.stop_loss,
+                    confidence=_scalp_plan.confidence,
+                    rr_qualifies=_scalp_plan.valid,
+                    rr_ratio=_scalp_plan.rr_ratio,
+                    rr_quality="CLEAR" if _scalp_plan.valid else "BLOCKED",
+                    session=sess_info.get("session", ""),
+                    regime=regime.regime,
+                    vwap_event=_scalp_plan.vwap_event,
+                    rsi_zone=_scalp_plan.rsi_zone,
+                    entry_type=_scalp_plan.setup_type,
+                    order_flow_score=_of_score,
+                    size_mult=round(
+                        float(macro_ev.get("size_mult", 1.0) or 1.0)
+                        * float(_scalp_plan.learning_size_mult or 1.0),
+                        2,
+                    ),
+                    trading_tier=_trading_tier,
+                    ml_scalp_prob=ml_scalp,
+                    ml_daily_prob=ml_daily_p,
+                    ml_swing_prob=ml_swing_p,
+                    ml_deep_prob=ml_deep_p,
+                    ml_ensemble_score=int(round(ml_ensemble_p * 100)),
+                    atr=_scalp_plan.atr_14,
+                    rsi_value=_scalp_plan.rsi_14,
+                    macd_hist=_scalp_plan.macd_hist,
+                    macd_hist_prev=_scalp_plan.macd_hist_prev,
+                    avg_daily_volume=(
+                        float(df_ind["Volume"].mean() * 390)
+                        if "Volume" in df_ind.columns else 0.0
+                    ),
+                    scalp_plan=_scalp_plan,
+                    _out_status=_scalp_exec_status,
+                )
+                if _trade_id:
+                    _last_signal_ts[_scalp_key] = time.time()
 
         # Update open paper trades + live backtest tracking.
         # Pass bar_high/bar_low so stop/target detection uses the full intrabar
@@ -1630,6 +1770,7 @@ def analyse_ticker(
             order_flow_label    = _of_label,
             signal_strength     = _sig_strength,
             signal_size_mult    = _sig_size_mult,
+            scalp_plan          = _scalp_plan.to_dict() if _scalp_plan else {},
         )
 
         # Evaluate structured trading algorithm signals (Phase 1+)

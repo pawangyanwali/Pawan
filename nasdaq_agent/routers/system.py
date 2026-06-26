@@ -58,6 +58,18 @@ async def algo_page():
     return FileResponse(os.path.join(STATIC_DIR, "algo.html"))
 
 
+@router.get("/settings", response_class=HTMLResponse)
+@router.get("/settings.html", response_class=HTMLResponse)
+async def settings_page():
+    return FileResponse(os.path.join(STATIC_DIR, "settings.html"))
+
+
+@router.get("/scalp", response_class=HTMLResponse)
+@router.get("/scalp.html", response_class=HTMLResponse)
+async def scalp_page():
+    return FileResponse(os.path.join(STATIC_DIR, "scalp.html"))
+
+
 @router.get("/api/health")
 async def health():
     from agent.data_fetcher import get_credit_usage

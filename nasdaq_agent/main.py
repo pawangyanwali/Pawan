@@ -1184,6 +1184,7 @@ from routers.streaming     import router as streaming_router
 from routers.algo          import router as algo_router
 from routers.alerts        import router as alerts_router
 from routers.audit         import router as audit_router
+from routers.scalp         import router as scalp_router
 
 # Re-export helpers for backward compatibility with test suite and other tooling
 from routers.streaming import _safe_ws_close  # noqa: F401  (tests import this from main)
@@ -1202,6 +1203,7 @@ app.include_router(streaming_router)
 app.include_router(algo_router)
 app.include_router(alerts_router)
 app.include_router(audit_router)
+app.include_router(scalp_router)
 
 
 

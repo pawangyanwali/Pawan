@@ -169,10 +169,15 @@ def compute_entry_fill(
     )
     spread_bps, half_spread = _compute_spread(last_price, atr, bid, ask)
 
+    has_book = ask > 0 and bid > 0 and ask >= bid
     if direction == "BUY":
-        fill_price = last_price + half_spread + slip_per_share
+        # A market buy crosses to the ask. Only synthesize half-spread when an
+        # actual book is unavailable; adding half-spread to ask double-counts it.
+        executable = ask if has_book else last_price + half_spread
+        fill_price = executable + slip_per_share
     else:
-        fill_price = last_price - half_spread - slip_per_share
+        executable = bid if has_book else last_price - half_spread
+        fill_price = executable - slip_per_share
 
     fill_price = round(max(fill_price, 0.01), 4)
 

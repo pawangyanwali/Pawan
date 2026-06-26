@@ -252,6 +252,8 @@ def tmp_db_paths(tmp_path, monkeypatch):
         "agent.weekend_learner",
         "agent.multi_tf_backtest",
         "agent.backtester",
+        "agent.scalp.store",
+        "agent.scalp.learning",
         "historical.store",
     ]
     import importlib
@@ -262,6 +264,10 @@ def tmp_db_paths(tmp_path, monkeypatch):
                 monkeypatch.setattr(_mod, "get_conn", _gc)
             if hasattr(_mod, "_get_pool"):
                 monkeypatch.setattr(_mod, "_get_pool", lambda p=_pool: p)
+            if _mod_name == "agent.scalp.store":
+                monkeypatch.setattr(_mod, "_initialized", False)
+            if _mod_name == "agent.scalp.learning":
+                monkeypatch.setattr(_mod, "_gate_cache", {})
         except Exception:
             pass
 
