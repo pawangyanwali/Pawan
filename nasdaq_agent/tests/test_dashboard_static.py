@@ -34,6 +34,24 @@ def test_dashboard_rest_fallback_applies_signal_payload():
     assert "_applySignalPayload(await r.json());" in src
 
 
+def test_signal_dashboard_exposes_long_short_trade_plans():
+    src = _html()
+
+    assert 'id="signal-dashboard-btn"' in src
+    assert 'id="signal-dashboard-modal"' in src
+    assert "function renderSignalDashboard()" in src
+    assert "s.direction" in src
+    assert "s.entry_reason" in src
+    assert "LONG Signals" in src
+    assert "SHORT Signals" in src
+    assert "Entry</th><th>Stop</th><th>T1</th><th>Target" in src
+    assert "RSI zone missing" in src
+    assert "VWAP event missing" in src
+    assert "rsiZone === 'UNKNOWN'" in src
+    assert "vwapEvent === 'UNKNOWN'" in src
+    assert "renderTable(); renderSignalDashboard();" in src
+
+
 def test_dashboard_does_not_reconnect_websocket_for_price_staleness_only():
     src = _html()
 

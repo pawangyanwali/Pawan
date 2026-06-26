@@ -542,6 +542,7 @@
     NASDAQ<span>&nbsp;Scalping Agent</span>
   </div>
   <div class="header-right">
+    <button onclick="openSignalDashboard()" id="signal-dashboard-btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:3px 10px;cursor:pointer;font-family:inherit;font-size:10px" title="Actionable LONG/SHORT signal plans">Signals</button>
     <!-- WebSocket status chip — clickable to force-reconnect when down -->
     <button id="ws-chip" class="ws-chip" onclick="wsChipClick()" title="WebSocket connection to backend">
       <span id="dot" class="status-dot"></span>
@@ -574,6 +575,7 @@
 
 <!-- Mobile nav drawer (shown on small screens) -->
 <div class="mobile-nav" id="mobile-nav">
+  <button onclick="openSignalDashboard();toggleMobileNav()">Signal Dashboard</button>
   <button onclick="openHistory();toggleMobileNav()">📊 Signal History</button>
   <button onclick="openPnl();toggleMobileNav()">💰 P&amp;L Dashboard</button>
   <button onclick="openBacktest();toggleMobileNav()">📈 Backtest</button>
@@ -1573,6 +1575,41 @@ TRADING_MAX_POSITION_PCT=10
 </div>
 
 <!-- Audit Trail Modal — decision log (suppressions, threshold changes) -->
+<!-- LONG / SHORT Signal Dashboard Modal -->
+<div class="history-modal" id="signal-dashboard-modal">
+  <div class="history-modal-inner" style="width:min(1200px,96vw);max-height:88vh">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;gap:12px">
+      <div>
+        <div style="font-size:16px;font-weight:700;color:var(--text)">Signal Dashboard</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">LONG and SHORT trade plans from the latest scanner snapshot</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="signal-dash-filter" onchange="renderSignalDashboard()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:5px 8px;font-family:inherit;font-size:11px">
+          <option value="ALL">All states</option>
+          <option value="ACTIONABLE">Actionable</option>
+          <option value="WATCHING">Watching</option>
+          <option value="FILTERED">Filtered</option>
+          <option value="IN_TRADE">In trade</option>
+          <option value="DATA_GAP">Data gap</option>
+        </select>
+        <button onclick="renderSignalDashboard()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:10px">Refresh</button>
+        <button onclick="closeSignalDashboard()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">x</button>
+      </div>
+    </div>
+    <div id="signal-dashboard-kpis" style="display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:10px;margin-bottom:14px"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px" id="signal-dashboard-columns">
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--green);margin-bottom:8px">LONG Signals</div>
+        <div id="signal-dashboard-long" style="overflow:auto;max-height:62vh"></div>
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:8px">SHORT Signals</div>
+        <div id="signal-dashboard-short" style="overflow:auto;max-height:62vh"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="history-modal" id="audit-modal">
   <div class="history-modal-inner">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -3107,6 +3144,131 @@ function buildSignalExplanation(s, trade) {
 }
 
 // ─── Summary ───────────────────────────────────────────────────────────────────
+function _signalDirection(s) {
+  const parts = [
+    s.direction,
+    s.signal,
+    s.prediction,
+    s.entry_type,
+    s.entry_reason,
+    ...(Array.isArray(s.patterns) ? s.patterns : []),
+    ...(Array.isArray(s.bounce_signals) ? s.bounce_signals : []),
+  ].map(v => String(v || '').toUpperCase()).join(' ');
+  if (/\b(STRONG\s+BUY|BUY|LONG|BULL|BULLISH|ORB_BULL|ORB5_BULL|ORB15_BULL)\b/.test(parts)) return 'LONG';
+  if (/\b(STRONG\s+SELL|SELL|SHORT|BEAR|BEARISH|ORB_BEAR|ORB5_BEAR|ORB15_BEAR)\b/.test(parts)) return 'SHORT';
+  return '';
+}
+function _signalDataGaps(s) {
+  const gaps = [];
+  const rsiZone = String(s.rsi_zone || '').trim().toUpperCase();
+  const vwapEvent = String(s.vwap_event || '').trim().toUpperCase();
+  if (!rsiZone || rsiZone === 'UNKNOWN') gaps.push('RSI zone missing');
+  if (!vwapEvent || vwapEvent === 'UNKNOWN') gaps.push('VWAP event missing');
+  if (!Number(s.target_price)) gaps.push('target missing');
+  if (!Number(s.stop_loss)) gaps.push('stop missing');
+  return gaps;
+}
+function _signalState(s) {
+  const trade = allOpenTrades[s.ticker];
+  const gaps = _signalDataGaps(s);
+  if (trade) return 'IN_TRADE';
+  if (gaps.length) return 'DATA_GAP';
+  if (s.is_suppressed) return 'FILTERED';
+  if (!_signalDirection(s)) return 'WATCHING';
+  if ((s.prediction || '').includes('STRONG') || Number(s.confidence || 0) >= 70) return 'ACTIONABLE';
+  return 'WATCHING';
+}
+function _signalStateColor(state) {
+  return {
+    ACTIONABLE: 'var(--green-s)',
+    IN_TRADE: 'var(--blue)',
+    WATCHING: 'var(--yellow)',
+    FILTERED: 'var(--red)',
+    DATA_GAP: 'var(--red-s)',
+  }[state] || 'var(--muted)';
+}
+function _signalPlanRow(s) {
+  const state = _signalState(s);
+  const color = _signalStateColor(state);
+  const dir = _signalDirection(s);
+  const gaps = _signalDataGaps(s);
+  const trade = allOpenTrades[s.ticker];
+  const entry = Number(trade?.entry_price || s.entry_price || s.price || 0);
+  const stop = Number(s.stop_loss || trade?.stop || 0);
+  const target = Number(s.target_price || trade?.target || 0);
+  const risk = Math.abs(entry - stop);
+  const t1 = entry && risk ? (dir === 'SHORT' ? entry - risk : entry + risk) : 0;
+  const notes = [];
+  if (gaps.length) notes.push(...gaps);
+  if (s.is_suppressed) notes.push(s.suppress_reason || 'filtered by risk/adaptive gate');
+  if ((s.rsi_zone || 'UNKNOWN') === 'NEUTRAL') notes.push('RSI neutral');
+  if ((s.vwap_event || 'UNKNOWN') === 'UNKNOWN') notes.push('VWAP unknown');
+  if ((s.rr_quality || 'LOW') === 'LOW') notes.push('LOW R:R structure');
+  if (trade) notes.push(`open ${trade.direction || ''} trade`);
+  const title = escAttr(buildSignalExplanation(s, trade) + (gaps.length ? `\n\nData quality:\n- ${gaps.join('\n- ')}` : ''));
+  return `<tr title="${title}" data-ticker="${s.ticker}" style="border-bottom:1px solid var(--border);cursor:pointer">
+    <td style="padding:7px 8px;font-weight:700;color:var(--text)">${s.ticker}<div style="font-size:9px;color:var(--muted);font-weight:400">${s.name || ''}</div></td>
+    <td style="padding:7px 8px"><span style="display:inline-block;padding:2px 6px;border-radius:4px;border:1px solid ${color};color:${color};font-size:9px;font-weight:700">${state}</span></td>
+    <td style="padding:7px 8px;color:${dir === 'LONG' ? 'var(--green)' : 'var(--red)'};font-weight:700">${dir || 'WATCH'}</td>
+    <td style="padding:7px 8px">$${fmt(entry, 2)}</td>
+    <td style="padding:7px 8px;color:var(--red)">$${fmt(stop, 2)}</td>
+    <td style="padding:7px 8px;color:var(--green)">$${fmt(t1, 2)}</td>
+    <td style="padding:7px 8px;color:var(--green-s)">$${fmt(target, 2)}</td>
+    <td style="padding:7px 8px;color:${Number(s.rr_ratio || 0) >= 2 ? 'var(--green)' : 'var(--yellow)'}">${fmt(s.rr_ratio || 0, 1)}:1</td>
+    <td style="padding:7px 8px">${fmt(s.confidence || 0, 0)}%</td>
+    <td style="padding:7px 8px">${s.rsi_zone || 'UNKNOWN'}</td>
+    <td style="padding:7px 8px">${s.vwap_event || 'UNKNOWN'}</td>
+    <td style="padding:7px 8px;color:var(--muted);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${notes.join(' | ') || (s.entry_type || 'signal plan')}</td>
+  </tr>`;
+}
+function _renderSignalPlanTable(rows, emptyLabel) {
+  if (!rows.length) {
+    return `<div style="padding:24px;text-align:center;color:var(--muted);border:1px solid var(--border);border-radius:8px;background:var(--surface2)">${emptyLabel}</div>`;
+  }
+  return `<table class="bt-attr-table" style="width:100%;font-size:11px">
+    <thead><tr>
+      <th>Ticker</th><th>State</th><th>Side</th><th>Entry</th><th>Stop</th><th>T1</th><th>Target</th><th>R:R</th><th>Conf</th><th>RSI</th><th>VWAP</th><th>Notes</th>
+    </tr></thead>
+    <tbody>${rows.map(_signalPlanRow).join('')}</tbody>
+  </table>`;
+}
+function renderSignalDashboard() {
+  const modal = document.getElementById('signal-dashboard-modal');
+  if (!modal || !modal.classList.contains('open')) return;
+  const selected = document.getElementById('signal-dash-filter')?.value || 'ALL';
+  const plans = [...allSignals]
+    .filter(s => s && !s.is_observation)
+    .map(s => Object.assign({}, s, { _state: _signalState(s), _side: _signalDirection(s) }))
+    .filter(s => selected === 'ALL' || s._state === selected)
+    .sort((a, b) => {
+      const order = { ACTIONABLE:0, IN_TRADE:1, WATCHING:2, DATA_GAP:3, FILTERED:4 };
+      return (order[a._state] ?? 9) - (order[b._state] ?? 9)
+        || Number(b.confidence || 0) - Number(a.confidence || 0)
+        || Number(b.rr_ratio || 0) - Number(a.rr_ratio || 0);
+    });
+  const longRows = plans.filter(s => s._side === 'LONG');
+  const shortRows = plans.filter(s => s._side === 'SHORT');
+  const counts = plans.reduce((acc, s) => { acc[s._state] = (acc[s._state] || 0) + 1; return acc; }, {});
+  const kpi = (label, value, color) => `<div class="bt-kpi"><div class="bt-kpi-label">${label}</div><div class="bt-kpi-value" style="color:${color}">${value}</div></div>`;
+  document.getElementById('signal-dashboard-kpis').innerHTML = [
+    kpi('LONG', longRows.length, 'var(--green)'),
+    kpi('SHORT', shortRows.length, 'var(--red)'),
+    kpi('Actionable', counts.ACTIONABLE || 0, 'var(--green-s)'),
+    kpi('Filtered', counts.FILTERED || 0, 'var(--red)'),
+    kpi('Data Gaps', counts.DATA_GAP || 0, 'var(--red-s)'),
+  ].join('');
+  document.getElementById('signal-dashboard-long').innerHTML = _renderSignalPlanTable(longRows, 'No LONG plans in this filter.');
+  document.getElementById('signal-dashboard-short').innerHTML = _renderSignalPlanTable(shortRows, 'No SHORT plans in this filter.');
+  modal.querySelectorAll('tr[data-ticker]').forEach(r => r.addEventListener('click', () => openDetail(r.dataset.ticker)));
+}
+function openSignalDashboard() {
+  document.getElementById('signal-dashboard-modal').classList.add('open');
+  renderSignalDashboard();
+}
+function closeSignalDashboard() {
+  document.getElementById('signal-dashboard-modal').classList.remove('open');
+}
+
 function updateSummary() {
   const c = {'STRONG BUY':0,'BUY':0,'NEUTRAL':0,'SELL':0,'STRONG SELL':0,'UVOL':0};
   allSignals.forEach(s => { c[s.prediction]=(c[s.prediction]||0)+1; if(s.unusual_vol) c.UVOL++; });
@@ -3491,7 +3653,7 @@ function renderTable() {
   tbody.querySelectorAll('tr[data-ticker]').forEach(r => r.addEventListener('click', () => openDetail(r.dataset.ticker)));
 }
 
-function renderAll() { updateSummary(); renderTable(); }
+function renderAll() { updateSummary(); renderTable(); renderSignalDashboard(); }
 
 // ─── Detail Panel ──────────────────────────────────────────────────────────────
 function openDetail(ticker) {

@@ -1417,8 +1417,8 @@ def maybe_open_trade(
         logger.info(f"[PAPER] {ticker} skip: {_tech_reason}")
         _append_status(_out_status, "BLOCKED_TECHNICAL_GATE")
         return None
-    rsi_zone = ((rsi_zone or "").upper().strip() or _zone_from_rsi_value(rsi_value))
-    vwap_event = (vwap_event or "").upper().strip()
+    rsi_zone = ((rsi_zone or "").upper().strip() or _zone_from_rsi_value(rsi_value) or "UNKNOWN")
+    vwap_event = ((vwap_event or "").upper().strip() or "UNKNOWN")
 
     # Per-family execution controls — check BEFORE circuit breaker for fast-path rejection.
     if algo_name:

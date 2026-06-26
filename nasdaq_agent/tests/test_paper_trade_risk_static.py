@@ -24,3 +24,11 @@ def test_mfe_mae_excursion_columns_are_persisted():
     for column in ("mfe_dollar", "mae_dollar", "mfe_pct", "mae_pct", "mfe_r", "mae_r"):
         assert column in src
     assert "SET mfe_dollar=?, mae_dollar=?, mfe_pct=?, mae_pct=?, mfe_r=?, mae_r=?" in src
+
+
+def test_paper_trades_never_persist_blank_rsi_or_vwap_context():
+    src = _src()
+
+    assert 'or "UNKNOWN")' in src
+    assert 'rsi_zone = ((rsi_zone or "").upper().strip() or _zone_from_rsi_value(rsi_value) or "UNKNOWN")' in src
+    assert 'vwap_event = ((vwap_event or "").upper().strip() or "UNKNOWN")' in src
