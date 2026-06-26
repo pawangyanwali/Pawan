@@ -1835,6 +1835,8 @@ def analyse_ticker(
                             rr_quality        = _algo_rr_quality,
                             session           = sess_info.get("session", ""),
                             regime            = regime.regime,
+                            vwap_event        = vwap_sig.get("event", ""),
+                            rsi_zone          = pred.get("rsi_zone", ""),
                             entry_type        = "ALGO",
                             order_flow_score  = _of_score,
                             size_mult         = float(macro_ev.get("size_mult", 1.0) or 1.0),

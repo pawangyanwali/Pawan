@@ -978,7 +978,7 @@ def _technical_entry_gate(
         from agent.config_manager import config as _cfg
         if not bool(_cfg.get("risk.technical_entry_gate_enabled", True)):
             return False, ""
-        missing_blocks = bool(_cfg.get("risk.technical_entry_gate_missing_data_block", False))
+        missing_blocks = bool(_cfg.get("risk.technical_entry_gate_missing_data_block", True))
         require_atr = bool(_cfg.get("risk.technical_entry_gate_require_atr", True))
         require_rsi = bool(_cfg.get("risk.technical_entry_gate_require_rsi", True))
         require_macd = bool(_cfg.get("risk.technical_entry_gate_require_macd", True))
@@ -993,14 +993,12 @@ def _technical_entry_gate(
         except (TypeError, ValueError):
             atr_f = 0.0
         if atr_f <= 0:
-            if missing_blocks:
-                return True, f"{ticker} blocked: ATR unavailable for stop/target validation"
+            return True, f"{ticker} blocked: ATR unavailable for stop/target validation"
 
     if require_rsi:
         zone = (rsi_zone or "").upper().strip() or _zone_from_rsi_value(rsi_value)
         if not zone:
-            if missing_blocks:
-                return True, f"{ticker} blocked: RSI unavailable for direction gate"
+            return True, f"{ticker} blocked: RSI unavailable for direction gate"
         elif direction == "BUY" and zone not in buy_zones:
             return True, f"{ticker} BUY blocked: RSI zone {zone} is not an oversold buy zone"
         elif direction == "SELL" and zone not in sell_zones:
@@ -1010,7 +1008,7 @@ def _technical_entry_gate(
         macd_ok, macd_reason = _macd_confirms_direction(direction, macd_hist, macd_hist_prev)
         if not macd_ok:
             if macd_reason.startswith("missing") and not missing_blocks:
-                return False, ""
+                return True, f"{ticker} blocked: {macd_reason}"
             return True, f"{ticker} blocked: {macd_reason}"
 
     return False, ""
@@ -1419,6 +1417,8 @@ def maybe_open_trade(
         logger.info(f"[PAPER] {ticker} skip: {_tech_reason}")
         _append_status(_out_status, "BLOCKED_TECHNICAL_GATE")
         return None
+    rsi_zone = ((rsi_zone or "").upper().strip() or _zone_from_rsi_value(rsi_value))
+    vwap_event = (vwap_event or "").upper().strip()
 
     # Per-family execution controls — check BEFORE circuit breaker for fast-path rejection.
     if algo_name:

@@ -194,7 +194,7 @@ _DEFAULTS: dict[str, Any] = {
     "risk.pred_immediate_premarket_min_ensemble": lambda: 55,
     "risk.pred_immediate_premarket_min_conf": lambda: 80.0,
     "risk.technical_entry_gate_enabled":     lambda: True,
-    "risk.technical_entry_gate_missing_data_block": lambda: False,
+    "risk.technical_entry_gate_missing_data_block": lambda: True,
     "risk.technical_entry_gate_require_atr": lambda: True,
     "risk.technical_entry_gate_require_rsi": lambda: True,
     "risk.technical_entry_gate_require_macd": lambda: True,
@@ -574,7 +574,7 @@ class ConfigManager:
                 except Exception:
                     return
                 updated_by = str(row["updated_by"] or "")
-                if abs(current_t1 - 1.5) < 1e-9 and updated_by == "seed_defaults":
+                if abs(current_t1 - 1.5) < 1e-9:
                     c.execute(
                         _UPSERT,
                         (
@@ -587,6 +587,29 @@ class ConfigManager:
                     logger.info(
                         "[ConfigManager] Migrated paper.t1_r_multiple from legacy 1.5R to 1.0R"
                     )
+
+                row = c.execute(
+                    "SELECT value FROM config_store WHERE key = ?",
+                    ("risk.technical_entry_gate_missing_data_block",),
+                ).fetchone()
+                if row:
+                    try:
+                        current_missing_block = bool(json.loads(row["value"]))
+                    except Exception:
+                        current_missing_block = False
+                    if not current_missing_block:
+                        c.execute(
+                            _UPSERT,
+                            (
+                                "risk.technical_entry_gate_missing_data_block",
+                                json.dumps(True),
+                                now,
+                                "migration_technical_missing_block",
+                            ),
+                        )
+                        logger.info(
+                            "[ConfigManager] Enabled technical missing-data blocking"
+                        )
         except Exception as exc:
             logger.warning("[ConfigManager] safety migration failed: %s", exc)
 

@@ -9,8 +9,23 @@ from agent.paper_trading import (
 from tests.conftest import make_ohlcv
 
 
+def _open_valid_trade(ticker, direction, price, target, stop, **kwargs):
+    if direction == "SELL":
+        kwargs.setdefault("rsi_zone", "OB")
+        kwargs.setdefault("rsi_value", 72.0)
+        kwargs.setdefault("macd_hist", -0.02)
+        kwargs.setdefault("macd_hist_prev", -0.01)
+    else:
+        kwargs.setdefault("rsi_zone", "OS")
+        kwargs.setdefault("rsi_value", 28.0)
+        kwargs.setdefault("macd_hist", 0.02)
+        kwargs.setdefault("macd_hist_prev", 0.01)
+    kwargs.setdefault("atr", 1.0)
+    return maybe_open_trade(ticker, direction, price, target, stop, **kwargs)
+
+
 def test_open_trade_high_confidence():
-    tid = maybe_open_trade("AAPL", "BUY", 180.0, 185.0, 178.0, confidence=75.0, rr_qualifies=True, session="REGULAR")
+    tid = _open_valid_trade("AAPL", "BUY", 180.0, 185.0, 178.0, confidence=75.0, rr_qualifies=True, session="REGULAR")
     assert tid is not None, "should open trade when confidence >= 65 and rr qualifies"
     open_trades = get_open_trades()
     assert any(t["ticker"] == "AAPL" for t in open_trades)
@@ -23,7 +38,7 @@ def test_low_confidence_trade_blocked():
 def test_rr_not_qualifying_still_opens():
     """rr_qualifies=False does NOT block paper trades — we need every data point.
     Position size is just scaled down (min 20% of normal) but the trade opens."""
-    tid = maybe_open_trade("NVDA", "BUY", 500.0, 510.0, 495.0, confidence=80.0, rr_qualifies=False, session="REGULAR")
+    tid = _open_valid_trade("NVDA", "BUY", 500.0, 510.0, 495.0, confidence=80.0, rr_qualifies=False, session="REGULAR")
     assert tid is not None, "rr_qualifies=False must still open a paper trade (data collection)"
 
 def test_post_fill_rebuilds_target_from_configured_reward():
@@ -35,7 +50,7 @@ def test_post_fill_rebuilds_target_from_configured_reward():
         "paper.t2_r_multiple": 1.5,
     }, updated_by="test")
 
-    tid = maybe_open_trade(
+    tid = _open_valid_trade(
         "CFG_RR",
         "BUY",
         100.0,
@@ -63,7 +78,7 @@ def test_configured_reward_multiple_does_not_gate_primary_or_algo():
     }, updated_by="test")
 
     primary_status = []
-    primary_tid = maybe_open_trade(
+    primary_tid = _open_valid_trade(
         "RRPRIM",
         "BUY",
         100.0,
@@ -82,7 +97,7 @@ def test_configured_reward_multiple_does_not_gate_primary_or_algo():
     assert primary_trade["rr_ratio"] == pytest.approx(2.0)
 
     algo_status = []
-    algo_tid = maybe_open_trade(
+    algo_tid = _open_valid_trade(
         "RRALGO",
         "BUY",
         100.0,
@@ -94,7 +109,6 @@ def test_configured_reward_multiple_does_not_gate_primary_or_algo():
         session="REGULAR",
         entry_type="ALGO",
         algo_name="KC_FADE_BULL",
-        atr=1.0,
         avg_daily_volume=10_000_000,
         _out_status=algo_status,
     )
@@ -114,7 +128,7 @@ def test_family_exec_min_rr_override_takes_precedence():
 
     assert get_execution_min_rr("REGIME_FADE_BULL", "ALGO") == 2.4
     status = []
-    tid = maybe_open_trade(
+    tid = _open_valid_trade(
         "RRREG",
         "BUY",
         100.0,
@@ -144,7 +158,7 @@ def test_premarket_widened_stop_is_rechecked_against_intraday_cap():
     }, updated_by="test")
 
     status = []
-    tid = maybe_open_trade(
+    tid = _open_valid_trade(
         "WIDEPM",
         "SELL",
         100.0,
@@ -156,7 +170,6 @@ def test_premarket_widened_stop_is_rechecked_against_intraday_cap():
         session="PRE_MARKET",
         entry_type="BOUNCE",
         trading_tier="HIGH",
-        atr=1.0,
         avg_daily_volume=10_000_000,
         _out_status=status,
     )
@@ -165,8 +178,8 @@ def test_premarket_widened_stop_is_rechecked_against_intraday_cap():
     assert status == ["BLOCKED_WIDE_GEOMETRY"]
 
 def test_no_duplicate_open_trade():
-    maybe_open_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-    tid2 = maybe_open_trade("TSLA", "SELL", 250.0, 240.0, 255.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    _open_valid_trade("TSLA", "BUY", 250.0, 260.0, 245.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    tid2 = _open_valid_trade("TSLA", "SELL", 250.0, 240.0, 255.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     assert tid2 is None, "second trade on same ticker must be blocked while one is open"
 
 def test_no_trade_neutral_direction():
@@ -181,7 +194,7 @@ def test_trade_closed_on_target():
     }, updated_by="test")
     # exit_signals reads df.iloc[-1]["Close"] — set it above target so TARGET_HIT fires
     df = make_ohlcv(start_price=107.0)  # last Close ~107, target=105
-    maybe_open_trade("HOOD", "BUY", 100.0, 105.0, 98.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    _open_valid_trade("HOOD", "BUY", 100.0, 105.0, 98.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     update_open_trades("HOOD", df, current_price=107.0)
     closed = get_closed_trades()
     assert any(t["ticker"] == "HOOD" for t in closed), "trade should have closed on TARGET_HIT"
@@ -194,7 +207,7 @@ def test_trade_closed_on_stop():
     }, updated_by="test")
     # Set df last Close below stop so STOP_HIT fires
     df = make_ohlcv(start_price=95.0)  # last Close ~95, stop=98
-    maybe_open_trade("COIN", "BUY", 100.0, 108.0, 98.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    _open_valid_trade("COIN", "BUY", 100.0, 108.0, 98.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     update_open_trades("COIN", df, current_price=95.0)
     closed = get_closed_trades()
     assert any(t["ticker"] == "COIN" for t in closed)
@@ -206,7 +219,7 @@ def test_sell_trade_pnl_direction():
         "risk.intraday_max_target_pct": 10.0,
     }, updated_by="test")
     df = make_ohlcv(start_price=200.0)
-    maybe_open_trade("META", "SELL", 200.0, 190.0, 205.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    _open_valid_trade("META", "SELL", 200.0, 190.0, 205.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     # price drops — SELL trade should be profitable
     update_open_trades("META", df, current_price=188.0)
     closed = get_closed_trades()
@@ -215,7 +228,7 @@ def test_sell_trade_pnl_direction():
         assert meta_trade["pnl_pct"] is not None
 
 def test_summary_counts():
-    maybe_open_trade("T1", "BUY", 50.0, 55.0, 49.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
+    _open_valid_trade("T1", "BUY", 50.0, 55.0, 49.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
     s = get_summary()
     assert s["open"] >= 1
     assert "wins" in s and "losses" in s and "win_rate" in s

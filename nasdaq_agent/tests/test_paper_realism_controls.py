@@ -309,6 +309,36 @@ def test_technical_entry_gate_allows_oversold_buy_with_macd_turning_and_atr():
     assert reason == ""
 
 
+def test_technical_entry_gate_required_indicators_block_even_when_legacy_missing_toggle_false():
+    cfg = _Cfg({
+        "risk.technical_entry_gate_enabled": True,
+        "risk.technical_entry_gate_missing_data_block": False,
+        "risk.technical_entry_gate_require_atr": True,
+        "risk.technical_entry_gate_require_rsi": True,
+        "risk.technical_entry_gate_require_macd": True,
+        "risk.technical_entry_gate_buy_rsi_zones": "OS,EXTREME_OS",
+        "risk.technical_entry_gate_sell_rsi_zones": "OB,EXTREME_OB",
+    })
+    with patch("agent.config_manager.config", cfg):
+        blocked, reason = pt._technical_entry_gate(
+            "AAPL", "BUY", "", None, macd_hist=0.02, macd_hist_prev=0.01, atr=1.2
+        )
+        assert blocked is True
+        assert "RSI unavailable" in reason
+
+        blocked, reason = pt._technical_entry_gate(
+            "AAPL", "BUY", "OS", 28.0, macd_hist=None, macd_hist_prev=None, atr=1.2
+        )
+        assert blocked is True
+        assert "missing MACD" in reason
+
+        blocked, reason = pt._technical_entry_gate(
+            "AAPL", "BUY", "OS", 28.0, macd_hist=0.02, macd_hist_prev=0.01, atr=0
+        )
+        assert blocked is True
+        assert "ATR unavailable" in reason
+
+
 def test_technical_entry_gate_blocks_sell_when_rsi_not_overbought():
     cfg = _Cfg({
         "risk.technical_entry_gate_enabled": True,
