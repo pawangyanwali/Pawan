@@ -9,7 +9,11 @@ from .models import QuoteSnapshot, QuoteSource
 def quote_snapshot_from_price_bus(ticker: str) -> QuoteSnapshot:
     from agent.valkey_client import get_price
 
-    quote = get_price(ticker) or {}
+    return quote_snapshot_from_payload(ticker, get_price(ticker) or {})
+
+
+def quote_snapshot_from_payload(ticker: str, quote: dict) -> QuoteSnapshot:
+    """Build a quote contract from an already-batched price-bus payload."""
     try:
         updated_at = float(quote.get("updated_at") or 0.0)
     except (TypeError, ValueError):

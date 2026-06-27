@@ -7,8 +7,8 @@ def _containers(up=True):
         for name in (
             "web-api",
             "market-data",
-            "scanner",
-            "learner",
+            "scalp-engine",
+            "scalp-learner",
             "scheduler",
             "context-intel",
             "watchdog",
@@ -82,9 +82,9 @@ def test_active_session_scan_snapshots_are_critical_even_when_fresh():
     assert any(a["message"] == "No trusted live/fallback prices" for a in sla["alerts"])
 
 
-def test_closed_session_still_requires_learner_and_watchdog():
+def test_closed_session_still_requires_scalp_learner_and_watchdog():
     containers = _containers()
-    containers["learner"] = {"up": False, "detail": "no learner heartbeat"}
+    containers["scalp-learner"] = {"up": False, "detail": "no scalp learner heartbeat"}
     containers["watchdog"] = {"up": False, "detail": "no watchdog heartbeat"}
 
     sla = evaluate_runtime_sla(
@@ -97,4 +97,4 @@ def test_closed_session_still_requires_learner_and_watchdog():
     )
 
     assert sla["status"] == "CRITICAL"
-    assert {a["component"] for a in sla["alerts"]} >= {"learner", "watchdog"}
+    assert {a["component"] for a in sla["alerts"]} >= {"scalp-learner", "watchdog"}

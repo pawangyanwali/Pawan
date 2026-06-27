@@ -82,8 +82,8 @@ def evaluate_runtime_sla(
     required_services = (
         "web-api",
         "market-data",
-        "scanner",
-        "learner",
+        "scalp-engine",
+        "scalp-learner",
         "scheduler",
         "context-intel",
         "watchdog",
@@ -101,12 +101,12 @@ def evaluate_runtime_sla(
             )
 
     # Learning must keep running even outside market hours.
-    learner = (containers or {}).get("learner", {})
+    learner = (containers or {}).get("scalp-learner", {})
     if _is_up(learner) and _num(learner, "last_seen_ago_s", 0.0) > 180:
         _alert(
             alerts,
             WARN,
-            "learner",
+            "scalp-learner",
             "Learner heartbeat slow",
             detail=f"last heartbeat {learner.get('last_seen_ago_s')}s ago",
             action="Inspect learner logs; continuous learning should not pause.",
@@ -172,18 +172,18 @@ def evaluate_runtime_sla(
             _alert(
                 alerts,
                 CRITICAL,
-                "scanner",
-                "Scanner freshness unknown",
-                action="Confirm scanner writes scan:latest and publishes scan results.",
+                "scalp-engine",
+                "Scalp engine freshness unknown",
+                action="Confirm scalp-engine writes canonical scan:latest snapshots.",
             )
         elif scan_age > 180:
             _alert(
                 alerts,
                 CRITICAL,
-                "scanner",
-                "Scanner stale during active session",
+                "scalp-engine",
+                "Scalp engine stale during active session",
                 detail=f"last scan {scan_age:.1f}s ago",
-                action="Inspect slow tickers, worker saturation, and market-data dependencies.",
+                action="Inspect scalp-engine workers and market-data dependencies.",
             )
     else:
         if total_prices <= 0:
@@ -199,8 +199,8 @@ def evaluate_runtime_sla(
             _alert(
                 alerts,
                 WARN,
-                "scanner",
-                "Scanner snapshot old",
+                "scalp-engine",
+                "Scalp snapshot old",
                 detail=f"last scan {scan_age:.1f}s ago",
                 action="Closed-session scanning can be slower, but stale snapshots should recover before pre-market.",
             )

@@ -140,6 +140,35 @@ def get_context_snapshot(ticker: str) -> dict:
     return default
 
 
+def get_context_snapshots(tickers: list[str]) -> dict[str, dict]:
+    """Read many hot snapshots in one Valkey pipeline without PG fan-out."""
+    symbols = [str(ticker).upper() for ticker in tickers]
+    now = time.time()
+    result: dict[str, dict] = {}
+    c = _client()
+    payloads = []
+    if c is not None:
+        try:
+            pipe = c.pipeline(transaction=False)
+            for ticker in symbols:
+                pipe.get(f"{_KEY_PREFIX}{ticker}")
+            payloads = pipe.execute()
+        except Exception as exc:
+            logger.debug("[context_snapshot] batched Valkey read error: %s", exc)
+    for index, ticker in enumerate(symbols):
+        raw = payloads[index] if index < len(payloads) else None
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            payload = json.loads(raw) if raw else dict(_EMPTY_PAYLOAD)
+        except Exception:
+            payload = dict(_EMPTY_PAYLOAD)
+        payload = {**_EMPTY_PAYLOAD, **payload, "ticker": ticker}
+        payload["stale_age_s"] = round(now - float(payload.get("asof_ts") or 0.0), 1)
+        result[ticker] = payload
+    return result
+
+
 def _read_valkey(ticker: str) -> Optional[dict]:
     c = _client()
     if c is None:

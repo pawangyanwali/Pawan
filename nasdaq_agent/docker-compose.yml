@@ -11,15 +11,15 @@
 # needed for them.  Never add postgres/redis/valkey services here.
 #
 # EBS bind-mounts (created by deploy/setup-host.sh before first compose up):
-#   /opt/nasdaq-agent/models   — XGBoost + BiLSTM weights (scanner reads, learner writes)
+#   /opt/nasdaq-agent/models   — advisory scalp ML artifacts
 #   /opt/nasdaq-agent/tokens   — Schwab OAuth tokens      (market-data + web-api)
-#   /opt/nasdaq-agent/cache    — OHLCV bar cache          (scanner + context-intel)
+#   /opt/nasdaq-agent/cache    — OHLCV bar cache          (context-intel)
 #   /opt/nasdaq-agent/logs     — rotating log files       (all containers)
 #
 # Usage
 # ─────
 #   docker compose up -d               # start all containers
-#   docker compose logs -f scanner     # tail one service
+#   docker compose logs -f scalp-engine # tail one service
 #   docker compose restart market-data # restart without touching others
 #   docker compose pull && docker compose up -d --remove-orphans
 #
@@ -76,7 +76,7 @@ services:
   # ── web-api ─────────────────────────────────────────────────────────────────
   # FastAPI + Gunicorn (1 UvicornWorker).  Serves REST API and WebSocket.
   # All four service-mode flags are OFF — this container only serves HTTP.
-  # It reads signals from Valkey/PG; the scanner publishes them.
+  # It reads signal plans from Valkey/PG; scalp-engine publishes them.
   # Subscribes to scan:notify pub/sub → pushes to WebSocket clients.
   web-api:
     <<: *common
@@ -119,41 +119,37 @@ services:
       start_period: 60s
       retries: 3
 
-  # ── scanner ──────────────────────────────────────────────────────────────────
-  # ML inference engine.  8 parallel workers score every ticker each cycle.
-  # Reads live prices from ElastiCache md:prices (published by market-data).
+  # ── scalp-engine ─────────────────────────────────────────────────────────────
+  # Sole canonical plan and paper-entry owner for every configured ticker.
+  # Reads quotes and closed 1m bars from Valkey in batched pipelines.
   # Publishes completed scan results to ElastiCache scan:notify → web-api WebSocket.
-  # Writes signal history, paper trades, and live backtest records to RDS.
+  # Publishes SCALP_PLAN_V1 snapshots and writes canonical outcomes to RDS.
   # NASDAQ_MARKET_DATA_ENABLED=0 — market-data is its own container.
-  scanner:
+  scalp-engine:
     <<: *common
-    container_name: nasdaq-scanner
-    command: ["python", "-m", "services.scanner_service"]
+    container_name: nasdaq-scalp-engine
+    command: ["python", "-m", "services.scalp_engine_service"]
     volumes:
-      - models:/app/data/models   # XGBoost + BiLSTM model weights (read)
-      - cache:/app/data/cache     # OHLCV bar cache
+      - models:/app/data/models   # promoted scalp ML artifact (read)
       - logs:/app/logs
     environment:
       <<: [*db-env, *valkey-env, *log-env]
-      # Market data runs in its own container; scanner reads prices from Valkey.
+      # Market data runs in its own container; scalp-engine reads Valkey only.
       NASDAQ_MARKET_DATA_ENABLED: "0"
-      PIPELINE_WORKERS: ${PIPELINE_WORKERS:-8}
-      FINNHUB_API_KEY:  ${FINNHUB_API_KEY:-}
     deploy:
       resources:
         limits:
-          # Scanner is the dominant CPU workload during market hours.
-          # 8 ML workers burst to ~2 CPUs during inference; idle between cycles.
-          cpus: "2.5"
-          memory: 3G
+          # Deterministic workers burst during the full-universe plan cycle.
+          cpus: "1.5"
+          memory: 2G
         reservations:
           memory: 1G
     healthcheck:
-      test: ["CMD", "python", "-m", "services.scanner_healthcheck"]
+      test: ["CMD", "python", "-m", "services.scalp_engine_healthcheck"]
       interval: 30s
       timeout: 15s
-      # First scan cycle can take up to 90s (DB init + first price fetch).
-      start_period: 120s
+      # First cycle initializes schema and reads every ticker in one pipeline.
+      start_period: 60s
       retries: 3
 
   # ── token-service ────────────────────────────────────────────────────────────
@@ -193,7 +189,7 @@ services:
   # Schwab WebSocket streamer + REST MD poller.
   # Publishes every price tick to ElastiCache md:prices (<100ms latency).
   # Publishes 1-min candles to ElastiCache md:1m:{ticker}.
-  # Isolated so a Schwab disconnect / token refresh does NOT restart the scanner.
+  # Isolated so a Schwab disconnect / token refresh does not restart scalp-engine.
   # Hot-reload: subscribes to schwab:tokens_refreshed pub/sub — reconnects
   # automatically when web-api completes a new OAuth flow.
   market-data:
@@ -221,45 +217,37 @@ services:
       start_period: 90s
       retries: 3
 
-  # ── learner ──────────────────────────────────────────────────────────────────
-  # Adaptive filter calibration + algo parameter tuning (continuous).
-  # BiLSTM deep retraining (off-hours only — gated by market hours check).
-  # Reads trade outcomes from RDS; writes updated model weights to EBS models/.
-  # Publishes learner:status to ElastiCache (TTL 300s) so web-api can serve
-  # /api/learning-status without a local learner process.
-  learner:
+  # ── scalp-learner ────────────────────────────────────────────────────────────
+  # Canonical scalp outcome observer and economically gated advisory trainer.
+  # Immediate context learning happens synchronously when a canonical trade closes.
+  scalp-learner:
     <<: *common
-    container_name: nasdaq-learner
-    command: ["python", "-m", "services.learner_service"]
+    container_name: nasdaq-scalp-learner
+    command: ["python", "-m", "services.scalp_learner_service"]
     volumes:
-      - models:/app/data/models   # BiLSTM weights (read + write)
-      - cache:/app/data/cache
+      - models:/app/data/models   # versioned scalp ML artifacts (read + write)
       - logs:/app/logs
     environment:
       <<: [*db-env, *valkey-env, *log-env]
-      # 5-minute startup delay so scanner settles before first deep cycle.
-      # Runtime knobs (deep_enabled, interval, ticker_limit) live in PG config_store.
-      LEARNER_DEEP_STARTUP_DELAY_S: ${LEARNER_DEEP_STARTUP_DELAY_S:-300}
     deploy:
       resources:
         limits:
-          # BiLSTM training runs off-hours; limit prevents starving scanner
-          # during rare cases where market hours check is delayed at startup.
-          cpus: "1.5"
-          memory: 3500M
+          # Training remains isolated from the live plan engine.
+          cpus: "1.0"
+          memory: 2G
         reservations:
           memory: 512M
     healthcheck:
-      test: ["CMD", "python", "-m", "services.learner_healthcheck"]
-      interval: 60s
+      test: ["CMD", "python", "-m", "services.scalp_learner_healthcheck"]
+      interval: 30s
       timeout: 15s
-      start_period: 120s
+      start_period: 60s
       retries: 3
 
   # ── scheduler ────────────────────────────────────────────────────────────────
   # Time-driven tasks: EOD position close at 3:45 PM ET on weekdays.
   # Publishes scheduler:heartbeat to PG + Valkey every 30s.
-  # Completely independent — no Schwab, no scanner coupling.
+  # Completely independent — no Schwab or signal-engine coupling.
   scheduler:
     <<: *common
     container_name: nasdaq-scheduler
@@ -338,7 +326,7 @@ services:
       WATCHDOG_UNHEALTHY_STRIKES: ${WATCHDOG_UNHEALTHY_STRIKES:-2}
       WATCHDOG_RESTART_TIMEOUT_S: ${WATCHDOG_RESTART_TIMEOUT_S:-10}
       # Comma-separated compose service names to watch.
-      WATCHDOG_SERVICES: "web-api,token-service,scanner,market-data,learner,scheduler,context-intel"
+      WATCHDOG_SERVICES: "web-api,token-service,scalp-engine,market-data,scalp-learner,scheduler,context-intel"
     deploy:
       resources:
         limits:
@@ -359,8 +347,8 @@ services:
 # See deploy/setup-host.sh.
 #
 # models/ and tokens/ are shared across multiple containers — Docker handles
-# concurrent reads safely; write coordination is by design (learner writes
-# models, market-data writes tokens).
+# concurrent reads safely; write coordination is by design (scalp-learner
+# writes models, token-service writes tokens).
 
 volumes:
   models:

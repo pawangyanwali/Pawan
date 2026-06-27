@@ -5,7 +5,9 @@
 set -euo pipefail
 
 APP_DIR="/opt/nasdaq-agent"
-DATA_DIR="$APP_DIR/nasdaq_agent/data"
+COMPOSE_FILE="$APP_DIR/nasdaq_agent/docker-compose.yml"
+MODEL_DIR="$APP_DIR/models"
+CACHE_DIR="$APP_DIR/cache"
 BRANCH="claude/nasdaq-stock-prediction-agent-kDe60"
 
 echo "[1/6] Pulling latest code from $BRANCH ..."
@@ -13,11 +15,11 @@ git -C "$APP_DIR" fetch origin
 git -C "$APP_DIR" reset --hard "origin/$BRANCH"
 
 echo "[2/6] Ensuring host bind-mount directories exist ..."
-mkdir -p "$DATA_DIR/models"
-mkdir -p "$DATA_DIR/cache"
+mkdir -p "$MODEL_DIR"
+mkdir -p "$CACHE_DIR"
 mkdir -p "$APP_DIR/tokens"
 mkdir -p "$APP_DIR/logs"
-chown -R 1000:1000 "$DATA_DIR" 2>/dev/null || true
+chown -R 1000:1000 "$MODEL_DIR" "$CACHE_DIR" 2>/dev/null || true
 chown -R 1000:1000 "$APP_DIR/tokens" 2>/dev/null || true
 chmod 700 "$APP_DIR/tokens" 2>/dev/null || true
 find "$APP_DIR/tokens" -maxdepth 1 -type f -name 'schwab*_tokens.json' \
@@ -28,8 +30,8 @@ echo "[3/6] Migrating any legacy Docker named volumes to host bind-mount paths .
 # copy their contents to the host bind-mount path before recreating containers.
 # This runs safely on every update — cp -u skips files already present on host.
 declare -A _VOL_MAP=(
-    ["nasdaq-agent_models"]="$DATA_DIR/models"
-    ["nasdaq-agent_cache"]="$DATA_DIR/cache"
+    ["nasdaq-agent_models"]="$MODEL_DIR"
+    ["nasdaq-agent_cache"]="$CACHE_DIR"
 )
 _MIGRATED=0
 for _VOL in "${!_VOL_MAP[@]}"; do
@@ -50,11 +52,14 @@ if [[ $_MIGRATED -eq 0 ]]; then
 fi
 
 echo "[4/6] Building image ..."
-docker compose -f "$APP_DIR/docker-compose.yml" build
+docker build -t "nasdaq-agent:${IMAGE_TAG:-latest}" "$APP_DIR/nasdaq_agent"
 
 echo "[5/6] Recreating containers (down → up ensures bind-mount config applies) ..."
-docker compose -f "$APP_DIR/docker-compose.yml" down
-docker compose -f "$APP_DIR/docker-compose.yml" up -d
+docker compose -f "$COMPOSE_FILE" --project-directory "$APP_DIR" up -d --remove-orphans
+if docker ps -a --format '{{.Names}}' | grep -Eq '^nasdaq-(scanner|learner)$'; then
+    echo "ERROR: orphaned legacy scanner/learner container remains"
+    exit 1
+fi
 
 # Remove old named volumes now that containers are running with bind mounts.
 # Safe to ignore errors if volumes are in use or don't exist.
@@ -66,11 +71,11 @@ done
 
 echo "[6/6] Checking container health ..."
 sleep 6
-docker compose -f "$APP_DIR/docker-compose.yml" ps --format "table {{.Name}}\t{{.Status}}"
+docker compose -f "$COMPOSE_FILE" --project-directory "$APP_DIR" ps --format "table {{.Name}}\t{{.Status}}"
 
 echo ""
-echo "Model files: $DATA_DIR/models/"
-echo "  $(ls "$DATA_DIR/models" 2>/dev/null | wc -l) .joblib files on host"
+echo "Model files: $MODEL_DIR/"
+echo "  $(ls "$MODEL_DIR" 2>/dev/null | wc -l) files on host"
 echo ""
 echo "Token files expected at: $APP_DIR/tokens/schwab_tokens.json"
 echo "                         $APP_DIR/tokens/schwab_md_tokens.json"

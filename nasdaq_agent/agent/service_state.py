@@ -5,10 +5,10 @@ Replaces last-known-state Valkey keys with PostgreSQL UPSERT so that
 service snapshots survive Valkey restarts and are visible to any DB client.
 
 Keys migrated (Valkey is still the live-bus; PostgreSQL is the source of truth):
-  scan:latest          → no expiry   (scanner writes after every cycle)
-  learner:status       → expires 300s
+  scan:latest          → no expiry   (scalp-engine writes every cycle)
+  scalp-learner:status → expires 180s
   scheduler:heartbeat  → expires 90s
-  scanner:streamer     → expires 60s
+  market-data:status   → expires 60s
 
 Keys that stay Valkey-only (high-frequency streaming / pub-sub only):
   md:prices            — 3.3 Hz HASH + pub/sub fan-out

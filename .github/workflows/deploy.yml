@@ -141,6 +141,12 @@ jobs:
               # Rolling update: bring up new containers; remove old ones when healthy
               _dc up -d --remove-orphans
 
+              if sudo docker ps -a --format '{{.Names}}' | grep -Eq '^nasdaq-(scanner|learner)$'; then
+                echo "ERROR: orphaned legacy runtime container still exists"
+                sudo docker ps -a --filter name=nasdaq-scanner --filter name=nasdaq-learner
+                exit 1
+              fi
+
               # ── Wait for token-service (fatal; owns all refresh timers) ──────────
               echo "=== Waiting for token-service to become healthy (max 1 min) ==="
               TOKEN_SVC_HEALTHY=0
@@ -204,22 +210,22 @@ jobs:
               fi
 
               # ── Wait for scanner (fatal; first scan cycle can take 90s) ────────
-              echo "=== Waiting for scanner to become healthy (max 3 min) ==="
-              SCANNER_HEALTHY=0
-              for i in $(seq 1 18); do
+              echo "=== Waiting for scalp-engine to become healthy (max 2 min) ==="
+              SCALP_ENGINE_HEALTHY=0
+              for i in $(seq 1 12); do
                 sleep 10
-                status=$(_svc_health scanner)
+                status=$(_svc_health scalp-engine)
                 if [ "$status" = "healthy" ]; then
-                  echo "  scanner healthy after $((i*10))s"
-                  SCANNER_HEALTHY=1
+                  echo "  scalp-engine healthy after $((i*10))s"
+                  SCALP_ENGINE_HEALTHY=1
                   break
                 fi
-                echo "  Attempt $i/18: health=$status"
+                echo "  Attempt $i/12: health=$status"
               done
 
-              if [ "$SCANNER_HEALTHY" = "0" ]; then
-                echo "ERROR: scanner did not become healthy within 3 min — printing logs"
-                _dc logs --tail 60 scanner 2>/dev/null || true
+              if [ "$SCALP_ENGINE_HEALTHY" = "0" ]; then
+                echo "ERROR: scalp-engine did not become healthy within 2 min"
+                _dc logs --tail 60 scalp-engine 2>/dev/null || true
                 exit 1
               fi
 
@@ -240,28 +246,35 @@ jobs:
               done
 
               # ── Wait for learner (non-fatal; 5 min startup delay by design) ───
-              echo "=== Waiting for learner to become healthy (max 5 min) ==="
-              for i in $(seq 1 30); do
+              echo "=== Waiting for scalp-learner to become healthy (max 2 min) ==="
+              SCALP_LEARNER_HEALTHY=0
+              for i in $(seq 1 12); do
                 sleep 10
-                status=$(_svc_health learner)
+                status=$(_svc_health scalp-learner)
                 if [ "$status" = "healthy" ]; then
-                  echo "  learner healthy after $((i*10))s"
+                  echo "  scalp-learner healthy after $((i*10))s"
+                  SCALP_LEARNER_HEALTHY=1
                   break
                 fi
-                echo "  Attempt $i/30: health=$status"
-                if [ $i -eq 30 ]; then
-                  echo "WARNING: learner not yet healthy after 5 min — check logs"
-                  _dc logs --tail 30 learner 2>/dev/null || true
+                echo "  Attempt $i/12: health=$status"
+                if [ $i -eq 12 ]; then
+                  echo "ERROR: scalp-learner not healthy after 2 min"
+                  _dc logs --tail 30 scalp-learner 2>/dev/null || true
                 fi
               done
+              if [ "$SCALP_LEARNER_HEALTHY" = "0" ]; then
+                exit 1
+              fi
 
               # ── Wait for context-intel (non-fatal; 120s start_period) ─────────
               echo "=== Waiting for context-intel to become healthy (max 3 min) ==="
+              CONTEXT_HEALTHY=0
               for i in $(seq 1 18); do
                 sleep 10
                 status=$(_svc_health context-intel)
                 if [ "$status" = "healthy" ]; then
                   echo "  context-intel healthy after $((i*10))s"
+                  CONTEXT_HEALTHY=1
                   break
                 fi
                 echo "  Attempt $i/18: health=$status"
@@ -270,6 +283,12 @@ jobs:
                   _dc logs --tail 30 context-intel 2>/dev/null || true
                 fi
               done
+              if [ "$CONTEXT_HEALTHY" = "0" ]; then
+                exit 1
+              fi
+
+              echo "=== Activating health-gated scalp-only paper runtime ==="
+              _dc exec -T scalp-engine python /app/scripts/activate_scalp_only.py
 
               # ── Wait for watchdog (non-fatal; quick 15s start_period) ─────────
               echo "=== Waiting for watchdog to become healthy (max 1 min) ==="
@@ -312,7 +331,7 @@ jobs:
               # Dumps last 60 log lines per unhealthy service so failures are fully
               # visible in the Actions log without needing to SSH in.
               UNHEALTHY=0
-              for svc in web-api scanner market-data learner scheduler context-intel watchdog; do
+              for svc in web-api token-service scalp-engine market-data scalp-learner scheduler context-intel watchdog; do
                 status=$(_svc_health "$svc")
                 if [ "$status" != "healthy" ]; then
                   UNHEALTHY=1
@@ -331,68 +350,8 @@ jobs:
               echo "=== Deployed via Docker Compose successfully ==="
 
             else
-              # ── Systemd fallback ─────────────────────────────────────────────
-              # Used when Docker is not yet installed on the EC2 instance.
-              echo "=== Docker not available — falling back to systemd deploy ==="
-              VENV="$APP_DIR/venv"
-              SERVICE="nasdaq-agent"
-
-              echo "=== Installing any new dependencies ==="
-              sudo -u "$APP_USER" "$VENV/bin/pip" install -q -r "$APP_DIR/nasdaq_agent/requirements.txt"
-
-              echo "=== Ensure service file has required directives ==="
-              SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
-              PATCHED=0
-              if ! grep -q "ExecStartPre" "$SERVICE_FILE"; then
-                sudo sed -i '/^ExecStart=/i ExecStartPre=/bin/truncate -s 0 /opt/nasdaq-agent/logs/agent.err' "$SERVICE_FILE"
-                echo "Patched service file with ExecStartPre"
-                PATCHED=1
-              fi
-              if ! grep -q "ExecReload" "$SERVICE_FILE"; then
-                sudo sed -i '/^ExecReload=/d; /^ExecStart=/a ExecReload=/bin/kill -s HUP $MAINPID' "$SERVICE_FILE"
-                echo "Patched service file with ExecReload"
-                PATCHED=1
-              fi
-              if [ "$PATCHED" = "1" ]; then
-                sudo systemctl daemon-reload
-              fi
-
-              echo "=== Reloading service (zero-downtime) ==="
-              if sudo systemctl reload "$SERVICE" 2>/dev/null; then
-                echo "Graceful reload sent"
-              else
-                echo "Reload not supported, falling back to restart"
-                sudo systemctl restart "$SERVICE"
-              fi
-
-              echo "=== Waiting for service to come up ==="
-              for i in $(seq 1 12); do
-                sleep 5
-                status=$(systemctl is-active "$SERVICE" 2>/dev/null || echo "unknown")
-                if [ "$status" = "active" ]; then
-                  echo "Service is active after $((i*5))s"
-                  break
-                fi
-                echo "  Attempt $i/12: status=$status"
-                if [ $i -eq 12 ]; then
-                  echo "ERROR: Service failed to start within 60s"
-                  sudo journalctl -u "$SERVICE" --no-pager -n 50
-                  exit 1
-                fi
-              done
-
-              echo "=== Health check (internal) ==="
-              for i in 1 2 3; do
-                if curl -sf --max-time 10 http://localhost:8000/api/health \
-                     | python3 -c "import sys,json; d=json.load(sys.stdin); \
-                       print('Health:', d.get('status','?'), '| Tickers:', d.get('tickers','?'))"; then
-                  break
-                fi
-                echo "Health check attempt $i failed, retrying..."
-                sleep 5
-              done
-
-              echo "=== Deployed via systemd successfully ==="
+              echo "ERROR: Docker Compose is required for the scalp-only runtime"
+              exit 1
             fi
 
       - name: Notify on failure

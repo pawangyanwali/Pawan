@@ -240,6 +240,15 @@ class ScalpSignalPlan:
     learning_size_mult: float = 1.0
     learning_confidence_floor: float = 0.0
     learning_action_expires_at: str = ""
+    context_fresh: bool = False
+    sentiment_30m: float = 0.0
+    sentiment_velocity: float = 0.0
+    news_shock: bool = False
+    context_risk_score: float = 0.0
+    earnings_phase: str = ""
+    earnings_next_date: str = ""
+    earnings_days_away: int = 999
+    recent_headlines: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
 

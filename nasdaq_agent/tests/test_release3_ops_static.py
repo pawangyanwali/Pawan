@@ -10,7 +10,7 @@ def _src(path: str) -> str:
 
 
 def _repo(path: str) -> str:
-    return (REPO / path).read_text(encoding="utf-8")
+    return (ROOT / path).read_text(encoding="utf-8")
 
 
 def test_service_heartbeat_publishes_to_postgres_and_valkey():
@@ -25,8 +25,8 @@ def test_service_heartbeat_publishes_to_postgres_and_valkey():
 def test_all_standalone_services_publish_uniform_heartbeats():
     service_files = {
         "market-data": "services/market_data_service.py",
-        "scanner": "services/scanner_service.py",
-        "learner": "services/learner_service.py",
+        "scalp-engine": "services/scalp_engine_service.py",
+        "scalp-learner": "services/scalp_learner_service.py",
         "scheduler": "services/scheduler_service.py",
         "context-intel": "services/context_intel_service.py",
         "watchdog": "services/watchdog_service.py",
@@ -35,7 +35,7 @@ def test_all_standalone_services_publish_uniform_heartbeats():
     for service_name, path in service_files.items():
         src = _src(path)
         assert "start_service_heartbeat" in src
-        assert f'start_service_heartbeat("{service_name}", _runner)' in src
+        assert f'"{service_name}",' in src
 
 
 def test_api_services_reports_full_release3_container_health():
@@ -45,8 +45,8 @@ def test_api_services_reports_full_release3_container_health():
     assert "def _container_health(valkey_connected: bool)" in src
     for service_name in (
         "market-data",
-        "scanner",
-        "learner",
+        "scalp-engine",
+        "scalp-learner",
         "scheduler",
         "context-intel",
         "watchdog",
@@ -54,41 +54,24 @@ def test_api_services_reports_full_release3_container_health():
         assert f'service:{{service_name}}:heartbeat' in _src("agent/service_heartbeat.py")
         assert f'"{service_name}"' in src
 
-    assert '"scanner:streamer"' in src
+    assert '"market-data:status"' in src
     assert '"ctx:intel:heartbeat"' in src
     # fresh_coverage_pct is published by the streamer into service state
     assert "fresh_coverage_pct" in _src("agent/broker/schwab_streamer.py")
 
 
-def test_dashboard_container_health_includes_all_release3_services():
-    src = _src("web/static/index.html")
-
-    for dom_id in (
-        "ct-webapi",
-        "ct-marketdata",
-        "ct-scanner",
-        "ct-learner",
-        "ct-scheduler",
-        "ct-context",
-        "ct-watchdog",
-    ):
-        assert f'id="{dom_id}-badge"' in src
-        assert f"id+'-badge'" in src or f"{dom_id}','" in src
-
-    assert "repeat(auto-fit,minmax(72px,1fr))" in src
-    assert "['ct-marketdata','market-data']" in src
-    assert "['ct-context','context-intel']" in src
-    assert "['ct-watchdog','watchdog']" in src
+def test_command_center_exposes_runtime_health_and_one_second_refresh():
+    src = _src("web/static/scalp.html")
+    assert 'id="md-chip"' in src
+    assert 'id="scan-chip"' in src
+    assert 'id="execution-chip"' in src
+    assert "state.timer=setTimeout(load,1000)" in src
 
 
-def test_compose_resource_budget_matches_t3a_xlarge_release3():
+def test_compose_resource_budget_matches_scalp_only_runtime():
     src = _repo("docker-compose.yml")
-
-    assert "t3a.xlarge resource budget: 4 vCPU / 16 GB RAM" in src
-    assert "mem_limit: 1500m" in src
-    assert 'cpus: "0.75"' in src
-    assert "mem_limit: 5000m" in src
-    assert 'cpus: "1.75"' in src
-    assert "mem_limit: 4000m" in src
-    assert 'cpus: "1.25"' in src
-    assert "mem_limit: 768m" in src
+    assert "scalp-engine:" in src
+    assert "scalp-learner:" in src
+    assert 'cpus: "1.5"' in src
+    assert 'cpus: "1.0"' in src
+    assert "memory: 2G" in src

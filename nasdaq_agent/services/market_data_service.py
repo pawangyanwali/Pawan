@@ -8,13 +8,13 @@ Responsibilities:
   3. Publish every price update to Valkey (md:prices hash + pub/sub).
   4. Publish 1-min candles to Valkey (md:1m:{ticker} lists) on each bar close
      so the scanner container can read them via data_fetcher Tier A½.
-  5. Publish streamer/poller status to Valkey (scanner:streamer, 15s cadence)
+  5. Publish streamer/poller status to Valkey (market-data:status, 15s cadence)
      so the web-api Infrastructure panel shows accurate state.
 
 Interface contract:
   WRITES  Valkey md:prices          — spot quotes hash + pub/sub (~300 ms)
   WRITES  Valkey md:1m:{ticker}     — Redis LIST of last 200 1-min candles
-  WRITES  Valkey scanner:streamer   — JSON status blob (TTL 60s, every 15s)
+  WRITES  Valkey market-data:status — JSON status blob (TTL 60s, every 15s)
 
 Environment variables:
   NASDAQ_MD_STARTUP_DELAY_S   float  poller warm-up delay in seconds (default 10)
@@ -104,21 +104,21 @@ def _publish_streamer_status_loop() -> None:
             # ── 1. PostgreSQL (source of truth) ───────────────────────────────
             try:
                 from agent.service_state import set_state
-                set_state("scanner:streamer", payload, ttl_s=_TTL)
+                set_state("market-data:status", payload, ttl_s=_TTL)
             except Exception as exc:
-                _log.debug("scanner:streamer PG write failed: %s", exc)
+                _log.debug("market-data:status PG write failed: %s", exc)
 
             # ── 2. Valkey (fast-path cache) ───────────────────────────────────
             try:
                 from agent.valkey_client import _get_client
                 client = _get_client()
                 if client:
-                    client.setex("scanner:streamer", _TTL, _json.dumps(payload))
+                    client.setex("market-data:status", _TTL, _json.dumps(payload))
             except Exception as exc:
-                _log.debug("scanner:streamer Valkey write failed: %s", exc)
+                _log.debug("market-data:status Valkey write failed: %s", exc)
 
         except Exception as exc:
-            _log.debug("scanner:streamer status collection failed: %s", exc)
+            _log.debug("market-data:status collection failed: %s", exc)
         time.sleep(15)
 
 

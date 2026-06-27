@@ -84,6 +84,16 @@ _DEFAULTS: dict[str, Any] = {
     "scalp.allow_rest_fallback_trading":   lambda: False,
     "scalp.block_when_path_obstructed":    lambda: True,
     "scalp.block_when_risk_capped":        lambda: True,
+    "scalp_runtime.cycle_interval_s":       lambda: 5.0,
+    "scalp_runtime.workers":                lambda: 8,
+    "scalp_runtime.bar_lookback":           lambda: 120,
+    "scalp_runtime.blocked_sessions":       lambda: [
+        "CLOSED", "RESTRICTED", "CLOSING_CAUTION", "HARD_CLOSE"
+    ],
+    "scalp_runtime.require_context_data":   lambda: True,
+    "scalp_runtime.max_context_age_s":      lambda: 180.0,
+    "scalp_runtime.max_context_risk_score": lambda: 0.8,
+    "scalp_runtime.adverse_news_sentiment": lambda: 0.25,
     # Bounded scalp outcome learning. Actions only tighten execution and expire.
     "scalp_learn.enabled":                  lambda: True,
     "scalp_learn.rolling_window_min":       lambda: 120,
@@ -538,7 +548,7 @@ class ConfigManager:
         Python default.  Also migrates legacy account_config values for the four
         paper.* keys that were previously stored there.
 
-        Called at startup (main.py, scanner_service.py, learner_service.py) after
+        Called at startup by web-api, scalp-engine, and scalp-learner after
         load() so that every config key appears in the DB and the Settings UI.
         """
         self._ensure_table()

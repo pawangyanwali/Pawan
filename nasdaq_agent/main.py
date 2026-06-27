@@ -21,10 +21,11 @@ from fastapi.staticfiles import StaticFiles
 
 # ── Service mode flags ────────────────────────────────────────────────────────
 # Defined before agent imports so heavy subsystems are never loaded in containers
-# that don't run them.  All default to enabled — preserves single-process behaviour.
-_SCANNER_ENABLED     = os.getenv("NASDAQ_SCANNER_ENABLED",     "1") != "0"
+# that do not run them. Legacy scanner and learner default off; Release 5 owns
+# those responsibilities in dedicated scalp-engine and scalp-learner services.
+_SCANNER_ENABLED     = os.getenv("NASDAQ_SCANNER_ENABLED",     "0") != "0"
 _MARKET_DATA_ENABLED = os.getenv("NASDAQ_MARKET_DATA_ENABLED", "1") != "0"
-_LEARNER_ENABLED     = os.getenv("NASDAQ_LEARNER_ENABLED",     "1") != "0"
+_LEARNER_ENABLED     = os.getenv("NASDAQ_LEARNER_ENABLED",     "0") != "0"
 _SCHEDULER_ENABLED   = os.getenv("NASDAQ_SCHEDULER_ENABLED",   "1") != "0"
 
 if _SCANNER_ENABLED:

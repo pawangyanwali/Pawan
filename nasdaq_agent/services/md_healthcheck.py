@@ -6,7 +6,7 @@ Exit 0 healthy, exit 1 unhealthy.
 
 Checks:
   1. Valkey ping.
-  2. scanner:streamer status publisher freshness.
+  2. market-data:status publisher freshness.
   3. md:prices trusted freshness across the whole universe during active sessions.
 
 During CLOSED sessions the quote freshness check is skipped because live quotes
@@ -70,16 +70,16 @@ def main() -> int:
         schwab_tokens_present = pathlib.Path("/app/data/tokens/schwab_tokens.json").exists()
 
     try:
-        raw = client.get("scanner:streamer")
+        raw = client.get("market-data:status")
         if raw:
             age = time.time() - json.loads(raw).get("ts", 0)
             if age > 90:
                 if schwab_tokens_present:
-                    print(f"FAIL: scanner:streamer stale ({age:.0f}s)")
+                    print(f"FAIL: market-data:status stale ({age:.0f}s)")
                     return 1
-                print(f"WARN: scanner:streamer stale ({age:.0f}s) — skipping (no Schwab tokens)")
+                print(f"WARN: market-data:status stale ({age:.0f}s) — skipping (no Schwab tokens)")
     except Exception as exc:
-        print(f"WARN: scanner:streamer check error: {exc}")
+        print(f"WARN: market-data:status check error: {exc}")
 
     try:
         from agent.market_hours import get_market_session

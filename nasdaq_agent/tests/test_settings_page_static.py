@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INDEX = ROOT / "web" / "static" / "index.html"
+INDEX = ROOT / "web" / "static" / "scalp.html"
 SETTINGS = ROOT / "web" / "static" / "settings.html"
 SYSTEM_ROUTER = ROOT / "routers" / "system.py"
 
@@ -18,7 +18,7 @@ def test_settings_is_a_dedicated_page() -> None:
 
     assert 'id="settings-modal"' not in dashboard
     assert "document.getElementById('settings-modal')" not in dashboard
-    assert dashboard.count("window.location.href='/settings'") == 3
+    assert 'href="/settings"' in dashboard
     assert '@router.get("/settings"' in routes
     assert 'FileResponse(os.path.join(STATIC_DIR, "settings.html"))' in routes
     assert "Runtime Settings" in settings

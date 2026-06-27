@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import json
+import sys
+from types import SimpleNamespace
+from pathlib import Path
+
+import pandas as pd
+
+from agent.scalp.bar_feed import _frame_from_payload
+from agent.scalp.indicators import (
+    calculate_one_minute_indicators,
+    indicator_snapshot_from_frame,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+APP = ROOT / "nasdaq_agent"
+
+
+def _bars(count: int = 80) -> list[bytes]:
+    start = pd.Timestamp("2026-06-25T13:30:00Z")
+    payload = []
+    for index in range(count):
+        price = 100.0 + index * 0.05
+        payload.append(
+            json.dumps(
+                {
+                    "time_ms": int((start + pd.Timedelta(minutes=index)).timestamp() * 1000),
+                    "open": price - 0.02,
+                    "high": price + 0.08,
+                    "low": price - 0.08,
+                    "close": price,
+                    "volume": 1000 + index * 5,
+                }
+            ).encode()
+        )
+    return payload
+
+
+def test_batched_bar_payload_becomes_ordered_utc_frame():
+    frame = _frame_from_payload(list(reversed(_bars(50))))
+    assert len(frame) == 50
+    assert str(frame.index.tz) == "UTC"
+    assert frame.index.is_monotonic_increasing
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+
+
+def test_indicator_contract_is_computed_from_closed_one_minute_bars():
+    enriched = calculate_one_minute_indicators(_frame_from_payload(_bars()))
+    snapshot = indicator_snapshot_from_frame(
+        enriched,
+        now_ms=int(enriched.index[-1].timestamp() * 1000) + 60_000,
+    )
+    assert snapshot.rsi_14 is not None
+    assert snapshot.rsi_7 is not None
+    assert snapshot.rsi_2 is not None
+    assert snapshot.macd_hist is not None
+    assert snapshot.macd_hist_prev is not None
+    assert snapshot.atr_14 and snapshot.atr_14 > 0
+    assert snapshot.vwap and snapshot.vwap > 0
+    assert snapshot.rvol and snapshot.rvol > 0
+    assert snapshot.bar_age_ms == 60_000
+
+
+def test_compose_has_only_canonical_signal_and_learning_owners():
+    import yaml
+
+    compose = yaml.safe_load((APP / "docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    assert "scalp-engine" in services
+    assert "scalp-learner" in services
+    assert "scanner" not in services
+    assert "learner" not in services
+    assert services["scalp-engine"]["command"][-1] == "services.scalp_engine_service"
+    assert services["scalp-learner"]["command"][-1] == "services.scalp_learner_service"
+    watched = services["watchdog"]["environment"]["WATCHDOG_SERVICES"]
+    assert "scalp-engine" in watched and "scalp-learner" in watched
+    assert ",scanner," not in f",{watched},"
+    assert ",learner," not in f",{watched},"
+
+
+def test_root_ui_and_deployment_are_scalp_only():
+    routes = (APP / "routers" / "system.py").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    assert 'STATIC_DIR, "scalp.html"' in routes
+    assert "_dc up -d --remove-orphans" in workflow
+    assert "orphaned legacy runtime container still exists" in workflow
+    assert "_svc_health scalp-engine" in workflow
+    assert "_svc_health scalp-learner" in workflow
+    assert "activate_scalp_only.py" in workflow
+
+
+def test_runtime_controls_are_ui_catalogued():
+    from agent.config_catalog import build_catalog
+    from agent.config_manager import _DEFAULTS
+
+    catalog = build_catalog({}, {key: factory() for key, factory in _DEFAULTS.items()})
+    fields = {field["key"]: field for field in catalog["fields"]}
+    for key in (
+        "scalp_runtime.cycle_interval_s",
+        "scalp_runtime.workers",
+        "scalp_runtime.bar_lookback",
+        "scalp_runtime.blocked_sessions",
+    ):
+        assert key in fields
+        assert fields[key]["advanced"] is False
+        assert fields[key]["description"]
+
+
+def test_runtime_publishes_every_ticker_even_when_one_has_no_bars(monkeypatch):
+    from agent.scalp.runtime import ScalpRuntime
+    import agent.scalp.runtime as runtime_module
+    import agent.context_snapshot as context_snapshot
+    import agent.paper_trading as paper_trading
+    import agent.signal_snapshot as signal_snapshot
+    import agent.valkey_client as valkey_client
+
+    frame = _frame_from_payload(_bars())
+    monkeypatch.setattr(
+        runtime_module,
+        "load_one_minute_frames",
+        lambda tickers, limit: ({"AAA": frame}, {"BBB": "ONE_MINUTE_BARS_MISSING"}),
+    )
+    monkeypatch.setattr(
+        valkey_client,
+        "get_all_prices",
+        lambda: {
+            ticker: {
+                "last": 104.0,
+                "bid": 103.99,
+                "ask": 104.01,
+                "updated_at": pd.Timestamp.now(tz="UTC").timestamp(),
+                "source_status": "LIVE",
+            }
+            for ticker in ("AAA", "BBB")
+        },
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.market_hours",
+        SimpleNamespace(
+            get_session=lambda: "CLOSED",
+            get_session_info=lambda: {"session": "CLOSED", "tradeable": False},
+        ),
+    )
+    monkeypatch.setattr(paper_trading, "get_open_trades", lambda: [])
+    monkeypatch.setattr(
+        context_snapshot,
+        "get_context_snapshots",
+        lambda tickers: {
+            ticker: {"asof_ts": pd.Timestamp.now(tz="UTC").timestamp(), "stale_age_s": 1.0}
+            for ticker in tickers
+        },
+    )
+    captured = {}
+
+    def write_latest(signals, regime, session, scanned_count, scan_meta=None):
+        captured.update(
+            signals=signals,
+            scanned_count=scanned_count,
+            scan_meta=scan_meta,
+        )
+        return True
+
+    monkeypatch.setattr(signal_snapshot, "write_latest", write_latest)
+    result = ScalpRuntime(["AAA", "BBB"]).run_cycle()
+    assert result["runtime"] == "SCALP_ONLY_V1"
+    assert captured["scanned_count"] == 2
+    assert {row["ticker"] for row in captured["signals"]} == {"AAA", "BBB"}
+    missing = next(row for row in captured["signals"] if row["ticker"] == "BBB")
+    assert "ONE_MINUTE_BARS_MISSING" in missing["scalp_plan"]["blockers"]
+
+
+def test_fresh_context_is_required_and_earnings_blackout_is_explicit():
+    from agent.scalp.models import ScalpSignalPlan, SignalSide
+    from agent.scalp.runtime import _apply_market_context
+
+    plan = ScalpSignalPlan(
+        ticker="AAA",
+        side=SignalSide.LONG,
+        valid=True,
+        invalid_reason="",
+    )
+    _apply_market_context(
+        plan,
+        {
+            "asof_ts": 1.0,
+            "stale_age_s": 5.0,
+            "earnings_phase": "blackout",
+            "earnings_days_away": 0,
+            "news_shock": True,
+            "sentiment_30m": -0.5,
+        },
+        {
+            "scalp_runtime.require_context_data": True,
+            "scalp_runtime.max_context_age_s": 180,
+            "scalp_runtime.max_context_risk_score": 0.8,
+            "scalp_runtime.adverse_news_sentiment": 0.25,
+        },
+    )
+    assert plan.context_fresh is True
+    assert plan.earnings_days_away == 0
+    assert "EARNINGS_BLACKOUT" in plan.blockers
+    assert "ADVERSE_NEWS_SHOCK" in plan.blockers
+    assert plan.valid is False
+
+
+def test_market_context_is_present_before_ml_inference(monkeypatch):
+    import inspect
+    import agent.scalp.runtime as runtime_module
+
+    source = inspect.getsource(runtime_module.ScalpRuntime.run_cycle)
+    assert source.index("_apply_market_context(") < source.index("apply_ml_overlay(")
+
+    observed = {}
+
+    def capture(plan):
+        observed.update(
+            context_fresh=plan.context_fresh,
+            sentiment_30m=plan.sentiment_30m,
+            earnings_phase=plan.earnings_phase,
+        )
+        return plan
+
+    monkeypatch.setattr(runtime_module, "apply_ml_overlay", capture)
+    plan = _valid_plan_for_pipeline_test()
+    runtime_module._apply_market_context(
+        plan,
+        {
+            "asof_ts": pd.Timestamp.now(tz="UTC").timestamp(),
+            "stale_age_s": 1.0,
+            "sentiment_30m": 0.4,
+            "earnings_phase": "CLEAR",
+        },
+        _ConfigStub(),
+    )
+    if plan.valid:
+        runtime_module.apply_ml_overlay(plan)
+
+    assert observed == {
+        "context_fresh": True,
+        "sentiment_30m": 0.4,
+        "earnings_phase": "CLEAR",
+    }
+
+
+class _ConfigStub:
+    def get(self, _key, default=None):
+        return default
+
+
+def _valid_plan_for_pipeline_test():
+    from agent.scalp.models import ScalpSignalPlan, SignalSide
+
+    return ScalpSignalPlan(
+        ticker="AAA",
+        side=SignalSide.LONG,
+        valid=True,
+        invalid_reason="",
+    )

@@ -7,6 +7,7 @@ from typing import Any
 
 GROUPS = [
     ("scalp", "Scalping Engine", "Signal validity, real-time inputs, and deterministic bracket construction."),
+    ("scalp_runtime", "Scalp Runtime", "Universe coverage, canonical plan cadence, concurrency, and session ownership."),
     ("scalp_learn", "Scalp Learning", "Bounded outcome learning, context gates, and expiring automatic actions."),
     ("scalp_ml", "Scalp ML Overlay", "Advisory TP1/TP2 probability models, economic promotion gates, and bounded confidence adjustment."),
     ("paper", "Paper Trading", "Simulated account, position limits, exits, and live-like execution behavior."),
@@ -167,6 +168,49 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.action_ttl_min": ("Learning action lifetime", "Minutes before an automatic action expires unless refreshed by another outcome.", "60 makes every automatic action reversible within one hour."),
 }
 
+_SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
+    "scalp_runtime.cycle_interval_s": (
+        "Canonical plan interval",
+        "Seconds between full-universe plan refreshes. The browser still marks prices and positions every second from the live price bus.",
+        "5 refreshes all 477 canonical plans every five seconds.",
+    ),
+    "scalp_runtime.workers": (
+        "Analysis workers",
+        "Maximum worker threads used for deterministic per-ticker calculation. Broker calls never run inside these workers.",
+        "8 leaves capacity for market data and the API on the four-vCPU host.",
+    ),
+    "scalp_runtime.bar_lookback": (
+        "One-minute bar lookback",
+        "Closed one-minute bars used for RSI, MACD, ATR, VWAP, RVOL, and local structure.",
+        "120 supplies two hours of recent intraday evidence.",
+    ),
+    "scalp_runtime.blocked_sessions": (
+        "Blocked entry sessions",
+        "Sessions in which plans remain visible but cannot become actionable or open a paper position.",
+        "CLOSED, RESTRICTED, CLOSING_CAUTION, and HARD_CLOSE blocks unsafe entry windows.",
+    ),
+    "scalp_runtime.require_context_data": (
+        "Require fresh market context",
+        "Blocks new entries when earnings and news context is missing or stale while keeping the plan visible.",
+        "Enabled prevents a technical scalp from trading without a current context-intel snapshot.",
+    ),
+    "scalp_runtime.max_context_age_s": (
+        "Maximum context age",
+        "Maximum age in seconds for the ticker earnings and news snapshot.",
+        "180 allows three minutes before context is treated as stale.",
+    ),
+    "scalp_runtime.max_context_risk_score": (
+        "Maximum context risk",
+        "Blocks a plan when the normalized earnings, macro, halt, or news risk score reaches this value.",
+        "0.8 blocks high-risk event contexts on a zero-to-one scale.",
+    ),
+    "scalp_runtime.adverse_news_sentiment": (
+        "Adverse news-shock threshold",
+        "Blocks LONG during a negative news shock and SHORT during a positive news shock.",
+        "0.25 requires absolute 30-minute sentiment of at least 0.25 together with news_shock=true.",
+    ),
+}
+
 _SCALP_ML_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_ml.training_enabled": ("Enable ML training", "Allows the isolated learner service to train TP1-before-stop and TP2-before-stop challengers from closed SCALP_PLAN_V1 outcomes. It never trains in scanner or web-api.", "Keep disabled until enough canonical outcomes exist; enabling does not activate execution."),
     "scalp_ml.shadow_enabled": ("Enable shadow predictions", "Loads the promoted champion and records probabilities on valid scalp plans without changing confidence or execution.", "Use shadow mode first to compare predictions with realized outcomes."),
@@ -213,7 +257,7 @@ def build_catalog(values: dict[str, Any], defaults: dict[str, Any]) -> dict[str,
                 "value": value,
                 "default": default,
                 "type": _value_type(value),
-                "advanced": key not in _SCALP_DETAILS and key not in _SCALP_LEARN_DETAILS and key not in _SCALP_ML_DETAILS,
+                "advanced": key not in _SCALP_DETAILS and key not in _SCALP_RUNTIME_DETAILS and key not in _SCALP_LEARN_DETAILS and key not in _SCALP_ML_DETAILS,
             }
         )
     return {"schema_version": 1, "groups": groups, "fields": fields}
@@ -222,6 +266,8 @@ def build_catalog(values: dict[str, Any], defaults: dict[str, Any]) -> dict[str,
 def _detail(key: str, value: Any, group: str) -> tuple[str, str, str]:
     if key in _SCALP_DETAILS:
         return _SCALP_DETAILS[key]
+    if key in _SCALP_RUNTIME_DETAILS:
+        return _SCALP_RUNTIME_DETAILS[key]
     if key in _SCALP_LEARN_DETAILS:
         return _SCALP_LEARN_DETAILS[key]
     if key in _SCALP_ML_DETAILS:

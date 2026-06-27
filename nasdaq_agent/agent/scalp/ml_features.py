@@ -6,7 +6,7 @@ from typing import Any
 
 from .models import ScalpSignalPlan
 
-FEATURE_SCHEMA_VERSION = 1
+FEATURE_SCHEMA_VERSION = 2
 
 FEATURE_NAMES = (
     "side_long", "side_short",
@@ -20,6 +20,9 @@ FEATURE_NAMES = (
     "path_clear", "path_blocked",
     "source_ws", "source_rest",
     "setup_score", "quote_age_s", "bar_age_min", "reward_r",
+    "context_fresh", "sentiment_30m", "sentiment_velocity",
+    "news_shock", "context_risk_score", "earnings_caution",
+    "earnings_days_away",
 )
 
 
@@ -32,6 +35,7 @@ def feature_vector(plan: ScalpSignalPlan | dict[str, Any]) -> list[float]:
     vwap_event = _text(read("vwap_event", "UNKNOWN"))
     path = _text(read("tp2_path", "UNKNOWN"))
     source = _text(read("source", "UNKNOWN"))
+    earnings_phase = _text(read("earnings_phase", ""))
     price = _number(read("price", 0.0))
     atr = _number(read("atr_14", 0.0))
     vwap = _number(read("vwap", 0.0))
@@ -59,6 +63,13 @@ def feature_vector(plan: ScalpSignalPlan | dict[str, Any]) -> list[float]:
         _clip(_number(read("data_age_ms", 0.0)) / 1000.0, 0.0, 60.0),
         _clip(_number(read("bar_age_ms", 0.0)) / 60000.0, 0.0, 60.0),
         _clip(_number(read("reward_r", 2.0)), 0.0, 5.0),
+        bool(read("context_fresh", False)),
+        _clip(_number(read("sentiment_30m", 0.0)), -1.0, 1.0),
+        _clip(_number(read("sentiment_velocity", 0.0)), -2.0, 2.0),
+        bool(read("news_shock", False)),
+        _clip(_number(read("context_risk_score", 0.0)), 0.0, 1.0),
+        earnings_phase == "CAUTION",
+        _clip(_number(read("earnings_days_away", 999.0)), 0.0, 30.0) / 30.0,
     )
     return [float(value) for value in values]
 

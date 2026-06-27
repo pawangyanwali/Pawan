@@ -84,6 +84,26 @@ def test_feature_contract_ignores_every_post_trade_field():
     assert feature_vector(mutated) == original
 
 
+def test_feature_contract_includes_pre_entry_market_context():
+    plan = _plan().to_dict()
+    baseline = feature_vector(plan)
+    contextual = feature_vector(
+        {
+            **plan,
+            "context_fresh": True,
+            "sentiment_30m": -0.6,
+            "sentiment_velocity": -0.25,
+            "news_shock": True,
+            "context_risk_score": 0.75,
+            "earnings_phase": "CAUTION",
+            "earnings_days_away": 2,
+        }
+    )
+
+    assert len(contextual) == len(FEATURE_NAMES)
+    assert contextual != baseline
+
+
 def test_expected_r_matches_two_stage_bracket_math():
     assert expected_r(0.0, 0.0, 2.0) == pytest.approx(-1.0)
     assert expected_r(1.0, 0.0, 2.0) == pytest.approx(0.5)

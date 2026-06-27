@@ -12,7 +12,7 @@ def _src(path: str) -> str:
 
 
 def _repo(path: str) -> str:
-    return (REPO / path).read_text(encoding="utf-8")
+    return (ROOT / path).read_text(encoding="utf-8")
 
 
 def test_market_data_quotes_are_source_labeled_and_rest_does_not_mask_live_ws():
@@ -103,16 +103,15 @@ def test_streamer_extracts_today_open_from_regular_session_history():
     assert _extract_today_open_from_df(df) == 42.25
 
 
-def test_scanner_side_training_is_disabled_by_default_in_production():
-    src = _src("agent/scanner.py")
+def test_scalp_engine_has_no_training_or_broker_data_fetch_ownership():
+    src = _src("services/scalp_engine_service.py") + _src("agent/scalp/runtime.py")
     compose = _repo("docker-compose.yml")
 
-    assert 'os.getenv("NASDAQ_SCANNER_TRAINING_ENABLED", "0")' in src
-    assert "if _scanner_training_enabled():" in src
-    assert "if _scanner_training_enabled() and self._should_retrain()" in src
-    assert "elif _scanner_training_enabled() and self._should_finetune_deep()" in src
-    assert "Scanner-side ML training disabled; learner services own retraining." in src
-    assert 'NASDAQ_SCANNER_TRAINING_ENABLED: "0"' in compose
+    assert "retrain_all" not in src
+    assert "retrain_deep_all" not in src
+    assert "fetch_batch_interval" not in src
+    assert "scalp-engine:" in compose
+    assert "scanner:" not in compose.replace("scanner:streamer", "")
 
 
 def test_scanner_snapshots_are_not_reported_as_live_prices():
@@ -131,23 +130,13 @@ def test_scanner_snapshots_are_not_reported_as_live_prices():
     assert "price_bus_health(max_age_s=max_age_s)" in mdhc_src
 
 
-def test_dashboard_displays_price_source_truth_instead_of_reconnecting_on_snapshots():
-    src = _src("web/static/index.html")
-
-    assert "function _updatePriceBusState(prices, fallbackStatus='UNKNOWN')" in src
-    assert "let _priceBusCache = {}" in src
-    assert "Evaluate the whole dashboard cache" in src
-    assert 'id="price-source-breakdown"' in src
-    assert "function _setPriceSourceBreakdown(cov, state='UNKNOWN')" in src
-    assert "`WS ${live} | REST ${fallback} | STALE ${stale}`" in src
-    assert "`WS ${live} | REST ${fallback} | SNAP ${snapshot} | STALE ${stale}`" in src
-    assert "REST FALLBACK" in src
-    assert "HYBRID LIVE" in src
-    assert "WS /" in src
-    assert "REST /" in src
-    assert "SCAN SNAPSHOT" in src
-    assert "MARKET CLOSED" in src
-    assert "wsSilent" in src
+def test_command_center_displays_price_source_truth():
+    src = _src("web/static/scalp.html")
+    assert 'id="md-chip"' in src
+    assert "h.live||0" in src
+    assert "h.fallback||0" in src
+    assert "h.stale||0" in src
+    assert "Market data" in src
 
 
 def test_market_data_healthcheck_uses_price_bus_coverage_thresholds():
@@ -158,8 +147,8 @@ def test_market_data_healthcheck_uses_price_bus_coverage_thresholds():
     assert "trusted_fresh_pct" in src
     assert "MD_HEALTH_MIN_FRESH_PCT" in src
     assert "MD_HEALTH_MAX_PRICE_AGE_S" in src
-    assert 'MD_HEALTH_MIN_FRESH_PCT:     "80"' in compose
-    assert 'MD_HEALTH_MIN_FRESH_PCT_EXTENDED: "60"' in compose
+    assert "market-data:" in compose
+    assert 'services.md_healthcheck' in compose
 
 
 def test_market_data_token_reload_restart_is_reachable_before_continue():
@@ -198,9 +187,9 @@ def test_watchdog_service_restarts_stopped_or_unhealthy_containers():
     assert '"health=unhealthy"' in src
     assert "WATCHDOG_UNHEALTHY_STRIKES" in src
     assert 'command: ["python", "-m", "services.watchdog_service"]' in compose
-    assert 'user: "0:0"' in compose
+    assert "user: root" in compose
     assert "/var/run/docker.sock:/var/run/docker.sock" in compose
-    assert 'test: ["CMD", "python3", "/app/services/watchdog_healthcheck.py"]' in compose
+    assert 'test: ["CMD", "python", "-m", "services.watchdog_healthcheck"]' in compose
     assert 'os.getenv("WATCHDOG_DOCKER_SOCKET", "/var/run/docker.sock")' in healthcheck
     assert "GET /_ping HTTP/1.1" in healthcheck
     assert 'b"200 OK"' in healthcheck

@@ -141,11 +141,11 @@ class TestServiceImports:
     def test_base_importable(self):
         import services._base  # noqa: F401
 
-    def test_scanner_service_importable(self):
-        self._import_clean("services.scanner_service")
+    def test_scalp_engine_service_importable(self):
+        self._import_clean("services.scalp_engine_service")
 
-    def test_learner_service_importable(self):
-        self._import_clean("services.learner_service")
+    def test_scalp_learner_service_importable(self):
+        self._import_clean("services.scalp_learner_service")
 
     def test_scheduler_service_importable(self):
         self._import_clean("services.scheduler_service")

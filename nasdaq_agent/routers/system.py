@@ -38,7 +38,7 @@ async def favicon():
 
 @router.get("/", response_class=HTMLResponse)
 async def root():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "scalp.html"))
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -76,8 +76,13 @@ async def health():
     from agent.valkey_client import health_status as vk_health
     from main import _current_signal_snapshot
     from routers._deps import manager
-    from agent.scanner import scanner
     sigs, last_scan, from_cache = _current_signal_snapshot()
+    try:
+        from agent.service_state import get_age_s
+        engine_age = get_age_s("service:scalp-engine:heartbeat")
+        engine_running = engine_age is not None and engine_age < 45
+    except Exception:
+        engine_running = False
     # Memory pressure — best-effort, never blocks the health response
     _memory_rss_mb: float | None = None
     try:
@@ -93,7 +98,8 @@ async def health():
             pass
     return {
         "status": "ok",
-        "is_running": scanner.is_running,
+        "is_running": engine_running,
+        "runtime": "SCALP_ONLY_V1",
         "last_scan": last_scan,
         "tickers_tracked": len(sigs),
         "from_cache": from_cache,
@@ -169,15 +175,15 @@ def _container_health(valkey_connected: bool) -> dict:
 
     result["market-data"] = _heartbeat(
         "market-data", 120,
-        fallback=_legacy_key("scanner:streamer", 90, "streamer status"),
+        fallback=_legacy_key("market-data:status", 90, "market-data status"),
     )
-    result["scanner"] = _heartbeat(
-        "scanner", 120,
+    result["scalp-engine"] = _heartbeat(
+        "scalp-engine", 45,
         fallback=_legacy_key("scan:latest", 660, "last scan"),
     )
-    result["learner"] = _heartbeat(
-        "learner", 180,
-        fallback=_legacy_key("learner:status", 300, "learner status"),
+    result["scalp-learner"] = _heartbeat(
+        "scalp-learner", 45,
+        fallback=_legacy_key("scalp-learner:status", 180, "scalp learner status"),
     )
     result["scheduler"] = _heartbeat(
         "scheduler", 120,
@@ -202,7 +208,6 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     from agent.broker.schwab_streamer import get_streamer_status
     from main import _current_signal_snapshot
     from routers._deps import manager
-    from agent.scanner import scanner
 
     vk = vk_health()
     streamer = get_streamer_status()
@@ -212,7 +217,7 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     if not streamer.get("ws_streamer", {}).get("running"):
         try:
             from agent.service_state import get_state as _ss_get
-            _sd = _ss_get("scanner:streamer")
+            _sd = _ss_get("market-data:status")
             if _sd:
                 streamer = _sd
         except Exception:
@@ -222,24 +227,18 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
                 from agent.valkey_client import _get_client as _vk_c
                 _vc = _vk_c()
                 if _vc:
-                    raw = _vc.get("scanner:streamer")
+                    raw = _vc.get("market-data:status")
                     if raw:
                         streamer = json.loads(raw)
             except Exception:
                 pass
 
-    # scanner.is_running is always False in web-api (scanner runs in its own
-    # container).  Derive running state from the scanner heartbeat instead;
-    # fall back to the in-process flag for monolith deployments.
-    _scanner_running = scanner.is_running
-    if not _scanner_running:
-        try:
-            from agent.service_state import get_age_s as _hb_age
-            _age = _hb_age("service:scanner:heartbeat")
-            if _age is not None and _age < 120:
-                _scanner_running = True
-        except Exception:
-            pass
+    try:
+        from agent.service_state import get_age_s as _hb_age
+        _age = _hb_age("service:scalp-engine:heartbeat")
+        _engine_running = _age is not None and _age < 45
+    except Exception:
+        _engine_running = False
 
     # RDS check — lightweight: just try to get a connection from the pool
     rds_ok = False
@@ -264,8 +263,8 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
     sigs, last_scan, from_cache = _current_signal_snapshot()
 
     return {
-        "scanner": {
-            "running":    _scanner_running,
+        "scalp_engine": {
+            "running":    _engine_running,
             "last_scan":  last_scan,
             "tickers":    len(sigs),
             "from_cache": from_cache,
@@ -307,11 +306,11 @@ async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
         price_2s = price_bus_health(max_age_s=2.0)
         price_5s = price_bus_health(max_age_s=5.0)
 
-        # Scanner freshness from service state
+        # Canonical scalp-engine freshness from service state
         scan_age_s = None
         try:
             from agent.service_state import get_age_s as _ss_age
-            scan_age_s = _ss_age("service:scanner:heartbeat")
+            scan_age_s = _ss_age("service:scalp-engine:heartbeat")
         except Exception:
             pass
 

@@ -38,7 +38,7 @@ _TARGET_SERVICES = {
     s.strip()
     for s in os.getenv(
         "WATCHDOG_SERVICES",
-        "web-api,market-data,scanner,learner,scheduler,context-intel",
+        "web-api,market-data,scalp-engine,scalp-learner,scheduler,context-intel",
     ).split(",")
     if s.strip()
 }

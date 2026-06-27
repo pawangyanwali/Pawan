@@ -17,7 +17,7 @@
 set -euo pipefail
 
 HOST_TOKEN_DIR="/opt/nasdaq-agent/tokens"
-COMPOSE_FILE="/opt/nasdaq-agent/docker-compose.yml"
+COMPOSE_FILE="/opt/nasdaq-agent/nasdaq_agent/docker-compose.yml"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
@@ -41,11 +41,11 @@ chmod 600 "$TRADING_TOKEN" "$MD_TOKEN"
 info "Ownership fixed."
 
 # ── Restart services that consume the tokens ──────────────────────────────────
-info "Restarting market-data (reads schwab_md_tokens.json) ..."
-docker compose -f "$COMPOSE_FILE" restart market-data
+info "Restarting token-service (sole token owner) ..."
+docker compose -f "$COMPOSE_FILE" --project-directory /opt/nasdaq-agent restart token-service
 
-info "Restarting scanner (reads schwab_tokens.json for order placement) ..."
-docker compose -f "$COMPOSE_FILE" restart scanner
+info "Restarting market-data after token owner is available ..."
+docker compose -f "$COMPOSE_FILE" --project-directory /opt/nasdaq-agent restart market-data
 
 # ── Verify ────────────────────────────────────────────────────────────────────
 info "Waiting 8s for services to initialise ..."
@@ -53,11 +53,11 @@ sleep 8
 
 echo ""
 info "market-data logs (last 20 lines):"
-docker compose -f "$COMPOSE_FILE" logs market-data --since 15s 2>&1 | grep -E "MD poller|streamer|token|WARN|ERROR|started" || true
+docker compose -f "$COMPOSE_FILE" --project-directory /opt/nasdaq-agent logs market-data --since 15s 2>&1 | grep -E "MD poller|streamer|token|WARN|ERROR|started" || true
 
 echo ""
-info "scanner logs (last 10 lines):"
-docker compose -f "$COMPOSE_FILE" logs scanner --since 15s 2>&1 | grep -E "Schwab|token|WARN|ERROR|scan" | head -10 || true
+info "token-service logs (last 10 lines):"
+docker compose -f "$COMPOSE_FILE" --project-directory /opt/nasdaq-agent logs token-service --since 15s 2>&1 | grep -E "Schwab|token|WARN|ERROR" | head -10 || true
 
 echo ""
 info "Done. Check above for 'MD poller started' — if still missing, re-auth via /schwab/auth/md"

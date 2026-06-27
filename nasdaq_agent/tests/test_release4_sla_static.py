@@ -27,8 +27,8 @@ def test_release4_sla_rules_cover_active_prices_and_required_services():
     for service_name in (
         "web-api",
         "market-data",
-        "scanner",
-        "learner",
+        "scalp-engine",
+        "scalp-learner",
         "scheduler",
         "context-intel",
         "watchdog",
@@ -36,13 +36,11 @@ def test_release4_sla_rules_cover_active_prices_and_required_services():
         assert f'"{service_name}"' in src
 
 
-def test_dashboard_surfaces_runtime_sla_without_touching_price_chip():
-    src = _src("web/static/index.html")
+def test_command_center_surfaces_market_and_plan_freshness():
+    src = _src("web/static/scalp.html")
 
-    assert 'id="ops-sla-chip"' in src
-    assert "function _setOpsSlaChip(sla)" in src
-    assert "async function pollRuntimeSla()" in src
-    assert "/api/runtime-health" in src
-    assert "setInterval(pollRuntimeSla, 10000)" in src
-    assert "setInterval(() => {" in src
-    assert "document.getElementById('data-freshness')" in src
+    assert 'id="md-chip"' in src
+    assert 'id="scan-chip"' in src
+    assert "Market data" in src
+    assert "d.scan_ts" in src
+    assert "setTimeout(load,1000)" in src
