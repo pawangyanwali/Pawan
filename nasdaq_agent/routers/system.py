@@ -6,6 +6,7 @@ System / infrastructure routes:
   GET  /api/runtime-health  (alias: /api/health if needed)
   GET  /
   GET  /login   /login.html
+  GET  /health  /health.html
   GET  /admin.html
 """
 
@@ -62,6 +63,12 @@ async def algo_page():
 @router.get("/settings.html", response_class=HTMLResponse)
 async def settings_page():
     return FileResponse(os.path.join(STATIC_DIR, "settings.html"))
+
+
+@router.get("/health", response_class=HTMLResponse)
+@router.get("/health.html", response_class=HTMLResponse)
+async def health_page():
+    return FileResponse(os.path.join(STATIC_DIR, "health.html"))
 
 
 @router.get("/scalp", response_class=HTMLResponse)
