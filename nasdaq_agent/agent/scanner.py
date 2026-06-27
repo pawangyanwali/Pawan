@@ -772,6 +772,10 @@ def _build_scalp_plan(
     if external_blockers:
         plan.valid = False
         plan.invalid_reason = plan.blockers[0]
+    # Release 4 ML is advisory and confidence-only. It runs after deterministic
+    # validity/blocker construction and before the stricter online learning gate.
+    from agent.scalp.ml_overlay import apply_ml_overlay
+    apply_ml_overlay(plan)
     from agent.scalp.learning import apply_context_gate
     apply_context_gate(plan)
     return plan

@@ -172,6 +172,7 @@ def create_scalp_signal_plan(
         session=str(session or "").upper(),
         setup_score=setup_score,
         confidence=setup_score,
+        base_confidence=setup_score,
         learned_expectancy_r=float(learned_expectancy_r),
         learned_win_rate=float(learned_win_rate),
         reasons=reasons,

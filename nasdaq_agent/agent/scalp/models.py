@@ -226,6 +226,13 @@ class ScalpSignalPlan:
     session: str = ""
     setup_score: float = 0.0
     confidence: float = 0.0
+    base_confidence: float = 0.0
+    ml_tp1_probability: float = 0.0
+    ml_tp2_probability: float = 0.0
+    ml_expected_r: float = 0.0
+    ml_confidence_adjustment: float = 0.0
+    ml_model_version: str = ""
+    ml_overlay_applied: bool = False
     learned_expectancy_r: float = 0.0
     learned_win_rate: float = 0.0
     context_key: str = ""

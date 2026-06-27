@@ -254,6 +254,7 @@ def tmp_db_paths(tmp_path, monkeypatch):
         "agent.backtester",
         "agent.scalp.store",
         "agent.scalp.learning",
+        "agent.scalp.ml_trainer",
         "historical.store",
     ]
     import importlib

@@ -130,11 +130,17 @@ def _learning_snapshot() -> dict[str, Any]:
         {**row, "context_gate": gates.get(row.get("context_key"), "ALLOW")}
         for row in data["recent_outcomes"]
     ]
+    champion = _decode_ml_metadata(data.get("ml_champion"))
+    evaluations = [
+        _decode_ml_metadata(row) for row in data.get("ml_evaluations", [])
+    ]
     return {
         "active_actions": active,
         "recent_actions": data["recent_actions"],
         "recent_outcomes": outcomes,
         "contexts": stats,
+        "ml_champion": champion,
+        "ml_evaluations": evaluations,
     }
 
 
@@ -214,3 +220,22 @@ def _expired(value: Any, now: datetime) -> bool:
         except (TypeError, ValueError):
             return True
     return expiry.replace(tzinfo=expiry.tzinfo or timezone.utc) <= now
+
+
+def _decode_ml_metadata(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    result = dict(row)
+    raw = result.get("metrics_json")
+    if isinstance(raw, str):
+        try:
+            import json
+            result["metrics"] = json.loads(raw)
+        except (TypeError, ValueError):
+            result["metrics"] = {}
+    elif isinstance(raw, dict):
+        result["metrics"] = raw
+    else:
+        result["metrics"] = {}
+    result.pop("metrics_json", None)
+    return result

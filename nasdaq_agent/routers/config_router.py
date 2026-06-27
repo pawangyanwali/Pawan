@@ -179,6 +179,23 @@ async def update_config(
                 detail=f"Invalid scalp learning configuration: {exc}",
             ) from exc
 
+    if any(key.startswith("scalp_ml.") for key in updates):
+        candidate: dict[str, Any] = {}
+        for key, factory in _DEFAULTS.items():
+            try:
+                candidate[key] = factory()
+            except Exception:
+                continue
+        candidate.update(current_before)
+        candidate.update(updates)
+        try:
+            _validate_scalp_ml(candidate)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid scalp ML configuration: {exc}",
+            ) from exc
+
     use_atr_stops = bool(
         updates.get(
             "prediction.use_atr_stops",
@@ -253,6 +270,39 @@ def _validate_scalp_learning(values: dict[str, Any]) -> None:
         raise ValueError("base confidence floor plus raise step cannot exceed 100")
     if not 0 < size_mult <= 1:
         raise ValueError("size_reduce_mult must be greater than 0 and no greater than 1")
+
+
+def _validate_scalp_ml(values: dict[str, Any]) -> None:
+    interval = int(values["scalp_ml.training_interval_min"])
+    lookback = int(values["scalp_ml.training_lookback_days"])
+    maximum_age = int(values["scalp_ml.maximum_model_age_hours"])
+    minimum_samples = int(values["scalp_ml.minimum_samples"])
+    holdout = float(values["scalp_ml.holdout_pct"])
+    selected = int(values["scalp_ml.minimum_selected_holdout"])
+    sessions = int(values["scalp_ml.minimum_holdout_sessions"])
+    per_session = int(values["scalp_ml.minimum_session_samples"])
+    expectancy = float(values["scalp_ml.minimum_expectancy_r"])
+    profit_factor = float(values["scalp_ml.minimum_profit_factor"])
+    session_expectancy = float(values["scalp_ml.minimum_session_expectancy_r"])
+    minimum_auc = float(values["scalp_ml.minimum_auc"])
+    brier_improvement = float(values["scalp_ml.minimum_brier_improvement"])
+    raise_cap = float(values["scalp_ml.max_confidence_raise"])
+    reduce_cap = float(values["scalp_ml.max_confidence_reduction"])
+    points_per_r = float(values["scalp_ml.confidence_points_per_r"])
+    if interval <= 0 or lookback < 5 or maximum_age <= 0 or minimum_samples < 50:
+        raise ValueError("training interval/model age must be positive, lookback at least 5 days, and minimum_samples at least 50")
+    if not 0.10 <= holdout <= 0.40:
+        raise ValueError("holdout_pct must be between 0.10 and 0.40")
+    if selected <= 0 or sessions < 2 or per_session <= 0:
+        raise ValueError("holdout trade and session sample floors must be positive; at least two sessions are required")
+    if selected > minimum_samples * holdout:
+        raise ValueError("minimum_selected_holdout cannot exceed the expected holdout size")
+    if expectancy < 0 or session_expectancy < 0 or profit_factor <= 1.0:
+        raise ValueError("promotion expectancy must be non-negative and profit factor must exceed 1.0")
+    if not 0.5 <= minimum_auc <= 1.0 or brier_improvement < 0:
+        raise ValueError("minimum AUC must be between 0.5 and 1.0 and Brier improvement non-negative")
+    if points_per_r < 0 or not 0 <= raise_cap <= 15 or not 0 <= reduce_cap <= 30:
+        raise ValueError("confidence sensitivity and caps are outside their safe bounds")
 
 
 # ── /api/position-size GET ────────────────────────────────────────────────────

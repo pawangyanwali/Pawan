@@ -81,6 +81,17 @@ _DEEP_STATE: dict = {
 }
 _DEEP_LOCK = threading.Lock()
 
+_SCALP_ML_STATE: dict = {
+    "enabled": False,
+    "running": False,
+    "last_started_at": None,
+    "last_finished_at": None,
+    "last_status": "DISABLED",
+    "last_version": None,
+    "last_error": None,
+}
+_SCALP_ML_LOCK = threading.Lock()
+
 
 # ── Market-hours guard ────────────────────────────────────────────────────────
 
@@ -133,6 +144,65 @@ def _deep_state_snapshot() -> dict:
 def _set_deep_state(**updates) -> None:
     with _DEEP_LOCK:
         _DEEP_STATE.update(updates)
+
+
+def _scalp_ml_state_snapshot() -> dict:
+    with _SCALP_ML_LOCK:
+        return dict(_SCALP_ML_STATE)
+
+
+def _set_scalp_ml_state(**updates) -> None:
+    with _SCALP_ML_LOCK:
+        _SCALP_ML_STATE.update(updates)
+
+
+def _run_scalp_ml_cycle() -> None:
+    started = time.time()
+    _set_scalp_ml_state(
+        enabled=True, running=True, last_started_at=started,
+        last_finished_at=None, last_error=None,
+    )
+    try:
+        from agent.scalp.ml_trainer import train_and_maybe_promote
+
+        result = train_and_maybe_promote()
+        _set_scalp_ml_state(
+            running=False,
+            last_finished_at=time.time(),
+            last_status=str(result.get("status") or "UNKNOWN"),
+            last_version=result.get("version_id"),
+            last_error=result.get("rejection_reason") or result.get("reason"),
+        )
+    except Exception as exc:
+        _log.warning("Scalp ML training cycle failed: %s", exc, exc_info=True)
+        _set_scalp_ml_state(
+            running=False, last_finished_at=time.time(),
+            last_status="ERROR", last_error=str(exc),
+        )
+
+
+def _continuous_scalp_ml_loop() -> None:
+    """Run advisory challenger training only when explicitly enabled."""
+    if _runner._stop.wait(180):
+        return
+    while not _runner.stopped:
+        try:
+            from agent.config_manager import config as _cfg
+
+            enabled = bool(_cfg.get("scalp_ml.training_enabled", False))
+            interval = max(
+                15, int(_cfg.get("scalp_ml.training_interval_min", 60))
+            )
+        except Exception:
+            enabled, interval = False, 60
+        if not enabled:
+            _set_scalp_ml_state(enabled=False, running=False, last_status="DISABLED")
+            if _runner._stop.wait(60):
+                return
+            continue
+        _run_scalp_ml_cycle()
+        if _runner._stop.wait(interval * 60):
+            return
 
 
 def _publish_deep_state_now() -> None:
@@ -512,6 +582,7 @@ def _publish_status_loop() -> None:
                 "phase2":          phase2_status,
                 "parameter_governor": parameter_governor,
                 "deep":            _deep_state_snapshot(),
+                "scalp_ml":        _scalp_ml_state_snapshot(),
                 "service": {
                     "mode": "continuous",
                     "poll_interval_s": _POLL_INTERVAL_S,
@@ -615,6 +686,7 @@ def main() -> None:
     threading.Thread(target=_monitor_loop,        daemon=True, name="learner-monitor").start()
     threading.Thread(target=_publish_status_loop, daemon=True, name="learner-status-pub").start()
     threading.Thread(target=_continuous_deep_loop, daemon=True, name="continuous-deep").start()
+    threading.Thread(target=_continuous_scalp_ml_loop, daemon=True, name="continuous-scalp-ml").start()
 
     _log.info("Learner running — waiting for SIGTERM/SIGINT …")
 

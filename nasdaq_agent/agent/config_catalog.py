@@ -8,6 +8,7 @@ from typing import Any
 GROUPS = [
     ("scalp", "Scalping Engine", "Signal validity, real-time inputs, and deterministic bracket construction."),
     ("scalp_learn", "Scalp Learning", "Bounded outcome learning, context gates, and expiring automatic actions."),
+    ("scalp_ml", "Scalp ML Overlay", "Advisory TP1/TP2 probability models, economic promotion gates, and bounded confidence adjustment."),
     ("paper", "Paper Trading", "Simulated account, position limits, exits, and live-like execution behavior."),
     ("risk", "Risk Controls", "Account protection, exposure, cooldowns, and adaptive execution brakes."),
     ("execution", "Execution Model", "Spread, slippage, liquidity, and stop-fill simulation."),
@@ -166,6 +167,29 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.action_ttl_min": ("Learning action lifetime", "Minutes before an automatic action expires unless refreshed by another outcome.", "60 makes every automatic action reversible within one hour."),
 }
 
+_SCALP_ML_DETAILS: dict[str, tuple[str, str, str]] = {
+    "scalp_ml.training_enabled": ("Enable ML training", "Allows the isolated learner service to train TP1-before-stop and TP2-before-stop challengers from closed SCALP_PLAN_V1 outcomes. It never trains in scanner or web-api.", "Keep disabled until enough canonical outcomes exist; enabling does not activate execution."),
+    "scalp_ml.shadow_enabled": ("Enable shadow predictions", "Loads the promoted champion and records probabilities on valid scalp plans without changing confidence or execution.", "Use shadow mode first to compare predictions with realized outcomes."),
+    "scalp_ml.overlay_enabled": ("Apply confidence overlay", "Applies the promoted model's bounded confidence adjustment. It cannot create a setup, change bracket levels, alter size, or bypass blockers.", "Enable only after shadow calibration is economically validated."),
+    "scalp_ml.training_interval_min": ("Training interval", "Minutes between challenger training attempts inside the learner container.", "60 evaluates a fresh challenger at most once per hour."),
+    "scalp_ml.training_lookback_days": ("Training lookback", "Maximum age of canonical outcomes included in a challenger dataset so obsolete regimes cannot dominate current scalping behavior.", "60 trains only from the most recent sixty calendar days."),
+    "scalp_ml.maximum_model_age_hours": ("Maximum champion age", "Rejects inference from a champion older than this many hours. Missing or stale ML always fails open to deterministic confidence.", "168 expires a champion after seven days without successful revalidation."),
+    "scalp_ml.minimum_samples": ("Minimum training outcomes", "Minimum closed canonical outcomes required before a challenger may be fitted.", "200 prevents promotion from a tiny sample."),
+    "scalp_ml.holdout_pct": ("Chronological holdout fraction", "Newest fraction of outcomes reserved strictly for out-of-sample promotion testing. No random shuffle or scaler fit touches it.", "0.25 reserves the newest 25% for validation."),
+    "scalp_ml.minimum_selected_holdout": ("Minimum evaluated holdout trades", "Minimum holdout rows whose model expected-R clears the selection threshold before economic metrics are trusted.", "30 requires at least thirty independently evaluated opportunities."),
+    "scalp_ml.minimum_holdout_sessions": ("Minimum validation sessions", "Number of recent market dates that must independently satisfy session stability checks.", "2 prevents one unusually strong day from promoting a model."),
+    "scalp_ml.minimum_session_samples": ("Minimum trades per session", "Minimum selected holdout trades required on each recent validation session.", "5 requires meaningful coverage on both recent days."),
+    "scalp_ml.minimum_expectancy_r": ("Promotion expectancy floor", "Minimum realized mean R on selected chronological holdout rows.", "0.05 requires at least +0.05R per selected trade."),
+    "scalp_ml.minimum_profit_factor": ("Promotion profit-factor floor", "Minimum gross holdout wins divided by absolute gross holdout losses.", "1.10 requires ten percent more gross profit than gross loss."),
+    "scalp_ml.minimum_session_expectancy_r": ("Per-session expectancy floor", "Minimum realized expectancy required independently on each recent validation session.", "0.0 prevents promotion when either recent session is negative."),
+    "scalp_ml.minimum_auc": ("Minimum holdout AUC", "Minimum out-of-sample discrimination required independently for both TP1 and TP2 classifiers.", "0.52 requires each model to rank outcomes better than chance."),
+    "scalp_ml.minimum_brier_improvement": ("Minimum Brier improvement", "Required probability-calibration improvement over a constant training-prevalence baseline on chronological holdout data.", "0.0 rejects a model whose probabilities are worse than the naive baseline."),
+    "scalp_ml.selection_expected_r": ("Prediction selection threshold", "Minimum model-implied expected R used to include a holdout row in economic promotion evaluation.", "0.0 evaluates only model-positive opportunities."),
+    "scalp_ml.confidence_points_per_r": ("Confidence sensitivity", "Percentage-point adjustment produced per one unit of model-implied expected R before caps.", "5 adds 2.5 points for +0.50 expected R."),
+    "scalp_ml.max_confidence_raise": ("Maximum confidence increase", "Hard cap on positive model influence. The plan must already be valid before this can matter.", "5 prevents ML from adding more than five confidence points."),
+    "scalp_ml.max_confidence_reduction": ("Maximum confidence reduction", "Hard cap on negative model influence. Negative evidence may tighten more strongly than positive evidence can relax.", "15 permits up to a fifteen-point reduction."),
+}
+
 
 def build_catalog(values: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
     groups = [
@@ -189,7 +213,7 @@ def build_catalog(values: dict[str, Any], defaults: dict[str, Any]) -> dict[str,
                 "value": value,
                 "default": default,
                 "type": _value_type(value),
-                "advanced": key not in _SCALP_DETAILS and key not in _SCALP_LEARN_DETAILS,
+                "advanced": key not in _SCALP_DETAILS and key not in _SCALP_LEARN_DETAILS and key not in _SCALP_ML_DETAILS,
             }
         )
     return {"schema_version": 1, "groups": groups, "fields": fields}
@@ -200,6 +224,8 @@ def _detail(key: str, value: Any, group: str) -> tuple[str, str, str]:
         return _SCALP_DETAILS[key]
     if key in _SCALP_LEARN_DETAILS:
         return _SCALP_LEARN_DETAILS[key]
+    if key in _SCALP_ML_DETAILS:
+        return _SCALP_ML_DETAILS[key]
     suffix = key.split(".", 1)[-1]
     label = re.sub(r"\s+", " ", suffix.replace("_", " ")).strip().title()
     group_label = _GROUP_BY_PREFIX.get(group, ("System", ""))[0]

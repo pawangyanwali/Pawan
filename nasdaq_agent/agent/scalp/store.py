@@ -119,12 +119,45 @@ def init_scalp_tables() -> None:
                 expires_at          {timestamp_type}
             )
             """,
+            f"""
+            CREATE TABLE IF NOT EXISTS scalp_ml_models (
+                version_id              TEXT PRIMARY KEY,
+                created_at              {timestamp_type} NOT NULL,
+                status                  TEXT NOT NULL,
+                feature_schema_version  INTEGER NOT NULL,
+                sample_count            INTEGER NOT NULL DEFAULT 0,
+                train_count             INTEGER NOT NULL DEFAULT 0,
+                holdout_count           INTEGER NOT NULL DEFAULT 0,
+                selected_count          INTEGER NOT NULL DEFAULT 0,
+                trained_through         {timestamp_type},
+                evaluated_from          {timestamp_type},
+                evaluated_through       {timestamp_type},
+                metrics_json            TEXT NOT NULL DEFAULT '{{}}',
+                rejection_reason        TEXT DEFAULT '',
+                artifact_path           TEXT DEFAULT '',
+                artifact_sha256         TEXT DEFAULT ''
+            )
+            """,
+            f"""
+            CREATE TABLE IF NOT EXISTS scalp_ml_predictions (
+                plan_id                 TEXT PRIMARY KEY,
+                predicted_at            {timestamp_type} NOT NULL,
+                model_version           TEXT NOT NULL,
+                tp1_probability         DOUBLE PRECISION NOT NULL,
+                tp2_probability         DOUBLE PRECISION NOT NULL,
+                expected_r              DOUBLE PRECISION NOT NULL,
+                confidence_adjustment   DOUBLE PRECISION NOT NULL,
+                applied                 INTEGER NOT NULL DEFAULT 0
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_created ON scalp_signal_plans(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_ticker ON scalp_signal_plans(ticker, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_decisions_plan ON scalp_execution_decisions(plan_id)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_outcomes_context ON scalp_trade_outcomes(context_key, closed_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_outcomes_closed ON scalp_trade_outcomes(closed_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_actions_context ON scalp_learning_actions(context_key, action_ts)",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_ml_models_status ON scalp_ml_models(status, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_ml_predictions_model ON scalp_ml_predictions(model_version, predicted_at)",
         ]
         try:
             with get_conn() as conn:
@@ -276,8 +309,112 @@ def learning_dashboard_data(
             "SELECT * FROM scalp_trade_outcomes ORDER BY closed_at DESC LIMIT ?",
             (max(1, min(int(outcome_limit), 500)),),
         ).fetchall()
+        champion = conn.execute(
+            "SELECT * FROM scalp_ml_models WHERE status='CHAMPION' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        evaluations = conn.execute(
+            "SELECT * FROM scalp_ml_models ORDER BY created_at DESC LIMIT 10"
+        ).fetchall()
     return {
         "contexts": [dict(row) for row in contexts],
         "recent_actions": [dict(row) for row in actions],
         "recent_outcomes": [dict(row) for row in outcomes],
+        "ml_champion": dict(champion) if champion else None,
+        "ml_evaluations": [dict(row) for row in evaluations],
     }
+
+
+def record_ml_evaluation(metadata: dict[str, Any]) -> None:
+    init_scalp_tables()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO scalp_ml_models
+              (version_id, created_at, status, feature_schema_version,
+               sample_count, train_count, holdout_count, selected_count,
+               trained_through, evaluated_from, evaluated_through,
+               metrics_json, rejection_reason, artifact_path, artifact_sha256)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                metadata["version_id"], metadata["created_at"], metadata["status"],
+                metadata["feature_schema_version"], metadata.get("sample_count", 0),
+                metadata.get("train_count", 0), metadata.get("holdout_count", 0),
+                metadata.get("selected_count", 0), metadata.get("trained_through"),
+                metadata.get("evaluated_from"), metadata.get("evaluated_through"),
+                json.dumps(metadata.get("metrics") or {}, separators=(",", ":")),
+                metadata.get("rejection_reason", ""), metadata.get("artifact_path", ""),
+                metadata.get("artifact_sha256", ""),
+            ),
+        )
+
+
+def promote_ml_model(metadata: dict[str, Any]) -> None:
+    """Atomically archive the old champion and register the validated challenger."""
+    init_scalp_tables()
+    with get_conn() as conn:
+        conn.execute("UPDATE scalp_ml_models SET status='ARCHIVED' WHERE status='CHAMPION'")
+        conn.execute(
+            """
+            INSERT INTO scalp_ml_models
+              (version_id, created_at, status, feature_schema_version,
+               sample_count, train_count, holdout_count, selected_count,
+               trained_through, evaluated_from, evaluated_through,
+               metrics_json, rejection_reason, artifact_path, artifact_sha256)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                metadata["version_id"], metadata["created_at"], "CHAMPION",
+                metadata["feature_schema_version"], metadata.get("sample_count", 0),
+                metadata.get("train_count", 0), metadata.get("holdout_count", 0),
+                metadata.get("selected_count", 0), metadata.get("trained_through"),
+                metadata.get("evaluated_from"), metadata.get("evaluated_through"),
+                json.dumps(metadata.get("metrics") or {}, separators=(",", ":")),
+                "", metadata.get("artifact_path", ""), metadata.get("artifact_sha256", ""),
+            ),
+        )
+
+
+def champion_ml_model() -> dict[str, Any] | None:
+    init_scalp_tables()
+    with get_conn(read_only=True) as conn:
+        row = conn.execute(
+            "SELECT * FROM scalp_ml_models WHERE status='CHAMPION' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_ml_prediction(
+    *, plan_id: str, predicted_at: str, model_version: str,
+    tp1_probability: float, tp2_probability: float, expected_r: float,
+    confidence_adjustment: float, applied: bool,
+) -> None:
+    init_scalp_tables()
+    values = (
+        predicted_at, model_version, tp1_probability, tp2_probability,
+        expected_r, confidence_adjustment, int(applied), plan_id,
+    )
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT plan_id FROM scalp_ml_predictions WHERE plan_id=?", (plan_id,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE scalp_ml_predictions
+                SET predicted_at=?, model_version=?, tp1_probability=?,
+                    tp2_probability=?, expected_r=?, confidence_adjustment=?, applied=?
+                WHERE plan_id=?
+                """,
+                values,
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO scalp_ml_predictions
+                  (predicted_at, model_version, tp1_probability, tp2_probability,
+                   expected_r, confidence_adjustment, applied, plan_id)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                values,
+            )

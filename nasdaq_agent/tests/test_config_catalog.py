@@ -28,6 +28,9 @@ def test_catalog_contains_every_runtime_setting() -> None:
     assert all(field["example"] for field in fields.values())
     assert fields["scalp.execution_enabled"]["default"] is False
     assert fields["scalp.reward_r"]["advanced"] is False
+    assert fields["scalp_ml.training_enabled"]["default"] is False
+    assert fields["scalp_ml.overlay_enabled"]["default"] is False
+    assert fields["scalp_ml.minimum_profit_factor"]["advanced"] is False
 
 
 def test_invalid_scalp_relationship_is_rejected_before_write(monkeypatch) -> None:
@@ -95,3 +98,19 @@ def test_invalid_scalp_ranges_are_rejected(monkeypatch, updates, message) -> Non
 
     assert exc_info.value.status_code == 422
     assert message in str(exc_info.value.detail)
+
+
+def test_invalid_scalp_ml_promotion_gate_is_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(config, "all", lambda: {})
+    monkeypatch.setattr(config, "set_many", lambda *args, **kwargs: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            update_config(
+                {"scalp_ml.minimum_profit_factor": 0.9},
+                _admin(),
+            )
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "profit factor" in str(exc_info.value.detail)

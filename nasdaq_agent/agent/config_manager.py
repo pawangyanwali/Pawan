@@ -98,6 +98,27 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_learn.confidence_raise_step":    lambda: 10.0,
     "scalp_learn.size_reduce_mult":         lambda: 0.50,
     "scalp_learn.action_ttl_min":           lambda: 60,
+    # Release 4 advisory ML. Disabled until an operator enables it in Settings.
+    "scalp_ml.training_enabled":             lambda: False,
+    "scalp_ml.shadow_enabled":               lambda: False,
+    "scalp_ml.overlay_enabled":              lambda: False,
+    "scalp_ml.training_interval_min":        lambda: 60,
+    "scalp_ml.training_lookback_days":       lambda: 60,
+    "scalp_ml.maximum_model_age_hours":      lambda: 168,
+    "scalp_ml.minimum_samples":              lambda: 200,
+    "scalp_ml.holdout_pct":                  lambda: 0.25,
+    "scalp_ml.minimum_selected_holdout":     lambda: 30,
+    "scalp_ml.minimum_holdout_sessions":     lambda: 2,
+    "scalp_ml.minimum_session_samples":      lambda: 5,
+    "scalp_ml.minimum_expectancy_r":         lambda: 0.05,
+    "scalp_ml.minimum_profit_factor":        lambda: 1.10,
+    "scalp_ml.minimum_session_expectancy_r": lambda: 0.0,
+    "scalp_ml.minimum_auc":                  lambda: 0.52,
+    "scalp_ml.minimum_brier_improvement":    lambda: 0.0,
+    "scalp_ml.selection_expected_r":         lambda: 0.0,
+    "scalp_ml.confidence_points_per_r":      lambda: 5.0,
+    "scalp_ml.max_confidence_raise":         lambda: 5.0,
+    "scalp_ml.max_confidence_reduction":     lambda: 15.0,
     # ── Prediction / R:R engine ────────────────────────────────────────────────
     # These control the trade-entry quality filter. All hot-reload — no restart needed.
     "prediction.min_rr":                   lambda: 1.5,    # target reward multiple (e.g. 2.0 = risk 1, reward 2); not a signal gate
