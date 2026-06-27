@@ -59,30 +59,34 @@ def init_universe_registry() -> None:
         tier2 = set(TIER2)
         with get_conn() as conn:
             conn.execute(_DDL)
-            for ticker in FULL_UNIVERSE:
-                tier = 1 if ticker in tier1 else 2 if ticker in tier2 else 3
-                conn.execute(
-                    """
-                    INSERT INTO universe_registry
-                      (ticker, tier, status, reason, source)
-                    VALUES (?, ?, 'ACTIVE', '', 'STATIC_CATALOG')
-                    ON CONFLICT (ticker) DO NOTHING
-                    """,
-                    (ticker, tier),
+            seed_rows = [
+                (
+                    ticker,
+                    1 if ticker in tier1 else 2 if ticker in tier2 else 3,
                 )
-            for ticker in INITIAL_QUARANTINE:
-                conn.execute(
-                    """
-                    UPDATE universe_registry
-                    SET status='QUARANTINED',
-                        reason='NO_USABLE_SCHWAB_1M_HISTORY',
-                        source='PRODUCTION_AUDIT_2026_06_27',
-                        last_checked_at=NOW(),
-                        consecutive_failures=GREATEST(consecutive_failures, 1)
-                    WHERE ticker=? AND manual_override=FALSE
-                    """,
-                    (ticker,),
-                )
+                for ticker in FULL_UNIVERSE
+            ]
+            conn.executemany(
+                """
+                INSERT INTO universe_registry
+                  (ticker, tier, status, reason, source)
+                VALUES (?, ?, 'ACTIVE', '', 'STATIC_CATALOG')
+                ON CONFLICT (ticker) DO NOTHING
+                """,
+                seed_rows,
+            )
+            conn.execute(
+                """
+                UPDATE universe_registry
+                SET status='QUARANTINED',
+                    reason='NO_USABLE_SCHWAB_1M_HISTORY',
+                    source='PRODUCTION_AUDIT_2026_06_27',
+                    last_checked_at=NOW(),
+                    consecutive_failures=GREATEST(consecutive_failures, 1)
+                WHERE ticker = ANY(?) AND manual_override=FALSE
+                """,
+                (list(INITIAL_QUARANTINE),),
+            )
         _initialized = True
         _publish_summary()
 
