@@ -293,7 +293,7 @@ def latest_outcomes(limit: int = 100) -> list[dict[str, Any]]:
 
 def learning_dashboard_data(
     *, context_limit: int = 100, action_limit: int = 30, outcome_limit: int = 30
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, Any]:
     """Read command-center learning data through one pooled connection."""
     init_scalp_tables()
     with get_conn(read_only=True) as conn:
@@ -315,12 +315,23 @@ def learning_dashboard_data(
         evaluations = conn.execute(
             "SELECT * FROM scalp_ml_models ORDER BY created_at DESC LIMIT 10"
         ).fetchall()
+        counts = conn.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM scalp_trade_outcomes) AS outcomes,
+              (SELECT COUNT(*) FROM scalp_context_stats) AS contexts,
+              (SELECT COUNT(*) FROM scalp_learning_actions) AS actions
+            """
+        ).fetchone()
     return {
         "contexts": [dict(row) for row in contexts],
         "recent_actions": [dict(row) for row in actions],
         "recent_outcomes": [dict(row) for row in outcomes],
         "ml_champion": dict(champion) if champion else None,
         "ml_evaluations": [dict(row) for row in evaluations],
+        "counts": dict(counts) if counts else {
+            "outcomes": 0, "contexts": 0, "actions": 0,
+        },
     }
 
 

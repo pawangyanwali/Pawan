@@ -63,6 +63,18 @@ def _dashboard_snapshot() -> dict[str, Any]:
     positions = [_enrich_position(row, prices) for row in get_open_trades()]
     today = get_today_pnl()
     budget = float(config.get("paper.budget", 50000.0))
+    configured_max_open = int(config.get("paper.max_open_trades", 10))
+    risk_max_open = int(config.get("risk.max_concurrent_trades", configured_max_open))
+    effective_max_open = min(configured_max_open, risk_max_open)
+    max_trade_pct = float(config.get("paper.max_trade_pct", 5.0))
+    max_allocated_pct = float(config.get("paper.max_allocated_pct", 40.0))
+    max_portfolio_heat_pct = float(config.get("risk.max_portfolio_heat_pct", 1.5))
+    daily_halt_usd = abs(float(config.get("paper.daily_loss_halt_usd", 300.0)))
+    daily_halt_pct = abs(float(config.get("paper.daily_loss_halt_pct", 0.25)))
+    percent_halt_usd = budget * daily_halt_pct / 100.0
+    effective_daily_halt_usd = min(
+        threshold for threshold in (daily_halt_usd, percent_halt_usd) if threshold > 0
+    ) if daily_halt_usd > 0 or percent_halt_usd > 0 else 0.0
     open_risk = sum(
         abs(float(row.get("entry_price") or 0) - float(row.get("stop") or 0))
         * int(row.get("shares_remaining") or row.get("shares") or 0)
@@ -102,7 +114,17 @@ def _dashboard_snapshot() -> dict[str, Any]:
             "allocated": round(allocated, 2),
             "allocated_pct": round(allocated / budget * 100, 2) if budget else 0.0,
             "open_positions": len(positions),
-            "max_open_positions": int(config.get("paper.max_open_trades", 10)),
+            "max_open_positions": effective_max_open,
+            "configured_max_open_positions": configured_max_open,
+            "risk_max_open_positions": risk_max_open,
+            "max_trade_pct": round(max_trade_pct, 3),
+            "max_allocated_pct": round(max_allocated_pct, 3),
+            "max_portfolio_heat_pct": round(max_portfolio_heat_pct, 3),
+            "daily_loss_halt_usd": round(daily_halt_usd, 2),
+            "daily_loss_halt_pct": round(daily_halt_pct, 3),
+            "effective_daily_loss_halt_usd": round(effective_daily_halt_usd, 2),
+            "tp1_r": round(float(config.get("scalp.tp1_r", 1.0)), 3),
+            "tp2_r": round(float(config.get("scalp.reward_r", 2.0)), 3),
             "execution_enabled": bool(config.get("scalp.execution_enabled", False)),
         },
         "learning": learning,
@@ -141,6 +163,9 @@ def _learning_snapshot() -> dict[str, Any]:
         "contexts": stats,
         "ml_champion": champion,
         "ml_evaluations": evaluations,
+        "outcome_count": int((data.get("counts") or {}).get("outcomes") or 0),
+        "context_count": int((data.get("counts") or {}).get("contexts") or 0),
+        "action_count": int((data.get("counts") or {}).get("actions") or 0),
     }
 
 

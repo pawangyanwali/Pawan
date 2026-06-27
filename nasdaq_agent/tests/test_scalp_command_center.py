@@ -97,6 +97,7 @@ def test_dashboard_snapshot_joins_plans_prices_risk_and_learning(monkeypatch):
             "contexts": [],
             "recent_actions": [],
             "recent_outcomes": [],
+            "counts": {"outcomes": 0, "contexts": 0, "actions": 0},
         },
     )
     monkeypatch.setattr(scalp_router, "_cache_value", None)
@@ -114,6 +115,11 @@ def test_dashboard_snapshot_joins_plans_prices_risk_and_learning(monkeypatch):
     assert result["positions"][0]["price_source"] == "WS_LIVE"
     assert result["risk"]["realized_pnl"] == pytest.approx(25.0)
     assert result["risk"]["open_risk"] == pytest.approx(10.0)
+    assert result["risk"]["max_open_positions"] <= result["risk"]["configured_max_open_positions"]
+    assert "max_allocated_pct" in result["risk"]
+    assert "max_portfolio_heat_pct" in result["risk"]
+    assert "effective_daily_loss_halt_usd" in result["risk"]
+    assert result["learning"]["outcome_count"] == 0
 
 
 def test_hard_learning_block_is_not_presented_as_watch():
@@ -186,6 +192,16 @@ def test_opportunity_rows_show_live_price_rsi_and_macd():
     assert "Closed 1m RSI 14 / 7 / 2" in html
     assert "p.live_rsi_14??p.rsi_14" in html
     assert "p.live_macd_hist??p.macd_hist" in html
+    assert "configured_max_open_positions" in html
+    assert "Closed scalp outcomes" in html
+    assert "No SCALP_PLAN_V1 outcomes yet" in html
+
+
+def test_bulk_history_load_uses_indexed_lateral_lookup():
+    source = (ROOT / "agent" / "historical_cache.py").read_text(encoding="utf-8")
+    assert "CROSS JOIN LATERAL" in source
+    assert "FROM unnest(%s::text[])" in source
+    assert "ROW_NUMBER() OVER (PARTITION BY ticker" not in source
 
 
 def test_scalp_learning_configuration_rejects_unsafe_ordering():

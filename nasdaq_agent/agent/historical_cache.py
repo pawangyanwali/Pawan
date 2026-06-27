@@ -163,17 +163,19 @@ def get_recent_bars_bulk(
     with get_conn() as conn:
         rows = conn.execute(
             """
-            WITH ranked AS (
-                SELECT ticker, dt, open, high, low, close, volume,
-                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY dt DESC) AS rn
+            SELECT requested.ticker, bars.dt, bars.open, bars.high, bars.low,
+                   bars.close, bars.volume
+            FROM unnest(%s::text[]) AS requested(ticker)
+            CROSS JOIN LATERAL (
+                SELECT dt, open, high, low, close, volume
                 FROM ohlcv_bars
-                WHERE interval = %s AND ticker = ANY(%s)
-            )
-            SELECT ticker, dt, open, high, low, close, volume
-            FROM ranked WHERE rn <= %s
-            ORDER BY ticker, dt ASC
+                WHERE ticker = requested.ticker AND interval = %s
+                ORDER BY dt DESC
+                LIMIT %s
+            ) AS bars
+            ORDER BY requested.ticker, bars.dt ASC
             """,
-            (interval, symbols, max(35, int(limit))),
+            (symbols, interval, max(35, int(limit))),
         ).fetchall()
 
     grouped: dict[str, list[dict]] = {}
