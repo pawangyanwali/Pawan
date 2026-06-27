@@ -50,7 +50,7 @@ The GitHub deployment performs these mandatory steps:
 2. Fail if `nasdaq-scanner` or `nasdaq-learner` still exists.
 3. Require healthy token-service, web-api, market-data, scalp-engine, and
    scalp-learner containers.
-4. Run `scripts/activate_scalp_only.py` inside scalp-engine.
+4. Run `python -m scripts.activate_scalp_only` inside scalp-engine.
 5. Activate paper execution only when the canonical snapshot is fresh, covers
    at least 400 tickers, and both new service heartbeats are fresh.
 

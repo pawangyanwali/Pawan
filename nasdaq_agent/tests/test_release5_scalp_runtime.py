@@ -88,7 +88,7 @@ def test_root_ui_and_deployment_are_scalp_only():
     assert "orphaned legacy runtime container still exists" in workflow
     assert "_svc_health scalp-engine" in workflow
     assert "_svc_health scalp-learner" in workflow
-    assert "activate_scalp_only.py" in workflow
+    assert "python -m scripts.activate_scalp_only" in workflow
 
 
 def test_runtime_controls_are_ui_catalogued():

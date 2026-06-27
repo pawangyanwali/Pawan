@@ -288,7 +288,7 @@ jobs:
               fi
 
               echo "=== Activating health-gated scalp-only paper runtime ==="
-              _dc exec -T scalp-engine python /app/scripts/activate_scalp_only.py
+              _dc exec -T scalp-engine python -m scripts.activate_scalp_only
 
               # ── Wait for watchdog (non-fatal; quick 15s start_period) ─────────
               echo "=== Waiting for watchdog to become healthy (max 1 min) ==="
