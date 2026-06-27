@@ -151,7 +151,7 @@ def test_market_data_healthcheck_uses_price_bus_coverage_thresholds():
     assert 'services.md_healthcheck' in compose
 
 
-def test_market_data_token_reload_restart_is_reachable_before_continue():
+def test_market_data_token_reload_delegates_once_before_continue():
     src = _src("services/market_data_service.py")
     tree = ast.parse(src)
     fn = next(
@@ -167,13 +167,14 @@ def test_market_data_token_reload_restart_is_reachable_before_continue():
     assert token_event_ifs
 
     body = token_event_ifs[0].body
-    start_index = next(
+    handler_index = next(
         i for i, node in enumerate(body)
-        if "_start(list(NASDAQ_TICKERS))" in ast.unparse(node)
+        if "_handle_token_event(payload)" in ast.unparse(node)
     )
     continue_index = next(i for i, node in enumerate(body) if isinstance(node, ast.Continue))
 
-    assert start_index < continue_index
+    assert handler_index < continue_index
+    assert "_start(list(NASDAQ_TICKERS))" not in ast.unparse(token_event_ifs[0])
 
 
 def test_watchdog_service_restarts_stopped_or_unhealthy_containers():

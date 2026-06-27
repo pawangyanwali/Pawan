@@ -242,6 +242,25 @@ def price_bus_health(max_age_s: float = 2.0) -> dict:
     prices.
     """
     prices = get_all_prices()
+    # The hash intentionally retains the last quote for quarantined symbols so
+    # existing positions can still be marked. Health and UI coverage, however,
+    # must be measured against the eligible runtime universe only.
+    client = _get_client()
+    if client is not None:
+        try:
+            raw_eligible = client.get("universe:eligible")
+            if raw_eligible:
+                eligible = {
+                    str(ticker).upper()
+                    for ticker in json.loads(raw_eligible)
+                    if ticker
+                }
+                prices = {
+                    ticker: quote for ticker, quote in prices.items()
+                    if ticker.upper() in eligible
+                }
+        except Exception as exc:
+            logger.debug("[Valkey] eligible-universe health filter skipped: %s", exc)
     now = time.time()
     total = len(prices)
     if total == 0:

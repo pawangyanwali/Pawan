@@ -44,6 +44,85 @@ _last_token_reload_at: dict[str, float] = {}
 _bar_hydration_status: dict = {"status": "STARTING", "updated_at": 0.0}
 
 
+def _discover_universe_replacements() -> int:
+    """Promote strictly validated NASDAQ movers until the eligible target is met."""
+    try:
+        from agent.broker.schwab_market_data import (
+            fetch_full_quotes,
+            fetch_price_history_batch_async,
+            fetch_top_movers_symbols,
+        )
+        from agent.ticker_universe import FULL_UNIVERSE
+        from agent.universe_registry import (
+            get_universe_registry_summary,
+            promote_replacement,
+        )
+
+        summary = get_universe_registry_summary()
+        target = max(400, int(os.getenv("UNIVERSE_TARGET_ELIGIBLE", "450")))
+        slots = max(0, target - int(summary.get("eligible_total") or 0))
+        if slots <= 0:
+            return 0
+        known = set(FULL_UNIVERSE)
+        known.update(summary.get("eligible_tickers") or [])
+        known.update(
+            str(item.get("ticker") or "").upper()
+            for item in summary.get("quarantined") or []
+        )
+        movers = fetch_top_movers_symbols(n=min(40, slots * 2))
+        candidates = [
+            str(ticker).upper() for ticker in movers
+            if ticker and str(ticker).upper() not in known
+        ][:max(1, slots * 2)]
+        if not candidates:
+            return 0
+
+        quotes = fetch_full_quotes(candidates)
+        frames = fetch_price_history_batch_async(
+            candidates,
+            interval="1min",
+            outputsize=500,
+            extended_hours=True,
+            background=True,
+        )
+        promoted = 0
+        for ticker in candidates:
+            if promoted >= slots:
+                break
+            frame = frames.get(ticker)
+            quote = quotes.get(ticker) or {}
+            if frame is None or frame.empty:
+                continue
+            volume_column = next(
+                (column for column in frame.columns if str(column).lower() == "volume"),
+                None,
+            )
+            if volume_column is None:
+                continue
+            volume = frame[volume_column]
+            positive = frame[volume > 0]
+            history_bars = len(positive)
+            estimated_daily_volume = float(positive[volume_column].tail(390).sum())
+            quote_price = float(quote.get("last") or quote.get("mark") or 0.0)
+            if promote_replacement(
+                ticker,
+                average_daily_volume=estimated_daily_volume,
+                history_bars=history_bars,
+                quote_price=quote_price,
+                listing_verified=True,
+                source="SCHWAB_NASDAQ_MOVERS",
+            ):
+                promoted += 1
+        if promoted:
+            _log.warning(
+                "Universe registry promoted %d validated replacement(s)", promoted
+            )
+        return promoted
+    except Exception as exc:
+        _log.warning("Universe replacement discovery skipped: %s", exc)
+        return 0
+
+
 # ── Market data startup ───────────────────────────────────────────────────────
 
 def _start(tickers: list[str]) -> None:
@@ -144,7 +223,9 @@ def _handle_token_event(payload: dict) -> None:
     if generation:
         _last_token_generation[app] = generation
 
-    from config import NASDAQ_TICKERS
+    from agent.universe_registry import get_runtime_universe
+
+    runtime_tickers = get_runtime_universe()
 
     if app == "trader":
         from agent.broker.schwab_auth import load_stored_tokens
@@ -167,7 +248,7 @@ def _handle_token_event(payload: dict) -> None:
             "[token_reload] Trader token loaded (generation=%s); starting WS streamer",
             generation or "-",
         )
-        start_streamer(list(NASDAQ_TICKERS))
+        start_streamer(runtime_tickers)
         return
 
     from agent.broker.schwab_auth import load_stored_md_tokens
@@ -190,7 +271,7 @@ def _handle_token_event(payload: dict) -> None:
         generation or "-",
     )
     start_md_poller(
-        list(NASDAQ_TICKERS),
+        runtime_tickers,
         interval=1.0,
         parallel_batches=2,
         startup_delay_s=delay,
@@ -237,12 +318,6 @@ def _token_reload_loop() -> None:
                             raw = raw.decode()
                         payload = json.loads(raw)
                         _handle_token_event(payload)
-                        _log.info("[token_reload] Token refresh detected - restarting data sources")
-                        try:
-                            from config import NASDAQ_TICKERS
-                            _start(list(NASDAQ_TICKERS))
-                        except Exception as exc:
-                            _log.warning("[token_reload] Restart after token refresh failed: %s", exc)
                     except Exception as exc:
                         _log.warning("[token_reload] Token event handling failed: %s", exc)
                     continue
@@ -287,6 +362,14 @@ def _bar_hydration_loop(tickers: list[str]) -> None:
             "updated_at": time.time(),
             **metrics,
         }
+        try:
+            from agent.scalp.bar_hydration import missing_valkey_history
+            from agent.universe_registry import record_history_audit
+
+            unresolved = set(missing_valkey_history(targets))
+            record_history_audit(targets, set(targets) - unresolved)
+        except Exception as exc:
+            _log.debug("[ScalpBars] universe history audit failed: %s", exc)
         return metrics
 
     last_session = ""
@@ -410,10 +493,20 @@ def _health_loop() -> None:
 
 def main() -> None:
     import threading
-    from config import NASDAQ_TICKERS
+    from agent.universe_registry import get_runtime_universe
 
     _log.info("=== market_data_service starting ===")
-    _start(list(NASDAQ_TICKERS))
+    try:
+        from agent.broker.schwab_auth import load_stored_md_tokens
+        if load_stored_md_tokens(schedule_refresh=False):
+            _discover_universe_replacements()
+    except Exception as exc:
+        _log.warning("Universe replacement bootstrap skipped: %s", exc)
+    runtime_tickers = get_runtime_universe()
+    _log.info(
+        "Universe registry selected %d eligible tickers", len(runtime_tickers)
+    )
+    _start(runtime_tickers)
 
     from agent.service_heartbeat import start_service_heartbeat
     start_service_heartbeat(
@@ -427,7 +520,7 @@ def main() -> None:
     threading.Thread(target=_publish_token_status_loop,    daemon=True, name="md-token-status").start()
     threading.Thread(target=_token_reload_loop,            daemon=True, name="md-token-reload").start()
     threading.Thread(target=_bar_hydration_loop,           daemon=True, name="ScalpBarHydrator",
-                     args=(list(NASDAQ_TICKERS),)).start()
+                     args=(runtime_tickers,)).start()
 
     _log.info("Market data running — waiting for SIGTERM/SIGINT …")
     _runner.register_signals()

@@ -202,6 +202,7 @@ services:
     environment:
       <<: [*db-env, *valkey-env, *schwab-env, *log-env]
       NASDAQ_MD_STARTUP_DELAY_S: ${NASDAQ_MD_STARTUP_DELAY_S:-10}
+      UNIVERSE_TARGET_ELIGIBLE: ${UNIVERSE_TARGET_ELIGIBLE:-450}
     deploy:
       resources:
         limits:

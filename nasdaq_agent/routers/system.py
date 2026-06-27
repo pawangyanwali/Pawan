@@ -354,13 +354,19 @@ async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
 async def universe_status():
     """Ticker universe status: total tracked, active this cycle, tier breakdown."""
     try:
-        from agent.ticker_universe import get_universe_manager, TIER1, TIER2, TIER3, FULL_UNIVERSE
-        mgr = get_universe_manager()
-        active = mgr.get_active_tickers()
+        from agent.ticker_universe import TIER1, TIER2, TIER3, FULL_UNIVERSE
+        from agent.universe_registry import get_universe_registry_summary
+
+        registry = get_universe_registry_summary()
+        active = registry["eligible_tickers"]
         active_set = set(active)
         return {
             "universe_total":  len(FULL_UNIVERSE),
             "active_this_cycle": len(active),
+            "eligible_total": registry["eligible_total"],
+            "quarantined_total": registry["quarantined_total"],
+            "candidate_total": registry["candidate_total"],
+            "quarantined": registry["quarantined"],
             "tier1_count":     len(TIER1),
             "tier2_count":     len(TIER2),
             "tier3_count":     len(TIER3),

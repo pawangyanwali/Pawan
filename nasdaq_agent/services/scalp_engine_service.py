@@ -16,14 +16,15 @@ def main() -> int:
     from agent.scalp.runtime import ScalpRuntime
     from agent.scalp.store import init_scalp_tables
     from agent.service_heartbeat import start_service_heartbeat
-    from agent.ticker_universe import FULL_UNIVERSE
+    from agent.universe_registry import get_runtime_universe
 
-    _log.info("=== scalp_engine_service starting (%d tickers) ===", len(FULL_UNIVERSE))
+    tickers = get_runtime_universe()
+    _log.info("=== scalp_engine_service starting (%d eligible tickers) ===", len(tickers))
     config.load()
     config.seed_defaults()
     config.start_listener(_runner)
     init_scalp_tables()
-    runtime = ScalpRuntime(FULL_UNIVERSE)
+    runtime = ScalpRuntime(tickers)
     start_service_heartbeat(
         "scalp-engine",
         _runner,
