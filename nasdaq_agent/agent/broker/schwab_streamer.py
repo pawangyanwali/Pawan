@@ -243,7 +243,12 @@ def _accumulate_one_minute_bar_locked(
         current["volume"] = max(
             0.0, float(current.get("volume") or 0.0) + volume_delta
         )
-    return completed
+    # REST quote polling continues on weekends and outside equity sessions.
+    # Repeated snapshots can advance the wall-clock minute without a trade;
+    # those are not market bars and would poison VWAP/RVOL with zero volume.
+    if completed and float(completed.get("volume") or 0.0) > 0:
+        return completed
+    return None
 
 
 def _dispatch_completed_bars(bars: list[tuple[str, dict]]) -> None:

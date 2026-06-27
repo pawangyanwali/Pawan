@@ -6,7 +6,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from agent.scalp.bar_hydration import frame_is_usable, publish_frames_to_valkey
+from agent.scalp.bar_feed import _frame_from_payload
+from agent.scalp.bar_hydration import (
+    _normalise_frame,
+    frame_is_usable,
+    publish_frames_to_valkey,
+)
 from agent.scalp.indicators import calculate_one_minute_indicators
 
 
@@ -55,12 +60,46 @@ def test_level_one_builder_produces_real_ohlcv_from_cumulative_volume():
     assert streamer._forming_bars["AAPL"]["volume"] == pytest.approx(10.0)
 
 
+def test_level_one_builder_does_not_emit_weekend_quote_snapshots_as_bars():
+    import agent.broker.schwab_streamer as streamer
+
+    streamer._forming_bars.clear()
+    streamer._last_cumulative_volume.clear()
+    with streamer._lock:
+        assert streamer._accumulate_one_minute_bar_locked(
+            "AAPL", {"last": 100.0, "volume": 1000}, now=60.1
+        ) is None
+        completed = streamer._accumulate_one_minute_bar_locked(
+            "AAPL", {"last": 100.0, "volume": 1000}, now=120.1
+        )
+    assert completed is None
+
+
 def test_history_requires_real_volume_and_enough_bars():
     assert frame_is_usable(_frame()) is True
     no_volume = _frame()
     no_volume["Volume"] = 0.0
     assert frame_is_usable(no_volume) is False
     assert frame_is_usable(_frame(20)) is False
+
+
+def test_zero_volume_polling_rows_are_removed_at_hydration_and_read_boundaries():
+    frame = _frame()
+    frame.loc[frame.index[-1], "Volume"] = 0.0
+    assert len(_normalise_frame(frame)) == len(frame) - 1
+
+    payload = [
+        {
+            "time_ms": int(index.timestamp() * 1000),
+            "open": row.Open,
+            "high": row.High,
+            "low": row.Low,
+            "close": row.Close,
+            "volume": row.Volume,
+        }
+        for index, row in frame.iterrows()
+    ]
+    assert len(_frame_from_payload(payload)) == len(frame) - 1
 
 
 class _Pipe:

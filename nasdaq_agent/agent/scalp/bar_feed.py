@@ -82,6 +82,7 @@ def _frame_from_payload(payload: list[Any] | None) -> pd.DataFrame:
     frame = frame.drop(columns=["timestamp"])
     frame = frame[~frame.index.isna()]
     frame = frame[(frame[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
+    frame = frame[frame["Volume"] > 0]
     return frame[~frame.index.duplicated(keep="last")].sort_index()
 
 

@@ -161,6 +161,9 @@ def _normalise_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result.index = index
     result = result[~result.index.isna()]
     result = result[(result[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
+    # A zero-volume row produced by quote polling is not a completed trade bar.
+    # Excluding it also repairs already-persisted weekend/off-hours pollution.
+    result = result[result["Volume"] > 0]
     return result[["Open", "High", "Low", "Close", "Volume"]].sort_index()
 
 
