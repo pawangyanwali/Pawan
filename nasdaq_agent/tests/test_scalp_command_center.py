@@ -145,6 +145,26 @@ def test_closed_market_staleness_is_not_reported_as_data_loss():
     assert scalp_router._plan_state(plan) == "DATA_GAP"
 
 
+def test_context_unavailability_is_blocked_not_mislabeled_as_market_data_gap():
+    plan = {
+        "session": "REGULAR",
+        "side": "LONG",
+        "valid": False,
+        "blockers": ["CONTEXT_DATA_MISSING_OR_STALE"],
+    }
+    assert scalp_router._plan_state(plan) == "BLOCKED"
+
+
+def test_rest_fallback_is_a_data_gap_during_an_active_session():
+    plan = {
+        "session": "REGULAR",
+        "side": "LONG",
+        "valid": False,
+        "blockers": ["REST_FALLBACK_NOT_TRADABLE"],
+    }
+    assert scalp_router._plan_state(plan) == "DATA_GAP"
+
+
 def test_plan_live_telemetry_uses_fresh_quote_and_hides_ema_state(monkeypatch):
     now = datetime.now(timezone.utc).timestamp()
     monkeypatch.setattr(scalp_router.time, "time", lambda: now)

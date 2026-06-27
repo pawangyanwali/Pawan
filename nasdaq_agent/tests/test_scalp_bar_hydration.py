@@ -145,6 +145,24 @@ def test_vwap_and_rvol_reset_at_regular_session_open():
     assert pd.isna(regular_open["vol_ratio"])
 
 
+def test_rvol_uses_prior_same_session_bars_across_trading_days():
+    index = pd.to_datetime(
+        [f"2026-06-{day:02d}T20:00:00Z" for day in range(10, 22)]
+    )
+    frame = pd.DataFrame(
+        {
+            "Open": [100.0] * 12,
+            "High": [100.1] * 12,
+            "Low": [99.9] * 12,
+            "Close": [100.0] * 12,
+            "Volume": [1000.0] * 11 + [2000.0],
+        },
+        index=index,
+    )
+    enriched = calculate_one_minute_indicators(frame)
+    assert enriched.iloc[-1]["vol_ratio"] == pytest.approx(2.0)
+
+
 def test_production_bar_contract_is_durable_and_self_healing():
     streamer = (ROOT / "agent" / "broker" / "schwab_streamer.py").read_text(encoding="utf-8")
     service = (ROOT / "services" / "market_data_service.py").read_text(encoding="utf-8")

@@ -13,6 +13,7 @@ from .indicators import calculate_one_minute_indicators, indicator_snapshot_from
 from .learning import apply_context_gate
 from .ml_overlay import apply_ml_overlay
 from .models import IndicatorSnapshot, ScalpSignalConfig, ScalpSignalPlan, SignalSide
+from .quality import has_market_data_gap
 from .quotes import quote_snapshot_from_payload
 
 logger = logging.getLogger(__name__)
@@ -261,11 +262,7 @@ def _add_blocker(plan: ScalpSignalPlan, blocker: str) -> None:
 
 
 def _has_actionable_data_gap(blockers: list[str], session: str) -> bool:
-    if any("MISSING" in blocker for blocker in blockers):
-        return True
-    if str(session).upper() == "CLOSED":
-        return False
-    return any("STALE" in blocker or "SOURCE" in blocker for blocker in blockers)
+    return has_market_data_gap(blockers, session)
 
 
 def _apply_market_context(plan: ScalpSignalPlan, context: dict[str, Any], config: Any) -> None:

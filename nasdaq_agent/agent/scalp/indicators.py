@@ -52,13 +52,19 @@ def calculate_one_minute_indicators(frame: Any) -> Any:
     if getattr(local_index, "tz", None) is None:
         local_index = local_index.tz_localize("UTC")
     local_index = local_index.tz_convert("America/New_York")
+    session_names = pd.Series(
+        [_volume_session(stamp.hour * 60 + stamp.minute) for stamp in local_index],
+        index=result.index,
+    )
     session_keys = pd.Series(
-        [f"{stamp.date()}:{_volume_session(stamp.hour * 60 + stamp.minute)}" for stamp in local_index],
+        [f"{stamp.date()}:{name}" for stamp, name in zip(local_index, session_names)],
         index=result.index,
     )
     cumulative_volume = volume.groupby(session_keys).cumsum()
     result["vwap"] = (typical * volume).groupby(session_keys).cumsum() / cumulative_volume.replace(0.0, float("nan"))
-    baseline = volume.groupby(session_keys).transform(
+    # RVOL compares with prior bars from the same market session across days.
+    # Grouping by date made the first ten bars of every PM/AH session unusable.
+    baseline = volume.groupby(session_names).transform(
         lambda values: values.shift(1).rolling(20, min_periods=10).mean()
     )
     result["vol_ratio"] = volume / baseline.replace(0.0, float("nan"))

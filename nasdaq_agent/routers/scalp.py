@@ -239,18 +239,16 @@ _INDICATOR_STATE_FIELDS = (
 
 
 def _plan_state(plan: dict[str, Any]) -> str:
+    from agent.scalp.quality import has_market_data_gap
+
     blockers = [str(item) for item in plan.get("blockers") or []]
-    if any("MISSING" in item for item in blockers):
-        return "DATA_GAP"
-    if str(plan.get("session") or "").upper() != "CLOSED" and any(
-        "STALE" in item or "SOURCE" in item for item in blockers
-    ):
+    if has_market_data_gap(blockers, str(plan.get("session") or "")):
         return "DATA_GAP"
     if bool(plan.get("valid")) and plan.get("side") in {"LONG", "SHORT"}:
         return "ACTIONABLE"
     hard_prefixes = (
         "SESSION_", "EARNINGS_", "MACRO_", "LEARNING_", "BRACKET_",
-        "REQUIRED_", "SPREAD_", "RVOL_", "BLOCKED_BY_",
+        "REQUIRED_", "SPREAD_", "RVOL_", "BLOCKED_BY_", "CONTEXT_",
     )
     if blockers and any(item.startswith(hard_prefixes) for item in blockers):
         return "BLOCKED"
