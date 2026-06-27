@@ -86,7 +86,7 @@ _DEFAULTS: dict[str, Any] = {
     "scalp.block_when_risk_capped":        lambda: True,
     "scalp_runtime.cycle_interval_s":       lambda: 5.0,
     "scalp_runtime.workers":                lambda: 8,
-    "scalp_runtime.bar_lookback":           lambda: 120,
+    "scalp_runtime.bar_lookback":           lambda: 500,
     "scalp_runtime.blocked_sessions":       lambda: [
         "CLOSED", "RESTRICTED", "CLOSING_CAUTION", "HARD_CLOSE"
     ],

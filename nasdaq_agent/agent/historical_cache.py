@@ -85,7 +85,11 @@ def _upsert_bars(ticker: str, interval: str, df: pd.DataFrame) -> int:
     sql = (
         "INSERT INTO ohlcv_bars (ticker, interval, dt, open, high, low, close, volume) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (ticker, interval, dt) DO NOTHING"
+        "ON CONFLICT (ticker, interval, dt) DO UPDATE SET "
+        "open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, "
+        "close = EXCLUDED.close, "
+        "volume = CASE WHEN EXCLUDED.volume > 0 THEN EXCLUDED.volume "
+        "ELSE ohlcv_bars.volume END"
     )
     with _lock:
         with get_conn() as conn:
@@ -147,6 +151,44 @@ def get_bars(ticker: str, interval: str, min_bars: int = 100) -> pd.DataFrame:
     df.index.name = "datetime"
     df.columns = ["open", "high", "low", "close", "volume"]
     return df
+
+
+def get_recent_bars_bulk(
+    tickers: list[str], interval: str = "1min", limit: int = 500
+) -> dict[str, pd.DataFrame]:
+    """Load the newest bars for many tickers in one PostgreSQL round trip."""
+    symbols = [str(ticker).upper() for ticker in dict.fromkeys(tickers) if ticker]
+    if not symbols:
+        return {}
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+                SELECT ticker, dt, open, high, low, close, volume,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY dt DESC) AS rn
+                FROM ohlcv_bars
+                WHERE interval = %s AND ticker = ANY(%s)
+            )
+            SELECT ticker, dt, open, high, low, close, volume
+            FROM ranked WHERE rn <= %s
+            ORDER BY ticker, dt ASC
+            """,
+            (interval, symbols, max(35, int(limit))),
+        ).fetchall()
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        item = dict(row)
+        grouped.setdefault(str(item.pop("ticker")).upper(), []).append(item)
+    result: dict[str, pd.DataFrame] = {}
+    for ticker, items in grouped.items():
+        frame = pd.DataFrame(items)
+        frame["dt"] = pd.to_datetime(frame["dt"], utc=True, errors="coerce")
+        frame = frame.dropna(subset=["dt"]).set_index("dt")
+        frame.index.name = "datetime"
+        frame.columns = ["Open", "High", "Low", "Close", "Volume"]
+        result[ticker] = frame
+    return result
 
 
 def cache_stats() -> dict:

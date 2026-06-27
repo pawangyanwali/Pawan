@@ -48,12 +48,31 @@ def calculate_one_minute_indicators(frame: Any) -> Any:
     result["atr_14"] = true_range.ewm(alpha=1.0 / 14.0, adjust=False, min_periods=14).mean()
 
     typical = (high + low + close) / 3.0
-    local_dates = result.index.tz_convert("America/New_York").date
-    cumulative_volume = volume.groupby(local_dates).cumsum()
-    result["vwap"] = (typical * volume).groupby(local_dates).cumsum() / cumulative_volume.replace(0.0, float("nan"))
-    baseline = volume.shift(1).rolling(20, min_periods=10).mean()
+    local_index = result.index
+    if getattr(local_index, "tz", None) is None:
+        local_index = local_index.tz_localize("UTC")
+    local_index = local_index.tz_convert("America/New_York")
+    session_keys = pd.Series(
+        [f"{stamp.date()}:{_volume_session(stamp.hour * 60 + stamp.minute)}" for stamp in local_index],
+        index=result.index,
+    )
+    cumulative_volume = volume.groupby(session_keys).cumsum()
+    result["vwap"] = (typical * volume).groupby(session_keys).cumsum() / cumulative_volume.replace(0.0, float("nan"))
+    baseline = volume.groupby(session_keys).transform(
+        lambda values: values.shift(1).rolling(20, min_periods=10).mean()
+    )
     result["vol_ratio"] = volume / baseline.replace(0.0, float("nan"))
     return result
+
+
+def _volume_session(minute_of_day: int) -> str:
+    if 4 * 60 <= minute_of_day < 9 * 60 + 30:
+        return "PRE_MARKET"
+    if 9 * 60 + 30 <= minute_of_day < 16 * 60:
+        return "REGULAR"
+    if 16 * 60 <= minute_of_day <= 20 * 60:
+        return "AFTER_HOURS"
+    return "CLOSED"
 
 
 def indicator_snapshot_from_frame(

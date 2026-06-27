@@ -42,7 +42,7 @@ class ScalpRuntime:
         contexts = get_context_snapshots(self.tickers)
         frames, bar_errors = load_one_minute_frames(
             self.tickers,
-            limit=max(40, int(config.get("scalp_runtime.bar_lookback", 120))),
+            limit=max(390, int(config.get("scalp_runtime.bar_lookback", 500))),
         )
         signal_config = ScalpSignalConfig.from_runtime(config)
         workers = max(1, min(16, int(config.get("scalp_runtime.workers", 8))))
@@ -122,7 +122,7 @@ class ScalpRuntime:
         valid_count = sum(1 for plan in plans_by_ticker.values() if plan.valid)
         data_gap_count = sum(
             1 for plan in plans_by_ticker.values()
-            if any("MISSING" in blocker or "STALE" in blocker for blocker in plan.blockers)
+            if _has_actionable_data_gap(plan.blockers, session)
         )
         elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
         meta = {
@@ -258,6 +258,14 @@ def _add_blocker(plan: ScalpSignalPlan, blocker: str) -> None:
         plan.blockers.append(blocker)
     plan.valid = False
     plan.invalid_reason = plan.blockers[0]
+
+
+def _has_actionable_data_gap(blockers: list[str], session: str) -> bool:
+    if any("MISSING" in blocker for blocker in blockers):
+        return True
+    if str(session).upper() == "CLOSED":
+        return False
+    return any("STALE" in blocker or "SOURCE" in blocker for blocker in blockers)
 
 
 def _apply_market_context(plan: ScalpSignalPlan, context: dict[str, Any], config: Any) -> None:

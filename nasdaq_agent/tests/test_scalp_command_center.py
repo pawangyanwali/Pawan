@@ -126,6 +126,19 @@ def test_hard_learning_block_is_not_presented_as_watch():
     ) == "BLOCKED"
 
 
+def test_closed_market_staleness_is_not_reported_as_data_loss():
+    plan = {
+        "session": "CLOSED",
+        "side": "NONE",
+        "valid": False,
+        "blockers": ["QUOTE_STALE", "INDICATOR_BAR_STALE", "SESSION_CLOSED_BLOCKED"],
+    }
+    assert scalp_router._plan_state(plan) == "BLOCKED"
+    assert scalp_router._plan_reason(plan) == "MARKET_CLOSED_LAST_SESSION_DATA"
+    plan["blockers"].append("VWAP_MISSING")
+    assert scalp_router._plan_state(plan) == "DATA_GAP"
+
+
 def test_plan_live_telemetry_uses_fresh_quote_and_hides_ema_state(monkeypatch):
     now = datetime.now(timezone.utc).timestamp()
     monkeypatch.setattr(scalp_router.time, "time", lambda: now)
@@ -199,3 +212,23 @@ def test_scalp_learning_configuration_rejects_unsafe_ordering():
     invalid = dict(values, **{"scalp_learn.size_reduce_mult": 1.2})
     with pytest.raises(ValueError, match="no greater than 1"):
         _validate_scalp_learning(invalid)
+
+
+def test_scalp_runtime_rejects_truncated_session_history(monkeypatch):
+    from fastapi import HTTPException
+    import routers.config_router as config_router
+
+    class Config:
+        def all(self): return {}
+        def set_many(self, *_args, **_kwargs): raise AssertionError("must validate first")
+
+    import agent.config_manager as manager
+    monkeypatch.setattr(manager, "config", Config())
+    with pytest.raises(HTTPException, match="at least 390"):
+        import asyncio
+        asyncio.run(
+            config_router.update_config(
+                {"scalp_runtime.bar_lookback": 120},
+                user=type("User", (), {"username": "test"})(),
+            )
+        )

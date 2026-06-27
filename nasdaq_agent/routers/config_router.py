@@ -196,6 +196,16 @@ async def update_config(
                 detail=f"Invalid scalp ML configuration: {exc}",
             ) from exc
 
+    if "scalp_runtime.bar_lookback" in updates:
+        try:
+            if int(updates["scalp_runtime.bar_lookback"]) < 390:
+                raise ValueError("must be at least 390 bars for full-session VWAP")
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid scalp runtime configuration: {exc}",
+            ) from exc
+
     use_atr_stops = bool(
         updates.get(
             "prediction.use_atr_stops",

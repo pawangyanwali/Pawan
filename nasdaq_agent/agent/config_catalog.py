@@ -181,8 +181,8 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
     ),
     "scalp_runtime.bar_lookback": (
         "One-minute bar lookback",
-        "Closed one-minute bars used for RSI, MACD, ATR, VWAP, RVOL, and local structure.",
-        "120 supplies two hours of recent intraday evidence.",
+        "Closed one-minute OHLCV bars retained for RSI, MACD, ATR, session-reset VWAP, RVOL, and local structure. Values below 390 are rejected because they cannot represent a complete regular session.",
+        "500 preserves a full 390-minute regular session plus indicator warm-up bars.",
     ),
     "scalp_runtime.blocked_sessions": (
         "Blocked entry sessions",

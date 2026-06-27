@@ -12,7 +12,7 @@ Keys migrated (Valkey is still the live-bus; PostgreSQL is the source of truth):
 
 Keys that stay Valkey-only (high-frequency streaming / pub-sub only):
   md:prices            — 3.3 Hz HASH + pub/sub fan-out
-  md:1m:{ticker}       — append-only 1-min candle LISTs, 2 h TTL
+  md:1m:{ticker}       — rolling 1-min OHLCV LISTs, seven-day TTL
   scan:notify          — lightweight pub/sub wake-up trigger
   schwab:tokens_refreshed — pub/sub OAuth trigger
 

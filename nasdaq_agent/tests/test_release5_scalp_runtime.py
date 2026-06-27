@@ -136,6 +136,7 @@ def test_runtime_controls_are_ui_catalogued():
         assert key in fields
         assert fields[key]["advanced"] is False
         assert fields[key]["description"]
+    assert fields["scalp_runtime.bar_lookback"]["default"] == 500
 
 
 def test_runtime_publishes_every_ticker_even_when_one_has_no_bars(monkeypatch):

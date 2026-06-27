@@ -215,7 +215,11 @@ _INDICATOR_STATE_FIELDS = (
 
 def _plan_state(plan: dict[str, Any]) -> str:
     blockers = [str(item) for item in plan.get("blockers") or []]
-    if any("MISSING" in item or "STALE" in item or "SOURCE" in item for item in blockers):
+    if any("MISSING" in item for item in blockers):
+        return "DATA_GAP"
+    if str(plan.get("session") or "").upper() != "CLOSED" and any(
+        "STALE" in item or "SOURCE" in item for item in blockers
+    ):
         return "DATA_GAP"
     if bool(plan.get("valid")) and plan.get("side") in {"LONG", "SHORT"}:
         return "ACTIONABLE"
@@ -231,6 +235,8 @@ def _plan_state(plan: dict[str, Any]) -> str:
 
 
 def _plan_reason(plan: dict[str, Any]) -> str:
+    if str(plan.get("session") or "").upper() == "CLOSED":
+        return "MARKET_CLOSED_LAST_SESSION_DATA"
     if plan.get("valid"):
         reasons = plan.get("reasons") or []
         return str(reasons[0] if reasons else "VALID_SETUP")

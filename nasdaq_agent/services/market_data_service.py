@@ -6,14 +6,14 @@ Responsibilities:
   1. Maintain the Schwab WebSocket streamer connection.
   2. Run the REST MD poller as fallback / supplement.
   3. Publish every price update to Valkey (md:prices hash + pub/sub).
-  4. Publish 1-min candles to Valkey (md:1m:{ticker} lists) on each bar close
-     so the scanner container can read them via data_fetcher Tier A½.
+  4. Hydrate complete 1-min OHLCV history, then keep it current from
+     LEVELONE price and cumulative-volume updates.
   5. Publish streamer/poller status to Valkey (market-data:status, 15s cadence)
      so the web-api Infrastructure panel shows accurate state.
 
 Interface contract:
   WRITES  Valkey md:prices          — spot quotes hash + pub/sub (~300 ms)
-  WRITES  Valkey md:1m:{ticker}     — Redis LIST of last 200 1-min candles
+  WRITES  Valkey md:1m:{ticker}     — Redis LIST of last 500 1-min candles
   WRITES  Valkey market-data:status — JSON status blob (TTL 60s, every 15s)
 
 Environment variables:
@@ -41,6 +41,7 @@ _log    = configure_logging("market-data")
 _runner = ServiceRunner("market-data")
 _last_token_generation: dict[str, int] = {}
 _last_token_reload_at: dict[str, float] = {}
+_bar_hydration_status: dict = {"status": "STARTING", "updated_at": 0.0}
 
 
 # ── Market data startup ───────────────────────────────────────────────────────
@@ -253,30 +254,88 @@ def _token_reload_loop() -> None:
 
 # ── Bar-history gap filler ────────────────────────────────────────────────────
 
-def _bar_accumulator_loop(tickers: list[str]) -> None:
-    """
-    Fill ohlcv_bars for any ticker that has fewer bars than the training
-    minimum so ML retrain never hits Schwab REST cold.
+def _bar_hydration_loop(tickers: list[str]) -> None:
+    """Keep the shared scalp bar contract warm from PG and Schwab history."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    Waits 120 s at startup so the WebSocket streamer and MD poller finish
-    their own initialisation before we add background REST load.
-    Repeats every 24 h so non-streamed tickers stay current.
-    """
-    _log.info(
-        "[BarAccumulator] Starting — will fill 1-min/15-min/daily gaps for %d tickers",
-        len(tickers),
+    from agent.market_hours import get_session
+    from agent.scalp.bar_hydration import (
+        hydrate_one_minute_history,
+        missing_valkey_history,
     )
-    time.sleep(120)
+
+    def hydrate(targets, **kwargs):
+        global _bar_hydration_status
+        _bar_hydration_status = {
+            "status": "RUNNING",
+            "requested": len(targets),
+            "updated_at": time.time(),
+        }
+        try:
+            metrics = hydrate_one_minute_history(targets, **kwargs)
+        except Exception as exc:
+            _bar_hydration_status = {
+                "status": "FAILED",
+                "requested": len(targets),
+                "error": str(exc)[:240],
+                "updated_at": time.time(),
+            }
+            raise
+        _bar_hydration_status = {
+            "status": "READY" if metrics.get("unresolved", 0) == 0 else "DEGRADED",
+            "updated_at": time.time(),
+            **metrics,
+        }
+        return metrics
+
+    last_session = ""
+    last_nightly_refresh = None
+    _runner._stop.wait(5.0)
 
     while not _runner.stopped:
         try:
-            from agent.historical_cache import fill_history_gaps
-            _log.info("[BarAccumulator] Running fill_history_gaps for all intervals…")
-            for _iv, _out, _min in [("1min", 3900, 200), ("15min", 5000, 200), ("1day", 500, 100)]:
-                fill_history_gaps(tickers, interval=_iv, min_bars=_min, outputsize=_out)
+            session = str(get_session() or "CLOSED").upper()
+            active = session != "CLOSED"
+            session_opened = active and last_session == "CLOSED"
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            nightly_due = (
+                not active
+                and now_et.hour >= 20
+                and last_nightly_refresh != now_et.date()
+            )
+            missing = missing_valkey_history(tickers)
+            if not last_session or session_opened:
+                targets = tickers
+                hydrate(
+                    targets,
+                    fetch_missing=True,
+                    force_refresh=nightly_due,
+                    require_fresh=active,
+                )
+            elif missing:
+                _log.warning("[ScalpBars] Repairing %d missing Valkey histories", len(missing))
+                hydrate(missing, fetch_missing=active, require_fresh=active)
+
+            if nightly_due:
+                if last_session:
+                    hydrate(tickers, fetch_missing=True, force_refresh=True)
+                from agent.historical_cache import fill_history_gaps
+                for interval, outputsize, minimum in (
+                    ("15min", 5000, 200),
+                    ("1day", 500, 100),
+                ):
+                    fill_history_gaps(
+                        tickers,
+                        interval=interval,
+                        min_bars=minimum,
+                        outputsize=outputsize,
+                    )
+                last_nightly_refresh = now_et.date()
+            last_session = session
         except Exception as exc:
-            _log.warning("[BarAccumulator] error: %s", exc)
-        time.sleep(86400)
+            _log.warning("[ScalpBars] hydration cycle failed: %s", exc)
+        _runner._stop.wait(60.0)
 
 
 # ── Token status publisher ────────────────────────────────────────────────────
@@ -357,13 +416,17 @@ def main() -> None:
     _start(list(NASDAQ_TICKERS))
 
     from agent.service_heartbeat import start_service_heartbeat
-    start_service_heartbeat("market-data", _runner)
+    start_service_heartbeat(
+        "market-data",
+        _runner,
+        extra=lambda: {"bar_hydration": dict(_bar_hydration_status)},
+    )
 
     threading.Thread(target=_health_loop,                  daemon=True, name="md-health").start()
     threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="md-streamer-status").start()
     threading.Thread(target=_publish_token_status_loop,    daemon=True, name="md-token-status").start()
     threading.Thread(target=_token_reload_loop,            daemon=True, name="md-token-reload").start()
-    threading.Thread(target=_bar_accumulator_loop,         daemon=True, name="BarAccumulator",
+    threading.Thread(target=_bar_hydration_loop,           daemon=True, name="ScalpBarHydrator",
                      args=(list(NASDAQ_TICKERS),)).start()
 
     _log.info("Market data running — waiting for SIGTERM/SIGINT …")

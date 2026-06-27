@@ -12,8 +12,7 @@ Why this matters (thinking like a 40-year trader):
     single most predictive real-time directional signal for scalps.
 
 Services subscribed:
-  LEVELONE_EQUITIES   — real-time bid/ask/volume for all 154 tickers
-  CHART_EQUITY        — 1-min candles as each minute closes
+  LEVELONE_EQUITIES   — real-time bid/ask/volume and all-universe 1-min bars
   SCREENER_EQUITY     — top movers on NASDAQ (scanner priority)
   LEVELONE_FUTURES    — /NQ and /ES for macro direction bias
 
@@ -45,7 +44,9 @@ TRADER_BASE = "https://api.schwabapi.com/trader/v1"
 # ── Live data stores (thread-safe via _lock) ──────────────────────────────────
 _lock              = threading.Lock()
 _live_quotes:  dict[str, dict]        = {}   # ticker → quote dict
-_live_candles: dict[str, deque]       = {}   # ticker → deque of last 300 1-min OHLCV
+_live_candles: dict[str, deque]       = {}   # ticker → rolling 1-min OHLCV
+_forming_bars: dict[str, dict]        = {}   # ticker → current L1-derived 1-min bar
+_last_cumulative_volume: dict[str, float] = {}
 _screener_up:  list[dict]             = []   # NASDAQ top % gainers (last update)
 _screener_down: list[dict]            = []   # NASDAQ top % losers
 _screener_vol:  list[dict]            = []   # NASDAQ top volume
@@ -57,7 +58,7 @@ import queue as _q
 _bar_close_queue: _q.Queue = _q.Queue(maxsize=20000)
 _bar_close_callbacks: list = []
 
-# ── CHART_EQUITY → PostgreSQL persistence queue ───────────────────────────────
+# ── Completed one-minute bars → PostgreSQL persistence queue ─────────────────
 # Non-blocking: WebSocket handler puts completed bars here; a daemon worker
 # drains and batch-writes them to ohlcv_bars.  Sized for a full trading day
 # of 1-min bars for 300 tickers (300 × 390 = 117,000) with headroom.
@@ -89,7 +90,7 @@ _mdpoller_error:     Optional[str] = None
 # MDPoller checks this to decide whether to fire a REST call or stand down.
 _last_ws_data_at: float = 0.0
 
-MAX_CANDLE_HISTORY = 300   # 5 hours of 1-min bars
+MAX_CANDLE_HISTORY = 500   # complete regular session plus warm-up history
 _WS_STANDDOWN_FRESH_PCT = float(os.getenv("NASDAQ_WS_STANDDOWN_FRESH_PCT", "0.95"))
 
 # ── Real-time tick callback registry ─────────────────────────────────────────
@@ -195,11 +196,80 @@ _CHART_FIELDS = {
     # Schwab CHART_EQUITY field mapping (empirically verified):
     #   "1" = sequence / chart-day counter — NOT the open price, omit it
     #   "2" = open, "3" = high, "4" = low, "5" = close, "7" = epoch-ms timestamp
-    # Share volume is not reliably present in the streaming CHART_EQUITY response;
-    # BarAccumulator fills ohlcv_bars with correct volume via REST API daily.
-    "2": "open", "3": "high", "4": "low", "5": "close",
+    # Field 6 is used when Schwab supplies bar volume. LEVELONE cumulative-volume
+    # deltas cover the full 477-symbol universe independently of CHART limits.
+    "2": "open", "3": "high", "4": "low", "5": "close", "6": "volume",
     "7": "time_ms",
 }
+
+
+def _accumulate_one_minute_bar_locked(
+    sym: str, quote: dict, *, now: float | None = None
+) -> dict | None:
+    """Update an OHLCV bar from a Level One snapshot; caller holds ``_lock``."""
+    current_time = time.time() if now is None else float(now)
+    minute_ms = int(current_time // 60) * 60_000
+    price = float(quote.get("last") or quote.get("mark") or 0.0)
+    if price <= 0:
+        return None
+    cumulative = max(0.0, float(quote.get("volume") or 0.0))
+    previous_total = _last_cumulative_volume.get(sym)
+    volume_delta = (
+        cumulative - previous_total
+        if previous_total is not None and cumulative >= previous_total
+        else 0.0
+    )
+    _last_cumulative_volume[sym] = cumulative
+
+    current = _forming_bars.get(sym)
+    completed = None
+    if current and int(current.get("time_ms") or 0) < minute_ms:
+        completed = dict(current)
+        current = None
+    if current is None:
+        current = {
+            "time_ms": minute_ms,
+            "open": price,
+            "high": price,
+            "low": price,
+            "close": price,
+            "volume": max(0.0, volume_delta),
+        }
+        _forming_bars[sym] = current
+    else:
+        current["high"] = max(float(current["high"]), price)
+        current["low"] = min(float(current["low"]), price)
+        current["close"] = price
+        current["volume"] = max(
+            0.0, float(current.get("volume") or 0.0) + volume_delta
+        )
+    return completed
+
+
+def _dispatch_completed_bars(bars: list[tuple[str, dict]]) -> None:
+    """Fan completed bars to memory, Valkey, PostgreSQL, and callbacks once."""
+    if not bars:
+        return
+    with _lock:
+        for sym, candle in bars:
+            if sym not in _live_candles:
+                _live_candles[sym] = deque(maxlen=MAX_CANDLE_HISTORY)
+            _live_candles[sym].append(candle)
+    for sym, candle in bars:
+        try:
+            _bar_close_queue.put_nowait((sym, candle))
+        except _q.Full:
+            pass
+        for fn in _bar_close_callbacks:
+            try:
+                fn(sym, candle)
+            except Exception:
+                pass
+        try:
+            _bar_persist_queue.put_nowait((sym, candle))
+        except _q.Full:
+            pass
+    _publish_candles_to_valkey(bars)
 
 
 def _process_levelone_equities(content: list) -> None:
@@ -208,6 +278,7 @@ def _process_levelone_equities(content: list) -> None:
         _last_ws_data_at = time.time()
     updated: list[tuple[str, dict]] = []
     need_open_backfill: list[str] = []
+    completed_bars: list[tuple[str, dict]] = []
     with _lock:
         for item in content:
             sym = item.get("key", "")
@@ -237,6 +308,9 @@ def _process_levelone_equities(content: list) -> None:
             quote["source_status"] = "LIVE"
             quote["is_live"] = True
             updated.append((sym, dict(quote)))   # snapshot for callbacks (outside lock)
+            completed = _accumulate_one_minute_bar_locked(sym, quote)
+            if completed:
+                completed_bars.append((sym, completed))
 
             # Accumulate compact quote for the 500ms Valkey flush
             # updated_at is required so the dashboard freshness filter (main.py)
@@ -262,6 +336,8 @@ def _process_levelone_equities(content: list) -> None:
                 and float(quote.get("last") or quote.get("mark") or 0) > 0
             ):
                 need_open_backfill.append(sym)
+
+    _dispatch_completed_bars(completed_bars)
 
     # Fire tick callbacks outside the lock — 250ms throttle per ticker
     _schedule_open_backfill(need_open_backfill)
@@ -293,38 +369,14 @@ def _process_levelone_futures(content: list) -> None:
 
 def _process_chart_equity(content: list) -> None:
     new_bars: list[tuple[str, dict]] = []
-    with _lock:
-        for item in content:
-            sym = item.get("key", "")
-            if not sym:
-                continue
-            candle = {name: item[raw] for raw, name in _CHART_FIELDS.items() if raw in item}
-            if not candle:
-                continue
-            if sym not in _live_candles:
-                _live_candles[sym] = deque(maxlen=MAX_CANDLE_HISTORY)
-            _live_candles[sym].append(candle)
+    for item in content:
+        sym = item.get("key", "")
+        if not sym:
+            continue
+        candle = {name: item[raw] for raw, name in _CHART_FIELDS.items() if raw in item}
+        if candle:
             new_bars.append((sym, candle))
-
-    # Fire bar-close events outside the lock so callbacks never deadlock
-    for sym, candle in new_bars:
-        try:
-            _bar_close_queue.put_nowait((sym, candle))
-        except _q.Full:
-            pass
-        for fn in _bar_close_callbacks:
-            try:
-                fn(sym, candle)
-            except Exception:
-                pass
-        # Enqueue for async PostgreSQL persistence (non-blocking)
-        try:
-            _bar_persist_queue.put_nowait((sym, candle))
-        except _q.Full:
-            pass
-
-    if new_bars:
-        _publish_candles_to_valkey(new_bars)
+    _dispatch_completed_bars(new_bars)
 
 
 def _bar_persist_worker() -> None:
@@ -393,8 +445,8 @@ def _ensure_bar_persist_worker() -> None:
 def _publish_candles_to_valkey(bars: list[tuple[str, dict]]) -> None:
     """
     Push new 1-min candles to Valkey LIST keys (md:1m:{ticker}).
-    Each list holds the last 200 bars in chronological order (oldest first).
-    TTL = 7200s so stale data auto-expires if the streamer goes down.
+    Each list holds a complete regular-session working set.
+    Seven-day TTL preserves Friday history across weekends and holidays.
     Called from _process_chart_equity — errors are suppressed (non-fatal).
     """
     try:
@@ -407,8 +459,8 @@ def _publish_candles_to_valkey(bars: list[tuple[str, dict]]) -> None:
         for sym, candle in bars:
             key = f"md:1m:{sym}"
             pipe.rpush(key, _json.dumps(candle))
-            pipe.ltrim(key, -200, -1)   # keep last 200 bars
-            pipe.expire(key, 7200)      # 2-hour TTL
+            pipe.ltrim(key, -MAX_CANDLE_HISTORY, -1)
+            pipe.expire(key, 7 * 24 * 60 * 60)
         pipe.execute()
     except Exception:
         pass  # non-fatal — scanner falls back to in-process cache or REST
@@ -643,24 +695,14 @@ async def _streamer_main(tickers: list[str]) -> None:
                     )]}
                     await ws.send(json.dumps(subs_msg))
 
-                # ── 3. CHART_EQUITY — real-time 1-min candles ─────────────────
-                # Schwab hard-caps CHART_EQUITY at 300 symbols per streamer session.
-                # Subscribe only the first 300 — these are Tier 1/2 tickers since
-                # the ticker list is ordered by priority. LEVELONE_EQUITIES already
-                # covers all 477 tickers for live bid/ask/last quotes.
-                _CHART_MAX = 300
-                chart_tickers = tickers[:_CHART_MAX]
-                for i in range(0, len(chart_tickers), batch_size):
-                    batch = chart_tickers[i: i + batch_size]
-                    cmd = "SUBS" if i == 0 else "ADD"
-                    chart_msg = {"requests": [_req(
-                        "CHART_EQUITY", cmd, 200 + i, {
-                            "keys":   ",".join(batch),
-                            "fields": "0,2,3,4,5,7",
-                        }, customer_id, correl_id,
-                    )]}
-                    await ws.send(json.dumps(chart_msg))
-                logger.info(f"[Streamer] CHART_EQUITY subscribed for {len(chart_tickers)}/{len(tickers)} tickers (Schwab 300-symbol cap).")
+                # ── 3. One-minute bars ─────────────────────────────────────────
+                # LEVELONE cumulative-volume deltas build OHLCV bars for all 477
+                # symbols. This avoids CHART_EQUITY's lower symbol cap and gives
+                # every scalp plan the same indicator contract.
+                logger.info(
+                    "[Streamer] LEVELONE OHLCV builder active for %d tickers",
+                    len(tickers),
+                )
 
                 # ── 4. SCREENER_EQUITY — NASDAQ top movers ────────────────────
                 screener_keys = (
@@ -766,6 +808,8 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
         logger.debug("[MDPoller] Already running.")
         return
 
+    _ensure_bar_persist_worker()
+
     all_tickers = list(tickers)
     _subscribed_tickers = all_tickers
 
@@ -787,6 +831,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
         bulk: dict[str, dict] = {}
         upd:  list[tuple[str, dict]] = []
         need_open_backfill: list[str] = []
+        completed_bars: list[tuple[str, dict]] = []
         with _lock:
             for sym, q in quotes.items():
                 quote = _live_quotes.setdefault(sym, {})
@@ -837,6 +882,9 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                 quote["source"]        = "SCHWAB_REST"
                 quote["source_status"] = "REST_FALLBACK"
                 quote["is_live"]       = False
+                completed = _accumulate_one_minute_bar_locked(sym, quote)
+                if completed:
+                    completed_bars.append((sym, completed))
                 if quote["last"] <= 0:
                     _halted.add(sym)
                 else:
@@ -860,6 +908,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     "is_live": False,
                 }
 
+        _dispatch_completed_bars(completed_bars)
         _schedule_open_backfill(need_open_backfill)
 
         if not bulk:
@@ -1177,7 +1226,7 @@ def register_bar_close_callback(fn) -> None:
 
 
 def get_bar_close_queue() -> "_q.Queue":
-    """Queue of (ticker, candle) tuples published on every CHART_EQUITY bar close."""
+    """Queue of (ticker, candle) tuples published on every one-minute close."""
     return _bar_close_queue
 
 
