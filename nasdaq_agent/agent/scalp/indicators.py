@@ -67,6 +67,13 @@ def calculate_one_minute_indicators(frame: Any) -> Any:
     baseline = volume.groupby(session_names).transform(
         lambda values: values.shift(1).rolling(20, min_periods=10).mean()
     )
+    # Sparse PM/AH symbols may not have ten prints in the current session
+    # within the hot history window. Fall back to prior real traded bars;
+    # this is deliberately conservative because regular-session volume usually
+    # makes the resulting extended-hours RVOL small rather than overstated.
+    fallback_baseline = volume.shift(1).rolling(20, min_periods=10).mean()
+    extended_hours = session_names.isin({"PRE_MARKET", "AFTER_HOURS"})
+    baseline = baseline.where(~(baseline.isna() & extended_hours), fallback_baseline)
     result["vol_ratio"] = volume / baseline.replace(0.0, float("nan"))
     return result
 

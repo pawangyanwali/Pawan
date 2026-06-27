@@ -163,6 +163,23 @@ def test_rvol_uses_prior_same_session_bars_across_trading_days():
     assert enriched.iloc[-1]["vol_ratio"] == pytest.approx(2.0)
 
 
+def test_sparse_extended_hours_rvol_falls_back_to_prior_real_bars():
+    regular_index = pd.date_range("2026-06-26T13:30:00Z", periods=20, freq="min")
+    index = regular_index.append(pd.DatetimeIndex([pd.Timestamp("2026-06-26T20:00:00Z")]))
+    frame = pd.DataFrame(
+        {
+            "Open": [100.0] * 21,
+            "High": [100.1] * 21,
+            "Low": [99.9] * 21,
+            "Close": [100.0] * 21,
+            "Volume": [1000.0] * 20 + [100.0],
+        },
+        index=index,
+    )
+    enriched = calculate_one_minute_indicators(frame)
+    assert enriched.iloc[-1]["vol_ratio"] == pytest.approx(0.1)
+
+
 def test_production_bar_contract_is_durable_and_self_healing():
     streamer = (ROOT / "agent" / "broker" / "schwab_streamer.py").read_text(encoding="utf-8")
     service = (ROOT / "services" / "market_data_service.py").read_text(encoding="utf-8")
