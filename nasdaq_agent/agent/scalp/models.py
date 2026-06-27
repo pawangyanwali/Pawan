@@ -162,6 +162,16 @@ class IndicatorSnapshot:
     rvol: float | None
     vwap_event: str = ""
     bar_age_ms: int | None = 0
+    indicator_close: float | None = None
+    rsi_avg_gain_14: float | None = None
+    rsi_avg_loss_14: float | None = None
+    rsi_avg_gain_7: float | None = None
+    rsi_avg_loss_7: float | None = None
+    rsi_avg_gain_2: float | None = None
+    rsi_avg_loss_2: float | None = None
+    macd_fast_ema: float | None = None
+    macd_slow_ema: float | None = None
+    macd_signal_ema: float | None = None
 
     @property
     def macd_slope(self) -> float | None:
@@ -217,6 +227,16 @@ class ScalpSignalPlan:
     macd_hist: float = 0.0
     macd_hist_prev: float = 0.0
     macd_slope: float = 0.0
+    indicator_close: float = 0.0
+    rsi_avg_gain_14: float = 0.0
+    rsi_avg_loss_14: float = 0.0
+    rsi_avg_gain_7: float = 0.0
+    rsi_avg_loss_7: float = 0.0
+    rsi_avg_gain_2: float = 0.0
+    rsi_avg_loss_2: float = 0.0
+    macd_fast_ema: float = 0.0
+    macd_slow_ema: float = 0.0
+    macd_signal_ema: float = 0.0
     atr_14: float = 0.0
     atr_bucket: str = "UNKNOWN"
     vwap: float = 0.0

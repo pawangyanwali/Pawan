@@ -126,6 +126,55 @@ def test_hard_learning_block_is_not_presented_as_watch():
     ) == "BLOCKED"
 
 
+def test_plan_live_telemetry_uses_fresh_quote_and_hides_ema_state(monkeypatch):
+    now = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(scalp_router.time, "time", lambda: now)
+    plan = {
+        "ticker": "AAPL", "entry": 100, "stop_loss": 99, "tp1": 101, "tp2": 102,
+        "indicator_close": 100.0, "macd_hist": 0.01,
+        "rsi_avg_gain_14": 0.2, "rsi_avg_loss_14": 0.1,
+        "rsi_avg_gain_7": 0.2, "rsi_avg_loss_7": 0.1,
+        "rsi_avg_gain_2": 0.2, "rsi_avg_loss_2": 0.1,
+        "macd_fast_ema": 100.1, "macd_slow_ema": 99.9, "macd_signal_ema": 0.15,
+    }
+    result = scalp_router._enrich_plan(
+        plan,
+        {"AAPL": {"last": 100.5, "bid": 100.49, "ask": 100.51,
+                  "updated_at": now - 0.2, "source_status": "LIVE"}},
+    )
+    assert result["live_price"] == pytest.approx(100.5)
+    assert result["live_price_age_ms"] == 200
+    assert result["indicator_mode"] == "PROVISIONAL_LIVE"
+    assert result["live_rsi_14"] is not None
+    assert result["live_macd_hist"] is not None
+    assert "macd_fast_ema" not in result
+    assert "rsi_avg_gain_14" not in result
+
+
+def test_stale_quote_does_not_claim_provisional_live_indicators(monkeypatch):
+    now = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(scalp_router.time, "time", lambda: now)
+    result = scalp_router._enrich_plan(
+        {"ticker": "AAPL", "entry": 100, "stop_loss": 99, "tp1": 101, "tp2": 102},
+        {"AAPL": {"last": 100.5, "updated_at": now - 10, "source_status": "LIVE"}},
+    )
+    assert result["indicator_mode"] == "CLOSED_1M"
+    assert result["live_rsi_14"] is None
+    assert result["live_macd_hist"] is None
+
+
+def test_opportunity_rows_show_live_price_rsi_and_macd():
+    html = (ROOT / "web" / "static" / "scalp.html").read_text(encoding="utf-8")
+    assert "Live price" in html
+    assert "RSI 14" in html
+    assert "MACD hist" in html
+    assert "Provisional RSI 14 / 7 / 2" in html
+    assert "Provisional MACD hist / slope" in html
+    assert "Closed 1m RSI 14 / 7 / 2" in html
+    assert "p.live_rsi_14??p.rsi_14" in html
+    assert "p.live_macd_hist??p.macd_hist" in html
+
+
 def test_scalp_learning_configuration_rejects_unsafe_ordering():
     values = {
         "scalp_learn.rolling_window_min": 120,

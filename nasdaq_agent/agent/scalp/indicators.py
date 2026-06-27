@@ -19,8 +19,8 @@ def calculate_one_minute_indicators(frame: Any) -> Any:
     low = pd.to_numeric(result["Low"], errors="coerce")
     volume = pd.to_numeric(result["Volume"], errors="coerce").fillna(0.0)
 
+    delta = close.diff()
     for period in (14, 7, 2):
-        delta = close.diff()
         gain = delta.clip(lower=0).ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
         loss = (-delta.clip(upper=0)).ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
         rs = gain / loss.replace(0.0, float("nan"))
@@ -28,11 +28,16 @@ def calculate_one_minute_indicators(frame: Any) -> Any:
         rsi = rsi.mask((loss == 0) & (gain > 0), 100.0)
         rsi = rsi.mask((loss == 0) & (gain == 0), 50.0)
         result[f"rsi_{period}"] = rsi
+        result[f"rsi_avg_gain_{period}"] = gain
+        result[f"rsi_avg_loss_{period}"] = loss
 
     fast = close.ewm(span=12, adjust=False, min_periods=12).mean()
     slow = close.ewm(span=26, adjust=False, min_periods=26).mean()
     macd = fast - slow
     signal = macd.ewm(span=9, adjust=False, min_periods=9).mean()
+    result["macd_fast_ema"] = fast
+    result["macd_slow_ema"] = slow
+    result["macd_signal_ema"] = signal
     result["macd_hist"] = macd - signal
 
     prior_close = close.shift(1)
@@ -85,7 +90,70 @@ def indicator_snapshot_from_frame(
         rvol=value("vol_ratio"),
         vwap_event=_derive_vwap_event(frame),
         bar_age_ms=_frame_bar_age_ms(frame, now_ms=now_ms),
+        indicator_close=value("Close"),
+        rsi_avg_gain_14=value("rsi_avg_gain_14"),
+        rsi_avg_loss_14=value("rsi_avg_loss_14"),
+        rsi_avg_gain_7=value("rsi_avg_gain_7"),
+        rsi_avg_loss_7=value("rsi_avg_loss_7"),
+        rsi_avg_gain_2=value("rsi_avg_gain_2"),
+        rsi_avg_loss_2=value("rsi_avg_loss_2"),
+        macd_fast_ema=value("macd_fast_ema"),
+        macd_slow_ema=value("macd_slow_ema"),
+        macd_signal_ema=value("macd_signal_ema"),
     )
+
+
+def provisional_live_indicators(state: Any, live_price: object) -> dict[str, float] | None:
+    """Append one transient quote to the closed-bar EMA state without mutating it."""
+    try:
+        price = float(live_price)
+    except (TypeError, ValueError):
+        return None
+    close = _state_number(state, "indicator_close")
+    if not finite(price) or price <= 0 or not finite(close):
+        return None
+
+    result: dict[str, float] = {}
+    delta = price - float(close)
+    for period in (14, 7, 2):
+        gain = _state_number(state, f"rsi_avg_gain_{period}")
+        loss = _state_number(state, f"rsi_avg_loss_{period}")
+        if not finite(gain) or not finite(loss):
+            return None
+        alpha = 1.0 / period
+        next_gain = alpha * max(delta, 0.0) + (1.0 - alpha) * float(gain)
+        next_loss = alpha * max(-delta, 0.0) + (1.0 - alpha) * float(loss)
+        if next_loss == 0.0:
+            rsi = 100.0 if next_gain > 0.0 else 50.0
+        else:
+            rsi = 100.0 - (100.0 / (1.0 + next_gain / next_loss))
+        result[f"rsi_{period}"] = round(rsi, 6)
+
+    fast = _state_number(state, "macd_fast_ema")
+    slow = _state_number(state, "macd_slow_ema")
+    signal = _state_number(state, "macd_signal_ema")
+    prior_hist = _state_number(state, "macd_hist")
+    if not all(finite(value) for value in (fast, slow, signal, prior_hist)):
+        return None
+    next_fast = (2.0 / 13.0) * price + (11.0 / 13.0) * float(fast)
+    next_slow = (2.0 / 27.0) * price + (25.0 / 27.0) * float(slow)
+    next_macd = next_fast - next_slow
+    next_signal = (2.0 / 10.0) * next_macd + (8.0 / 10.0) * float(signal)
+    next_hist = next_macd - next_signal
+    result.update(
+        macd_hist=round(next_hist, 8),
+        macd_slope=round(next_hist - float(prior_hist), 8),
+    )
+    return result
+
+
+def _state_number(state: Any, name: str) -> float | None:
+    raw = state.get(name) if isinstance(state, dict) else getattr(state, name, None)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if finite(value) else None
 
 
 def _derive_vwap_event(frame: Any) -> str:

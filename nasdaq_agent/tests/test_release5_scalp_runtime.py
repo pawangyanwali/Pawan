@@ -6,11 +6,13 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from agent.scalp.bar_feed import _frame_from_payload
 from agent.scalp.indicators import (
     calculate_one_minute_indicators,
     indicator_snapshot_from_frame,
+    provisional_live_indicators,
 )
 
 
@@ -61,6 +63,34 @@ def test_indicator_contract_is_computed_from_closed_one_minute_bars():
     assert snapshot.vwap and snapshot.vwap > 0
     assert snapshot.rvol and snapshot.rvol > 0
     assert snapshot.bar_age_ms == 60_000
+
+
+def test_provisional_indicators_match_appending_one_live_price_observation():
+    frame = _frame_from_payload(_bars())
+    enriched = calculate_one_minute_indicators(frame)
+    snapshot = indicator_snapshot_from_frame(enriched)
+    live_price = float(frame["Close"].iloc[-1]) - 0.37
+
+    provisional = provisional_live_indicators(snapshot, live_price)
+    appended = frame.copy()
+    next_index = appended.index[-1] + pd.Timedelta(minutes=1)
+    appended.loc[next_index] = {
+        "Open": live_price,
+        "High": live_price,
+        "Low": live_price,
+        "Close": live_price,
+        "Volume": 0.0,
+    }
+    expected = calculate_one_minute_indicators(appended).iloc[-1]
+
+    assert provisional is not None
+    assert provisional["rsi_14"] == pytest.approx(expected["rsi_14"], abs=1e-6)
+    assert provisional["rsi_7"] == pytest.approx(expected["rsi_7"], abs=1e-6)
+    assert provisional["rsi_2"] == pytest.approx(expected["rsi_2"], abs=1e-6)
+    assert provisional["macd_hist"] == pytest.approx(expected["macd_hist"], abs=1e-8)
+    assert provisional["macd_slope"] == pytest.approx(
+        expected["macd_hist"] - enriched["macd_hist"].iloc[-1], abs=1e-8
+    )
 
 
 def test_compose_has_only_canonical_signal_and_learning_owners():

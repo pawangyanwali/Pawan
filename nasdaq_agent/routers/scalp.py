@@ -44,12 +44,13 @@ def _dashboard_snapshot() -> dict[str, Any]:
     from agent.valkey_client import get_all_prices, price_bus_health
 
     snapshot = read_latest() or {}
+    prices = get_all_prices()
     plans = []
     for signal in snapshot.get("signals") or []:
         plan = dict(signal.get("scalp_plan") or {})
         if not plan:
             continue
-        plans.append(_enrich_plan(plan))
+        plans.append(_enrich_plan(plan, prices))
     plans.sort(
         key=lambda plan: (
             plan["state"] != "ACTIONABLE",
@@ -59,7 +60,6 @@ def _dashboard_snapshot() -> dict[str, Any]:
         )
     )
 
-    prices = get_all_prices()
     positions = [_enrich_position(row, prices) for row in get_open_trades()]
     today = get_today_pnl()
     budget = float(config.get("paper.budget", 50000.0))
@@ -144,21 +144,73 @@ def _learning_snapshot() -> dict[str, Any]:
     }
 
 
-def _enrich_plan(plan: dict[str, Any]) -> dict[str, Any]:
+def _enrich_plan(plan: dict[str, Any], prices: dict[str, dict] | None = None) -> dict[str, Any]:
+    from agent.scalp.indicators import provisional_live_indicators
+
     result = dict(plan)
     entry = float(result.get("entry") or 0.0)
     stop = float(result.get("stop_loss") or 0.0)
     tp1 = float(result.get("tp1") or 0.0)
     tp2 = float(result.get("tp2") or 0.0)
     risk = float(result.get("risk_per_share") or abs(entry - stop))
+    ticker = str(result.get("ticker") or "").upper()
+    quote = (prices or {}).get(ticker) or {}
+    live_price = _as_float(quote.get("last") or quote.get("mark"))
+    quote_ts = _as_float(quote.get("updated_at"))
+    quote_age_ms = int(max(0.0, time.time() - quote_ts) * 1000) if quote_ts > 0 else -1
+    source_status = str(quote.get("source_status") or "UNKNOWN").upper()
+    live_sources = {"LIVE", "WS_LIVE"}
+    rest_sources = {"REST_FALLBACK", "FALLBACK"}
+    fresh_quote = (
+        live_price > 0
+        and 0 <= quote_age_ms <= 2_500
+        and source_status in live_sources | rest_sources
+    )
+    live = provisional_live_indicators(result, live_price) if fresh_quote else None
+    indicator_mode = (
+        "PROVISIONAL_LIVE"
+        if live and source_status in live_sources
+        else "PROVISIONAL_REST"
+        if live
+        else "CLOSED_1M"
+    )
     result.update(
         state=_plan_state(result),
         display_reason=_plan_reason(result),
         stop_r=round(abs(stop - entry) / risk, 4) if risk > 0 else 0.0,
         tp1_r=round(abs(tp1 - entry) / risk, 4) if risk > 0 else 0.0,
         tp2_r=round(abs(tp2 - entry) / risk, 4) if risk > 0 else 0.0,
+        live_price=round(live_price, 4) if live_price > 0 else 0.0,
+        live_bid=round(_as_float(quote.get("bid")), 4),
+        live_ask=round(_as_float(quote.get("ask")), 4),
+        live_price_source=source_status,
+        live_price_age_ms=quote_age_ms,
+        live_rsi_14=(live or {}).get("rsi_14"),
+        live_rsi_7=(live or {}).get("rsi_7"),
+        live_rsi_2=(live or {}).get("rsi_2"),
+        live_macd_hist=(live or {}).get("macd_hist"),
+        live_macd_slope=(live or {}).get("macd_slope"),
+        indicator_mode=indicator_mode,
     )
+    for key in _INDICATOR_STATE_FIELDS:
+        result.pop(key, None)
     return result
+
+
+def _as_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+_INDICATOR_STATE_FIELDS = (
+    "indicator_close",
+    "rsi_avg_gain_14", "rsi_avg_loss_14",
+    "rsi_avg_gain_7", "rsi_avg_loss_7",
+    "rsi_avg_gain_2", "rsi_avg_loss_2",
+    "macd_fast_ema", "macd_slow_ema", "macd_signal_ema",
+)
 
 
 def _plan_state(plan: dict[str, Any]) -> str:
