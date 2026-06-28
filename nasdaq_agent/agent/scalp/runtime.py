@@ -9,11 +9,16 @@ from typing import Any
 
 from .bar_feed import load_one_minute_frames
 from .engine import create_scalp_signal_plan
-from .indicators import calculate_one_minute_indicators, indicator_snapshot_from_frame
+from .indicators import (
+    calculate_one_minute_indicators,
+    indicator_snapshot_from_frame,
+    refresh_indicator_bar_age,
+)
 from .learning import apply_context_gate
 from .ml_overlay import apply_ml_overlay
 from .multi_timeframe import (
     apply_multi_timeframe_shadow,
+    completed_five_minute_bar_id,
     five_minute_snapshot,
     refresh_five_minute_age,
 )
@@ -29,7 +34,8 @@ class ScalpRuntime:
 
     def __init__(self, tickers: list[str]) -> None:
         self.tickers = list(dict.fromkeys(str(t).upper() for t in tickers))
-        self._indicator_cache: dict[str, tuple[int, Any, IndicatorSnapshot, list[float], list[float], Any]] = {}
+        self._indicator_cache: dict[str, tuple[int, Any, IndicatorSnapshot, list[float], list[float]]] = {}
+        self._mtf_cache: dict[str, tuple[int, Any]] = {}
         self._last_execution_bar: dict[str, int] = {}
         self._last_position_bar: dict[str, int] = {}
         self.last_cycle: dict[str, Any] = {}
@@ -43,6 +49,10 @@ class ScalpRuntime:
         self.tickers = normalized
         self._indicator_cache = {
             ticker: value for ticker, value in self._indicator_cache.items()
+            if ticker in keep
+        }
+        self._mtf_cache = {
+            ticker: value for ticker, value in self._mtf_cache.items()
             if ticker in keep
         }
         self._last_execution_bar = {
@@ -92,23 +102,29 @@ class ScalpRuntime:
             bar_id = int(frame.index[-1].timestamp() * 1000)
             cached = self._indicator_cache.get(ticker)
             if cached and cached[0] == bar_id:
-                enriched, _cached_indicators, supports, resistances, cached_mtf = cached[1:]
-                indicators = indicator_snapshot_from_frame(enriched)
-                mtf_context = refresh_five_minute_age(
-                    cached_mtf,
-                    max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
-                )
+                enriched, cached_indicators, supports, resistances = cached[1:]
+                indicators = refresh_indicator_bar_age(cached_indicators, enriched)
             else:
                 enriched = calculate_one_minute_indicators(frame)
                 indicators = indicator_snapshot_from_frame(enriched)
                 supports, resistances = _structure_levels(enriched)
+                self._indicator_cache[ticker] = (
+                    bar_id, enriched, indicators, supports, resistances
+                )
+
+            mtf_bar_id = completed_five_minute_bar_id(frame)
+            cached_mtf = self._mtf_cache.get(ticker)
+            if cached_mtf and cached_mtf[0] == mtf_bar_id:
+                mtf_context = refresh_five_minute_age(
+                    cached_mtf[1],
+                    max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
+                )
+            else:
                 mtf_context = five_minute_snapshot(
                     frame,
                     max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
                 )
-                self._indicator_cache[ticker] = (
-                    bar_id, enriched, indicators, supports, resistances, mtf_context
-                )
+                self._mtf_cache[ticker] = (mtf_bar_id, mtf_context)
 
             candidates = [
                 create_scalp_signal_plan(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import Any
 
 import pandas as pd
@@ -182,6 +183,19 @@ def provisional_live_indicators(state: Any, live_price: object) -> dict[str, flo
         macd_slope=round(next_hist - float(prior_hist), 8),
     )
     return result
+
+
+def refresh_indicator_bar_age(
+    snapshot: IndicatorSnapshot,
+    frame: Any,
+    *,
+    now_ms: int | None = None,
+) -> IndicatorSnapshot:
+    """Refresh cached 1m age without recalculating or re-extracting indicators."""
+    return replace(
+        snapshot,
+        bar_age_ms=_frame_bar_age_ms(frame, now_ms=now_ms),
+    )
 
 
 def _state_number(state: Any, name: str) -> float | None:

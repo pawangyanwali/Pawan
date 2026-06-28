@@ -15,6 +15,7 @@ from agent.scalp_signal import (
     detect_scalp_signal_plan,
     indicator_snapshot_from_frame,
 )
+from agent.scalp.indicators import refresh_indicator_bar_age
 
 
 def _long_indicators(**overrides):
@@ -298,6 +299,22 @@ def test_stale_indicator_bar_blocks_a_live_quote():
 
     assert plan.valid is False
     assert "INDICATOR_BAR_STALE" in plan.blockers
+
+
+def test_cached_indicator_age_refreshes_without_changing_values():
+    index = pd.date_range("2026-06-26T13:25:00Z", periods=35, freq="min")
+    frame = pd.DataFrame({"Close": [100.0] * 35}, index=index)
+    snapshot = _long_indicators(bar_age_ms=1_000)
+
+    refreshed = refresh_indicator_bar_age(
+        snapshot,
+        frame,
+        now_ms=int(index[-1].timestamp() * 1000) + 180_000,
+    )
+
+    assert refreshed.bar_age_ms == 180_000
+    assert refreshed.rsi_14 == snapshot.rsi_14
+    assert refreshed.macd_hist == snapshot.macd_hist
 
 
 def test_short_frame_returns_invalid_plan_when_bar_depth_is_insufficient():

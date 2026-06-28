@@ -64,6 +64,18 @@ def completed_five_minute_bars(frame: Any) -> pd.DataFrame:
     return grouped[grouped["Volume"] > 0]
 
 
+def completed_five_minute_bar_id(frame: Any) -> int:
+    """Return the latest possible completed 5m bucket start in epoch ms."""
+    if frame is None or len(frame) == 0 or not isinstance(frame.index, pd.DatetimeIndex):
+        return 0
+    last = frame.index[-1]
+    if last.tzinfo is None:
+        last = last.tz_localize("UTC")
+    completed_end = (last + pd.Timedelta(minutes=1)).floor("5min")
+    completed_start = completed_end - pd.Timedelta(minutes=5)
+    return int(completed_start.timestamp() * 1000)
+
+
 def five_minute_snapshot(
     frame: Any,
     *,

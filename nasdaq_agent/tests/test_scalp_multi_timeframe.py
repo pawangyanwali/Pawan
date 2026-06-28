@@ -11,6 +11,7 @@ from agent.scalp import (
 )
 from agent.scalp.multi_timeframe import (
     apply_multi_timeframe_shadow,
+    completed_five_minute_bar_id,
     completed_five_minute_bars,
     refresh_five_minute_age,
 )
@@ -100,6 +101,15 @@ def test_future_rows_inside_incomplete_bucket_cannot_change_completed_context():
     right = completed_five_minute_bars(changed)
 
     pd.testing.assert_frame_equal(left, right)
+
+
+def test_five_minute_cache_id_changes_only_when_a_bucket_closes():
+    before_close = completed_five_minute_bar_id(_frame(8))
+    still_open = completed_five_minute_bar_id(_frame(9))
+    after_close = completed_five_minute_bar_id(_frame(10))
+
+    assert before_close == still_open
+    assert after_close > still_open
 
 
 def test_shadow_momentum_detects_pullback_without_mutating_canonical_plan():
