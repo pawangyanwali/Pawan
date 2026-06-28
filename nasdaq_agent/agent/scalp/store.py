@@ -335,6 +335,16 @@ def learning_dashboard_data(
     }
 
 
+def scalp_outcome_count() -> int:
+    """Return the durable canonical outcome count for learner sample gating."""
+    init_scalp_tables()
+    with get_conn(read_only=True) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM scalp_trade_outcomes"
+        ).fetchone()
+    return int((row or {}).get("count") or 0)
+
+
 def record_ml_evaluation(metadata: dict[str, Any]) -> None:
     init_scalp_tables()
     with get_conn() as conn:

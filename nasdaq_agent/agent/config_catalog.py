@@ -213,6 +213,7 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
 
 _SCALP_ML_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_ml.training_enabled": ("Enable ML training", "Allows the isolated learner service to train TP1-before-stop and TP2-before-stop challengers from closed SCALP_PLAN_V1 outcomes. It never trains in scanner or web-api.", "Keep disabled until enough canonical outcomes exist; enabling does not activate execution."),
+    "scalp_ml.auto_train_when_ready": ("Auto-start ML at sample gate", "Arms the isolated learner now and automatically starts challenger training once the minimum canonical outcome count is reached. Before the gate, it observes without creating empty challenger evaluations.", "Enabled with a 200-outcome floor means training starts automatically at outcome 200."),
     "scalp_ml.shadow_enabled": ("Enable shadow predictions", "Loads the promoted champion and records probabilities on valid scalp plans without changing confidence or execution.", "Use shadow mode first to compare predictions with realized outcomes."),
     "scalp_ml.overlay_enabled": ("Apply confidence overlay", "Applies the promoted model's bounded confidence adjustment. It cannot create a setup, change bracket levels, alter size, or bypass blockers.", "Enable only after shadow calibration is economically validated."),
     "scalp_ml.training_interval_min": ("Training interval", "Minutes between challenger training attempts inside the learner container.", "60 evaluates a fresh challenger at most once per hour."),

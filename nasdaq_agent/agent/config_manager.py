@@ -108,8 +108,10 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_learn.confidence_raise_step":    lambda: 10.0,
     "scalp_learn.size_reduce_mult":         lambda: 0.50,
     "scalp_learn.action_ttl_min":           lambda: 60,
-    # Release 4 advisory ML. Disabled until an operator enables it in Settings.
+    # Release 4 advisory ML. Auto-arm waits for the sample floor, then begins
+    # isolated challenger training without requiring a later operator action.
     "scalp_ml.training_enabled":             lambda: False,
+    "scalp_ml.auto_train_when_ready":         lambda: True,
     "scalp_ml.shadow_enabled":               lambda: False,
     "scalp_ml.overlay_enabled":              lambda: False,
     "scalp_ml.training_interval_min":        lambda: 60,

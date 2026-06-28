@@ -175,3 +175,13 @@ def test_rest_poller_requires_nearly_complete_ws_coverage_before_standdown():
     ).read_text(encoding="utf-8")
     assert "max(\n                    _WS_STANDDOWN_FRESH_PCT, 0.999\n                )" in streamer
     assert "for batch in cycle_batches" in streamer
+
+
+def test_challenger_training_is_auto_armed_and_db_failures_are_contained():
+    learner = (
+        ROOT / "services" / "scalp_learner_service.py"
+    ).read_text(encoding="utf-8")
+    assert 'config.get("scalp_ml.auto_train_when_ready", True)' in learner
+    assert "auto_armed and sample_ready" in learner
+    assert 'mode="DEGRADED"' in learner
+    assert "Canonical outcome count failed" in learner

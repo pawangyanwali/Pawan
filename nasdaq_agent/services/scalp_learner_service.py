@@ -26,7 +26,7 @@ def _publish_status(**updates: Any) -> None:
 def main() -> int:
     from agent.config_manager import config
     from agent.scalp.ml_trainer import train_and_maybe_promote
-    from agent.scalp.store import init_scalp_tables
+    from agent.scalp.store import init_scalp_tables, scalp_outcome_count
     from agent.service_heartbeat import start_service_heartbeat
 
     _log.info("=== scalp_learner_service starting ===")
@@ -44,7 +44,23 @@ def main() -> int:
     last_attempt = 0.0
     _publish_status(mode="OBSERVING", detail="Immediate context learning runs on every canonical trade close")
     while not _runner.stopped:
-        enabled = bool(config.get("scalp_ml.training_enabled", False))
+        manually_enabled = bool(config.get("scalp_ml.training_enabled", False))
+        auto_armed = bool(config.get("scalp_ml.auto_train_when_ready", True))
+        minimum_samples = max(50, int(config.get("scalp_ml.minimum_samples", 200)))
+        try:
+            outcome_count = scalp_outcome_count()
+        except Exception as exc:
+            _log.exception("Canonical outcome count failed")
+            _publish_status(
+                mode="DEGRADED",
+                training_enabled=False,
+                auto_armed=auto_armed,
+                error=str(exc),
+            )
+            _runner._stop.wait(30)
+            continue
+        sample_ready = outcome_count >= minimum_samples
+        enabled = manually_enabled or (auto_armed and sample_ready)
         interval_s = max(
             300.0,
             float(config.get("scalp_ml.training_interval_min", 60)) * 60.0,
@@ -57,13 +73,28 @@ def main() -> int:
                 _publish_status(
                     mode="OBSERVING",
                     training_enabled=True,
+                    auto_armed=auto_armed,
+                    sample_ready=sample_ready,
+                    outcome_count=outcome_count,
+                    minimum_samples=minimum_samples,
                     last_training_result=result,
                 )
             except Exception as exc:
                 _log.exception("Scalp ML training failed")
                 _publish_status(mode="DEGRADED", training_enabled=True, error=str(exc))
         else:
-            _publish_status(mode="OBSERVING", training_enabled=enabled)
+            _publish_status(
+                mode=(
+                    "OBSERVING" if enabled
+                    else "WAITING_FOR_SAMPLES" if auto_armed
+                    else "DISABLED"
+                ),
+                training_enabled=enabled,
+                auto_armed=auto_armed,
+                sample_ready=sample_ready,
+                outcome_count=outcome_count,
+                minimum_samples=minimum_samples,
+            )
         _runner._stop.wait(30)
     _log.info("=== scalp_learner_service stopped ===")
     return 0

@@ -274,6 +274,9 @@ def _readiness_snapshot() -> dict[str, Any]:
         f"Execution {'enabled' if risk.get('execution_enabled') else 'shadow only'}.",
     ))
     outcomes = int(learning.get("outcome_count") or 0)
+    minimum_ml_samples = max(50, int(config.get("scalp_ml.minimum_samples", 200)))
+    ml_auto_armed = bool(config.get("scalp_ml.auto_train_when_ready", True))
+    ml_manual = bool(config.get("scalp_ml.training_enabled", False))
     checks.append(check(
         "Immediate outcome learning",
         "PASS" if learner_up and outcomes > 0 else "WAITING" if learner_up else "FAIL",
@@ -281,6 +284,14 @@ def _readiness_snapshot() -> dict[str, Any]:
         "learner running; outcomes after canonical closes",
         f"{int(learning.get('action_count') or 0)} durable actions; "
         f"{int(learning.get('context_count') or 0)} observed contexts",
+    ))
+    checks.append(check(
+        "Challenger ML lifecycle",
+        "PASS" if outcomes >= minimum_ml_samples else "WAITING",
+        f"{outcomes}/{minimum_ml_samples} outcomes",
+        "auto-armed or manually enabled; chronological sample gate met",
+        "Training will start automatically at the sample gate. Promotion still requires "
+        "out-of-sample expectancy, profit factor, AUC, calibration, and session stability.",
     ))
 
     blocking = [item for item in checks if item["state"] == "FAIL"]
@@ -294,9 +305,7 @@ def _readiness_snapshot() -> dict[str, Any]:
             "scalp_engine": engine_up,
             "paper_execution": bool(risk.get("execution_enabled")),
             "immediate_learning": learner_up,
-            "scheduled_ml_training": learner_up and bool(
-                config.get("scalp_ml.training_enabled", False)
-            ),
+            "scheduled_ml_training": learner_up and (ml_manual or ml_auto_armed),
             "universe_self_healing": market_up,
         },
         "checks": checks,
