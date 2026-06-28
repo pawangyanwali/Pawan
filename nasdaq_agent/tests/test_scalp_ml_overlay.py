@@ -104,6 +104,26 @@ def test_feature_contract_includes_pre_entry_market_context():
     assert contextual != baseline
 
 
+def test_feature_contract_includes_closed_five_minute_context_only():
+    plan = _plan().to_dict()
+    baseline = feature_vector(plan)
+    contextual = feature_vector(
+        {
+            **plan,
+            "mtf_state": "BULLISH",
+            "mtf_alignment": "ALIGNED",
+            "rsi_14_5m": 58.0,
+            "macd_hist_5m": 0.04,
+            "macd_slope_5m": 0.02,
+            "atr_14_5m": 1.5,
+            "vwap_5m": 99.5,
+        }
+    )
+
+    assert len(contextual) == len(FEATURE_NAMES)
+    assert contextual != baseline
+
+
 def test_expected_r_matches_two_stage_bracket_math():
     assert expected_r(0.0, 0.0, 2.0) == pytest.approx(-1.0)
     assert expected_r(1.0, 0.0, 2.0) == pytest.approx(0.5)

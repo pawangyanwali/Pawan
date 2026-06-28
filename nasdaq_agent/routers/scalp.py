@@ -100,6 +100,17 @@ def _dashboard_snapshot() -> dict[str, Any]:
         "data_gap": sum(plan["state"] == "DATA_GAP" for plan in plans),
         "long": sum(plan.get("side") == "LONG" and plan["state"] == "ACTIONABLE" for plan in plans),
         "short": sum(plan.get("side") == "SHORT" and plan["state"] == "ACTIONABLE" for plan in plans),
+        "shadow_ready": sum(bool(plan.get("shadow_setup_ready")) for plan in plans),
+        "shadow_momentum": sum(
+            bool(plan.get("shadow_setup_ready"))
+            and plan.get("shadow_strategy_family") == "MOMENTUM_PULLBACK"
+            for plan in plans
+        ),
+        "shadow_reversal": sum(
+            bool(plan.get("shadow_setup_ready"))
+            and plan.get("shadow_strategy_family") == "REVERSAL"
+            for plan in plans
+        ),
     }
     result = {
         "schema_version": 1,

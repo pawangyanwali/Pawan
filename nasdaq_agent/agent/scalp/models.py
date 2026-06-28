@@ -57,6 +57,15 @@ class ScalpSignalConfig:
     allow_rest_fallback_trading: bool = False
     block_when_path_obstructed: bool = True
     block_when_risk_capped: bool = True
+    mtf_enabled: bool = True
+    mtf_mode: str = "SHADOW"
+    mtf_max_bar_age_ms: int = 420_000
+    momentum_shadow_enabled: bool = True
+    reversal_shadow_enabled: bool = True
+    momentum_long_rsi_min: float = 45.0
+    momentum_long_rsi_max: float = 70.0
+    momentum_short_rsi_min: float = 30.0
+    momentum_short_rsi_max: float = 55.0
 
     def __post_init__(self) -> None:
         if self.reward_r <= 1.0:
@@ -79,6 +88,14 @@ class ScalpSignalConfig:
             raise ValueError("max_spread_to_risk must be positive")
         if self.min_rvol_regular < 0 or self.min_rvol_extended < 0:
             raise ValueError("RVOL thresholds cannot be negative")
+        if str(self.mtf_mode).upper() not in {"OFF", "SHADOW"}:
+            raise ValueError("mtf_mode must be OFF or SHADOW")
+        if self.mtf_max_bar_age_ms <= 0:
+            raise ValueError("mtf_max_bar_age_ms must be positive")
+        if not 0 <= self.momentum_long_rsi_min < self.momentum_long_rsi_max <= 100:
+            raise ValueError("momentum LONG RSI boundaries are invalid")
+        if not 0 <= self.momentum_short_rsi_min < self.momentum_short_rsi_max <= 100:
+            raise ValueError("momentum SHORT RSI boundaries are invalid")
         if not (
             0 <= self.rsi_extreme_oversold
             <= self.rsi_oversold
@@ -122,6 +139,27 @@ class ScalpSignalConfig:
                 read("scalp.block_when_path_obstructed", True)
             ),
             block_when_risk_capped=bool(read("scalp.block_when_risk_capped", True)),
+            mtf_enabled=bool(read("scalp.mtf_enabled", True)),
+            mtf_mode=str(read("scalp.mtf_mode", "SHADOW")).upper(),
+            mtf_max_bar_age_ms=int(read("scalp.mtf_max_bar_age_ms", 420_000)),
+            momentum_shadow_enabled=bool(
+                read("scalp.momentum_shadow_enabled", True)
+            ),
+            reversal_shadow_enabled=bool(
+                read("scalp.reversal_shadow_enabled", True)
+            ),
+            momentum_long_rsi_min=float(
+                read("scalp.momentum_long_rsi_min", 45.0)
+            ),
+            momentum_long_rsi_max=float(
+                read("scalp.momentum_long_rsi_max", 70.0)
+            ),
+            momentum_short_rsi_min=float(
+                read("scalp.momentum_short_rsi_min", 30.0)
+            ),
+            momentum_short_rsi_max=float(
+                read("scalp.momentum_short_rsi_max", 55.0)
+            ),
         )
 
 
@@ -181,6 +219,25 @@ class IndicatorSnapshot:
 
 
 @dataclass(frozen=True)
+class MultiTimeframeSnapshot:
+    timeframe: str = "5m"
+    state: str = "NO_DATA"
+    close: float | None = None
+    rsi_14: float | None = None
+    macd_hist: float | None = None
+    macd_hist_prev: float | None = None
+    macd_slope: float | None = None
+    atr_14: float | None = None
+    vwap: float | None = None
+    vwap_event: str = ""
+    ema_fast: float | None = None
+    ema_slow: float | None = None
+    bar_age_ms: int | None = None
+    bar_closed_at_ms: int | None = None
+    completed_bars: int = 0
+
+
+@dataclass(frozen=True)
 class BracketGeometry:
     entry: float
     stop_loss: float
@@ -203,7 +260,7 @@ class ScalpSignalPlan:
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
-    schema_version: int = 1
+    schema_version: int = 2
     entry: float = 0.0
     stop_loss: float = 0.0
     tp1: float = 0.0
@@ -243,6 +300,7 @@ class ScalpSignalPlan:
     vwap_event: str = ""
     rvol: float = 0.0
     setup_type: str = ""
+    strategy_family: str = "NONE"
     session: str = ""
     setup_score: float = 0.0
     confidence: float = 0.0
@@ -269,6 +327,25 @@ class ScalpSignalPlan:
     earnings_next_date: str = ""
     earnings_days_away: int = 999
     recent_headlines: list[str] = field(default_factory=list)
+    mtf_mode: str = "OFF"
+    mtf_state: str = "NO_DATA"
+    mtf_alignment: str = "NO_DATA"
+    mtf_bar_age_ms: int = -1
+    rsi_14_5m: float = 0.0
+    macd_hist_5m: float = 0.0
+    macd_hist_prev_5m: float = 0.0
+    macd_slope_5m: float = 0.0
+    atr_14_5m: float = 0.0
+    vwap_5m: float = 0.0
+    vwap_event_5m: str = ""
+    ema_fast_5m: float = 0.0
+    ema_slow_5m: float = 0.0
+    shadow_strategy_family: str = ""
+    shadow_side: str = "NONE"
+    shadow_setup_ready: bool = False
+    shadow_setup_score: float = 0.0
+    shadow_reasons: list[str] = field(default_factory=list)
+    shadow_blockers: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
 

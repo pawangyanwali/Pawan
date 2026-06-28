@@ -12,6 +12,11 @@ from .engine import create_scalp_signal_plan
 from .indicators import calculate_one_minute_indicators, indicator_snapshot_from_frame
 from .learning import apply_context_gate
 from .ml_overlay import apply_ml_overlay
+from .multi_timeframe import (
+    apply_multi_timeframe_shadow,
+    five_minute_snapshot,
+    refresh_five_minute_age,
+)
 from .models import IndicatorSnapshot, ScalpSignalConfig, ScalpSignalPlan, SignalSide
 from .quality import has_market_data_gap
 from .quotes import quote_snapshot_from_payload
@@ -24,7 +29,7 @@ class ScalpRuntime:
 
     def __init__(self, tickers: list[str]) -> None:
         self.tickers = list(dict.fromkeys(str(t).upper() for t in tickers))
-        self._indicator_cache: dict[str, tuple[int, Any, IndicatorSnapshot, list[float], list[float]]] = {}
+        self._indicator_cache: dict[str, tuple[int, Any, IndicatorSnapshot, list[float], list[float], Any]] = {}
         self._last_execution_bar: dict[str, int] = {}
         self._last_position_bar: dict[str, int] = {}
         self.last_cycle: dict[str, Any] = {}
@@ -87,13 +92,22 @@ class ScalpRuntime:
             bar_id = int(frame.index[-1].timestamp() * 1000)
             cached = self._indicator_cache.get(ticker)
             if cached and cached[0] == bar_id:
-                enriched, indicators, supports, resistances = cached[1:]
+                enriched, _cached_indicators, supports, resistances, cached_mtf = cached[1:]
+                indicators = indicator_snapshot_from_frame(enriched)
+                mtf_context = refresh_five_minute_age(
+                    cached_mtf,
+                    max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
+                )
             else:
                 enriched = calculate_one_minute_indicators(frame)
                 indicators = indicator_snapshot_from_frame(enriched)
                 supports, resistances = _structure_levels(enriched)
+                mtf_context = five_minute_snapshot(
+                    frame,
+                    max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
+                )
                 self._indicator_cache[ticker] = (
-                    bar_id, enriched, indicators, supports, resistances
+                    bar_id, enriched, indicators, supports, resistances, mtf_context
                 )
 
             candidates = [
@@ -109,6 +123,13 @@ class ScalpRuntime:
                 for side in (SignalSide.LONG, SignalSide.SHORT)
             ]
             plan = _select_candidate(candidates, indicators.macd_slope)
+            apply_multi_timeframe_shadow(
+                plan,
+                indicators,
+                mtf_context,
+                signal_config,
+                session=session,
+            )
             blocked_sessions = {
                 str(value).upper()
                 for value in config.get(

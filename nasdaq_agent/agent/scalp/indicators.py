@@ -92,6 +92,7 @@ def indicator_snapshot_from_frame(
     frame: Any,
     *,
     now_ms: int | None = None,
+    bar_close_offset_ms: int = 0,
 ) -> IndicatorSnapshot:
     """Extract final-bar values without substituting neutral defaults."""
     if frame is None or len(frame) < 35:
@@ -121,7 +122,11 @@ def indicator_snapshot_from_frame(
         vwap=value("vwap"),
         rvol=value("vol_ratio"),
         vwap_event=_derive_vwap_event(frame),
-        bar_age_ms=_frame_bar_age_ms(frame, now_ms=now_ms),
+        bar_age_ms=_frame_bar_age_ms(
+            frame,
+            now_ms=now_ms,
+            bar_close_offset_ms=bar_close_offset_ms,
+        ),
         indicator_close=value("Close"),
         rsi_avg_gain_14=value("rsi_avg_gain_14"),
         rsi_avg_loss_14=value("rsi_avg_loss_14"),
@@ -204,7 +209,12 @@ def _derive_vwap_event(frame: Any) -> str:
     return "ABOVE" if price > vwap else "BELOW" if price < vwap else "AT_VWAP"
 
 
-def _frame_bar_age_ms(frame: Any, *, now_ms: int | None) -> int | None:
+def _frame_bar_age_ms(
+    frame: Any,
+    *,
+    now_ms: int | None,
+    bar_close_offset_ms: int = 0,
+) -> int | None:
     if frame is None or len(frame) == 0:
         return None
     last_index = frame.index[-1]
@@ -215,4 +225,4 @@ def _frame_bar_age_ms(frame: Any, *, now_ms: int | None) -> int | None:
     except (AttributeError, OSError, OverflowError, TypeError, ValueError):
         return None
     current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
-    return current_ms - timestamp_ms
+    return current_ms - timestamp_ms - max(0, int(bar_close_offset_ms))

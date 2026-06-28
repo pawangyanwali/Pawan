@@ -210,6 +210,10 @@ def test_opportunity_rows_show_live_price_rsi_and_macd():
     assert "Provisional RSI 14 / 7 / 2" in html
     assert "Provisional MACD hist / slope" in html
     assert "Closed 1m RSI 14 / 7 / 2" in html
+    assert "Closed 5m context" in html
+    assert "Closed 5m RSI / MACD slope" in html
+    assert "Shadow scalp family" in html
+    assert "Shadow strategy evidence" in html
     assert "p.live_rsi_14??p.rsi_14" in html
     assert "p.live_macd_hist??p.macd_hist" in html
     assert "configured_max_open_positions" in html

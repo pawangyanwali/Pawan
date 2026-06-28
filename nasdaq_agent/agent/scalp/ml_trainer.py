@@ -19,7 +19,13 @@ from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from agent.db import get_conn
 
-from .ml_features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, expected_r, feature_vector
+from .ml_features import (
+    FEATURE_NAMES,
+    FEATURE_SCHEMA_VERSION,
+    MIN_PLAN_SCHEMA_VERSION,
+    expected_r,
+    feature_vector,
+)
 from .store import init_scalp_tables, promote_ml_model, record_ml_evaluation
 
 logger = logging.getLogger(__name__)
@@ -169,6 +175,8 @@ def load_training_dataset() -> TrainingDataset:
     for row in rows:
         try:
             plan = json.loads(row["plan_json"])
+            if int(plan.get("schema_version") or 0) < MIN_PLAN_SCHEMA_VERSION:
+                continue
             vector = feature_vector(plan)
             if len(vector) != len(FEATURE_NAMES):
                 continue

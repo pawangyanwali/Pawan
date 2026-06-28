@@ -6,7 +6,8 @@ from typing import Any
 
 from .models import ScalpSignalPlan
 
-FEATURE_SCHEMA_VERSION = 2
+FEATURE_SCHEMA_VERSION = 3
+MIN_PLAN_SCHEMA_VERSION = 2
 
 FEATURE_NAMES = (
     "side_long", "side_short",
@@ -23,6 +24,10 @@ FEATURE_NAMES = (
     "context_fresh", "sentiment_30m", "sentiment_velocity",
     "news_shock", "context_risk_score", "earnings_caution",
     "earnings_days_away",
+    "family_reversal", "mtf_bullish", "mtf_bearish", "mtf_mixed",
+    "mtf_aligned", "mtf_conflict", "rsi_14_5m",
+    "macd_hist_5m_atr", "macd_slope_5m_atr", "atr_5m_pct",
+    "vwap_5m_distance_atr",
 )
 
 
@@ -36,10 +41,16 @@ def feature_vector(plan: ScalpSignalPlan | dict[str, Any]) -> list[float]:
     path = _text(read("tp2_path", "UNKNOWN"))
     source = _text(read("source", "UNKNOWN"))
     earnings_phase = _text(read("earnings_phase", ""))
+    strategy_family = _text(read("strategy_family", "REVERSAL"))
+    mtf_state = _text(read("mtf_state", "NO_DATA"))
+    mtf_alignment = _text(read("mtf_alignment", "NO_DATA"))
     price = _number(read("price", 0.0))
     atr = _number(read("atr_14", 0.0))
     vwap = _number(read("vwap", 0.0))
     atr_denom = atr if atr > 1e-9 else 1.0
+    atr_5m = _number(read("atr_14_5m", 0.0))
+    vwap_5m = _number(read("vwap_5m", 0.0))
+    atr_5m_denom = atr_5m if atr_5m > 1e-9 else 1.0
 
     values = (
         side == "LONG", side == "SHORT",
@@ -70,6 +81,19 @@ def feature_vector(plan: ScalpSignalPlan | dict[str, Any]) -> list[float]:
         _clip(_number(read("context_risk_score", 0.0)), 0.0, 1.0),
         earnings_phase == "CAUTION",
         _clip(_number(read("earnings_days_away", 999.0)), 0.0, 30.0) / 30.0,
+        strategy_family == "REVERSAL",
+        mtf_state == "BULLISH", mtf_state == "BEARISH", mtf_state == "MIXED",
+        mtf_alignment == "ALIGNED", mtf_alignment == "CONFLICT",
+        _clip(_number(read("rsi_14_5m", 50.0)) / 100.0, 0.0, 1.0),
+        _clip(_number(read("macd_hist_5m", 0.0)) / atr_5m_denom, -5.0, 5.0),
+        _clip(_number(read("macd_slope_5m", 0.0)) / atr_5m_denom, -5.0, 5.0),
+        _clip((atr_5m / price * 100.0) if price > 0 else 0.0, 0.0, 20.0),
+        _clip(
+            ((price - vwap_5m) / atr_5m_denom)
+            if price > 0 and vwap_5m > 0 else 0.0,
+            -10.0,
+            10.0,
+        ),
     )
     return [float(value) for value in values]
 

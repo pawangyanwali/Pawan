@@ -7,6 +7,7 @@ storage, or alter the legacy scanner and paper execution paths.
 from agent.scalp import (
     BracketGeometry,
     IndicatorSnapshot,
+    MultiTimeframeSnapshot,
     PathQuality,
     QuoteSnapshot,
     QuoteSource,
@@ -16,6 +17,8 @@ from agent.scalp import (
     build_bracket,
     create_scalp_signal_plan,
     detect_scalp_signal_plan,
+    completed_five_minute_bars,
+    five_minute_snapshot,
     indicator_snapshot_from_frame,
     quote_snapshot_from_price_bus,
 )
@@ -23,6 +26,7 @@ from agent.scalp import (
 __all__ = [
     "BracketGeometry",
     "IndicatorSnapshot",
+    "MultiTimeframeSnapshot",
     "PathQuality",
     "QuoteSnapshot",
     "QuoteSource",
@@ -32,6 +36,8 @@ __all__ = [
     "build_bracket",
     "create_scalp_signal_plan",
     "detect_scalp_signal_plan",
+    "completed_five_minute_bars",
+    "five_minute_snapshot",
     "indicator_snapshot_from_frame",
     "quote_snapshot_from_price_bus",
 ]

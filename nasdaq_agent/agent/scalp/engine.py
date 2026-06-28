@@ -179,6 +179,7 @@ def create_scalp_signal_plan(
         vwap_event=vwap_event,
         rvol=number(indicators.rvol),
         setup_type=setup_type,
+        strategy_family="REVERSAL" if normalized_side is not SignalSide.NONE else "NONE",
         session=str(session or "").upper(),
         setup_score=setup_score,
         confidence=setup_score,

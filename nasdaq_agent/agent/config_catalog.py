@@ -150,6 +150,51 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Rejects a plan when ATR/spread requires a stop wider than the configured maximum rather than squeezing the stop artificially.",
         "If ATR requires 2.5% but max stop is 2%, the plan is watch-only.",
     ),
+    "scalp.mtf_enabled": (
+        "Five-minute scalp context",
+        "Calculates context from fully closed five-minute bars while live quotes and one-minute bars remain the only execution clock.",
+        "Enabled adds five-minute trend, RSI, MACD, ATR, and VWAP evidence without changing entries in SHADOW mode.",
+    ),
+    "scalp.mtf_mode": (
+        "Multi-timeframe rollout mode",
+        "OFF disables the assessment. SHADOW records and displays reversal versus momentum-pullback evidence but cannot change validity, confidence, size, stops, or targets.",
+        "Keep SHADOW until chronological net-of-cost validation proves positive expectancy.",
+    ),
+    "scalp.mtf_max_bar_age_ms": (
+        "Maximum closed 5m bar age",
+        "Marks five-minute context unavailable when its last fully closed bar is older than this limit. The current incomplete five-minute bucket is never used.",
+        "420000 allows seven minutes from the close of the last completed five-minute bar.",
+    ),
+    "scalp.momentum_shadow_enabled": (
+        "Evaluate momentum pullbacks",
+        "Builds shadow continuation candidates from aligned closed-five-minute trend plus one-minute RSI pullback, MACD reacceleration, VWAP direction, and RVOL.",
+        "Enabled measures continuation opportunities that the original reversal-only engine cannot detect.",
+    ),
+    "scalp.reversal_shadow_enabled": (
+        "Evaluate scalp reversals",
+        "Builds shadow reversal candidates from one-minute RSI extremes, MACD turn, VWAP reaction, and five-minute conflict detection.",
+        "Enabled keeps the original reversal thesis measurable beside momentum pullbacks.",
+    ),
+    "scalp.momentum_long_rsi_min": (
+        "Momentum LONG RSI floor",
+        "Lowest closed one-minute RSI-14 accepted as a pullback inside a bullish five-minute scalp context.",
+        "45 avoids treating a deeply oversold breakdown as an ordinary continuation pullback.",
+    ),
+    "scalp.momentum_long_rsi_max": (
+        "Momentum LONG RSI ceiling",
+        "Highest closed one-minute RSI-14 accepted before a bullish continuation entry is considered too extended.",
+        "70 rejects chasing an already overbought one-minute move.",
+    ),
+    "scalp.momentum_short_rsi_min": (
+        "Momentum SHORT RSI floor",
+        "Lowest closed one-minute RSI-14 accepted before a bearish continuation entry is considered too extended.",
+        "30 rejects chasing an already oversold one-minute move lower.",
+    ),
+    "scalp.momentum_short_rsi_max": (
+        "Momentum SHORT RSI ceiling",
+        "Highest closed one-minute RSI-14 accepted as a bounce inside a bearish five-minute scalp context.",
+        "55 limits short continuation candidates to modest countertrend bounces.",
+    ),
 }
 
 _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
