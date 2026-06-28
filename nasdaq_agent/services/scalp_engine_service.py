@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 
 from services._base import ServiceRunner, configure_logging
 
@@ -46,8 +47,12 @@ def main() -> int:
         daemon=True,
         name="scalp-position-monitor",
     ).start()
+    last_universe_refresh = 0.0
     while not _runner.stopped:
         try:
+            if time.monotonic() - last_universe_refresh >= 30.0:
+                runtime.update_tickers(get_runtime_universe())
+                last_universe_refresh = time.monotonic()
             runtime.run_cycle()
         except Exception:
             _log.exception("Scalp cycle failed")

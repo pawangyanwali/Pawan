@@ -44,18 +44,76 @@ _last_token_reload_at: dict[str, float] = {}
 _bar_hydration_status: dict = {"status": "STARTING", "updated_at": 0.0}
 
 
+def _validate_universe_candidates(
+    candidates: list[str],
+    *,
+    source: str,
+    limit: int | None = None,
+    record_failures: bool = False,
+) -> int:
+    """Validate provider candidates against price, liquidity, and 1m history."""
+    from agent.broker.schwab_market_data import (
+        fetch_full_quotes,
+        fetch_price_history_batch_async,
+    )
+    from agent.universe_registry import promote_replacement, record_recheck_failure
+
+    symbols = list(dict.fromkeys(str(t).upper() for t in candidates if t))
+    if not symbols:
+        return 0
+    quotes = fetch_full_quotes(symbols)
+    frames = fetch_price_history_batch_async(
+        symbols,
+        interval="1min",
+        outputsize=500,
+        extended_hours=True,
+        background=True,
+    )
+    promoted = 0
+    for ticker in symbols:
+        if limit is not None and promoted >= limit:
+            break
+        frame = frames.get(ticker)
+        quote = quotes.get(ticker) or {}
+        failure = "NO_USABLE_SCHWAB_1M_HISTORY"
+        if frame is not None and not frame.empty:
+            volume_column = next(
+                (column for column in frame.columns if str(column).lower() == "volume"),
+                None,
+            )
+            if volume_column is not None:
+                positive = frame[frame[volume_column] > 0]
+                history_bars = len(positive)
+                estimated_daily_volume = float(positive[volume_column].tail(390).sum())
+                quote_price = float(quote.get("last") or quote.get("mark") or 0.0)
+                if promote_replacement(
+                    ticker,
+                    average_daily_volume=estimated_daily_volume,
+                    history_bars=history_bars,
+                    quote_price=quote_price,
+                    listing_verified=True,
+                    source=source,
+                ):
+                    promoted += 1
+                    continue
+                if history_bars < 390:
+                    failure = f"INSUFFICIENT_1M_HISTORY:{history_bars}/390"
+                elif estimated_daily_volume < 500_000:
+                    failure = f"INSUFFICIENT_LIQUIDITY:{estimated_daily_volume:.0f}"
+                elif quote_price < 1.0:
+                    failure = f"PRICE_BELOW_MINIMUM:{quote_price:.4f}"
+        if record_failures:
+            record_recheck_failure(ticker, reason=failure)
+    return promoted
+
+
 def _discover_universe_replacements() -> int:
     """Promote strictly validated NASDAQ movers until the eligible target is met."""
     try:
-        from agent.broker.schwab_market_data import (
-            fetch_full_quotes,
-            fetch_price_history_batch_async,
-            fetch_top_movers_symbols,
-        )
+        from agent.broker.schwab_market_data import fetch_top_movers_symbols
         from agent.ticker_universe import FULL_UNIVERSE
         from agent.universe_registry import (
             get_universe_registry_summary,
-            promote_replacement,
         )
 
         summary = get_universe_registry_summary()
@@ -77,42 +135,11 @@ def _discover_universe_replacements() -> int:
         if not candidates:
             return 0
 
-        quotes = fetch_full_quotes(candidates)
-        frames = fetch_price_history_batch_async(
+        promoted = _validate_universe_candidates(
             candidates,
-            interval="1min",
-            outputsize=500,
-            extended_hours=True,
-            background=True,
+            source="SCHWAB_NASDAQ_MOVERS",
+            limit=slots,
         )
-        promoted = 0
-        for ticker in candidates:
-            if promoted >= slots:
-                break
-            frame = frames.get(ticker)
-            quote = quotes.get(ticker) or {}
-            if frame is None or frame.empty:
-                continue
-            volume_column = next(
-                (column for column in frame.columns if str(column).lower() == "volume"),
-                None,
-            )
-            if volume_column is None:
-                continue
-            volume = frame[volume_column]
-            positive = frame[volume > 0]
-            history_bars = len(positive)
-            estimated_daily_volume = float(positive[volume_column].tail(390).sum())
-            quote_price = float(quote.get("last") or quote.get("mark") or 0.0)
-            if promote_replacement(
-                ticker,
-                average_daily_volume=estimated_daily_volume,
-                history_bars=history_bars,
-                quote_price=quote_price,
-                listing_verified=True,
-                source="SCHWAB_NASDAQ_MOVERS",
-            ):
-                promoted += 1
         if promoted:
             _log.warning(
                 "Universe registry promoted %d validated replacement(s)", promoted
@@ -329,6 +356,52 @@ def _token_reload_loop() -> None:
 
 # ── Bar-history gap filler ────────────────────────────────────────────────────
 
+def _universe_recheck_loop() -> None:
+    """Consume explicit rechecks and hot-reload validated REST subscriptions."""
+    while not _runner.stopped:
+        try:
+            from agent.universe_registry import (
+                get_runtime_universe,
+                get_universe_registry_summary,
+            )
+            from agent.valkey_client import _get_client
+
+            client = _get_client()
+            raw_symbols = client.smembers("universe:recheck:requested") if client else set()
+            queued = {
+                item.decode() if isinstance(item, bytes) else str(item)
+                for item in raw_symbols
+                if item
+            }
+            # PostgreSQL is the durable command source. Valkey only shortens
+            # reaction time and a cache outage cannot strand a CANDIDATE.
+            summary = get_universe_registry_summary()
+            queued.update(
+                str(item.get("ticker") or "").upper()
+                for item in summary.get("candidates") or []
+                if item.get("ticker")
+            )
+            symbols = sorted(queued)
+            if symbols:
+                promoted = _validate_universe_candidates(
+                    symbols,
+                    source="ADMIN_PROVIDER_RECHECK",
+                    record_failures=True,
+                )
+                if client:
+                    client.srem("universe:recheck:requested", *symbols)
+                from agent.broker.schwab_streamer import update_md_poller_tickers
+
+                update_md_poller_tickers(get_runtime_universe())
+                _log.warning(
+                    "Universe recheck completed: %d requested, %d promoted",
+                    len(symbols), promoted,
+                )
+        except Exception as exc:
+            _log.warning("Universe recheck cycle failed: %s", exc)
+        _runner._stop.wait(30.0)
+
+
 def _bar_hydration_loop(tickers: list[str]) -> None:
     """Keep the shared scalp bar contract warm from PG and Schwab history."""
     from datetime import datetime
@@ -378,6 +451,9 @@ def _bar_hydration_loop(tickers: list[str]) -> None:
 
     while not _runner.stopped:
         try:
+            from agent.universe_registry import get_runtime_universe
+
+            tickers = get_runtime_universe()
             session = str(get_session() or "CLOSED").upper()
             active = session != "CLOSED"
             session_opened = active and last_session == "CLOSED"
@@ -519,6 +595,7 @@ def main() -> None:
     threading.Thread(target=_publish_streamer_status_loop, daemon=True, name="md-streamer-status").start()
     threading.Thread(target=_publish_token_status_loop,    daemon=True, name="md-token-status").start()
     threading.Thread(target=_token_reload_loop,            daemon=True, name="md-token-reload").start()
+    threading.Thread(target=_universe_recheck_loop,        daemon=True, name="md-universe-recheck").start()
     threading.Thread(target=_bar_hydration_loop,           daemon=True, name="ScalpBarHydrator",
                      args=(runtime_tickers,)).start()
 

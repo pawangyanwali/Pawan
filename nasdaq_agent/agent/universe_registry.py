@@ -221,6 +221,106 @@ def promote_replacement(
     return True
 
 
+def request_recheck(ticker: str, *, requested_by: str = "SYSTEM") -> dict[str, Any]:
+    """Move a known symbol to CANDIDATE and queue provider-side validation."""
+    symbol = str(ticker or "").upper().strip()
+    if not symbol:
+        raise ValueError("Ticker is required")
+    init_universe_registry()
+    from agent.db import get_conn
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT ticker, status FROM universe_registry WHERE ticker=?",
+            (symbol,),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Unknown universe ticker: {symbol}")
+        conn.execute(
+            """
+            UPDATE universe_registry
+            SET status='CANDIDATE', reason='RECHECK_REQUESTED',
+                source=?, manual_override=FALSE, last_checked_at=NOW()
+            WHERE ticker=?
+            """,
+            (f"ADMIN:{requested_by}"[:120], symbol),
+        )
+    queued = False
+    try:
+        from agent.valkey_client import _get_client
+        client = _get_client()
+        if client is not None:
+            client.sadd("universe:recheck:requested", symbol)
+            client.publish(
+                "universe:recheck",
+                json.dumps({"ticker": symbol, "requested_by": requested_by}),
+            )
+            queued = True
+    except Exception as exc:
+        logger.warning("[UniverseRegistry] recheck queue failed for %s: %s", symbol, exc)
+    _publish_summary()
+    return {"ticker": symbol, "status": "CANDIDATE", "queued": queued}
+
+
+def quarantine_ticker(
+    ticker: str,
+    *,
+    reason: str,
+    requested_by: str = "SYSTEM",
+) -> dict[str, Any]:
+    """Apply an explicit operator quarantine; it cannot auto-promote later."""
+    symbol = str(ticker or "").upper().strip()
+    detail = str(reason or "").strip()
+    if not symbol:
+        raise ValueError("Ticker is required")
+    if len(detail) < 8:
+        raise ValueError("A quarantine reason of at least 8 characters is required")
+    init_universe_registry()
+    from agent.db import get_conn
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT ticker FROM universe_registry WHERE ticker=?", (symbol,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Unknown universe ticker: {symbol}")
+        conn.execute(
+            """
+            UPDATE universe_registry
+            SET status='QUARANTINED', reason=?, source=?, manual_override=TRUE,
+                last_checked_at=NOW()
+            WHERE ticker=?
+            """,
+            (detail[:240], f"ADMIN:{requested_by}"[:120], symbol),
+        )
+    _publish_summary()
+    return {"ticker": symbol, "status": "QUARANTINED", "manual_override": True}
+
+
+def record_recheck_failure(ticker: str, *, reason: str) -> None:
+    """Return a failed candidate to quarantine without touching manual holds."""
+    symbol = str(ticker or "").upper().strip()
+    if not symbol:
+        return
+    init_universe_registry()
+    from agent.db import get_conn
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE universe_registry
+            SET status=CASE WHEN manual_override THEN status ELSE 'QUARANTINED' END,
+                reason=CASE WHEN manual_override THEN reason ELSE ? END,
+                source=CASE WHEN manual_override THEN source ELSE 'PROVIDER_RECHECK' END,
+                consecutive_failures=consecutive_failures+1,
+                last_checked_at=NOW()
+            WHERE ticker=?
+            """,
+            (str(reason or "RECHECK_FAILED")[:240], symbol),
+        )
+    _publish_summary()
+
+
 def get_universe_registry_summary(*, include_symbols: bool = True) -> dict[str, Any]:
     init_universe_registry()
     from agent.db import get_conn
@@ -239,6 +339,15 @@ def get_universe_registry_summary(*, include_symbols: bool = True) -> dict[str, 
             ORDER BY tier, ticker
             """
         ).fetchall()
+        candidates = conn.execute(
+            """
+            SELECT ticker, tier, reason, source, consecutive_failures,
+                   last_checked_at, last_usable_at, manual_override
+            FROM universe_registry
+            WHERE status='CANDIDATE'
+            ORDER BY tier, ticker
+            """
+        ).fetchall()
     by_status = {str(row["status"]): int(row["count"]) for row in counts}
     result: dict[str, Any] = {
         "catalog_total": len(FULL_UNIVERSE),
@@ -249,6 +358,7 @@ def get_universe_registry_summary(*, include_symbols: bool = True) -> dict[str, 
     }
     if include_symbols:
         result["quarantined"] = [dict(row) for row in quarantined]
+        result["candidates"] = [dict(row) for row in candidates]
         result["eligible_tickers"] = get_runtime_universe()
     return result
 

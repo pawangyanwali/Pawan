@@ -14,14 +14,20 @@ import json
 import os
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse, Response
+from pydantic import BaseModel
 
-from auth.dependencies import require_viewer, AuthenticatedUser
+from auth.dependencies import require_admin, require_viewer, AuthenticatedUser
 
 router = APIRouter(tags=["system"])
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web", "static")
+
+
+class UniverseAction(BaseModel):
+    action: str
+    reason: str = ""
 
 
 @router.get("/robots.txt", response_class=PlainTextResponse)
@@ -69,6 +75,12 @@ async def settings_page():
 @router.get("/health.html", response_class=HTMLResponse)
 async def health_page():
     return FileResponse(os.path.join(STATIC_DIR, "health.html"))
+
+
+@router.get("/universe", response_class=HTMLResponse)
+@router.get("/universe.html", response_class=HTMLResponse)
+async def universe_page():
+    return FileResponse(os.path.join(STATIC_DIR, "universe.html"))
 
 
 @router.get("/scalp", response_class=HTMLResponse)
@@ -351,7 +363,7 @@ async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
 
 
 @router.get("/api/universe")
-async def universe_status():
+async def universe_status(_user: AuthenticatedUser = Depends(require_viewer)):
     """Ticker universe status: total tracked, active this cycle, tier breakdown."""
     try:
         from agent.ticker_universe import TIER1, TIER2, TIER3, FULL_UNIVERSE
@@ -367,6 +379,7 @@ async def universe_status():
             "quarantined_total": registry["quarantined_total"],
             "candidate_total": registry["candidate_total"],
             "quarantined": registry["quarantined"],
+            "candidates": registry.get("candidates", []),
             "tier1_count":     len(TIER1),
             "tier2_count":     len(TIER2),
             "tier3_count":     len(TIER3),
@@ -377,3 +390,37 @@ async def universe_status():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@router.post("/api/universe/{ticker}/action")
+async def universe_action(
+    ticker: str,
+    body: UniverseAction,
+    request: Request,
+    user: AuthenticatedUser = Depends(require_admin),
+):
+    """Apply an audited quarantine or queue provider-side revalidation."""
+    from agent.universe_registry import quarantine_ticker, request_recheck
+    from auth.utils import audit
+
+    action = str(body.action or "").upper().strip()
+    try:
+        if action == "RECHECK":
+            result = request_recheck(ticker, requested_by=user.username)
+        elif action == "QUARANTINE":
+            result = quarantine_ticker(
+                ticker,
+                reason=body.reason,
+                requested_by=user.username,
+            )
+        else:
+            raise ValueError("Action must be RECHECK or QUARANTINE")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit(
+        "UNIVERSE_ACTION",
+        user_id=user.id,
+        detail={"ticker": ticker.upper(), "action": action, "reason": body.reason},
+        ip_addr=request.client.host if request.client else None,
+    )
+    return {"ok": True, **result}

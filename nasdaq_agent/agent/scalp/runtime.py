@@ -29,6 +29,28 @@ class ScalpRuntime:
         self._last_position_bar: dict[str, int] = {}
         self.last_cycle: dict[str, Any] = {}
 
+    def update_tickers(self, tickers: list[str]) -> bool:
+        """Replace the eligible universe between cycles and prune stale caches."""
+        normalized = list(dict.fromkeys(str(t).upper() for t in tickers if t))
+        if normalized == self.tickers:
+            return False
+        keep = set(normalized)
+        self.tickers = normalized
+        self._indicator_cache = {
+            ticker: value for ticker, value in self._indicator_cache.items()
+            if ticker in keep
+        }
+        self._last_execution_bar = {
+            ticker: value for ticker, value in self._last_execution_bar.items()
+            if ticker in keep
+        }
+        self._last_position_bar = {
+            ticker: value for ticker, value in self._last_position_bar.items()
+            if ticker in keep
+        }
+        logger.warning("[ScalpRuntime] Eligible universe updated to %d tickers", len(normalized))
+        return True
+
     def run_cycle(self) -> dict[str, Any]:
         from agent.config_manager import config
         from agent.context_snapshot import get_context_snapshots

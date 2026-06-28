@@ -31,6 +31,12 @@ async def scalp_learning(_user: AuthenticatedUser = Depends(require_viewer)):
     return await loop.run_in_executor(None, _learning_snapshot)
 
 
+@router.get("/api/scalp/readiness")
+async def scalp_readiness(_user: AuthenticatedUser = Depends(require_viewer)):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _readiness_snapshot)
+
+
 def _dashboard_snapshot() -> dict[str, Any]:
     global _cache_ts, _cache_value
     now = time.time()
@@ -166,6 +172,145 @@ def _learning_snapshot() -> dict[str, Any]:
         "outcome_count": int((data.get("counts") or {}).get("outcomes") or 0),
         "context_count": int((data.get("counts") or {}).get("contexts") or 0),
         "action_count": int((data.get("counts") or {}).get("actions") or 0),
+    }
+
+
+def _readiness_snapshot() -> dict[str, Any]:
+    """One read-only acceptance contract for the production scalp runtime."""
+    from agent.config_manager import config
+    from agent.universe_registry import get_universe_registry_summary
+    from agent.valkey_client import health_status, price_bus_health
+    from routers.system import _container_health
+
+    dashboard = _dashboard_snapshot()
+    registry = get_universe_registry_summary(include_symbols=False)
+    valkey = health_status()
+    containers = _container_health(bool(valkey.get("connected")))
+    price_health = price_bus_health(max_age_s=2.0)
+    plans = dashboard.get("plans") or []
+    counts = dashboard.get("counts") or {}
+    risk = dashboard.get("risk") or {}
+    learning = dashboard.get("learning") or {}
+    session = dashboard.get("session") or {}
+    session_name = str(session.get("session") or session.get("name") or "UNKNOWN").upper()
+    active_session = session_name not in {"CLOSED", "WEEKEND", "HOLIDAY", "UNKNOWN"}
+    catalog = int(registry.get("catalog_total") or 0)
+    eligible = int(registry.get("eligible_total") or 0)
+    plan_total = len(plans)
+    gaps = int(counts.get("data_gap") or 0)
+
+    def check(name: str, state: str, observed: Any, expected: str, detail: str) -> dict[str, Any]:
+        return {
+            "name": name,
+            "state": state,
+            "observed": observed,
+            "expected": expected,
+            "detail": detail,
+        }
+
+    checks: list[dict[str, Any]] = []
+    coverage = eligible / catalog if catalog else 0.0
+    checks.append(check(
+        "Eligible universe",
+        "PASS" if coverage >= 0.80 else "FAIL",
+        f"{eligible}/{catalog}",
+        ">=80% provider-validated",
+        f"{int(registry.get('quarantined_total') or 0)} quarantined; "
+        f"{int(registry.get('candidate_total') or 0)} awaiting validation",
+    ))
+    plan_coverage = plan_total / eligible if eligible else 0.0
+    checks.append(check(
+        "Canonical plan coverage",
+        "PASS" if plan_coverage >= 0.95 else "FAIL",
+        f"{plan_total}/{eligible}",
+        ">=95% of eligible universe",
+        "Every eligible ticker must produce an inspectable plan, including blocked plans.",
+    ))
+    gap_rate = gaps / plan_total if plan_total else 1.0
+    checks.append(check(
+        "Indicator completeness",
+        "PASS" if gap_rate <= 0.05 else "WARN" if gap_rate <= 0.15 else "FAIL",
+        f"{gaps} gaps ({gap_rate * 100:.1f}%)",
+        "<=5% DATA_GAP",
+        "Only real positive-volume one-minute bars qualify.",
+    ))
+    fresh_quotes = int(price_health.get("live") or 0) + int(price_health.get("fallback") or 0)
+    quote_rate = fresh_quotes / eligible if eligible else 0.0
+    quote_state = (
+        "PASS" if active_session and quote_rate >= 0.80
+        else "FAIL" if active_session
+        else "N/A"
+    )
+    checks.append(check(
+        "Fresh quote coverage",
+        quote_state,
+        f"{fresh_quotes}/{eligible}",
+        ">=80% during active sessions",
+        f"{price_health.get('live', 0)} WS, {price_health.get('fallback', 0)} REST, "
+        f"{price_health.get('stale', 0)} stale; session {session_name}",
+    ))
+    engine_up = bool((containers.get("scalp-engine") or {}).get("up"))
+    market_up = bool((containers.get("market-data") or {}).get("up"))
+    learner_up = bool((containers.get("scalp-learner") or {}).get("up"))
+    checks.append(check(
+        "Canonical services",
+        "PASS" if engine_up and market_up and learner_up else "FAIL",
+        f"engine={engine_up}, market={market_up}, learner={learner_up}",
+        "all running",
+        "Container heartbeats are read from PostgreSQL with Valkey fallback.",
+    ))
+    geometry_ok = (
+        float(risk.get("tp1_r") or 0) > 0
+        and float(risk.get("tp2_r") or 0) >= float(risk.get("tp1_r") or 0)
+        and float(risk.get("budget") or 0) > 0
+        and int(risk.get("max_open_positions") or 0) > 0
+    )
+    checks.append(check(
+        "Risk and bracket configuration",
+        "PASS" if geometry_ok else "FAIL",
+        f"TP1 {risk.get('tp1_r', 0)}R / TP2 {risk.get('tp2_r', 0)}R / "
+        f"slots {risk.get('max_open_positions', 0)}",
+        "positive budget, slots, and ordered targets",
+        f"Execution {'enabled' if risk.get('execution_enabled') else 'shadow only'}.",
+    ))
+    outcomes = int(learning.get("outcome_count") or 0)
+    checks.append(check(
+        "Immediate outcome learning",
+        "PASS" if learner_up and outcomes > 0 else "WAITING" if learner_up else "FAIL",
+        f"{outcomes} canonical outcomes",
+        "learner running; outcomes after canonical closes",
+        f"{int(learning.get('action_count') or 0)} durable actions; "
+        f"{int(learning.get('context_count') or 0)} observed contexts",
+    ))
+
+    blocking = [item for item in checks if item["state"] == "FAIL"]
+    warnings = [item for item in checks if item["state"] in {"WARN", "WAITING"}]
+    return {
+        "asof_ts": datetime.now(timezone.utc).isoformat(),
+        "status": "FAIL" if blocking else "WARN" if warnings else "PASS",
+        "session": session_name,
+        "enabled": {
+            "market_data": market_up,
+            "scalp_engine": engine_up,
+            "paper_execution": bool(risk.get("execution_enabled")),
+            "immediate_learning": learner_up,
+            "scheduled_ml_training": learner_up and bool(
+                config.get("scalp_ml.training_enabled", False)
+            ),
+            "universe_self_healing": market_up,
+        },
+        "checks": checks,
+        "registry": registry,
+        "market_data": price_health,
+        "risk": risk,
+        "learning": {
+            "outcomes": outcomes,
+            "contexts": int(learning.get("context_count") or 0),
+            "actions": int(learning.get("action_count") or 0),
+            "active_actions": len(learning.get("active_actions") or []),
+            "champion": bool(learning.get("ml_champion")),
+        },
+        "containers": containers,
     }
 
 

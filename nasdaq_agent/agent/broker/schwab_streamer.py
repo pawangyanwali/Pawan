@@ -791,6 +791,15 @@ def is_md_poller_running() -> bool:
     return bool(_mdpoller_thread and _mdpoller_thread.is_alive())
 
 
+def update_md_poller_tickers(tickers: list[str]) -> None:
+    """Hot-reload the REST universe; the next poll cycle rebuilds its batches."""
+    global _subscribed_tickers
+    normalized = list(dict.fromkeys(str(t).upper() for t in tickers if t))
+    with _lock:
+        _subscribed_tickers = normalized
+    logger.info("[MDPoller] Universe updated to %d tickers", len(normalized))
+
+
 def start_md_poller(tickers: list[str], interval: float = 1.0,
                     parallel_batches: int = 3,
                     startup_delay_s: float = 0.0) -> None:
@@ -1013,9 +1022,28 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                 # Stand down only when the WS streamer is covering almost the
                 # whole universe.  A single active WS ticker must not make the
                 # REST fallback stop while the rest of the dashboard goes stale.
-                if ws_fresh_coverage(max_age_s=2.0) >= _WS_STANDDOWN_FRESH_PCT:
+                if ws_fresh_coverage(max_age_s=2.0) >= max(
+                    _WS_STANDDOWN_FRESH_PCT, 0.999
+                ):
                     consecutive_miss = 0
                     time.sleep(interval)
+                    continue
+
+                # Rebuild batches from the registry-owned universe so a
+                # validated replacement becomes available without a restart.
+                with _lock:
+                    cycle_tickers = list(_subscribed_tickers)
+                cycle_n = len(cycle_tickers)
+                cycle_batch_size = max(
+                    1, (cycle_n + parallel_batches - 1) // parallel_batches
+                )
+                cycle_batches = [
+                    cycle_tickers[i:i + cycle_batch_size]
+                    for i in range(0, cycle_n, cycle_batch_size)
+                ]
+                if not cycle_batches:
+                    _mdpoller_error = "eligible universe is empty"
+                    time.sleep(3)
                     continue
 
                 # Submit all batches simultaneously.
@@ -1024,7 +1052,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                 # messages in rapid succession and renders each group immediately.
                 futures = [
                     _fetch_pool.submit(_fetch_batch_and_stream, batch)
-                    for batch in batches
+                    for batch in cycle_batches
                 ]
 
                 # Wait only to know when the slowest batch finishes so we can
@@ -1047,7 +1075,7 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                     # Only log every 10 misses (once per ~backoff window) to avoid spam
                     if consecutive_miss == 1 or consecutive_miss % 10 == 0:
                         logger.warning(
-                            f"[MDPoller] Cycle {cycle}: all {len(batches)} batches empty "
+                            f"[MDPoller] Cycle {cycle}: all {len(cycle_batches)} batches empty "
                             f"({consecutive_miss} consecutive — rate-limited)"
                         )
                     _mdpoller_error = f"rate-limited ({consecutive_miss} consecutive empty cycles)"
@@ -1059,8 +1087,8 @@ def start_md_poller(tickers: list[str], interval: float = 1.0,
                 if cycle % 60 == 0:
                     elapsed_ms = int((time.time() - _cycle_start) * 1000)
                     logger.info(
-                        f"[MDPoller] ✓ Cycle {cycle} | {n_ok}/{len(batches)} batches OK "
-                        f"| {n} tickers | {elapsed_ms}ms"
+                        f"[MDPoller] ✓ Cycle {cycle} | {n_ok}/{len(cycle_batches)} batches OK "
+                        f"| {cycle_n} tickers | {elapsed_ms}ms"
                     )
 
             except Exception as _e:
