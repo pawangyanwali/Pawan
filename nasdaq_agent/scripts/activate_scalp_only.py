@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-time, health-gated activation for the Release 5 paper runtime."""
+"""Health-gated activation for isolated canonical-plan shadow validation."""
 from __future__ import annotations
 
 import sys
@@ -32,14 +32,15 @@ def main() -> int:
     config.load()
     config.set_many(
         {
-            "scalp.shadow_enabled": False,
-            "scalp.execution_enabled": True,
+            "scalp.shadow_enabled": True,
+            "scalp.execution_enabled": False,
             "scalp_runtime.bar_lookback": 500,
         },
         updated_by="release5_health_gated_cutover",
     )
     print(
-        "SCALP_ONLY_V1 activated: canonical plans are now the sole paper-entry contract "
+        "SCALP_ONLY_V1 shadow validation activated: canonical paper entries remain disabled; "
+        "valid plans are evaluated in the isolated shadow ledger "
         f"({snapshot.get('universe_total')} tickers, snapshot age {snapshot_age:.1f}s)."
     )
     return 0

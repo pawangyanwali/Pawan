@@ -253,6 +253,7 @@ def tmp_db_paths(tmp_path, monkeypatch):
         "agent.multi_tf_backtest",
         "agent.backtester",
         "agent.scalp.store",
+        "agent.scalp.shadow",
         "agent.scalp.learning",
         "agent.scalp.ml_trainer",
         "historical.store",

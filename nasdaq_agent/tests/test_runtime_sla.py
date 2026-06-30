@@ -82,6 +82,28 @@ def test_active_session_scan_snapshots_are_critical_even_when_fresh():
     assert any(a["message"] == "No trusted live/fallback prices" for a in sla["alerts"])
 
 
+def test_active_session_plan_data_gaps_are_critical():
+    sla = evaluate_runtime_sla(
+        session="REGULAR",
+        price_2s=_price(),
+        price_5s=_price(),
+        scanner={
+            "scan_age_s": 10,
+            "universe_total": 400,
+            "valid_plan_count": 0,
+            "data_gap_count": 400,
+        },
+        containers=_containers(),
+        valkey={"connected": True},
+    )
+
+    assert sla["status"] == "CRITICAL"
+    assert any(
+        alert["message"] == "Canonical plan data gaps above SLA"
+        for alert in sla["alerts"]
+    )
+
+
 def test_closed_session_still_requires_scalp_learner_and_watchdog():
     containers = _containers()
     containers["scalp-learner"] = {"up": False, "detail": "no scalp learner heartbeat"}

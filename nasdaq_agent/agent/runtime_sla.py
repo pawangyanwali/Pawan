@@ -185,6 +185,29 @@ def evaluate_runtime_sla(
                 detail=f"last scan {scan_age:.1f}s ago",
                 action="Inspect scalp-engine workers and market-data dependencies.",
             )
+
+        universe_total = int(_num(scanner, "universe_total", 0.0))
+        data_gaps = int(_num(scanner, "data_gap_count", 0.0))
+        if universe_total > 0:
+            gap_pct = data_gaps / universe_total * 100.0
+            if gap_pct > 15.0:
+                _alert(
+                    alerts,
+                    CRITICAL,
+                    "scalp-engine",
+                    "Canonical plan data gaps above SLA",
+                    detail=f"{data_gaps}/{universe_total} plans blocked by data gaps ({gap_pct:.1f}%)",
+                    action="Keep execution disabled; inspect quote ordering, one-minute bars, and context coverage.",
+                )
+            elif gap_pct > 5.0:
+                _alert(
+                    alerts,
+                    WARN,
+                    "scalp-engine",
+                    "Canonical plan data gaps elevated",
+                    detail=f"{data_gaps}/{universe_total} plans blocked by data gaps ({gap_pct:.1f}%)",
+                    action="Review missing plan inputs before enabling canonical execution.",
+                )
     else:
         if total_prices <= 0:
             _alert(
@@ -224,5 +247,7 @@ def evaluate_runtime_sla(
             "active_price_trusted_fresh_pct_critical": 80.0,
             "active_live_pct_warn": 80.0,
             "active_scan_age_s_critical": 180,
+            "active_plan_data_gap_pct_warn": 5.0,
+            "active_plan_data_gap_pct_critical": 15.0,
         },
     }

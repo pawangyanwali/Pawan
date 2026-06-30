@@ -327,13 +327,15 @@ async def runtime_health(_user: AuthenticatedUser = Depends(require_viewer)):
 
         # Canonical scalp-engine freshness from service state
         scan_age_s = None
+        scanner_info = {}
         try:
-            from agent.service_state import get_age_s as _ss_age
+            from agent.service_state import get_age_s as _ss_age, get_state as _ss_get
             scan_age_s = _ss_age("service:scalp-engine:heartbeat")
+            scanner_info = _ss_get("service:scalp-engine:heartbeat", ignore_expiry=True) or {}
         except Exception:
             pass
 
-        scanner_info = {"scan_age_s": scan_age_s if scan_age_s is not None else -1.0}
+        scanner_info["scan_age_s"] = scan_age_s if scan_age_s is not None else -1.0
         containers = _container_health(bool(vk.get("connected")))
 
         sla = evaluate_runtime_sla(

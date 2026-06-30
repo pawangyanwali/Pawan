@@ -121,6 +121,21 @@ def test_root_ui_and_deployment_are_scalp_only():
     assert "python -m scripts.activate_scalp_only" in workflow
 
 
+def test_activation_enables_shadow_and_keeps_paper_execution_off():
+    activation = (APP / "scripts" / "activate_scalp_only.py").read_text(encoding="utf-8")
+    assert '"scalp.shadow_enabled": True' in activation
+    assert '"scalp.execution_enabled": False' in activation
+
+
+def test_context_compute_covers_runtime_universe_and_md_has_headroom():
+    context = (APP / "services" / "context_intel_service.py").read_text(encoding="utf-8")
+    compose = (APP / "docker-compose.yml").read_text(encoding="utf-8")
+    market = compose.split("  market-data:", 1)[1].split("  scalp-learner:", 1)[0]
+    assert "runtime_tickers = get_runtime_universe()" in context
+    assert "runtime_tickers + event_tickers" in context
+    assert "memory: 1G" in market
+
+
 def test_runtime_controls_are_ui_catalogued():
     from agent.config_catalog import build_catalog
     from agent.config_manager import _DEFAULTS

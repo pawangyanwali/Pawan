@@ -32,8 +32,8 @@ _GROUP_BY_PREFIX = {prefix: (group, description) for prefix, group, description 
 _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp.shadow_enabled": (
         "Shadow evaluation",
-        "Build and display new scalp plans without allowing them to open paper trades. Keep this enabled during comparison and rollout.",
-        "Enabled with execution disabled lets you compare plans safely against the legacy engine.",
+        "Opens valid plans in an isolated hypothetical ledger, marks them from executable bid/ask prices, and resolves TP1, TP2, stop, trail, session, and time exits without changing account P&L or learning controls.",
+        "Enable this while execution is disabled to measure win rate, expectancy in R, and profit factor safely.",
     ),
     "scalp.execution_enabled": (
         "Scalp execution cutover",

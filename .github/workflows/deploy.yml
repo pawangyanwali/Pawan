@@ -287,7 +287,7 @@ jobs:
                 exit 1
               fi
 
-              echo "=== Activating health-gated scalp-only paper runtime ==="
+              echo "=== Activating health-gated scalp-only shadow validation ==="
               _dc exec -T scalp-engine python -m scripts.activate_scalp_only
 
               # ── Wait for watchdog (non-fatal; quick 15s start_period) ─────────

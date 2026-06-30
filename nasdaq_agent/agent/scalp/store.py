@@ -150,6 +150,42 @@ def init_scalp_tables() -> None:
                 applied                 INTEGER NOT NULL DEFAULT 0
             )
             """,
+            f"""
+            CREATE TABLE IF NOT EXISTS scalp_shadow_trades (
+                id                  {id_type},
+                plan_id             TEXT NOT NULL,
+                entry_bar_id        BIGINT NOT NULL,
+                opened_at           {timestamp_type} NOT NULL,
+                closed_at           {timestamp_type},
+                ticker              TEXT NOT NULL,
+                side                TEXT NOT NULL,
+                setup_type          TEXT DEFAULT '',
+                session             TEXT DEFAULT '',
+                status              TEXT NOT NULL DEFAULT 'OPEN',
+                entry_fill          DOUBLE PRECISION NOT NULL,
+                current_price       DOUBLE PRECISION NOT NULL,
+                stop_loss           DOUBLE PRECISION NOT NULL,
+                original_stop       DOUBLE PRECISION NOT NULL,
+                tp1                 DOUBLE PRECISION NOT NULL,
+                tp2                 DOUBLE PRECISION NOT NULL,
+                risk_per_share      DOUBLE PRECISION NOT NULL,
+                shares              INTEGER NOT NULL,
+                shares_remaining    INTEGER NOT NULL,
+                t1_hit              INTEGER NOT NULL DEFAULT 0,
+                t2_hit              INTEGER NOT NULL DEFAULT 0,
+                realized_partial    DOUBLE PRECISION NOT NULL DEFAULT 0,
+                pnl_r               DOUBLE PRECISION NOT NULL DEFAULT 0,
+                pnl_dollar          DOUBLE PRECISION NOT NULL DEFAULT 0,
+                mfe_r               DOUBLE PRECISION NOT NULL DEFAULT 0,
+                mae_r               DOUBLE PRECISION NOT NULL DEFAULT 0,
+                high_watermark      DOUBLE PRECISION NOT NULL,
+                low_watermark       DOUBLE PRECISION NOT NULL,
+                exit_fill           DOUBLE PRECISION,
+                exit_reason         TEXT DEFAULT '',
+                plan_json           TEXT NOT NULL,
+                UNIQUE (ticker, entry_bar_id)
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_created ON scalp_signal_plans(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_ticker ON scalp_signal_plans(ticker, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_decisions_plan ON scalp_execution_decisions(plan_id)",
@@ -158,6 +194,9 @@ def init_scalp_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scalp_actions_context ON scalp_learning_actions(context_key, action_ts)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_ml_models_status ON scalp_ml_models(status, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_ml_predictions_model ON scalp_ml_predictions(model_version, predicted_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_status ON scalp_shadow_trades(status, opened_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_closed ON scalp_shadow_trades(closed_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_scalp_shadow_open_ticker ON scalp_shadow_trades(ticker) WHERE status='OPEN'",
         ]
         try:
             with get_conn() as conn:

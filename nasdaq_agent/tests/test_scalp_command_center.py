@@ -28,6 +28,7 @@ def test_command_center_is_a_dedicated_authenticated_live_page():
     assert "Learning Guard" in html
     assert "Open Positions" in html
     assert "Recent Learned Outcomes" in html
+    assert "Shadow Validation" in html
     assert 'href="/settings"' in html
 
 
@@ -120,6 +121,8 @@ def test_dashboard_snapshot_joins_plans_prices_risk_and_learning(monkeypatch):
     assert "max_portfolio_heat_pct" in result["risk"]
     assert "effective_daily_loss_halt_usd" in result["risk"]
     assert result["learning"]["outcome_count"] == 0
+    assert result["risk"]["shadow_enabled"] is True
+    assert "shadow" in result
 
 
 def test_hard_learning_block_is_not_presented_as_watch():

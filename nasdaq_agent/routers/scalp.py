@@ -92,6 +92,11 @@ def _dashboard_snapshot() -> dict[str, Any]:
         for row in positions
     )
     learning = _learning_snapshot()
+    try:
+        from agent.scalp.shadow import shadow_dashboard_data
+        shadow = shadow_dashboard_data(recent_limit=30)
+    except Exception:
+        shadow = {"open": [], "recent_closed": [], "metrics": {}}
     health = price_bus_health(max_age_s=2.0)
     counts = {
         "actionable": sum(plan["state"] == "ACTIONABLE" for plan in plans),
@@ -143,8 +148,10 @@ def _dashboard_snapshot() -> dict[str, Any]:
             "tp1_r": round(float(config.get("scalp.tp1_r", 1.0)), 3),
             "tp2_r": round(float(config.get("scalp.reward_r", 2.0)), 3),
             "execution_enabled": bool(config.get("scalp.execution_enabled", False)),
+            "shadow_enabled": bool(config.get("scalp.shadow_enabled", True)),
         },
         "learning": learning,
+        "shadow": shadow,
     }
     with _cache_lock:
         _cache_ts = now
@@ -315,6 +322,7 @@ def _readiness_snapshot() -> dict[str, Any]:
             "market_data": market_up,
             "scalp_engine": engine_up,
             "paper_execution": bool(risk.get("execution_enabled")),
+            "shadow_execution": bool(risk.get("shadow_enabled")),
             "immediate_learning": learner_up,
             "scheduled_ml_training": learner_up and (ml_manual or ml_auto_armed),
             "universe_self_healing": market_up,

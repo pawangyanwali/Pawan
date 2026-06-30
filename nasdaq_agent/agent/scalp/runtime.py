@@ -37,6 +37,7 @@ class ScalpRuntime:
         self._indicator_cache: dict[str, tuple[int, Any, IndicatorSnapshot, list[float], list[float]]] = {}
         self._mtf_cache: dict[str, tuple[int, Any]] = {}
         self._last_execution_bar: dict[str, int] = {}
+        self._last_shadow_bar: dict[str, int] = {}
         self._last_position_bar: dict[str, int] = {}
         self.last_cycle: dict[str, Any] = {}
 
@@ -59,6 +60,10 @@ class ScalpRuntime:
             ticker: value for ticker, value in self._last_execution_bar.items()
             if ticker in keep
         }
+        self._last_shadow_bar = {
+            ticker: value for ticker, value in self._last_shadow_bar.items()
+            if ticker in keep
+        }
         self._last_position_bar = {
             ticker: value for ticker, value in self._last_position_bar.items()
             if ticker in keep
@@ -76,7 +81,6 @@ class ScalpRuntime:
         started = time.monotonic()
         session = get_session()
         session_info = get_session_info()
-        quotes = get_all_prices()
         contexts = get_context_snapshots(self.tickers)
         frames, bar_errors = load_one_minute_frames(
             self.tickers,
@@ -85,19 +89,15 @@ class ScalpRuntime:
         signal_config = ScalpSignalConfig.from_runtime(config)
         workers = max(1, min(16, int(config.get("scalp_runtime.workers", 8))))
 
-        def analyze(ticker: str) -> tuple[str, ScalpSignalPlan, Any | None, int]:
-            quote = quote_snapshot_from_payload(ticker, quotes.get(ticker) or {})
+        def prepare(ticker: str) -> tuple[str, Any | None, int, Any, list[float], list[float], Any | None, str]:
             frame = frames.get(ticker)
             if frame is None or frame.empty:
-                plan = create_scalp_signal_plan(
-                    quote=quote,
-                    indicators=IndicatorSnapshot(None, None, None, None, None, None, None, None),
-                    side=SignalSide.NONE,
-                    session=session,
-                    config=signal_config,
+                return (
+                    ticker, None, 0,
+                    IndicatorSnapshot(None, None, None, None, None, None, None, None),
+                    [], [], None,
+                    bar_errors.get(ticker, "ONE_MINUTE_BARS_MISSING"),
                 )
-                _add_blocker(plan, bar_errors.get(ticker, "ONE_MINUTE_BARS_MISSING"))
-                return ticker, plan, None, 0
 
             bar_id = int(frame.index[-1].timestamp() * 1000)
             cached = self._indicator_cache.get(ticker)
@@ -125,6 +125,29 @@ class ScalpRuntime:
                     max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
                 )
                 self._mtf_cache[ticker] = (mtf_bar_id, mtf_context)
+
+            return ticker, enriched, bar_id, indicators, supports, resistances, mtf_context, ""
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-bars") as pool:
+            prepared = list(pool.map(prepare, self.tickers))
+
+        # Quotes are deliberately captured after the expensive bar/indicator pass.
+        # Plan age therefore measures market-data freshness, not cycle compute time.
+        quotes = get_all_prices()
+
+        def analyze(item: tuple[str, Any | None, int, Any, list[float], list[float], Any | None, str]) -> tuple[str, ScalpSignalPlan, Any | None, int]:
+            ticker, enriched, bar_id, indicators, supports, resistances, mtf_context, bar_error = item
+            quote = quote_snapshot_from_payload(ticker, quotes.get(ticker) or {})
+            if enriched is None:
+                plan = create_scalp_signal_plan(
+                    quote=quote,
+                    indicators=indicators,
+                    side=SignalSide.NONE,
+                    session=session,
+                    config=signal_config,
+                )
+                _add_blocker(plan, bar_error)
+                return ticker, plan, None, 0
 
             candidates = [
                 create_scalp_signal_plan(
@@ -162,7 +185,7 @@ class ScalpRuntime:
             return ticker, plan, enriched, bar_id
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-plan") as pool:
-            analyzed = list(pool.map(analyze, self.tickers))
+            analyzed = list(pool.map(analyze, prepared))
 
         rows: list[dict[str, Any]] = []
         plans_by_ticker: dict[str, ScalpSignalPlan] = {}
@@ -176,6 +199,8 @@ class ScalpRuntime:
                 bars_by_ticker[ticker] = bar_id
 
         self._manage_positions(frames_by_ticker, bars_by_ticker, quotes)
+        if bool(config.get("scalp.shadow_enabled", True)):
+            self._shadow_execute(plans_by_ticker, bars_by_ticker)
         if bool(config.get("scalp.execution_enabled", False)):
             self._execute(plans_by_ticker, frames_by_ticker, bars_by_ticker)
 
@@ -206,6 +231,15 @@ class ScalpRuntime:
         from agent.valkey_client import get_all_prices
 
         quotes = get_all_prices()
+        try:
+            from agent.config_manager import config
+            from agent.market_hours import get_session
+            from agent.scalp.shadow import mark_shadow_trades
+
+            if bool(config.get("scalp.shadow_enabled", True)):
+                mark_shadow_trades(quotes, session=get_session())
+        except Exception:
+            logger.exception("[ScalpRuntime] shadow position tick failed")
         for ticker in {
             str(row.get("ticker") or "").upper() for row in get_open_trades()
         }:
@@ -222,6 +256,24 @@ class ScalpRuntime:
                 rt_check_positions(ticker, current)
             except Exception:
                 logger.exception("[ScalpRuntime] live position tick failed for %s", ticker)
+
+    def _shadow_execute(
+        self,
+        plans: dict[str, ScalpSignalPlan],
+        bars: dict[str, int],
+    ) -> None:
+        """Open isolated hypothetical trades once per ticker/bar."""
+        from agent.scalp.shadow import open_shadow_trade
+
+        for ticker, plan in plans.items():
+            bar_id = bars.get(ticker, 0)
+            if not plan.valid or not bar_id or self._last_shadow_bar.get(ticker) == bar_id:
+                continue
+            self._last_shadow_bar[ticker] = bar_id
+            try:
+                open_shadow_trade(plan, entry_bar_id=bar_id)
+            except Exception:
+                logger.exception("[ScalpRuntime] shadow entry failed for %s", ticker)
 
     def _execute(
         self,

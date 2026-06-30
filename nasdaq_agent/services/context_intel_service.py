@@ -302,6 +302,7 @@ def _feature_compute_loop() -> None:
 
 
 def _run_feature_compute() -> None:
+    cycle_started = time.monotonic()
     from agent.context_store import (
         get_tickers_with_events,
         compute_features_for_ticker,
@@ -310,12 +311,15 @@ def _run_feature_compute() -> None:
         get_earnings_context,
     )
     from agent.context_snapshot import publish_context_snapshot, build_payload_from_features
-    from agent.ticker_universe import TIER1
+    from agent.universe_registry import get_runtime_universe
     from datetime import datetime, timezone
 
-    # Compute for: tickers with recent events + always TIER1
+    # Every eligible scalp ticker gets a neutral/fresh snapshot even when it has
+    # no recent news. Event tickers outside the active universe remain available
+    # for earnings/news inspection without blocking canonical plan coverage.
     event_tickers = get_tickers_with_events(max_age_hours=24)
-    tickers = list(dict.fromkeys(TIER1 + event_tickers))   # TIER1 first, then others, deduped
+    runtime_tickers = get_runtime_universe()
+    tickers = list(dict.fromkeys(runtime_tickers + event_tickers))
 
     updated = 0
     _mkt_sentiments: list[float] = []   # for market-wide aggregate
@@ -399,7 +403,13 @@ def _run_feature_compute() -> None:
             _log.debug("[feature_compute] ctx:market publish error: %s", _me)
 
     if updated:
-        _log.debug("[feature_compute] Updated %d tickers", updated)
+        _log.info(
+            "[feature_compute] Updated %d/%d runtime tickers (%d total) in %.1fs",
+            min(updated, len(runtime_tickers)),
+            len(runtime_tickers),
+            updated,
+            time.monotonic() - cycle_started,
+        )
 
 
 # ── IV poller — every 5 minutes (Phase 2 stub) ───────────────────────────────
