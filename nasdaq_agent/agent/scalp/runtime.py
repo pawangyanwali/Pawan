@@ -77,6 +77,7 @@ class ScalpRuntime:
         from agent.market_hours import get_session, get_session_info
         from agent.signal_snapshot import write_latest
         from agent.valkey_client import get_all_prices
+        from agent.scalp.execution_policy import execution_market_health
 
         started = time.monotonic()
         session = get_session()
@@ -134,6 +135,7 @@ class ScalpRuntime:
         # Quotes are deliberately captured after the expensive bar/indicator pass.
         # Plan age therefore measures market-data freshness, not cycle compute time.
         quotes = get_all_prices()
+        market_health = execution_market_health(max_age_s=2.0)
 
         def analyze(item: tuple[str, Any | None, int, Any, list[float], list[float], Any | None, str]) -> tuple[str, ScalpSignalPlan, Any | None, int]:
             ticker, enriched, bar_id, indicators, supports, resistances, mtf_context, bar_error = item
@@ -200,9 +202,14 @@ class ScalpRuntime:
 
         self._manage_positions(frames_by_ticker, bars_by_ticker, quotes)
         if bool(config.get("scalp.shadow_enabled", True)):
-            self._shadow_execute(plans_by_ticker, bars_by_ticker)
+            self._shadow_execute(plans_by_ticker, bars_by_ticker, market_health)
         if bool(config.get("scalp.execution_enabled", False)):
-            self._execute(plans_by_ticker, frames_by_ticker, bars_by_ticker)
+            self._execute(
+                plans_by_ticker,
+                frames_by_ticker,
+                bars_by_ticker,
+                market_health,
+            )
 
         valid_count = sum(1 for plan in plans_by_ticker.values() if plan.valid)
         data_gap_count = sum(
@@ -261,6 +268,7 @@ class ScalpRuntime:
         self,
         plans: dict[str, ScalpSignalPlan],
         bars: dict[str, int],
+        market_health: dict[str, Any],
     ) -> None:
         """Open isolated hypothetical trades once per ticker/bar."""
         from agent.scalp.shadow import open_shadow_trade
@@ -271,7 +279,11 @@ class ScalpRuntime:
                 continue
             self._last_shadow_bar[ticker] = bar_id
             try:
-                open_shadow_trade(plan, entry_bar_id=bar_id)
+                open_shadow_trade(
+                    plan,
+                    entry_bar_id=bar_id,
+                    market_health=market_health,
+                )
             except Exception:
                 logger.exception("[ScalpRuntime] shadow entry failed for %s", ticker)
 
@@ -280,14 +292,30 @@ class ScalpRuntime:
         plans: dict[str, ScalpSignalPlan],
         frames: dict[str, Any],
         bars: dict[str, int],
+        market_health: dict[str, Any],
     ) -> None:
         from agent.paper_trading import maybe_open_trade
+        from agent.scalp.execution_policy import evaluate_execution_policy
+        from agent.scalp.store import record_execution_decision
 
         for ticker, plan in plans.items():
             bar_id = bars.get(ticker, 0)
             if not plan.valid or not bar_id or self._last_execution_bar.get(ticker) == bar_id:
                 continue
             self._last_execution_bar[ticker] = bar_id
+            policy = evaluate_execution_policy(
+                plan,
+                mode="PAPER",
+                market_health=market_health,
+            )
+            if not policy.allowed:
+                record_execution_decision(
+                    plan.plan_id,
+                    "BLOCKED",
+                    reason=f"POLICY_{policy.reason}",
+                    detail={"policy": policy.to_dict(), "entry_bar_id": bar_id},
+                )
+                continue
             frame = frames[ticker]
             average_minute_volume = float(frame["Volume"].tail(20).mean())
             if not math.isfinite(average_minute_volume) or average_minute_volume < 0:
@@ -307,7 +335,7 @@ class ScalpRuntime:
                     vwap_event=plan.vwap_event,
                     rsi_zone=plan.rsi_zone,
                     entry_type="SCALP",
-                    size_mult=plan.learning_size_mult,
+                    size_mult=plan.learning_size_mult * policy.size_mult,
                     trading_tier="HIGH",
                     algo_name="SCALP_V1",
                     atr=plan.atr_14,

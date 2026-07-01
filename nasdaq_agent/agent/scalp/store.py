@@ -180,6 +180,15 @@ def init_scalp_tables() -> None:
                 mae_r               DOUBLE PRECISION NOT NULL DEFAULT 0,
                 high_watermark      DOUBLE PRECISION NOT NULL,
                 low_watermark       DOUBLE PRECISION NOT NULL,
+                policy_size_mult    DOUBLE PRECISION NOT NULL DEFAULT 1,
+                policy_json         TEXT NOT NULL DEFAULT '{{}}',
+                trigger_price       DOUBLE PRECISION,
+                trigger_source      TEXT DEFAULT '',
+                trigger_quote_age_ms INTEGER DEFAULT 0,
+                exit_bid            DOUBLE PRECISION,
+                exit_ask            DOUBLE PRECISION,
+                exit_spread_bps     DOUBLE PRECISION DEFAULT 0,
+                exit_slippage_bps   DOUBLE PRECISION DEFAULT 0,
                 exit_fill           DOUBLE PRECISION,
                 exit_reason         TEXT DEFAULT '',
                 plan_json           TEXT NOT NULL,
@@ -198,10 +207,24 @@ def init_scalp_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_closed ON scalp_shadow_trades(closed_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_scalp_shadow_open_ticker ON scalp_shadow_trades(ticker) WHERE status='OPEN'",
         ]
+        migrations = [
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_size_mult DOUBLE PRECISION NOT NULL DEFAULT 1",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_price DOUBLE PRECISION",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_source TEXT DEFAULT ''",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_quote_age_ms INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_bid DOUBLE PRECISION",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_ask DOUBLE PRECISION",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_spread_bps DOUBLE PRECISION DEFAULT 0",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_slippage_bps DOUBLE PRECISION DEFAULT 0",
+        ]
         try:
             with get_conn() as conn:
                 for statement in statements:
                     conn.execute(statement)
+                if using_postgres():
+                    for statement in migrations:
+                        conn.execute(statement)
             _initialized = True
         except Exception as exc:
             logger.error("[ScalpStore] schema initialization failed: %s", exc)

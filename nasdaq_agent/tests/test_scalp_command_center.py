@@ -29,6 +29,13 @@ def test_command_center_is_a_dedicated_authenticated_live_page():
     assert "Open Positions" in html
     assert "Recent Learned Outcomes" in html
     assert "Shadow Validation" in html
+    assert "Candidate evidence and policy-approved hypothetical execution" in html
+    assert "Rule score" in html
+    assert "candidate_count" in html
+    assert 'id="shadow-policy"' in html
+    assert "rejection_reasons" in html
+    assert "trigger_quote_age_ms" in html
+    assert "exit_slippage_bps" in html
     assert 'href="/settings"' in html
 
 

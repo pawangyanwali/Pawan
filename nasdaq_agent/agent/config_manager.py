@@ -99,6 +99,23 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_runtime.blocked_sessions":       lambda: [
         "CLOSED", "RESTRICTED", "CLOSING_CAUTION", "HARD_CLOSE"
     ],
+    # Shared execution preflight. Plans remain visible for research, while only
+    # policy-approved candidates may enter shadow or canonical paper execution.
+    "scalp_runtime.execution_policy_enabled": lambda: True,
+    "scalp_runtime.execution_blocked_sessions": lambda: [
+        "CLOSED", "RESTRICTED", "LUNCH_BLOCK", "CLOSING_CAUTION", "HARD_CLOSE"
+    ],
+    "scalp_runtime.require_live_execution_data": lambda: True,
+    "scalp_runtime.pre_market_size_mult":   lambda: 0.35,
+    "scalp_runtime.restricted_size_mult":   lambda: 0.0,
+    "scalp_runtime.prime_size_mult":        lambda: 1.0,
+    "scalp_runtime.lunch_size_mult":        lambda: 0.0,
+    "scalp_runtime.standard_size_mult":     lambda: 0.80,
+    "scalp_runtime.closing_size_mult":      lambda: 0.0,
+    "scalp_runtime.after_hours_size_mult":  lambda: 0.30,
+    "scalp_runtime.hard_close_size_mult":   lambda: 0.0,
+    "scalp_runtime.closed_size_mult":       lambda: 0.0,
+    "scalp_runtime.position_max_quote_age_ms": lambda: 5_000,
     "scalp_runtime.require_context_data":   lambda: True,
     "scalp_runtime.max_context_age_s":      lambda: 180.0,
     "scalp_runtime.max_context_risk_score": lambda: 0.8,
@@ -691,6 +708,30 @@ class ConfigManager:
                         )
                         logger.info(
                             "[ConfigManager] Enabled technical missing-data blocking"
+                        )
+
+                row = c.execute(
+                    "SELECT value FROM config_store WHERE key = ?",
+                    ("paper.max_bars_scalp",),
+                ).fetchone()
+                if row:
+                    try:
+                        current_max_bars = int(json.loads(row["value"]))
+                    except Exception:
+                        current_max_bars = 20
+                    if current_max_bars >= 300:
+                        c.execute(
+                            _UPSERT,
+                            (
+                                "paper.max_bars_scalp",
+                                json.dumps(20),
+                                now,
+                                "migration_scalp_horizon_20",
+                            ),
+                        )
+                        logger.info(
+                            "[ConfigManager] Restored paper.max_bars_scalp from %d to 20",
+                            current_max_bars,
                         )
         except Exception as exc:
             logger.warning("[ConfigManager] safety migration failed: %s", exc)
