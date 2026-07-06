@@ -195,6 +195,19 @@ def init_scalp_tables() -> None:
                 UNIQUE (ticker, entry_bar_id)
             )
             """,
+            f"""
+            CREATE TABLE IF NOT EXISTS scalp_shadow_daily_reports (
+                market_date         TEXT PRIMARY KEY,
+                generated_at        {timestamp_type} NOT NULL,
+                status              TEXT NOT NULL,
+                closed_count        INTEGER NOT NULL DEFAULT 0,
+                win_rate_pct        DOUBLE PRECISION DEFAULT 0,
+                expectancy_r        DOUBLE PRECISION DEFAULT 0,
+                pnl_r               DOUBLE PRECISION DEFAULT 0,
+                pnl_dollar          DOUBLE PRECISION DEFAULT 0,
+                report_json         TEXT NOT NULL
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_created ON scalp_signal_plans(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_ticker ON scalp_signal_plans(ticker, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_decisions_plan ON scalp_execution_decisions(plan_id)",
@@ -206,6 +219,7 @@ def init_scalp_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_status ON scalp_shadow_trades(status, opened_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_closed ON scalp_shadow_trades(closed_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_scalp_shadow_open_ticker ON scalp_shadow_trades(ticker) WHERE status='OPEN'",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_reports_generated ON scalp_shadow_daily_reports(generated_at)",
         ]
         migrations = [
             "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_size_mult DOUBLE PRECISION NOT NULL DEFAULT 1",

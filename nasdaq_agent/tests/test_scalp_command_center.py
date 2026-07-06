@@ -36,6 +36,9 @@ def test_command_center_is_a_dedicated_authenticated_live_page():
     assert "rejection_reasons" in html
     assert "trigger_quote_age_ms" in html
     assert "exit_slippage_bps" in html
+    assert "Daily Shadow Diagnosis" in html
+    assert 'id="shadow-reports-body"' in html
+    assert "renderShadowReports(d.shadow_reports||[])" in html
     assert 'href="/settings"' in html
 
 
@@ -130,6 +133,7 @@ def test_dashboard_snapshot_joins_plans_prices_risk_and_learning(monkeypatch):
     assert result["learning"]["outcome_count"] == 0
     assert result["risk"]["shadow_enabled"] is True
     assert "shadow" in result
+    assert "shadow_reports" in result
 
 
 def test_hard_learning_block_is_not_presented_as_watch():

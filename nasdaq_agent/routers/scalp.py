@@ -37,6 +37,15 @@ async def scalp_readiness(_user: AuthenticatedUser = Depends(require_viewer)):
     return await loop.run_in_executor(None, _readiness_snapshot)
 
 
+@router.get("/api/scalp/shadow-reports")
+async def scalp_shadow_reports(
+    limit: int = 5,
+    _user: AuthenticatedUser = Depends(require_viewer),
+):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _shadow_reports_snapshot, limit)
+
+
 def _dashboard_snapshot() -> dict[str, Any]:
     global _cache_ts, _cache_value
     now = time.time()
@@ -97,6 +106,11 @@ def _dashboard_snapshot() -> dict[str, Any]:
         shadow = shadow_dashboard_data(recent_limit=30)
     except Exception:
         shadow = {"open": [], "recent_closed": [], "metrics": {}}
+    try:
+        from agent.scalp.shadow_report import latest_shadow_daily_reports
+        shadow_reports = latest_shadow_daily_reports(limit=5)
+    except Exception:
+        shadow_reports = []
     health = price_bus_health(max_age_s=2.0)
     counts = {
         "actionable": sum(plan["state"] == "ACTIONABLE" for plan in plans),
@@ -152,11 +166,21 @@ def _dashboard_snapshot() -> dict[str, Any]:
         },
         "learning": learning,
         "shadow": shadow,
+        "shadow_reports": shadow_reports,
     }
     with _cache_lock:
         _cache_ts = now
         _cache_value = result
     return result
+
+
+def _shadow_reports_snapshot(limit: int = 5) -> dict[str, Any]:
+    from agent.scalp.shadow_report import latest_shadow_daily_reports
+
+    return {
+        "asof_ts": datetime.now(timezone.utc).isoformat(),
+        "reports": latest_shadow_daily_reports(limit=limit),
+    }
 
 
 def _learning_snapshot() -> dict[str, Any]:

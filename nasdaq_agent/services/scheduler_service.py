@@ -43,6 +43,12 @@ _HEARTBEAT_INTERVAL = int(os.getenv("SCHEDULER_HEARTBEAT_S", "30"))
 _EOD_HM_START = 945   # 15*60 + 45
 _EOD_HM_END   = 960   # 16*60 + 00
 
+# Full-session shadow diagnostics run after after-hours ends.  This is separate
+# from the 15:45 EOD position close because shadow analysis should include the
+# complete pre-market, regular, and after-hours scalp window.
+_SHADOW_REPORT_HM = int(os.getenv("SCALP_SHADOW_REPORT_HM", str(20 * 60 + 15)))
+_SHADOW_REPORT_BACKFILL_DAYS = int(os.getenv("SCALP_SHADOW_REPORT_BACKFILL_DAYS", "7"))
+
 
 # ── EOD watchdog ──────────────────────────────────────────────────────────────
 
@@ -123,6 +129,49 @@ def _heartbeat_loop() -> None:
         _runner._stop.wait(_HEARTBEAT_INTERVAL)
 
 
+def _shadow_report_loop() -> None:
+    """Generate durable daily diagnostics for isolated shadow execution."""
+    import zoneinfo
+    from datetime import datetime
+
+    fired_on: set = set()
+    tz_et = zoneinfo.ZoneInfo("America/New_York")
+
+    try:
+        from agent.scalp.shadow_report import generate_recent_shadow_reports
+
+        reports = generate_recent_shadow_reports(_SHADOW_REPORT_BACKFILL_DAYS)
+        _log.info("Shadow diagnostics backfilled for %d day(s)", len(reports))
+    except Exception as exc:
+        _log.warning("Shadow diagnostics backfill failed: %s", exc, exc_info=True)
+
+    while not _runner.stopped:
+        try:
+            now_et = datetime.now(tz_et)
+            hm = now_et.hour * 60 + now_et.minute
+            today = now_et.date()
+            if now_et.weekday() < 5 and hm >= _SHADOW_REPORT_HM and today not in fired_on:
+                fired_on.add(today)
+                from agent.scalp.shadow_report import generate_shadow_daily_report
+
+                report = generate_shadow_daily_report(today)
+                summary = report.get("summary") or {}
+                _log.info(
+                    "Shadow diagnostics %s: %s | %s closed | %.3fR EV | $%.2f",
+                    report.get("market_date"),
+                    report.get("status"),
+                    int(summary.get("closed") or 0),
+                    float(summary.get("expectancy_r") or 0.0),
+                    float(summary.get("pnl_dollar") or 0.0),
+                )
+            if len(fired_on) > 10:
+                fired_on = set(sorted(fired_on)[-5:])
+        except Exception as exc:
+            _log.warning("Shadow diagnostics generation failed: %s", exc, exc_info=True)
+
+        _runner._stop.wait(_HEARTBEAT_INTERVAL)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -141,6 +190,16 @@ def main() -> None:
         target=_heartbeat_loop, daemon=True, name="scheduler-heartbeat"
     ).start()
     _log.info("Heartbeat loop started (interval=%ds)", _HEARTBEAT_INTERVAL)
+
+    threading.Thread(
+        target=_shadow_report_loop, daemon=True, name="shadow-diagnostics"
+    ).start()
+    _log.info(
+        "Shadow diagnostics started — reports after %02d:%02d ET, backfill=%d day(s)",
+        _SHADOW_REPORT_HM // 60,
+        _SHADOW_REPORT_HM % 60,
+        _SHADOW_REPORT_BACKFILL_DAYS,
+    )
 
     _log.info("Scheduler running — waiting for SIGTERM/SIGINT …")
     _runner.register_signals()

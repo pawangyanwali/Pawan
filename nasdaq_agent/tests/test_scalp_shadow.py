@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import pytest
 
 import time
+from datetime import date
 
 from agent.scalp.models import QuoteSource, ScalpSignalPlan, SignalSide
 
@@ -70,6 +72,57 @@ def test_shadow_trade_is_isolated_and_resolves_at_tp2():
     assert closed["metrics"]["wins"] == 1
     assert closed["recent_closed"][0]["exit_reason"] == "TP2"
     assert closed["recent_closed"][0]["pnl_r"] >= 1.5
+
+
+def test_shadow_daily_report_persists_root_cause_summary():
+    from agent.db import get_conn
+    from agent.scalp.shadow_report import (
+        generate_shadow_daily_report,
+        latest_shadow_daily_reports,
+    )
+    from agent.scalp.store import init_scalp_tables
+
+    target = date(2026, 7, 2)
+    init_scalp_tables()
+    plan_json = json.dumps(
+        {
+            "setup_type": "OVERSOLD_MACD_TURN_LONG",
+            "rsi_zone": "EXTREME_OS",
+            "vwap_event": "RECLAIM",
+            "confidence": 82,
+            "rvol": 1.7,
+            "reasons": ["RSI_EXTREME", "MACD_TURN"],
+        }
+    )
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO scalp_shadow_trades
+              (plan_id, entry_bar_id, opened_at, closed_at, ticker, side,
+               setup_type, session, status, entry_fill, current_price,
+               stop_loss, original_stop, tp1, tp2, risk_per_share, shares,
+               shares_remaining, t1_hit, t2_hit, pnl_r, pnl_dollar, mfe_r,
+               mae_r, high_watermark, low_watermark, exit_reason, plan_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "report-1", 777, "2026-07-02T14:00:00+00:00",
+                "2026-07-02T14:05:00+00:00", "AAPL", "LONG",
+                "OVERSOLD_MACD_TURN_LONG", "STANDARD", "CLOSED", 100.0,
+                99.0, 99.0, 99.0, 101.0, 102.0, 1.0, 100, 0, 0, 0,
+                -1.0, -100.0, 0.2, -1.0, 100.2, 99.0, "STOP", plan_json,
+            ),
+        )
+
+    report = generate_shadow_daily_report(target, persist=True)
+    latest = latest_shadow_daily_reports(limit=1)
+
+    assert report["market_date"] == "2026-07-02"
+    assert report["status"] == "NEGATIVE"
+    assert report["summary"]["closed"] == 1
+    assert report["groups"]["exit_reason"][0]["exit_reason"] == "STOP"
+    assert "Pre-TP1 stops" in " ".join(report["findings"])
+    assert latest[0]["market_date"] == "2026-07-02"
 
 
 def test_shadow_trade_uses_executable_ask_for_short_stop():
