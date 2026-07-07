@@ -22,6 +22,15 @@ from .store import init_scalp_tables
 logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
+_GROUP_VALUE_FIELDS = {
+    "setup": "setup_type",
+    "side": "side",
+    "session": "session",
+    "exit_reason": "exit_reason",
+    "rsi_zone": "rsi_zone",
+    "vwap_event": "vwap_event",
+    "trigger_source": "trigger_source",
+}
 
 
 def generate_shadow_daily_report(
@@ -460,11 +469,12 @@ def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
     for key in ("setup", "session", "vwap_event", "rsi_zone"):
         bad = _worst_group(report, key)
         if bad:
+            bad_value = _group_value(bad, key)
             findings.append(
-                f"Worst {key}: {bad[key]} ({bad['closed']} trades, {bad['expectancy_r']:.3f}R EV)."
+                f"Worst {key}: {bad_value} ({bad['closed']} trades, {bad['expectancy_r']:.3f}R EV)."
             )
             recommendations.append(
-                f"Shadow-tighten or block {key}={bad[key]} until it recovers in later reports."
+                f"Shadow-tighten or block {key}={bad_value} until it recovers in later reports."
             )
 
     if _float(summary.get("avg_exit_slippage_bps")) > 25.0:
@@ -498,6 +508,11 @@ def _worst_group(report: dict[str, Any], group: str) -> dict[str, Any] | None:
     if not rows:
         return None
     return sorted(rows, key=lambda row: _float(row.get("expectancy_r")))[0]
+
+
+def _group_value(row: dict[str, Any], group: str) -> str:
+    field = _GROUP_VALUE_FIELDS.get(group, group)
+    return str(row.get(field) or row.get(group) or "UNKNOWN")
 
 
 def _persist_report(report: dict[str, Any]) -> None:
