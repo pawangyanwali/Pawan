@@ -26,10 +26,10 @@ def _quote(*, last: float, bid: float, ask: float) -> dict:
     }
 
 
-def _plan(side: SignalSide = SignalSide.LONG) -> ScalpSignalPlan:
+def _plan(side: SignalSide = SignalSide.LONG, ticker: str = "AAPL") -> ScalpSignalPlan:
     long = side is SignalSide.LONG
     return ScalpSignalPlan(
-        ticker="AAPL",
+        ticker=ticker,
         side=side,
         valid=True,
         invalid_reason="",
@@ -72,6 +72,53 @@ def test_shadow_trade_is_isolated_and_resolves_at_tp2():
     assert closed["metrics"]["wins"] == 1
     assert closed["recent_closed"][0]["exit_reason"] == "TP2"
     assert closed["recent_closed"][0]["pnl_r"] >= 1.5
+
+
+def test_shadow_loss_immediately_updates_learning_gate(monkeypatch):
+    from agent.config_manager import config
+    from agent.db import get_conn
+    from agent.scalp.learning import (
+        SIZE_REDUCE,
+        context_key_for_plan,
+        get_context_gate,
+    )
+    from agent.scalp.shadow import mark_shadow_trades, open_shadow_trade
+
+    overrides = {
+        "scalp_learn.enabled": True,
+        "scalp_learn.shadow_outcomes_enabled": True,
+        "scalp_learn.rolling_window_min": 120,
+        "scalp_learn.min_samples_to_adjust": 2,
+        "scalp_learn.min_samples_to_block": 4,
+        "scalp_learn.ewma_alpha": 0.5,
+        "scalp_learn.negative_reduce_r": -0.05,
+        "scalp_learn.negative_block_r": -0.20,
+        "scalp_learn.block_win_rate": 0.40,
+        "scalp_learn.size_reduce_mult": 0.5,
+    }
+    for key, value in overrides.items():
+        monkeypatch.setitem(config._cache, key, value)
+
+    first = _plan(ticker="AAPL")
+    second = _plan(ticker="MSFT")
+    context_key = context_key_for_plan(first)
+    assert context_key_for_plan(second) == context_key
+
+    assert open_shadow_trade(first, entry_bar_id=1001, market_health=_LIVE_HEALTH) is True
+    mark_shadow_trades({"AAPL": _quote(last=98.9, bid=98.8, ask=99.0)}, session="REGULAR")
+    assert open_shadow_trade(second, entry_bar_id=1002, market_health=_LIVE_HEALTH) is True
+    mark_shadow_trades({"MSFT": _quote(last=98.9, bid=98.8, ask=99.0)}, session="REGULAR")
+
+    gate = get_context_gate(context_key)
+    with get_conn(read_only=True) as conn:
+        learned = conn.execute(
+            "SELECT COUNT(*) AS n FROM scalp_trade_outcomes WHERE trade_id < 0"
+        ).fetchone()["n"]
+
+    assert learned == 2
+    assert gate["sample_count"] == 2
+    assert gate["gate_state"] == SIZE_REDUCE
+    assert gate["size_mult"] == 0.5
 
 
 def test_shadow_daily_report_persists_root_cause_summary():

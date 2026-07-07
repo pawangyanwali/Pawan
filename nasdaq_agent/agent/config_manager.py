@@ -122,6 +122,7 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_runtime.adverse_news_sentiment": lambda: 0.25,
     # Bounded scalp outcome learning. Actions only tighten execution and expire.
     "scalp_learn.enabled":                  lambda: True,
+    "scalp_learn.shadow_outcomes_enabled":  lambda: True,
     "scalp_learn.rolling_window_min":       lambda: 120,
     "scalp_learn.min_samples_to_adjust":    lambda: 5,
     "scalp_learn.min_samples_to_block":     lambda: 12,

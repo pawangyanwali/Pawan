@@ -198,7 +198,8 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
 }
 
 _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
-    "scalp_learn.enabled": ("Immediate outcome learning", "Updates context statistics whenever a SCALP_PLAN_V1 paper trade closes. Disabling it preserves outcomes but stops automatic gate changes.", "Keep enabled in paper mode to measure same-session adaptation."),
+    "scalp_learn.enabled": ("Immediate outcome learning", "Updates context statistics whenever a SCALP_PLAN_V1 paper or enabled shadow trade closes. Disabling it preserves outcomes but stops automatic gate changes.", "Keep enabled in paper/shadow mode to measure same-session adaptation."),
+    "scalp_learn.shadow_outcomes_enabled": ("Learn from shadow mistakes", "Turns closed shadow trades into negative-ID learning outcomes. This never changes paper P&L, but it lets the next matching setup reduce size, raise confidence, or block automatically.", "Enabled means a bad simulated LONG RECLAIM setup can tighten the next similar setup without human intervention."),
     "scalp_learn.rolling_window_min": ("Rolling context window", "Limits decisions to outcomes closed within this many minutes for the exact setup context.", "120 evaluates the most recent two hours."),
     "scalp_learn.min_samples_to_adjust": ("Samples before adjustment", "Minimum matching outcomes required before confidence or size may be tightened.", "5 prevents one isolated loss from changing execution."),
     "scalp_learn.min_samples_to_block": ("Samples before blocking", "Minimum matching outcomes required before a context may be temporarily blocked.", "12 requires a broader failure cluster than a size reduction."),

@@ -171,6 +171,102 @@ def record_closed_trade(conn, trade_id: int) -> dict[str, Any] | None:
     return outcome
 
 
+def record_closed_shadow_trade(conn, shadow_trade_id: int) -> dict[str, Any] | None:
+    """Persist one closed shadow trade as an immediate learning outcome.
+
+    Shadow outcomes remain isolated from account P&L and paper_trades.  They use
+    negative trade IDs in scalp_trade_outcomes so they are auditable, idempotent,
+    and cannot collide with real paper trade IDs.
+    """
+    from agent.config_manager import config
+
+    if not bool(config.get("scalp_learn.enabled", True)):
+        return None
+    if not bool(config.get("scalp_learn.shadow_outcomes_enabled", True)):
+        return None
+    init_scalp_tables()
+    row = conn.execute(
+        """
+        SELECT * FROM scalp_shadow_trades
+        WHERE id=? AND status='CLOSED'
+        """,
+        (shadow_trade_id,),
+    ).fetchone()
+    if not row:
+        return None
+    plan = json.loads(row["plan_json"] or "{}")
+    context_key = context_key_for_plan({**plan, "session": row["session"]})
+    exit_reason = str(row.get("exit_reason") or "")
+    shadow_outcome_id = -abs(int(row["id"]))
+    outcome = {
+        "plan_id": str(row.get("plan_id") or plan.get("plan_id") or ""),
+        "trade_id": shadow_outcome_id,
+        "closed_at": str(row.get("closed_at") or datetime.now(timezone.utc).isoformat()),
+        "ticker": str(row.get("ticker") or ""),
+        "side": _side_value(plan.get("side") or row.get("side")),
+        "context_key": context_key,
+        "setup_type": str(row.get("setup_type") or plan.get("setup_type") or ""),
+        "session": str(row.get("session") or plan.get("session") or ""),
+        "rsi_zone": str(plan.get("rsi_zone") or ""),
+        "macd_state": _macd_state(plan.get("macd_slope", 0.0)),
+        "vwap_event": str(plan.get("vwap_event") or ""),
+        "spread_bucket": _spread_bucket(plan.get("spread_to_risk", 0.0)),
+        "atr_bucket": str(plan.get("atr_bucket") or "UNKNOWN"),
+        "entry_fill": float(row.get("entry_fill") or 0.0),
+        "exit_fill": float(row.get("exit_fill") or row.get("current_price") or 0.0),
+        "tp1_hit": int(bool(row.get("t1_hit"))),
+        "tp2_hit": int(bool(row.get("t2_hit"))),
+        "stop_hit": int("STOP" in exit_reason),
+        "time_stop": int("TIME" in exit_reason or "MAX_BARS" in exit_reason),
+        "pnl_r": round(float(row.get("pnl_r") or 0.0), 6),
+        "pnl_dollar": round(float(row.get("pnl_dollar") or 0.0), 2),
+        "mfe_r": float(row.get("mfe_r") or 0.0),
+        "mae_r": float(row.get("mae_r") or 0.0),
+        "exit_reason": f"SHADOW_{exit_reason or 'CLOSED'}",
+    }
+    keys = (
+        "plan_id", "trade_id", "closed_at", "ticker", "side", "context_key",
+        "setup_type", "session", "rsi_zone", "macd_state", "vwap_event",
+        "spread_bucket", "atr_bucket", "entry_fill", "exit_fill", "tp1_hit", "tp2_hit",
+        "stop_hit", "time_stop", "pnl_r", "pnl_dollar", "mfe_r", "mae_r",
+        "exit_reason",
+    )
+    existing = conn.execute(
+        "SELECT id FROM scalp_trade_outcomes WHERE trade_id=?",
+        (shadow_outcome_id,),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE scalp_trade_outcomes
+            SET pnl_r=?, pnl_dollar=?, mfe_r=?, mae_r=?, exit_reason=?,
+                closed_at=?
+            WHERE trade_id=?
+            """,
+            (
+                outcome["pnl_r"], outcome["pnl_dollar"], outcome["mfe_r"],
+                outcome["mae_r"], outcome["exit_reason"], outcome["closed_at"],
+                shadow_outcome_id,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO scalp_trade_outcomes
+              (plan_id, trade_id, closed_at, ticker, side, context_key,
+               setup_type, session, rsi_zone, macd_state, vwap_event,
+               spread_bucket, atr_bucket, entry_fill, exit_fill, tp1_hit, tp2_hit,
+               stop_hit, time_stop, pnl_r, pnl_dollar, mfe_r, mae_r,
+               exit_reason)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            tuple(outcome[key] for key in keys),
+        )
+    _refresh_context(conn, context_key)
+    _invalidate_gate(context_key)
+    return outcome
+
+
 def get_context_gate(context_key: str) -> dict[str, Any]:
     now = time.time()
     with _cache_lock:

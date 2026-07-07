@@ -1,8 +1,8 @@
 """Isolated shadow execution for canonical scalp plans.
 
-Shadow trades never write to paper_trades or scalp_trade_outcomes.  They exist
-only to measure how valid plans would have behaved with executable bid/ask
-prices while canonical paper execution is disabled.
+Shadow trades never write to paper_trades or account P&L.  When enabled, closed
+shadow trades can also become negative-ID scalp learning outcomes so the system
+can tighten bad contexts without waiting for a human report review.
 """
 from __future__ import annotations
 
@@ -353,6 +353,16 @@ def mark_shadow_trades(quotes: dict[str, dict], *, session: str) -> int:
                     exit_fill if closed else None, exit_reason, row["id"],
                 ),
             )
+            if closed:
+                try:
+                    from .learning import record_closed_shadow_trade
+
+                    record_closed_shadow_trade(conn, int(row["id"]))
+                except Exception:
+                    logger.exception(
+                        "[Shadow] learning outcome failed for shadow trade %s",
+                        row.get("id"),
+                    )
         changed += 1
         if closed:
             logger.info(

@@ -395,6 +395,8 @@ def learning_dashboard_data(
             """
             SELECT
               (SELECT COUNT(*) FROM scalp_trade_outcomes) AS outcomes,
+              (SELECT COUNT(*) FROM scalp_trade_outcomes WHERE trade_id < 0) AS shadow_outcomes,
+              (SELECT COUNT(*) FROM scalp_trade_outcomes WHERE trade_id > 0) AS canonical_outcomes,
               (SELECT COUNT(*) FROM scalp_context_stats) AS contexts,
               (SELECT COUNT(*) FROM scalp_learning_actions) AS actions
             """
@@ -406,13 +408,14 @@ def learning_dashboard_data(
         "ml_champion": dict(champion) if champion else None,
         "ml_evaluations": [dict(row) for row in evaluations],
         "counts": dict(counts) if counts else {
-            "outcomes": 0, "contexts": 0, "actions": 0,
+            "outcomes": 0, "shadow_outcomes": 0, "canonical_outcomes": 0,
+            "contexts": 0, "actions": 0,
         },
     }
 
 
 def scalp_outcome_count() -> int:
-    """Return the durable canonical outcome count for learner sample gating."""
+    """Return the durable scalp outcome count for learner sample gating."""
     init_scalp_tables()
     with get_conn(read_only=True) as conn:
         row = conn.execute(

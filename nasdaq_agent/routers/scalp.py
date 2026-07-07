@@ -256,6 +256,8 @@ def _learning_snapshot() -> dict[str, Any]:
         "ml_champion": champion,
         "ml_evaluations": evaluations,
         "outcome_count": int((data.get("counts") or {}).get("outcomes") or 0),
+        "shadow_outcome_count": int((data.get("counts") or {}).get("shadow_outcomes") or 0),
+        "canonical_outcome_count": int((data.get("counts") or {}).get("canonical_outcomes") or 0),
         "context_count": int((data.get("counts") or {}).get("contexts") or 0),
         "action_count": int((data.get("counts") or {}).get("actions") or 0),
     }
