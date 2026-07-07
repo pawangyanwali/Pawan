@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from agent.db import get_conn, using_postgres
 
@@ -86,7 +88,8 @@ def init_scalp_tables() -> None:
                 pnl_dollar          DOUBLE PRECISION DEFAULT 0,
                 mfe_r               DOUBLE PRECISION DEFAULT 0,
                 mae_r               DOUBLE PRECISION DEFAULT 0,
-                exit_reason         TEXT DEFAULT ''
+                exit_reason         TEXT DEFAULT '',
+                plan_json           TEXT DEFAULT ''
             )
             """,
             f"""
@@ -222,6 +225,7 @@ def init_scalp_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_reports_generated ON scalp_shadow_daily_reports(generated_at)",
         ]
         migrations = [
+            "ALTER TABLE scalp_trade_outcomes ADD COLUMN IF NOT EXISTS plan_json TEXT DEFAULT ''",
             "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_size_mult DOUBLE PRECISION NOT NULL DEFAULT 1",
             "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_json TEXT NOT NULL DEFAULT '{}'",
             "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_price DOUBLE PRECISION",
@@ -372,6 +376,9 @@ def learning_dashboard_data(
 ) -> dict[str, Any]:
     """Read command-center learning data through one pooled connection."""
     init_scalp_tables()
+    today_start = datetime.now(ZoneInfo("America/New_York")).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(timezone.utc).isoformat()
     with get_conn(read_only=True) as conn:
         contexts = conn.execute(
             "SELECT * FROM scalp_context_stats ORDER BY updated_at DESC LIMIT ?",
@@ -401,10 +408,50 @@ def learning_dashboard_data(
               (SELECT COUNT(*) FROM scalp_learning_actions) AS actions
             """
         ).fetchone()
+        today = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS outcomes,
+              COALESCE(SUM(CASE WHEN trade_id < 0 THEN 1 ELSE 0 END), 0) AS shadow_outcomes,
+              COALESCE(SUM(CASE WHEN trade_id > 0 THEN 1 ELSE 0 END), 0) AS paper_outcomes,
+              COALESCE(SUM(CASE WHEN pnl_r > 0 THEN 1 ELSE 0 END), 0) AS wins,
+              COALESCE(SUM(CASE WHEN pnl_r <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+              COALESCE(SUM(pnl_r), 0) AS sum_r,
+              COALESCE(SUM(pnl_dollar), 0) AS pnl_dollar
+            FROM scalp_trade_outcomes
+            WHERE closed_at >= ?
+            """,
+            (today_start,),
+        ).fetchone()
+        worst_contexts = conn.execute(
+            """
+            SELECT
+              context_key,
+              COUNT(*) AS sample_count,
+              COALESCE(SUM(CASE WHEN pnl_r > 0 THEN 1 ELSE 0 END), 0) AS wins,
+              COALESCE(SUM(CASE WHEN pnl_r <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+              COALESCE(AVG(pnl_r), 0) AS avg_r,
+              COALESCE(SUM(pnl_r), 0) AS total_r,
+              COALESCE(SUM(pnl_dollar), 0) AS pnl_dollar,
+              MAX(closed_at) AS last_closed_at
+            FROM scalp_trade_outcomes
+            WHERE closed_at >= ?
+            GROUP BY context_key
+            HAVING COUNT(*) > 0
+            ORDER BY total_r ASC, sample_count DESC
+            LIMIT 8
+            """,
+            (today_start,),
+        ).fetchall()
     return {
         "contexts": [dict(row) for row in contexts],
         "recent_actions": [dict(row) for row in actions],
         "recent_outcomes": [dict(row) for row in outcomes],
+        "today": dict(today) if today else {
+            "outcomes": 0, "shadow_outcomes": 0, "paper_outcomes": 0,
+            "wins": 0, "losses": 0, "sum_r": 0.0, "pnl_dollar": 0.0,
+        },
+        "worst_contexts": [dict(row) for row in worst_contexts],
         "ml_champion": dict(champion) if champion else None,
         "ml_evaluations": [dict(row) for row in evaluations],
         "counts": dict(counts) if counts else {

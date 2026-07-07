@@ -244,15 +244,24 @@ def _learning_snapshot() -> dict[str, Any]:
         {**row, "context_gate": gates.get(row.get("context_key"), "ALLOW")}
         for row in data["recent_outcomes"]
     ]
+    recent_actions = [
+        {
+            **row,
+            "status": "EXPIRED" if _expired(row.get("expires_at"), now) else "ACTIVE",
+        }
+        for row in data["recent_actions"]
+    ]
     champion = _decode_ml_metadata(data.get("ml_champion"))
     evaluations = [
         _decode_ml_metadata(row) for row in data.get("ml_evaluations", [])
     ]
     return {
         "active_actions": active,
-        "recent_actions": data["recent_actions"],
+        "recent_actions": recent_actions,
         "recent_outcomes": outcomes,
         "contexts": stats,
+        "today": data.get("today") or {},
+        "worst_contexts": data.get("worst_contexts") or [],
         "ml_champion": champion,
         "ml_evaluations": evaluations,
         "outcome_count": int((data.get("counts") or {}).get("outcomes") or 0),

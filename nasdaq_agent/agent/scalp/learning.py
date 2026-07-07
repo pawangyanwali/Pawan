@@ -98,7 +98,8 @@ def record_closed_trade(conn, trade_id: int) -> dict[str, Any] | None:
     if not plan_row:
         logger.warning("[ScalpLearning] plan missing for closed trade %s", trade_id)
         return None
-    plan = json.loads(plan_row["plan_json"])
+    plan_json = str(plan_row["plan_json"] or "")
+    plan = json.loads(plan_json)
     context_key = context_key_for_plan({**plan, "session": row["session"]})
     shares = max(1, int(row["shares"] or 1))
     risk_capital = abs(float(plan.get("risk_per_share") or 0.0)) * shares
@@ -130,13 +131,14 @@ def record_closed_trade(conn, trade_id: int) -> dict[str, Any] | None:
         "mfe_r": float(row["mfe_r"] or 0.0),
         "mae_r": float(row["mae_r"] or 0.0),
         "exit_reason": reason,
+        "plan_json": plan_json,
     }
     keys = (
         "plan_id", "trade_id", "closed_at", "ticker", "side", "context_key",
         "setup_type", "session", "rsi_zone", "macd_state", "vwap_event",
         "spread_bucket", "atr_bucket", "entry_fill", "exit_fill", "tp1_hit", "tp2_hit",
         "stop_hit", "time_stop", "pnl_r", "pnl_dollar", "mfe_r", "mae_r",
-        "exit_reason",
+        "exit_reason", "plan_json",
     )
     existing = conn.execute(
         "SELECT id FROM scalp_trade_outcomes WHERE trade_id=?", (trade_id,)
@@ -145,12 +147,14 @@ def record_closed_trade(conn, trade_id: int) -> dict[str, Any] | None:
         conn.execute(
             """
             UPDATE scalp_trade_outcomes
-            SET pnl_r=?, pnl_dollar=?, mfe_r=?, mae_r=?, exit_reason=?
+            SET pnl_r=?, pnl_dollar=?, mfe_r=?, mae_r=?, exit_reason=?,
+                plan_json=?
             WHERE trade_id=?
             """,
             (
                 outcome["pnl_r"], outcome["pnl_dollar"], outcome["mfe_r"],
-                outcome["mae_r"], outcome["exit_reason"], trade_id,
+                outcome["mae_r"], outcome["exit_reason"], outcome["plan_json"],
+                trade_id,
             ),
         )
     else:
@@ -161,8 +165,8 @@ def record_closed_trade(conn, trade_id: int) -> dict[str, Any] | None:
                setup_type, session, rsi_zone, macd_state, vwap_event,
                spread_bucket, atr_bucket, entry_fill, exit_fill, tp1_hit, tp2_hit,
                stop_hit, time_stop, pnl_r, pnl_dollar, mfe_r, mae_r,
-               exit_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               exit_reason, plan_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             tuple(outcome[key] for key in keys),
         )
@@ -194,7 +198,8 @@ def record_closed_shadow_trade(conn, shadow_trade_id: int) -> dict[str, Any] | N
     ).fetchone()
     if not row:
         return None
-    plan = json.loads(row["plan_json"] or "{}")
+    plan_json = str(row["plan_json"] or "{}")
+    plan = json.loads(plan_json)
     context_key = context_key_for_plan({**plan, "session": row["session"]})
     exit_reason = str(row.get("exit_reason") or "")
     shadow_outcome_id = -abs(int(row["id"]))
@@ -223,13 +228,14 @@ def record_closed_shadow_trade(conn, shadow_trade_id: int) -> dict[str, Any] | N
         "mfe_r": float(row.get("mfe_r") or 0.0),
         "mae_r": float(row.get("mae_r") or 0.0),
         "exit_reason": f"SHADOW_{exit_reason or 'CLOSED'}",
+        "plan_json": plan_json,
     }
     keys = (
         "plan_id", "trade_id", "closed_at", "ticker", "side", "context_key",
         "setup_type", "session", "rsi_zone", "macd_state", "vwap_event",
         "spread_bucket", "atr_bucket", "entry_fill", "exit_fill", "tp1_hit", "tp2_hit",
         "stop_hit", "time_stop", "pnl_r", "pnl_dollar", "mfe_r", "mae_r",
-        "exit_reason",
+        "exit_reason", "plan_json",
     )
     existing = conn.execute(
         "SELECT id FROM scalp_trade_outcomes WHERE trade_id=?",
@@ -240,13 +246,13 @@ def record_closed_shadow_trade(conn, shadow_trade_id: int) -> dict[str, Any] | N
             """
             UPDATE scalp_trade_outcomes
             SET pnl_r=?, pnl_dollar=?, mfe_r=?, mae_r=?, exit_reason=?,
-                closed_at=?
+                closed_at=?, plan_json=?
             WHERE trade_id=?
             """,
             (
                 outcome["pnl_r"], outcome["pnl_dollar"], outcome["mfe_r"],
                 outcome["mae_r"], outcome["exit_reason"], outcome["closed_at"],
-                shadow_outcome_id,
+                outcome["plan_json"], shadow_outcome_id,
             ),
         )
     else:
@@ -257,8 +263,8 @@ def record_closed_shadow_trade(conn, shadow_trade_id: int) -> dict[str, Any] | N
                setup_type, session, rsi_zone, macd_state, vwap_event,
                spread_bucket, atr_bucket, entry_fill, exit_fill, tp1_hit, tp2_hit,
                stop_hit, time_stop, pnl_r, pnl_dollar, mfe_r, mae_r,
-               exit_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               exit_reason, plan_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             tuple(outcome[key] for key in keys),
         )
@@ -299,13 +305,22 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
     cutoff = now - timedelta(minutes=window_min)
     rows = conn.execute(
         """
-        SELECT closed_at, pnl_r FROM scalp_trade_outcomes
+        SELECT closed_at, pnl_r, exit_reason FROM scalp_trade_outcomes
         WHERE context_key=? ORDER BY closed_at ASC
         """,
         (context_key,),
     ).fetchall()
     samples = [row for row in rows if _parse_ts(row["closed_at"]) >= cutoff]
     pnl_values = [float(row["pnl_r"] or 0.0) for row in samples]
+    fast_window_min = max(1, int(config.get("scalp_learn.fast_stop_window_min", 10)))
+    fast_cutoff = now - timedelta(minutes=fast_window_min)
+    fast_stop_losses = sum(
+        1
+        for row in samples
+        if _parse_ts(row["closed_at"]) >= fast_cutoff
+        and float(row["pnl_r"] or 0.0) <= 0
+        and "STOP" in str(row["exit_reason"] or "").upper()
+    )
     wins = sum(1 for value in pnl_values if value > 0)
     losses = len(pnl_values) - wins
     posterior = (wins + 1.0) / (len(pnl_values) + 2.0)
@@ -325,7 +340,7 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
     ).fetchone()
     old_state = str(old["gate_state"] if old else ALLOW)
     gate_state, confidence_floor, size_mult, reason = _decide_gate(
-        len(pnl_values), posterior, ewma
+        len(pnl_values), posterior, ewma, fast_stop_losses
     )
     ttl = max(1, int(config.get("scalp_learn.action_ttl_min", 60)))
     expires = now + timedelta(minutes=ttl) if gate_state != ALLOW else None
@@ -385,11 +400,12 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
         "confidence_floor": confidence_floor,
         "size_mult": size_mult,
         "expires_at": expires.isoformat() if expires else None,
+        "fast_stop_losses": fast_stop_losses,
     }
 
 
 def _decide_gate(
-    samples: int, posterior: float, ewma: float
+    samples: int, posterior: float, ewma: float, fast_stop_losses: int = 0
 ) -> tuple[str, float, float, str]:
     from agent.config_manager import config
 
@@ -403,10 +419,26 @@ def _decide_gate(
     block_wr = float(config.get("scalp_learn.block_win_rate", 0.40))
     reduce_r = float(config.get("scalp_learn.negative_reduce_r", -0.05))
     confidence_wr = float(config.get("scalp_learn.confidence_win_rate", 0.48))
-    if samples < min_adjust:
-        return ALLOW, 0.0, 1.0, f"observing {samples}/{min_adjust} samples"
     if samples >= min_block and ewma <= block_r and posterior <= block_wr:
         return BLOCK, 0.0, 1.0, f"EWMA {ewma:.3f}R; posterior WR {posterior:.1%}"
+    if bool(config.get("scalp_learn.fast_stop_circuit_enabled", True)):
+        fast_count = max(1, int(config.get("scalp_learn.fast_stop_count", 3)))
+        if fast_stop_losses >= fast_count:
+            fast_window = max(
+                1, int(config.get("scalp_learn.fast_stop_window_min", 10))
+            )
+            mult = min(
+                1.0,
+                max(0.05, float(config.get("scalp_learn.fast_stop_size_mult", 0.25))),
+            )
+            return (
+                SIZE_REDUCE,
+                0.0,
+                mult,
+                f"{fast_stop_losses} stop exits in {fast_window}m",
+            )
+    if samples < min_adjust:
+        return ALLOW, 0.0, 1.0, f"observing {samples}/{min_adjust} samples"
     if ewma <= reduce_r:
         mult = min(
             1.0,

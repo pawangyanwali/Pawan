@@ -201,7 +201,7 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.enabled": ("Immediate outcome learning", "Updates context statistics whenever a SCALP_PLAN_V1 paper or enabled shadow trade closes. Disabling it preserves outcomes but stops automatic gate changes.", "Keep enabled in paper/shadow mode to measure same-session adaptation."),
     "scalp_learn.shadow_outcomes_enabled": ("Learn from shadow mistakes", "Turns closed shadow trades into negative-ID learning outcomes. This never changes paper P&L, but it lets the next matching setup reduce size, raise confidence, or block automatically.", "Enabled means a bad simulated LONG RECLAIM setup can tighten the next similar setup without human intervention."),
     "scalp_learn.rolling_window_min": ("Rolling context window", "Limits decisions to outcomes closed within this many minutes for the exact setup context.", "120 evaluates the most recent two hours."),
-    "scalp_learn.min_samples_to_adjust": ("Samples before adjustment", "Minimum matching outcomes required before confidence or size may be tightened.", "5 prevents one isolated loss from changing execution."),
+    "scalp_learn.min_samples_to_adjust": ("Samples before adjustment", "Minimum matching outcomes required before confidence or size may be tightened by the normal rolling-expectancy path.", "3 reacts within the same failure cluster while still ignoring one isolated bad print."),
     "scalp_learn.min_samples_to_block": ("Samples before blocking", "Minimum matching outcomes required before a context may be temporarily blocked.", "12 requires a broader failure cluster than a size reduction."),
     "scalp_learn.ewma_alpha": ("Expectancy EWMA alpha", "Weight assigned to the newest outcome when calculating rolling R expectancy.", "0.25 gives the newest trade 25% weight."),
     "scalp_learn.negative_reduce_r": ("Size-reduction expectancy", "Triggers reduced size when EWMA expectancy falls to this R value after the adjustment sample floor.", "-0.05R reduces exposure before a hard block."),
@@ -211,6 +211,10 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.base_confidence_floor": ("Base learned confidence floor", "Starting confidence requirement used for a CONFIDENCE_RAISE action.", "60 plus a 10-point step creates a 70% floor."),
     "scalp_learn.confidence_raise_step": ("Confidence raise step", "Percentage points added to the learned confidence floor for a weak context.", "10 raises a 60% floor to 70%."),
     "scalp_learn.size_reduce_mult": ("Learned size multiplier", "Multiplier applied while SIZE_REDUCE is active. Learning may reduce, but never increase, size.", "0.50 halves the planned position."),
+    "scalp_learn.fast_stop_circuit_enabled": ("Fast stop circuit", "Immediately tightens a setup context when clustered stop exits occur inside the fast-stop window, even before the normal rolling sample floor would react.", "Enabled catches three near-back-to-back STOP exits in the same context during a noisy tape."),
+    "scalp_learn.fast_stop_window_min": ("Fast stop window", "Minutes used to count clustered stop exits for the fast circuit.", "10 means only stops from the last ten minutes count toward the circuit."),
+    "scalp_learn.fast_stop_count": ("Fast stop count", "Number of losing stop exits in the fast-stop window required to trigger immediate size reduction.", "3 turns three same-context stop exits into an automatic risk tightening action."),
+    "scalp_learn.fast_stop_size_mult": ("Fast stop size multiplier", "Temporary position-size multiplier applied by the fast stop circuit. It can only reduce exposure.", "0.25 means the next matching setup trades at one-quarter size until the action expires or context recovers."),
     "scalp_learn.action_ttl_min": ("Learning action lifetime", "Minutes before an automatic action expires unless refreshed by another outcome.", "60 makes every automatic action reversible within one hour."),
 }
 

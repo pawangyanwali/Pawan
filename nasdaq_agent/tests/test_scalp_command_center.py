@@ -236,6 +236,9 @@ def test_opportunity_rows_show_live_price_rsi_and_macd():
     assert "p.live_macd_hist??p.macd_hist" in html
     assert "configured_max_open_positions" in html
     assert "Closed scalp outcomes" in html
+    assert "Today learned" in html
+    assert "Worst contexts today" in html
+    assert "Recent automatic changes" in html
     assert "No SCALP_PLAN_V1 outcomes yet" in html
 
 
@@ -259,6 +262,10 @@ def test_scalp_learning_configuration_rejects_unsafe_ordering():
         "scalp_learn.base_confidence_floor": 60,
         "scalp_learn.confidence_raise_step": 10,
         "scalp_learn.size_reduce_mult": 0.5,
+        "scalp_learn.fast_stop_circuit_enabled": True,
+        "scalp_learn.fast_stop_window_min": 10,
+        "scalp_learn.fast_stop_count": 3,
+        "scalp_learn.fast_stop_size_mult": 0.25,
         "scalp_learn.action_ttl_min": 60,
     }
     _validate_scalp_learning(values)
@@ -269,6 +276,10 @@ def test_scalp_learning_configuration_rejects_unsafe_ordering():
 
     invalid = dict(values, **{"scalp_learn.size_reduce_mult": 1.2})
     with pytest.raises(ValueError, match="no greater than 1"):
+        _validate_scalp_learning(invalid)
+
+    invalid = dict(values, **{"scalp_learn.fast_stop_size_mult": 1.2})
+    with pytest.raises(ValueError, match="fast_stop_size_mult"):
         _validate_scalp_learning(invalid)
 
 

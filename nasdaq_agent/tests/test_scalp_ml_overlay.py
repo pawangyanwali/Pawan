@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -18,7 +19,12 @@ from agent.scalp.ml_features import (
     feature_vector,
 )
 from agent.scalp.ml_overlay import apply_ml_overlay
-from agent.scalp.ml_trainer import TrainingDataset, _promotion_reasons, train_and_maybe_promote
+from agent.scalp.ml_trainer import (
+    TrainingDataset,
+    _promotion_reasons,
+    load_training_dataset,
+    train_and_maybe_promote,
+)
 from agent.scalp.store import learning_dashboard_data
 
 
@@ -312,3 +318,58 @@ def test_insufficient_dataset_is_audited_without_creating_artifact():
     dashboard = learning_dashboard_data()
     assert dashboard["ml_champion"] is None
     assert dashboard["ml_evaluations"][0]["status"] == "REJECTED"
+
+
+def test_training_dataset_loads_negative_shadow_outcome_without_plan_row():
+    from agent.scalp.store import init_scalp_tables
+
+    config.set("scalp_ml.training_lookback_days", 60, updated_by="test")
+    init_scalp_tables()
+    plan = _plan("SHADOWML").to_dict()
+    plan_json = json.dumps(plan, separators=(",", ":"))
+    closed_at = datetime.now(timezone.utc).isoformat()
+    with db.get_conn() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO scalp_shadow_trades
+              (plan_id, entry_bar_id, opened_at, closed_at, ticker, side,
+               setup_type, session, status, entry_fill, current_price,
+               stop_loss, original_stop, tp1, tp2, risk_per_share, shares,
+               shares_remaining, t1_hit, t2_hit, pnl_r, pnl_dollar, mfe_r,
+               mae_r, high_watermark, low_watermark, exit_reason, plan_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                plan["plan_id"], 9001, closed_at, closed_at, "SHADOWML", "LONG",
+                plan["setup_type"], plan["session"], "CLOSED", plan["entry"],
+                plan["stop_loss"], plan["stop_loss"], plan["stop_loss"],
+                plan["tp1"], plan["tp2"], plan["risk_per_share"], 100, 0,
+                0, 0, -1.0, -100.0, 0.0, -1.0, plan["entry"],
+                plan["stop_loss"], "STOP", plan_json,
+            ),
+        )
+        shadow_id = int(cursor.lastrowid)
+        conn.execute(
+            """
+            INSERT INTO scalp_trade_outcomes
+              (plan_id, trade_id, closed_at, ticker, side, context_key,
+               setup_type, session, rsi_zone, macd_state, vwap_event,
+               spread_bucket, atr_bucket, entry_fill, exit_fill, tp1_hit,
+               tp2_hit, stop_hit, time_stop, pnl_r, pnl_dollar, mfe_r, mae_r,
+               exit_reason)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                plan["plan_id"], -shadow_id, closed_at, "SHADOWML", "LONG",
+                "CTX", plan["setup_type"], plan["session"], plan["rsi_zone"],
+                "RISING", plan["vwap_event"], "NORMAL", plan["atr_bucket"],
+                plan["entry"], plan["stop_loss"], 0, 0, 1, 0, -1.0, -100.0,
+                0.0, -1.0, "SHADOW_STOP",
+            ),
+        )
+
+    dataset = load_training_dataset()
+
+    assert len(dataset) == 1
+    assert dataset.tp1.tolist() == [0]
+    assert dataset.pnl_r.tolist() == pytest.approx([-1.0])

@@ -54,8 +54,16 @@ def test_shadow_trade_is_isolated_and_resolves_at_tp2():
         open_shadow_trade,
         shadow_dashboard_data,
     )
+    from agent.db import get_conn
 
-    assert open_shadow_trade(_plan(), entry_bar_id=1234, market_health=_LIVE_HEALTH) is True
+    first_plan = _plan()
+    assert open_shadow_trade(first_plan, entry_bar_id=1234, market_health=_LIVE_HEALTH) is True
+    with get_conn(read_only=True) as conn:
+        persisted = conn.execute(
+            "SELECT COUNT(*) AS n FROM scalp_signal_plans WHERE plan_id=?",
+            (first_plan.plan_id,),
+        ).fetchone()["n"]
+    assert persisted == 1
     assert open_shadow_trade(_plan(), entry_bar_id=1234, market_health=_LIVE_HEALTH) is False
 
     opened = shadow_dashboard_data()
@@ -119,6 +127,54 @@ def test_shadow_loss_immediately_updates_learning_gate(monkeypatch):
     assert gate["sample_count"] == 2
     assert gate["gate_state"] == SIZE_REDUCE
     assert gate["size_mult"] == 0.5
+
+
+def test_shadow_fast_stop_circuit_tightens_before_normal_sample_floor(monkeypatch):
+    from agent.config_manager import config
+    from agent.scalp.learning import (
+        SIZE_REDUCE,
+        context_key_for_plan,
+        get_context_gate,
+    )
+    from agent.scalp.shadow import mark_shadow_trades, open_shadow_trade
+
+    overrides = {
+        "scalp_learn.enabled": True,
+        "scalp_learn.shadow_outcomes_enabled": True,
+        "scalp_learn.rolling_window_min": 120,
+        "scalp_learn.min_samples_to_adjust": 10,
+        "scalp_learn.min_samples_to_block": 12,
+        "scalp_learn.ewma_alpha": 0.5,
+        "scalp_learn.negative_reduce_r": -0.05,
+        "scalp_learn.negative_block_r": -0.20,
+        "scalp_learn.block_win_rate": 0.40,
+        "scalp_learn.size_reduce_mult": 0.5,
+        "scalp_learn.fast_stop_circuit_enabled": True,
+        "scalp_learn.fast_stop_window_min": 10,
+        "scalp_learn.fast_stop_count": 3,
+        "scalp_learn.fast_stop_size_mult": 0.25,
+    }
+    for key, value in overrides.items():
+        monkeypatch.setitem(config._cache, key, value)
+
+    plans = [_plan(ticker=f"FAST{i}") for i in range(3)]
+    context_key = context_key_for_plan(plans[0])
+    assert all(context_key_for_plan(plan) == context_key for plan in plans)
+    for offset, plan in enumerate(plans, start=1):
+        assert open_shadow_trade(
+            plan,
+            entry_bar_id=2000 + offset,
+            market_health=_LIVE_HEALTH,
+        ) is True
+        mark_shadow_trades(
+            {plan.ticker: _quote(last=98.9, bid=98.8, ask=99.0)},
+            session="REGULAR",
+        )
+
+    gate = get_context_gate(context_key)
+    assert gate["sample_count"] == 3
+    assert gate["gate_state"] == SIZE_REDUCE
+    assert gate["size_mult"] == pytest.approx(0.25)
 
 
 def test_shadow_daily_report_persists_root_cause_summary():

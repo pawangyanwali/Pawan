@@ -156,9 +156,14 @@ def load_training_dataset() -> TrainingDataset:
     with get_conn(read_only=True) as conn:
         rows = conn.execute(
             """
-            SELECT o.closed_at, o.tp1_hit, o.tp2_hit, o.pnl_r, p.plan_json
+            SELECT
+              o.closed_at, o.tp1_hit, o.tp2_hit, o.pnl_r,
+              COALESCE(NULLIF(o.plan_json, ''), p.plan_json, s.plan_json) AS plan_json
             FROM scalp_trade_outcomes o
-            JOIN scalp_signal_plans p ON p.plan_id=o.plan_id
+            LEFT JOIN scalp_signal_plans p ON p.plan_id=o.plan_id
+            LEFT JOIN scalp_shadow_trades s ON o.trade_id < 0 AND s.id=ABS(o.trade_id)
+            WHERE COALESCE(NULLIF(o.plan_json, ''), p.plan_json, s.plan_json) IS NOT NULL
+              AND COALESCE(NULLIF(o.plan_json, ''), p.plan_json, s.plan_json) <> ''
             ORDER BY o.closed_at ASC, o.trade_id ASC
             """
         ).fetchall()

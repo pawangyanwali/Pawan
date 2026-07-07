@@ -124,7 +124,7 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_learn.enabled":                  lambda: True,
     "scalp_learn.shadow_outcomes_enabled":  lambda: True,
     "scalp_learn.rolling_window_min":       lambda: 120,
-    "scalp_learn.min_samples_to_adjust":    lambda: 5,
+    "scalp_learn.min_samples_to_adjust":    lambda: 3,
     "scalp_learn.min_samples_to_block":     lambda: 12,
     "scalp_learn.ewma_alpha":               lambda: 0.25,
     "scalp_learn.negative_reduce_r":        lambda: -0.05,
@@ -134,6 +134,10 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_learn.base_confidence_floor":    lambda: 60.0,
     "scalp_learn.confidence_raise_step":    lambda: 10.0,
     "scalp_learn.size_reduce_mult":         lambda: 0.50,
+    "scalp_learn.fast_stop_circuit_enabled": lambda: True,
+    "scalp_learn.fast_stop_window_min":     lambda: 10,
+    "scalp_learn.fast_stop_count":          lambda: 3,
+    "scalp_learn.fast_stop_size_mult":      lambda: 0.25,
     "scalp_learn.action_ttl_min":           lambda: 60,
     # Release 4 advisory ML. Auto-arm waits for the sample floor, then begins
     # isolated challenger training without requiring a later operator action.

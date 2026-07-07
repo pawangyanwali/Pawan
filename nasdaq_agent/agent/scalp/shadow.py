@@ -15,7 +15,7 @@ from typing import Any
 from agent.db import get_conn
 
 from .models import ScalpSignalPlan, SignalSide
-from .store import init_scalp_tables
+from .store import init_scalp_tables, save_plan
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,7 @@ def open_shadow_trade(
         return False
     payload = json.dumps(plan.to_dict(), separators=(",", ":"))
     policy_payload = json.dumps(policy.to_dict(), separators=(",", ":"))
+    save_plan(plan)
 
     try:
         with get_conn() as conn:

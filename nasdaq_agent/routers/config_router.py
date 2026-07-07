@@ -263,9 +263,12 @@ def _validate_scalp_learning(values: dict[str, Any]) -> None:
     base_floor = float(values["scalp_learn.base_confidence_floor"])
     raise_step = float(values["scalp_learn.confidence_raise_step"])
     size_mult = float(values["scalp_learn.size_reduce_mult"])
+    fast_window = int(values["scalp_learn.fast_stop_window_min"])
+    fast_count = int(values["scalp_learn.fast_stop_count"])
+    fast_size_mult = float(values["scalp_learn.fast_stop_size_mult"])
     ttl = int(values["scalp_learn.action_ttl_min"])
-    if window <= 0 or min_adjust <= 0 or ttl <= 0:
-        raise ValueError("window, sample floor, and action lifetime must be positive")
+    if window <= 0 or min_adjust <= 0 or ttl <= 0 or fast_window <= 0 or fast_count <= 0:
+        raise ValueError("window, sample floors, fast-stop settings, and action lifetime must be positive")
     if min_block < min_adjust:
         raise ValueError("min_samples_to_block cannot be below min_samples_to_adjust")
     if not 0 < alpha <= 1:
@@ -280,6 +283,8 @@ def _validate_scalp_learning(values: dict[str, Any]) -> None:
         raise ValueError("base confidence floor plus raise step cannot exceed 100")
     if not 0 < size_mult <= 1:
         raise ValueError("size_reduce_mult must be greater than 0 and no greater than 1")
+    if not 0 < fast_size_mult <= 1:
+        raise ValueError("fast_stop_size_mult must be greater than 0 and no greater than 1")
 
 
 def _validate_scalp_ml(values: dict[str, Any]) -> None:
