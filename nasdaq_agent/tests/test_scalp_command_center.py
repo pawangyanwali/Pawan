@@ -38,7 +38,11 @@ def test_command_center_is_a_dedicated_authenticated_live_page():
     assert "exit_slippage_bps" in html
     assert "Daily Shadow Diagnosis" in html
     assert 'id="shadow-reports-body"' in html
-    assert "renderShadowReports(d.shadow_reports||[])" in html
+    assert "renderShadowReports(state.shadowReports||d.shadow_reports||[])" in html
+    assert 'id="shadow-start"' in html
+    assert 'id="shadow-end"' in html
+    assert 'id="shadow-run"' in html
+    assert "/api/scalp/shadow-reports" in html
     assert 'href="/settings"' in html
 
 

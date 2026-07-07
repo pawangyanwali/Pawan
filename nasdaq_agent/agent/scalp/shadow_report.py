@@ -142,6 +142,43 @@ def latest_shadow_daily_reports(limit: int = 5) -> list[dict[str, Any]]:
     return reports
 
 
+def shadow_daily_reports_for_range(
+    start_date: date | str,
+    end_date: date | str,
+    *,
+    generate_missing: bool = True,
+    include_weekends: bool = False,
+    max_days: int = 45,
+) -> list[dict[str, Any]]:
+    """Read or build reports for an inclusive ET date range, newest first."""
+    init_scalp_tables()
+    start = _coerce_date(start_date)
+    end = _coerce_date(end_date)
+    if start > end:
+        start, end = end, start
+    span_days = (end - start).days + 1
+    if span_days > max(1, int(max_days)):
+        raise ValueError(f"shadow report range is limited to {max_days} days")
+
+    market_dates = [
+        (start + timedelta(days=offset)).isoformat()
+        for offset in range(span_days)
+        if include_weekends or (start + timedelta(days=offset)).weekday() < 5
+    ]
+    if not market_dates:
+        return []
+    existing = _read_reports_by_date(market_dates)
+    if generate_missing:
+        for market_date in market_dates:
+            if market_date not in existing:
+                existing[market_date] = generate_shadow_daily_report(market_date)
+    return [
+        existing[market_date]
+        for market_date in sorted(market_dates, reverse=True)
+        if market_date in existing
+    ]
+
+
 def _coerce_date(value: date | str | None) -> date:
     if value is None:
         return datetime.now(ET).date()
@@ -150,6 +187,26 @@ def _coerce_date(value: date | str | None) -> date:
     if isinstance(value, datetime):
         return value.astimezone(ET).date() if value.tzinfo else value.date()
     return date.fromisoformat(str(value)[:10])
+
+
+def _read_reports_by_date(market_dates: list[str]) -> dict[str, dict[str, Any]]:
+    if not market_dates:
+        return {}
+    placeholders = ",".join("?" for _ in market_dates)
+    rows = _rows(
+        f"""
+        SELECT market_date, report_json FROM scalp_shadow_daily_reports
+        WHERE market_date IN ({placeholders})
+        """,
+        tuple(market_dates),
+    )
+    reports: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            reports[str(row.get("market_date"))] = json.loads(row.get("report_json") or "{}")
+        except Exception:
+            continue
+    return reports
 
 
 def _et_bounds(market_date: date) -> tuple[datetime, datetime]:

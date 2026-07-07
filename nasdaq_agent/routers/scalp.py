@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from auth.dependencies import AuthenticatedUser, require_viewer
 
@@ -40,10 +40,22 @@ async def scalp_readiness(_user: AuthenticatedUser = Depends(require_viewer)):
 @router.get("/api/scalp/shadow-reports")
 async def scalp_shadow_reports(
     limit: int = 5,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    generate_missing: bool = True,
+    include_weekends: bool = False,
     _user: AuthenticatedUser = Depends(require_viewer),
 ):
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _shadow_reports_snapshot, limit)
+    return await loop.run_in_executor(
+        None,
+        _shadow_reports_snapshot,
+        limit,
+        start_date,
+        end_date,
+        generate_missing,
+        include_weekends,
+    )
 
 
 def _dashboard_snapshot() -> dict[str, Any]:
@@ -174,12 +186,44 @@ def _dashboard_snapshot() -> dict[str, Any]:
     return result
 
 
-def _shadow_reports_snapshot(limit: int = 5) -> dict[str, Any]:
-    from agent.scalp.shadow_report import latest_shadow_daily_reports
+def _shadow_reports_snapshot(
+    limit: int = 5,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    generate_missing: bool = True,
+    include_weekends: bool = False,
+) -> dict[str, Any]:
+    from agent.scalp.shadow_report import (
+        latest_shadow_daily_reports,
+        shadow_daily_reports_for_range,
+    )
+
+    try:
+        if start_date or end_date:
+            if not start_date or not end_date:
+                raise ValueError("start_date and end_date are both required")
+            reports = shadow_daily_reports_for_range(
+                start_date,
+                end_date,
+                generate_missing=generate_missing,
+                include_weekends=include_weekends,
+            )
+            mode = "range"
+        else:
+            reports = latest_shadow_daily_reports(limit=limit)
+            mode = "latest"
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
         "asof_ts": datetime.now(timezone.utc).isoformat(),
-        "reports": latest_shadow_daily_reports(limit=limit),
+        "mode": mode,
+        "range": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "include_weekends": include_weekends,
+        },
+        "reports": reports,
     }
 
 

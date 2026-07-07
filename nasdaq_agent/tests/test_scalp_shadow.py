@@ -79,6 +79,7 @@ def test_shadow_daily_report_persists_root_cause_summary():
     from agent.scalp.shadow_report import (
         generate_shadow_daily_report,
         latest_shadow_daily_reports,
+        shadow_daily_reports_for_range,
     )
     from agent.scalp.store import init_scalp_tables
 
@@ -123,6 +124,18 @@ def test_shadow_daily_report_persists_root_cause_summary():
     assert report["groups"]["exit_reason"][0]["exit_reason"] == "STOP"
     assert "Pre-TP1 stops" in " ".join(report["findings"])
     assert latest[0]["market_date"] == "2026-07-02"
+
+    ranged = shadow_daily_reports_for_range("2026-07-02", "2026-07-06")
+    assert [row["market_date"] for row in ranged] == [
+        "2026-07-06",
+        "2026-07-03",
+        "2026-07-02",
+    ]
+    assert {row["market_date"] for row in ranged}.isdisjoint({"2026-07-04", "2026-07-05"})
+    assert ranged[-1]["summary"]["closed"] == 1
+
+    with pytest.raises(ValueError, match="limited"):
+        shadow_daily_reports_for_range("2026-01-01", "2026-03-01")
 
 
 def test_shadow_trade_uses_executable_ask_for_short_stop():
