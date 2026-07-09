@@ -108,11 +108,29 @@ def generate_shadow_daily_report(
             "actions_count": len(learning_actions),
             "recent_actions": [_clean(row) for row in learning_actions[:20]],
         },
+        "exit_calibration": _exit_calibration(closed),
         "worst_trades": _worst_trades(closed),
         "findings": [],
         "recommendations": [],
     }
     report["findings"], report["recommendations"] = _diagnose(report)
+    report["autonomous_diagnosis"] = _autonomous_diagnosis(report)
+    report["findings"] = _dedupe(
+        report["findings"]
+        + [
+            item.get("finding", "")
+            for item in report["autonomous_diagnosis"].get("actions", [])
+            if item.get("finding")
+        ]
+    )
+    report["recommendations"] = _dedupe(
+        report["recommendations"]
+        + [
+            item.get("recommendation", "")
+            for item in report["autonomous_diagnosis"].get("actions", [])
+            if item.get("recommendation")
+        ]
+    )
 
     if persist:
         _persist_report(report)
@@ -377,6 +395,51 @@ def _decision_summary(decisions: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _exit_calibration(closed: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(closed)
+    tp1_hits = sum(_int(row.get("t1_hit")) for row in closed)
+    tp2_hits = sum(_int(row.get("t2_hit")) for row in closed)
+    stop_exits = sum(
+        1
+        for row in closed
+        if str(row.get("exit_reason") or "").upper() in {"STOP", "STOP_HIT"}
+    )
+    trail_exits = sum(
+        1
+        for row in closed
+        if "TRAIL" in str(row.get("exit_reason") or "").upper()
+    )
+    breakeven_like = sum(
+        1
+        for row in closed
+        if _int(row.get("t1_hit"))
+        and not _int(row.get("t2_hit"))
+        and abs(_float(row.get("pnl_r"))) < 0.25
+    )
+    return {
+        "closed": total,
+        "tp1_hits": tp1_hits,
+        "tp2_hits": tp2_hits,
+        "tp1_to_tp2_conversion_pct": _round(tp2_hits / tp1_hits * 100.0)
+        if tp1_hits
+        else 0.0,
+        "tp1_without_tp2": max(0, tp1_hits - tp2_hits),
+        "stop_exits": stop_exits,
+        "trail_exits": trail_exits,
+        "breakeven_like_after_tp1": breakeven_like,
+        "avg_mfe_r": _round(
+            sum(_float(row.get("mfe_r")) for row in closed) / total, 4
+        )
+        if total
+        else 0.0,
+        "avg_mae_r": _round(
+            sum(_float(row.get("mae_r")) for row in closed) / total, 4
+        )
+        if total
+        else 0.0,
+    }
+
+
 def _worst_trades(closed: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
     result = []
     for trade in sorted(closed, key=lambda row: _float(row.get("pnl_r")))[:limit]:
@@ -465,6 +528,17 @@ def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
         recommendations.append(
             "Use TP1/trailing statistics as the main profitability signal until TP2 conversion improves."
         )
+    exit_cal = report.get("exit_calibration") or {}
+    if int(exit_cal.get("tp1_hits") or 0) >= 3 and _float(
+        exit_cal.get("tp1_to_tp2_conversion_pct")
+    ) < 20.0:
+        findings.append(
+            "TP1 hit but TP2 rarely converted: "
+            f"{exit_cal.get('tp1_to_tp2_conversion_pct', 0):.1f}% of TP1 hits reached TP2."
+        )
+        recommendations.append(
+            "Review TP2 distance and trailing capture by setup before allowing canonical execution."
+        )
 
     for key in ("setup", "session", "vwap_event", "rsi_zone"):
         bad = _worst_group(report, key)
@@ -491,6 +565,99 @@ def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
         )
 
     return _dedupe(findings), _dedupe(recommendations)
+
+
+def _autonomous_diagnosis(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") or {}
+    exit_cal = report.get("exit_calibration") or {}
+    closed = int(summary.get("closed") or 0)
+    actions: list[dict[str, Any]] = []
+    severity = "PASS"
+
+    def add(action: str, finding: str, recommendation: str, sev: str = "WARN") -> None:
+        nonlocal severity
+        order = {"PASS": 0, "INFO": 1, "WARN": 2, "CRITICAL": 3}
+        if order.get(sev, 0) > order.get(severity, 0):
+            severity = sev
+        actions.append(
+            {
+                "action": action,
+                "severity": sev,
+                "finding": finding,
+                "recommendation": recommendation,
+            }
+        )
+
+    if closed == 0:
+        add(
+            "CHECK_DATA_SIGNAL_PIPELINE",
+            "No closed shadow trades were available for diagnosis.",
+            "Verify market session, Schwab data, and policy rejections before changing strategy.",
+            "WARN",
+        )
+        return {
+            "severity": severity,
+            "summary": "No trade sample available.",
+            "actions": actions,
+        }
+
+    pnl_r = _float(summary.get("pnl_r"))
+    pnl_dollar = _float(summary.get("pnl_dollar"))
+    expectancy = _float(summary.get("expectancy_r"))
+    if pnl_dollar < 0 <= pnl_r:
+        add(
+            "DOLLAR_GUARD",
+            f"R outcome was non-negative ({pnl_r:.2f}R) but real dollar P&L was ${pnl_dollar:.2f}.",
+            "Keep dollar-aware context reduction enabled so same-context trades shrink when fills or sizing lose money.",
+            "WARN",
+        )
+    elif expectancy < 0 or pnl_dollar < 0:
+        add(
+            "KEEP_SHADOW_ONLY",
+            f"Daily shadow expectancy was {expectancy:.3f}R with dollar P&L ${pnl_dollar:.2f}.",
+            "Keep canonical execution disabled and let learning gates tighten the losing contexts.",
+            "CRITICAL",
+        )
+
+    if int(exit_cal.get("tp1_hits") or 0) >= 3 and _float(
+        exit_cal.get("tp1_to_tp2_conversion_pct")
+    ) < 20.0:
+        add(
+            "TP2_TRAIL_CALIBRATION",
+            f"Only {exit_cal.get('tp1_to_tp2_conversion_pct', 0):.1f}% of TP1 hits reached TP2.",
+            "Compare setup-level MFE against TP2 distance and prefer trailing capture until TP2 is statistically reachable.",
+            "WARN",
+        )
+
+    if int(exit_cal.get("stop_exits") or 0) >= 3:
+        add(
+            "ENTRY_CLUSTER_THROTTLE",
+            f"{exit_cal.get('stop_exits')} trades exited at the initial stop.",
+            "Use same-context cluster throttling and one extra confirmation after clustered pre-TP1 stops.",
+            "WARN",
+        )
+
+    if int((report.get("learning") or {}).get("actions_count") or 0) == 0:
+        add(
+            "VERIFY_LEARNING_MUTATION",
+            "No expiring learning action was written during this session.",
+            "If bad trades occurred, verify context keys, outcome persistence, and learning thresholds.",
+            "WARN",
+        )
+
+    if not actions:
+        add(
+            "CONTINUE_OBSERVATION",
+            "No material defect pattern exceeded autonomous thresholds.",
+            "Continue shadow observation and require multiple positive sessions before promotion.",
+            "INFO",
+        )
+
+    return {
+        "severity": severity,
+        "summary": actions[0]["finding"],
+        "actions": actions,
+    }
 
 
 def _find_group(report: dict[str, Any], group: str, value: str) -> dict[str, Any] | None:

@@ -102,6 +102,8 @@ def init_scalp_tables() -> None:
                 posterior_win_rate  DOUBLE PRECISION DEFAULT 0,
                 ewma_expectancy_r   DOUBLE PRECISION DEFAULT 0,
                 mean_expectancy_r   DOUBLE PRECISION DEFAULT 0,
+                sum_pnl_dollar      DOUBLE PRECISION DEFAULT 0,
+                mean_pnl_dollar     DOUBLE PRECISION DEFAULT 0,
                 gate_state          TEXT DEFAULT 'ALLOW',
                 confidence_floor    DOUBLE PRECISION DEFAULT 0,
                 size_mult           DOUBLE PRECISION DEFAULT 1,
@@ -235,6 +237,8 @@ def init_scalp_tables() -> None:
             "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_ask DOUBLE PRECISION",
             "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_spread_bps DOUBLE PRECISION DEFAULT 0",
             "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_slippage_bps DOUBLE PRECISION DEFAULT 0",
+            "ALTER TABLE scalp_context_stats ADD COLUMN IF NOT EXISTS sum_pnl_dollar DOUBLE PRECISION DEFAULT 0",
+            "ALTER TABLE scalp_context_stats ADD COLUMN IF NOT EXISTS mean_pnl_dollar DOUBLE PRECISION DEFAULT 0",
         ]
         try:
             with get_conn() as conn:

@@ -1,9 +1,10 @@
 """Shared execution preflight for canonical paper and shadow scalp trades."""
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -168,6 +169,82 @@ def _session_size_mult(session: str, config: Any) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _same_context_entries(
+    plan: ScalpSignalPlan,
+    *,
+    window_min: int,
+    mode: str,
+) -> dict[str, Any]:
+    """Count recent entries with the same learned context across shadow/paper."""
+    from .learning import context_key_for_plan
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(window_min)))
+    current_key = context_key_for_plan(plan)
+    rows: list[dict[str, Any]] = []
+    try:
+        with get_conn(read_only=True) as conn:
+            rows.extend(
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT opened_at, status, plan_json
+                    FROM scalp_shadow_trades
+                    WHERE opened_at >= ?
+                    ORDER BY opened_at DESC
+                    LIMIT 250
+                    """,
+                    (cutoff.isoformat(),),
+                ).fetchall()
+            )
+            try:
+                rows.extend(
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT p.opened_at, p.status, s.plan_json
+                        FROM paper_trades p
+                        LEFT JOIN scalp_signal_plans s ON s.plan_id=p.scalp_plan_id
+                        WHERE p.opened_at >= ?
+                          AND p.execution_contract='SCALP_PLAN_V1'
+                        ORDER BY p.opened_at DESC
+                        LIMIT 250
+                        """,
+                        (cutoff.isoformat(),),
+                    ).fetchall()
+                )
+            except Exception:
+                # Some isolated tests initialize only the shadow ledger.
+                pass
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "context_key": current_key,
+            "window_min": window_min,
+            "entry_count": 0,
+            "open_count": 0,
+            "error": str(exc),
+        }
+
+    matches = []
+    for row in rows:
+        try:
+            payload = json.loads(row.get("plan_json") or "{}")
+        except Exception:
+            payload = {}
+        if payload and context_key_for_plan(payload) == current_key:
+            matches.append(row)
+    return {
+        "enabled": True,
+        "mode": str(mode or "").upper(),
+        "context_key": current_key,
+        "window_min": window_min,
+        "entry_count": len(matches),
+        "open_count": sum(
+            1 for row in matches if str(row.get("status") or "").upper() == "OPEN"
+        ),
+    }
+
+
 def evaluate_execution_policy(
     plan: ScalpSignalPlan,
     *,
@@ -230,6 +307,28 @@ def evaluate_execution_policy(
             return ExecutionPolicyDecision(False, "MAX_DAILY_TRADES", 0.0, checks)
         if int(ledger["open_count"]) >= int(limits["max_open_trades"]):
             return ExecutionPolicyDecision(False, "MAX_OPEN_TRADES", 0.0, checks)
+
+    if bool(config.get("scalp_runtime.context_cluster_throttle_enabled", True)):
+        cluster_window = max(
+            1, int(config.get("scalp_runtime.context_cluster_window_min", 10))
+        )
+        cluster_max = max(
+            1, int(config.get("scalp_runtime.context_cluster_max_entries", 3))
+        )
+        cluster = _same_context_entries(
+            plan,
+            window_min=cluster_window,
+            mode=mode,
+        )
+        checks["context_cluster"] = cluster
+        checks["context_cluster_max_entries"] = cluster_max
+        if int(cluster.get("entry_count") or 0) >= cluster_max:
+            return ExecutionPolicyDecision(
+                False,
+                "CONTEXT_CLUSTER_THROTTLE",
+                0.0,
+                checks,
+            )
 
     return ExecutionPolicyDecision(True, "ALLOWED", size_mult, checks)
 

@@ -305,13 +305,14 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
     cutoff = now - timedelta(minutes=window_min)
     rows = conn.execute(
         """
-        SELECT closed_at, pnl_r, exit_reason FROM scalp_trade_outcomes
+        SELECT closed_at, pnl_r, pnl_dollar, exit_reason FROM scalp_trade_outcomes
         WHERE context_key=? ORDER BY closed_at ASC
         """,
         (context_key,),
     ).fetchall()
     samples = [row for row in rows if _parse_ts(row["closed_at"]) >= cutoff]
     pnl_values = [float(row["pnl_r"] or 0.0) for row in samples]
+    dollar_values = [float(row["pnl_dollar"] or 0.0) for row in samples]
     fast_window_min = max(1, int(config.get("scalp_learn.fast_stop_window_min", 10)))
     fast_cutoff = now - timedelta(minutes=fast_window_min)
     fast_stop_losses = sum(
@@ -331,6 +332,8 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
     for index, value in enumerate(pnl_values):
         ewma = value if index == 0 else alpha * value + (1.0 - alpha) * ewma
     mean_r = sum(pnl_values) / len(pnl_values) if pnl_values else 0.0
+    sum_dollar = sum(dollar_values)
+    mean_dollar = sum_dollar / len(dollar_values) if dollar_values else 0.0
     old = conn.execute(
         """
         SELECT gate_state, confidence_floor, size_mult
@@ -340,14 +343,16 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
     ).fetchone()
     old_state = str(old["gate_state"] if old else ALLOW)
     gate_state, confidence_floor, size_mult, reason = _decide_gate(
-        len(pnl_values), posterior, ewma, fast_stop_losses
+        len(pnl_values), posterior, ewma, fast_stop_losses, sum_dollar,
+        mean_dollar,
     )
     ttl = max(1, int(config.get("scalp_learn.action_ttl_min", 60)))
     expires = now + timedelta(minutes=ttl) if gate_state != ALLOW else None
     values = (
         now.isoformat(), len(pnl_values), wins, losses, round(posterior, 6),
-        round(ewma, 6), round(mean_r, 6), gate_state, confidence_floor,
-        size_mult, expires.isoformat() if expires else None,
+        round(ewma, 6), round(mean_r, 6), round(sum_dollar, 2),
+        round(mean_dollar, 2), gate_state, confidence_floor, size_mult,
+        expires.isoformat() if expires else None,
     )
     if old:
         conn.execute(
@@ -355,8 +360,8 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
             UPDATE scalp_context_stats
             SET updated_at=?, sample_count=?, wins=?, losses=?,
                 posterior_win_rate=?, ewma_expectancy_r=?,
-                mean_expectancy_r=?, gate_state=?, confidence_floor=?,
-                size_mult=?, expires_at=?
+                mean_expectancy_r=?, sum_pnl_dollar=?, mean_pnl_dollar=?,
+                gate_state=?, confidence_floor=?, size_mult=?, expires_at=?
             WHERE context_key=?
             """,
             values + (context_key,),
@@ -367,8 +372,9 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
             INSERT INTO scalp_context_stats
               (context_key, updated_at, sample_count, wins, losses,
                posterior_win_rate, ewma_expectancy_r, mean_expectancy_r,
-               gate_state, confidence_floor, size_mult, expires_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               sum_pnl_dollar, mean_pnl_dollar, gate_state, confidence_floor,
+               size_mult, expires_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (context_key,) + values,
         )
@@ -396,6 +402,8 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
         "posterior_win_rate": posterior,
         "ewma_expectancy_r": ewma,
         "mean_expectancy_r": mean_r,
+        "sum_pnl_dollar": sum_dollar,
+        "mean_pnl_dollar": mean_dollar,
         "gate_state": gate_state,
         "confidence_floor": confidence_floor,
         "size_mult": size_mult,
@@ -405,7 +413,12 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
 
 
 def _decide_gate(
-    samples: int, posterior: float, ewma: float, fast_stop_losses: int = 0
+    samples: int,
+    posterior: float,
+    ewma: float,
+    fast_stop_losses: int = 0,
+    sum_dollar: float = 0.0,
+    mean_dollar: float = 0.0,
 ) -> tuple[str, float, float, str]:
     from agent.config_manager import config
 
@@ -439,6 +452,31 @@ def _decide_gate(
             )
     if samples < min_adjust:
         return ALLOW, 0.0, 1.0, f"observing {samples}/{min_adjust} samples"
+    if bool(config.get("scalp_learn.dollar_guard_enabled", True)):
+        block_dollar = float(config.get("scalp_learn.negative_block_dollar", -100.0))
+        reduce_dollar = float(config.get("scalp_learn.negative_reduce_dollar", -25.0))
+        if (
+            samples >= min_block
+            and sum_dollar <= block_dollar
+            and posterior <= confidence_wr
+        ):
+            return (
+                BLOCK,
+                0.0,
+                1.0,
+                f"dollar P&L ${sum_dollar:.2f}; avg ${mean_dollar:.2f}; posterior WR {posterior:.1%}",
+            )
+        if sum_dollar <= reduce_dollar:
+            mult = min(
+                1.0,
+                max(0.05, float(config.get("scalp_learn.size_reduce_mult", 0.50))),
+            )
+            return (
+                SIZE_REDUCE,
+                0.0,
+                mult,
+                f"dollar P&L ${sum_dollar:.2f}; avg ${mean_dollar:.2f}",
+            )
     if ewma <= reduce_r:
         mult = min(
             1.0,

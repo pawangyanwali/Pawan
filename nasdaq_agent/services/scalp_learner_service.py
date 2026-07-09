@@ -60,6 +60,7 @@ def main() -> int:
             _runner._stop.wait(30)
             continue
         sample_ready = outcome_count >= minimum_samples
+        samples_until_training = max(0, minimum_samples - outcome_count)
         enabled = manually_enabled or (auto_armed and sample_ready)
         interval_s = max(
             300.0,
@@ -77,6 +78,7 @@ def main() -> int:
                     sample_ready=sample_ready,
                     outcome_count=outcome_count,
                     minimum_samples=minimum_samples,
+                    samples_until_training=samples_until_training,
                     last_training_result=result,
                 )
             except Exception as exc:
@@ -94,6 +96,7 @@ def main() -> int:
                 sample_ready=sample_ready,
                 outcome_count=outcome_count,
                 minimum_samples=minimum_samples,
+                samples_until_training=samples_until_training,
             )
         _runner._stop.wait(30)
     _log.info("=== scalp_learner_service stopped ===")

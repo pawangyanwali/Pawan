@@ -263,6 +263,8 @@ def _validate_scalp_learning(values: dict[str, Any]) -> None:
     base_floor = float(values["scalp_learn.base_confidence_floor"])
     raise_step = float(values["scalp_learn.confidence_raise_step"])
     size_mult = float(values["scalp_learn.size_reduce_mult"])
+    reduce_dollar = float(values["scalp_learn.negative_reduce_dollar"])
+    block_dollar = float(values["scalp_learn.negative_block_dollar"])
     fast_window = int(values["scalp_learn.fast_stop_window_min"])
     fast_count = int(values["scalp_learn.fast_stop_count"])
     fast_size_mult = float(values["scalp_learn.fast_stop_size_mult"])
@@ -283,6 +285,8 @@ def _validate_scalp_learning(values: dict[str, Any]) -> None:
         raise ValueError("base confidence floor plus raise step cannot exceed 100")
     if not 0 < size_mult <= 1:
         raise ValueError("size_reduce_mult must be greater than 0 and no greater than 1")
+    if not block_dollar <= reduce_dollar <= 0:
+        raise ValueError("negative_block_dollar must be no greater than negative_reduce_dollar, and both must be non-positive")
     if not 0 < fast_size_mult <= 1:
         raise ValueError("fast_stop_size_mult must be greater than 0 and no greater than 1")
 

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -14,6 +15,7 @@ from agent.scalp.learning import (
     ALLOW,
     BLOCK,
     SIZE_REDUCE,
+    _refresh_context,
     apply_context_gate,
     context_key_for_plan,
     get_context_gate,
@@ -104,6 +106,9 @@ def _learning_defaults():
             "scalp_learn.base_confidence_floor": 60,
             "scalp_learn.confidence_raise_step": 10,
             "scalp_learn.size_reduce_mult": 0.5,
+            "scalp_learn.dollar_guard_enabled": True,
+            "scalp_learn.negative_reduce_dollar": -25.0,
+            "scalp_learn.negative_block_dollar": -100.0,
             "scalp_learn.fast_stop_circuit_enabled": True,
             "scalp_learn.fast_stop_window_min": 10,
             "scalp_learn.fast_stop_count": 3,
@@ -175,6 +180,48 @@ def test_learning_gate_tightens_size_without_rewriting_bracket():
     assert plan.learning_size_mult == pytest.approx(0.5)
     assert (plan.entry, plan.stop_loss, plan.tp1, plan.tp2) == original
     assert plan.valid
+
+
+def test_dollar_guard_reduces_size_even_when_recent_r_is_positive():
+    init_scalp_tables()
+    plan = _plan("DOLLAR1")
+    context_key = context_key_for_plan(plan)
+    now = datetime.now(timezone.utc)
+
+    with db.get_conn() as conn:
+        for offset in range(3):
+            conn.execute(
+                """
+                INSERT INTO scalp_trade_outcomes
+                  (plan_id, trade_id, closed_at, ticker, side, context_key,
+                   setup_type, session, rsi_zone, macd_state, vwap_event,
+                   spread_bucket, atr_bucket, pnl_r, pnl_dollar, exit_reason,
+                   plan_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"dollar-{offset}", -10_000 - offset,
+                    (now - timedelta(minutes=offset)).isoformat(),
+                    plan.ticker, plan.side.value, context_key, plan.setup_type,
+                    plan.session, plan.rsi_zone, "MACD_UP", plan.vwap_event,
+                    "OK", plan.atr_bucket, 0.10, -15.0, "TRAIL_STOP",
+                    json.dumps(plan.to_dict(), separators=(",", ":")),
+                ),
+            )
+        stats = _refresh_context(conn, context_key)
+
+    assert stats["mean_expectancy_r"] > 0
+    assert stats["sum_pnl_dollar"] == pytest.approx(-45.0)
+    assert stats["gate_state"] == SIZE_REDUCE
+    with db.get_conn(read_only=True) as conn:
+        action = conn.execute(
+            """
+            SELECT reason FROM scalp_learning_actions
+            WHERE context_key=? ORDER BY action_ts DESC LIMIT 1
+            """,
+            (context_key,),
+        ).fetchone()
+    assert "dollar P&L" in action["reason"]
 
 
 def test_expired_learning_action_fails_open():

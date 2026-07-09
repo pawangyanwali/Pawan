@@ -228,6 +228,7 @@ def _shadow_reports_snapshot(
 
 
 def _learning_snapshot() -> dict[str, Any]:
+    from agent.config_manager import config
     from agent.scalp.store import learning_dashboard_data
 
     data = learning_dashboard_data(
@@ -255,6 +256,26 @@ def _learning_snapshot() -> dict[str, Any]:
     evaluations = [
         _decode_ml_metadata(row) for row in data.get("ml_evaluations", [])
     ]
+    minimum_ml_samples = max(50, int(config.get("scalp_ml.minimum_samples", 200)))
+    outcome_count = int((data.get("counts") or {}).get("outcomes") or 0)
+    try:
+        from agent.service_state import get_state
+
+        learner_status = get_state("scalp-learner:status", ignore_expiry=True) or {}
+    except Exception:
+        learner_status = {}
+    ml_status = {
+        "mode": learner_status.get("mode") or "UNKNOWN",
+        "training_enabled": bool(config.get("scalp_ml.training_enabled", False)),
+        "auto_train_when_ready": bool(config.get("scalp_ml.auto_train_when_ready", True)),
+        "shadow_enabled": bool(config.get("scalp_ml.shadow_enabled", False)),
+        "overlay_enabled": bool(config.get("scalp_ml.overlay_enabled", False)),
+        "sample_ready": outcome_count >= minimum_ml_samples,
+        "outcome_count": outcome_count,
+        "minimum_samples": minimum_ml_samples,
+        "samples_until_training": max(0, minimum_ml_samples - outcome_count),
+        "service": learner_status,
+    }
     return {
         "active_actions": active,
         "recent_actions": recent_actions,
@@ -264,7 +285,8 @@ def _learning_snapshot() -> dict[str, Any]:
         "worst_contexts": data.get("worst_contexts") or [],
         "ml_champion": champion,
         "ml_evaluations": evaluations,
-        "outcome_count": int((data.get("counts") or {}).get("outcomes") or 0),
+        "ml_status": ml_status,
+        "outcome_count": outcome_count,
         "shadow_outcome_count": int((data.get("counts") or {}).get("shadow_outcomes") or 0),
         "canonical_outcome_count": int((data.get("counts") or {}).get("canonical_outcomes") or 0),
         "context_count": int((data.get("counts") or {}).get("contexts") or 0),

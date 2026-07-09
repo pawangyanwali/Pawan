@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 from agent.scalp.models import QuoteSource, ScalpSignalPlan, SignalSide
 
@@ -90,3 +91,56 @@ def test_canonical_paper_preflight_obeys_daily_loss_halt(monkeypatch):
     )
     assert decision.allowed is False
     assert decision.reason == "DAILY_LOSS_HALT"
+
+
+def test_same_context_cluster_throttle_blocks_stampede(monkeypatch):
+    from agent.config_manager import config
+    from agent.db import get_conn
+    from agent.scalp.execution_policy import evaluate_execution_policy
+    from agent.scalp.store import init_scalp_tables
+
+    monkeypatch.setitem(config._cache, "paper.enforce_risk_controls", False)
+    monkeypatch.setitem(config._cache, "scalp_runtime.execution_policy_enabled", True)
+    monkeypatch.setitem(config._cache, "scalp_runtime.require_live_execution_data", True)
+    monkeypatch.setitem(
+        config._cache, "scalp_runtime.context_cluster_throttle_enabled", True
+    )
+    monkeypatch.setitem(config._cache, "scalp_runtime.context_cluster_window_min", 10)
+    monkeypatch.setitem(config._cache, "scalp_runtime.context_cluster_max_entries", 3)
+
+    plan = _plan()
+    payload = json.dumps(plan.to_dict(), separators=(",", ":"))
+    now = datetime.now(timezone.utc)
+    init_scalp_tables()
+    with get_conn() as conn:
+        for offset in range(3):
+            conn.execute(
+                """
+                INSERT INTO scalp_shadow_trades
+                  (plan_id, entry_bar_id, opened_at, closed_at, ticker, side,
+                   setup_type, session, status, entry_fill, current_price,
+                   stop_loss, original_stop, tp1, tp2, risk_per_share, shares,
+                   shares_remaining, high_watermark, low_watermark, plan_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    f"cluster-{offset}", 10_000 + offset,
+                    (now - timedelta(minutes=offset)).isoformat(),
+                    (now - timedelta(minutes=offset, seconds=-30)).isoformat(),
+                    f"SYM{offset}", plan.side.value, plan.setup_type,
+                    plan.session, "CLOSED", plan.entry, plan.entry,
+                    plan.stop_loss, plan.stop_loss, plan.tp1, plan.tp2,
+                    plan.risk_per_share, 100, 0, plan.entry, plan.entry,
+                    payload,
+                ),
+            )
+
+    decision = evaluate_execution_policy(
+        plan,
+        mode="SHADOW",
+        market_health=_health(),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "CONTEXT_CLUSTER_THROTTLE"
+    assert decision.checks["context_cluster"]["entry_count"] == 3

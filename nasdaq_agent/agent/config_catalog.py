@@ -211,6 +211,9 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.base_confidence_floor": ("Base learned confidence floor", "Starting confidence requirement used for a CONFIDENCE_RAISE action.", "60 plus a 10-point step creates a 70% floor."),
     "scalp_learn.confidence_raise_step": ("Confidence raise step", "Percentage points added to the learned confidence floor for a weak context.", "10 raises a 60% floor to 70%."),
     "scalp_learn.size_reduce_mult": ("Learned size multiplier", "Multiplier applied while SIZE_REDUCE is active. Learning may reduce, but never increase, size.", "0.50 halves the planned position."),
+    "scalp_learn.dollar_guard_enabled": ("Dollar-aware learning guard", "Lets the context gate react when recent trades are profitable in R but losing real dollars because of size, fills, spread, or slippage.", "Enabled catches a +0.15R day that is still -$50 and reduces the next matching setup."),
+    "scalp_learn.negative_reduce_dollar": ("Dollar size-reduction threshold", "Recent same-context dollar P&L at or below this value triggers a temporary size reduction after the adjustment sample floor.", "-25 reduces size when the rolling context has lost at least twenty-five dollars."),
+    "scalp_learn.negative_block_dollar": ("Dollar block threshold", "Recent same-context dollar P&L at or below this value can temporarily block the setup once the block sample floor is met and win-rate evidence is weak.", "-100 blocks a context that repeatedly loses real dollars even if a few partial exits look positive in R."),
     "scalp_learn.fast_stop_circuit_enabled": ("Fast stop circuit", "Immediately tightens a setup context when clustered stop exits occur inside the fast-stop window, even before the normal rolling sample floor would react.", "Enabled catches three near-back-to-back STOP exits in the same context during a noisy tape."),
     "scalp_learn.fast_stop_window_min": ("Fast stop window", "Minutes used to count clustered stop exits for the fast circuit.", "10 means only stops from the last ten minutes count toward the circuit."),
     "scalp_learn.fast_stop_count": ("Fast stop count", "Number of losing stop exits in the fast-stop window required to trigger immediate size reduction.", "3 turns three same-context stop exits into an automatic risk tightening action."),
@@ -287,6 +290,21 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
         "Adverse news-shock threshold",
         "Blocks LONG during a negative news shock and SHORT during a positive news shock.",
         "0.25 requires absolute 30-minute sentiment of at least 0.25 together with news_shock=true.",
+    ),
+    "scalp_runtime.context_cluster_throttle_enabled": (
+        "Context cluster throttle",
+        "Prevents the same setup/side/session/context from opening too many shadow or paper entries inside a short window.",
+        "Enabled stops a fourth identical context entry after three already opened in ten minutes.",
+    ),
+    "scalp_runtime.context_cluster_window_min": (
+        "Context cluster window",
+        "Minutes used by the execution policy to count recent same-context entries.",
+        "10 means the throttle only considers entries opened in the last ten minutes.",
+    ),
+    "scalp_runtime.context_cluster_max_entries": (
+        "Max same-context entries",
+        "Maximum entries allowed for the same learned context inside the cluster window before new entries are blocked.",
+        "3 lets the system test a setup cluster but prevents a full-universe stampede.",
     ),
 }
 

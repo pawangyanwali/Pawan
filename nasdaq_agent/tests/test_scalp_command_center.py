@@ -26,6 +26,8 @@ def test_command_center_is_a_dedicated_authenticated_live_page():
     assert "setTimeout(load,1000)" in html
     assert "canonical scalp plans" in html.lower()
     assert "Learning Guard" in html
+    assert "ML trainer" in html
+    assert "samples_until_training" in html
     assert "Open Positions" in html
     assert "Recent Learned Outcomes" in html
     assert "Shadow Validation" in html
@@ -262,6 +264,9 @@ def test_scalp_learning_configuration_rejects_unsafe_ordering():
         "scalp_learn.base_confidence_floor": 60,
         "scalp_learn.confidence_raise_step": 10,
         "scalp_learn.size_reduce_mult": 0.5,
+        "scalp_learn.dollar_guard_enabled": True,
+        "scalp_learn.negative_reduce_dollar": -25.0,
+        "scalp_learn.negative_block_dollar": -100.0,
         "scalp_learn.fast_stop_circuit_enabled": True,
         "scalp_learn.fast_stop_window_min": 10,
         "scalp_learn.fast_stop_count": 3,
@@ -280,6 +285,10 @@ def test_scalp_learning_configuration_rejects_unsafe_ordering():
 
     invalid = dict(values, **{"scalp_learn.fast_stop_size_mult": 1.2})
     with pytest.raises(ValueError, match="fast_stop_size_mult"):
+        _validate_scalp_learning(invalid)
+
+    invalid = dict(values, **{"scalp_learn.negative_block_dollar": -10.0})
+    with pytest.raises(ValueError, match="negative_block_dollar"):
         _validate_scalp_learning(invalid)
 
 

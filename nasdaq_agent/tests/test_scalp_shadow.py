@@ -226,6 +226,13 @@ def test_shadow_daily_report_persists_root_cause_summary():
     assert report["market_date"] == "2026-07-02"
     assert report["status"] == "NEGATIVE"
     assert report["summary"]["closed"] == 3
+    assert report["exit_calibration"]["stop_exits"] == 3
+    assert report["exit_calibration"]["tp1_to_tp2_conversion_pct"] == 0.0
+    assert report["autonomous_diagnosis"]["severity"] == "CRITICAL"
+    assert any(
+        item["action"] == "ENTRY_CLUSTER_THROTTLE"
+        for item in report["autonomous_diagnosis"]["actions"]
+    )
     assert report["groups"]["exit_reason"][0]["exit_reason"] == "STOP"
     assert "Pre-TP1 stops" in " ".join(report["findings"])
     assert "Worst setup: OVERSOLD_MACD_TURN_LONG" in " ".join(report["findings"])
