@@ -85,6 +85,16 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Blocks a live quote from being paired with stale RSI, MACD, ATR, VWAP, or RVOL calculations.",
         "120000 permits the most recently closed one-minute bar for up to two minutes.",
     ),
+    "scalp.use_provisional_live_indicators": (
+        "Use live provisional indicators",
+        "Projects the current live quote onto the latest closed one-minute RSI/MACD state so the scanner can evaluate the current scalp instead of waiting for the next finalized bar.",
+        "Enabled keeps dashboard RSI/MACD responsive while still blocking truly stale bars.",
+    ),
+    "scalp.provisional_max_bar_age_ms": (
+        "Maximum provisional base-bar age",
+        "Upper limit for using a closed bar as the base state for provisional live RSI/MACD. Older bars remain blocked as stale data.",
+        "300000 allows a live quote to refresh indicators only when the base one-minute bar is no more than five minutes old.",
+    ),
     "scalp.max_spread_to_risk": (
         "Maximum spread-to-risk",
         "Limits transaction cost relative to the planned stop distance.",
@@ -135,6 +145,26 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Requires oversold RSI for LONG and overbought RSI for SHORT in the initial reversal setup family.",
         "Keep enabled until additional deterministic continuation families are implemented.",
     ),
+    "scalp.long_require_fast_rsi_confirmation": (
+        "Require fast RSI long turn",
+        "Requires RSI-2 to rise above RSI-7 before an oversold LONG reversal can become actionable, reducing falling-knife entries.",
+        "Enabled means RSI-14 can be oversold, but the fast RSI must show an actual bounce.",
+    ),
+    "scalp.long_require_vwap_reclaim": (
+        "Require long VWAP reclaim",
+        "Requires LONG reversals to show a VWAP reclaim or support bounce instead of accepting a generic above-VWAP state.",
+        "Enabled prevents buying a weak oversold bounce just because price is above VWAP.",
+    ),
+    "scalp.long_require_mtf_not_bearish": (
+        "Block bearish 5-minute longs",
+        "Blocks LONG reversal entries when the completed five-minute context is bearish or directly conflicts with the long setup.",
+        "Enabled prevents a one-minute oversold signal from buying into a larger bearish tape.",
+    ),
+    "scalp.long_block_bearish_market": (
+        "Block longs in bearish market",
+        "Blocks LONG entries when QQQ/SPY market context is bearish, using five-minute state and one-minute VWAP/MACD evidence from the same scan.",
+        "Enabled keeps individual oversold bounces observational while the broader market is selling off.",
+    ),
     "scalp.allow_rest_fallback_trading": (
         "Allow REST fallback entries",
         "Allows paper execution from fresh REST quotes when WebSocket data is unavailable. Source remains visible on every plan.",
@@ -149,6 +179,26 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Block capped volatility risk",
         "Rejects a plan when ATR/spread requires a stop wider than the configured maximum rather than squeezing the stop artificially.",
         "If ATR requires 2.5% but max stop is 2%, the plan is watch-only.",
+    ),
+    "scalp.shadow_fixed_risk_enabled": (
+        "Fixed-risk shadow sizing",
+        "Sizes shadow trades from a fixed dollar risk budget per trade before applying session and learning multipliers.",
+        "Enabled makes reports compare strategy quality instead of different dollar risk per ticker.",
+    ),
+    "scalp.shadow_risk_per_trade_usd": (
+        "Shadow risk dollars",
+        "Dollar amount the shadow ledger may risk before policy, session, and learning reductions.",
+        "25 with a $1.00 stop opens about 25 shares; with a $5.00 stop it opens about 5 shares.",
+    ),
+    "scalp.shadow_min_shares": (
+        "Shadow minimum shares",
+        "Smallest share count allowed after fixed-risk sizing and reductions.",
+        "1 keeps very wide-stop trades observable when the risk budget can support at least one share.",
+    ),
+    "scalp.shadow_max_shares": (
+        "Shadow maximum shares",
+        "Hard cap on share count after fixed-risk sizing so very tight stops cannot create unrealistic share counts.",
+        "500 prevents penny-wide stops from opening thousands of simulated shares.",
     ),
     "scalp.mtf_enabled": (
         "Five-minute scalp context",
@@ -218,6 +268,7 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.fast_stop_window_min": ("Fast stop window", "Minutes used to count clustered stop exits for the fast circuit.", "10 means only stops from the last ten minutes count toward the circuit."),
     "scalp_learn.fast_stop_count": ("Fast stop count", "Number of losing stop exits in the fast-stop window required to trigger immediate size reduction.", "3 turns three same-context stop exits into an automatic risk tightening action."),
     "scalp_learn.fast_stop_size_mult": ("Fast stop size multiplier", "Temporary position-size multiplier applied by the fast stop circuit. It can only reduce exposure.", "0.25 means the next matching setup trades at one-quarter size until the action expires or context recovers."),
+    "scalp_learn.setup_session_gate_enabled": ("Broad setup-session learning", "Maintains an additional setup + side + session gate so clustered failures tighten even when RSI/VWAP buckets differ slightly.", "Enabled lets losing OVERSOLD_MACD_TURN_LONG + LONG + STANDARD trades reduce the next similar long in the same session."),
     "scalp_learn.action_ttl_min": ("Learning action lifetime", "Minutes before an automatic action expires unless refreshed by another outcome.", "60 makes every automatic action reversible within one hour."),
 }
 
@@ -317,6 +368,8 @@ _SCALP_ML_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_ml.training_lookback_days": ("Training lookback", "Maximum age of canonical outcomes included in a challenger dataset so obsolete regimes cannot dominate current scalping behavior.", "60 trains only from the most recent sixty calendar days."),
     "scalp_ml.maximum_model_age_hours": ("Maximum champion age", "Rejects inference from a champion older than this many hours. Missing or stale ML always fails open to deterministic confidence.", "168 expires a champion after seven days without successful revalidation."),
     "scalp_ml.minimum_samples": ("Minimum training outcomes", "Minimum closed canonical outcomes required before a challenger may be fitted.", "200 prevents promotion from a tiny sample."),
+    "scalp_ml.bootstrap_minimum_samples": ("Bootstrap evaluation outcomes", "Smaller sample floor that lets the learner fit and reject early challengers for visibility before promotion is allowed.", "75 starts useful diagnostics earlier; promotion still requires the main minimum training outcomes gate."),
+    "scalp_ml.bootstrap_training_enabled": ("Enable bootstrap evaluation", "Allows early challenger fitting from the bootstrap sample floor while retaining full promotion gates.", "Enabled means the learner can explain why a model is not ready instead of only saying waiting for samples."),
     "scalp_ml.holdout_pct": ("Chronological holdout fraction", "Newest fraction of outcomes reserved strictly for out-of-sample promotion testing. No random shuffle or scaler fit touches it.", "0.25 reserves the newest 25% for validation."),
     "scalp_ml.minimum_selected_holdout": ("Minimum evaluated holdout trades", "Minimum holdout rows whose model expected-R clears the selection threshold before economic metrics are trusted.", "30 requires at least thirty independently evaluated opportunities."),
     "scalp_ml.minimum_holdout_sessions": ("Minimum validation sessions", "Number of recent market dates that must independently satisfy session stability checks.", "2 prevents one unusually strong day from promoting a model."),

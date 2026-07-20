@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import logging
 import threading
 import time
@@ -136,6 +137,9 @@ def _get(path: str, params: dict, timeout: "int | tuple" = 20) -> dict | list:
         r.raise_for_status()
         _on_success()
         return r.json()
+    except requests.exceptions.Timeout as e:
+        _on_timeout(path, e)
+        return {}
     except Exception as e:
         logger.warning(f"[Schwab MD] {path} failed: {e}")
         return {}
@@ -156,6 +160,8 @@ _backoff_last:  float = 0.0        # duration of the most recent back-off window
 _BACKOFF_BASE   = 2.0              # seconds for first 429 back-off
 _BACKOFF_MAX    = 60.0             # cap at 60s
 _CDN_BLOCK_BACKOFF = 30.0          # Akamai CDN blocks last 30-60s; skip to 30s immediately
+_timeout_lock = threading.Lock()
+_timeout_streak = 0
 
 # Background-caller throttle: retrain tasks capped at 1 req/s.
 _bg_lock = threading.Lock()
@@ -201,11 +207,34 @@ def _on_cdn_block() -> None:
 
 def _on_success() -> None:
     """Clear back-off window after a clean response."""
-    global _backoff_until, _backoff_last
+    global _backoff_until, _backoff_last, _timeout_streak
     with _rate_lock:
         if _backoff_until > time.time():
             _backoff_until = 0.0
         _backoff_last = 0.0
+    with _timeout_lock:
+        _timeout_streak = 0
+
+
+def _on_timeout(path: str, exc: BaseException) -> None:
+    """Apply a short shared backoff after repeated transient read timeouts."""
+    global _backoff_until, _backoff_last, _timeout_streak
+    with _timeout_lock:
+        _timeout_streak += 1
+        streak = _timeout_streak
+    if streak >= 3:
+        hold = min(15.0, 2.0 * streak)
+        with _rate_lock:
+            _backoff_last = max(_backoff_last, hold)
+            _backoff_until = max(_backoff_until, time.time() + hold)
+        logger.warning(
+            "[Schwab MD] %s timed out (%d consecutive) - backing off %.1fs",
+            path,
+            streak,
+            hold,
+        )
+    elif streak == 1 or streak % 3 == 0:
+        logger.warning("[Schwab MD] %s timed out (%d consecutive): %s", path, streak, exc)
 
 
 # Prevent simultaneous refresh storms when many concurrent calls all get 401/403
@@ -626,21 +655,6 @@ async def _fetch_one_async(
             loop = _aio.get_event_loop()
             await loop.run_in_executor(None, _try_refresh_md_token)
             return pd.DataFrame()
-            refreshed = await loop.run_in_executor(None, _try_refresh_md_token)
-            if refreshed:
-                from agent.broker.schwab_auth import _market_data as _md_app
-                new_token = _md_app.get_access_token()
-                if new_token:
-                    new_headers = {"Authorization": f"Bearer {new_token}", "Accept": "application/json"}
-                    async with session.get(url, headers=new_headers, params=params, timeout=_to) as retry:
-                        if retry.status != 200:
-                            return pd.DataFrame()
-                        _on_success()
-                        data = await retry.json(content_type=None)
-                else:
-                    return pd.DataFrame()
-            else:
-                return pd.DataFrame()
         elif resp.status != 200:
             return pd.DataFrame()
         else:

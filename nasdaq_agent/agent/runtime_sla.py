@@ -189,6 +189,27 @@ def evaluate_runtime_sla(
         universe_total = int(_num(scanner, "universe_total", 0.0))
         data_gaps = int(_num(scanner, "data_gap_count", 0.0))
         if universe_total > 0:
+            blocker_counts = (scanner or {}).get("blocker_counts") or {}
+            indicator_stale = int(_num(blocker_counts, "INDICATOR_BAR_STALE", 0.0))
+            indicator_stale_pct = indicator_stale / universe_total * 100.0
+            if indicator_stale_pct > 25.0:
+                _alert(
+                    alerts,
+                    CRITICAL,
+                    "scalp-engine",
+                    "Indicator bars stale across universe",
+                    detail=f"{indicator_stale}/{universe_total} plans have stale RSI/MACD/VWAP bars ({indicator_stale_pct:.1f}%)",
+                    action="Inspect the 1-minute bar feed, Valkey md:1m lists, and provisional live indicator path before enabling execution.",
+                )
+            elif indicator_stale_pct > 10.0:
+                _alert(
+                    alerts,
+                    WARN,
+                    "scalp-engine",
+                    "Indicator bar staleness elevated",
+                    detail=f"{indicator_stale}/{universe_total} plans have stale RSI/MACD/VWAP bars ({indicator_stale_pct:.1f}%)",
+                    action="Watch for candle publication lag; stale indicators can freeze signal generation.",
+                )
             gap_pct = data_gaps / universe_total * 100.0
             if gap_pct > 15.0:
                 _alert(
@@ -249,5 +270,7 @@ def evaluate_runtime_sla(
             "active_scan_age_s_critical": 180,
             "active_plan_data_gap_pct_warn": 5.0,
             "active_plan_data_gap_pct_critical": 15.0,
+            "active_indicator_stale_pct_warn": 10.0,
+            "active_indicator_stale_pct_critical": 25.0,
         },
     }

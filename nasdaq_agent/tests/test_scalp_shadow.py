@@ -373,6 +373,88 @@ def test_premarket_policy_multiplier_reduces_shadow_size():
     assert opened["shares"] == 8
 
 
+def test_shadow_uses_fixed_dollar_risk_sizing(monkeypatch):
+    from agent.config_manager import config
+    from agent.db import get_conn
+    from agent.scalp.shadow import open_shadow_trade
+
+    for key, value in {
+        "scalp.shadow_fixed_risk_enabled": True,
+        "scalp.shadow_risk_per_trade_usd": 20.0,
+        "scalp.shadow_max_shares": 500,
+        "paper.max_trade_pct": 100.0,
+    }.items():
+        monkeypatch.setitem(config._cache, key, value)
+
+    tight = _plan(ticker="TIGHT")
+    wide = _plan(ticker="WIDE")
+    wide.stop_loss = 96.0
+    wide.risk_per_share = 4.0
+
+    assert open_shadow_trade(tight, entry_bar_id=7001, market_health=_LIVE_HEALTH) is True
+    assert open_shadow_trade(wide, entry_bar_id=7002, market_health=_LIVE_HEALTH) is True
+
+    with get_conn(read_only=True) as conn:
+        rows = {
+            row["ticker"]: dict(row)
+            for row in conn.execute(
+                "SELECT ticker, shares, risk_per_share FROM scalp_shadow_trades"
+            ).fetchall()
+        }
+    assert rows["TIGHT"]["shares"] == 20
+    assert rows["WIDE"]["shares"] == 5
+    assert rows["TIGHT"]["shares"] * rows["TIGHT"]["risk_per_share"] == pytest.approx(20.0)
+    assert rows["WIDE"]["shares"] * rows["WIDE"]["risk_per_share"] == pytest.approx(20.0)
+
+
+def test_setup_session_learning_reduces_near_duplicate_losing_longs(monkeypatch):
+    from agent.config_manager import config
+    from agent.scalp.learning import (
+        SIZE_REDUCE,
+        apply_context_gate,
+        get_context_gate,
+        setup_session_key_for_plan,
+    )
+    from agent.scalp.shadow import mark_shadow_trades, open_shadow_trade
+
+    overrides = {
+        "scalp_learn.enabled": True,
+        "scalp_learn.shadow_outcomes_enabled": True,
+        "scalp_learn.setup_session_gate_enabled": True,
+        "scalp_learn.rolling_window_min": 120,
+        "scalp_learn.min_samples_to_adjust": 2,
+        "scalp_learn.min_samples_to_block": 4,
+        "scalp_learn.negative_reduce_r": -0.05,
+        "scalp_learn.size_reduce_mult": 0.5,
+        "scalp.shadow_fixed_risk_enabled": True,
+        "scalp.shadow_risk_per_trade_usd": 25.0,
+    }
+    for key, value in overrides.items():
+        monkeypatch.setitem(config._cache, key, value)
+
+    first = _plan(ticker="LOSSA")
+    first.vwap_event = "RECLAIM"
+    second = _plan(ticker="LOSSB")
+    second.vwap_event = "ABOVE"
+    third = _plan(ticker="NEXT")
+    third.vwap_event = "BOUNCE_SUPPORT"
+    setup_key = setup_session_key_for_plan(first)
+
+    assert open_shadow_trade(first, entry_bar_id=8101, market_health=_LIVE_HEALTH) is True
+    mark_shadow_trades({"LOSSA": _quote(last=98.9, bid=98.8, ask=99.0)}, session="REGULAR")
+    assert open_shadow_trade(second, entry_bar_id=8102, market_health=_LIVE_HEALTH) is True
+    mark_shadow_trades({"LOSSB": _quote(last=98.9, bid=98.8, ask=99.0)}, session="REGULAR")
+
+    gate = get_context_gate(setup_key)
+    gated = apply_context_gate(third)
+
+    assert gate["sample_count"] == 2
+    assert gate["gate_state"] == SIZE_REDUCE
+    assert gated.learning_gate == SIZE_REDUCE
+    assert gated.learning_size_mult == pytest.approx(0.5)
+    assert "LEARNING_SETUP_SESSION_SIZE_REDUCED" in gated.reasons
+
+
 def test_auth_required_rejects_new_shadow_risk():
     from agent.scalp.shadow import open_shadow_trade, shadow_dashboard_data
 

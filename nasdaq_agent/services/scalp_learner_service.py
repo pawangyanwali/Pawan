@@ -46,7 +46,17 @@ def main() -> int:
     while not _runner.stopped:
         manually_enabled = bool(config.get("scalp_ml.training_enabled", False))
         auto_armed = bool(config.get("scalp_ml.auto_train_when_ready", True))
-        minimum_samples = max(50, int(config.get("scalp_ml.minimum_samples", 200)))
+        promotion_minimum_samples = max(50, int(config.get("scalp_ml.minimum_samples", 200)))
+        bootstrap_minimum_samples = max(
+            50,
+            int(config.get("scalp_ml.bootstrap_minimum_samples", 75)),
+        )
+        bootstrap_enabled = bool(config.get("scalp_ml.bootstrap_training_enabled", True))
+        minimum_samples = (
+            min(promotion_minimum_samples, bootstrap_minimum_samples)
+            if bootstrap_enabled
+            else promotion_minimum_samples
+        )
         try:
             outcome_count = scalp_outcome_count()
         except Exception as exc:
@@ -78,6 +88,9 @@ def main() -> int:
                     sample_ready=sample_ready,
                     outcome_count=outcome_count,
                     minimum_samples=minimum_samples,
+                    promotion_minimum_samples=promotion_minimum_samples,
+                    bootstrap_minimum_samples=bootstrap_minimum_samples,
+                    bootstrap_enabled=bootstrap_enabled,
                     samples_until_training=samples_until_training,
                     last_training_result=result,
                 )
@@ -96,6 +109,9 @@ def main() -> int:
                 sample_ready=sample_ready,
                 outcome_count=outcome_count,
                 minimum_samples=minimum_samples,
+                promotion_minimum_samples=promotion_minimum_samples,
+                bootstrap_minimum_samples=bootstrap_minimum_samples,
+                bootstrap_enabled=bootstrap_enabled,
                 samples_until_training=samples_until_training,
             )
         _runner._stop.wait(30)

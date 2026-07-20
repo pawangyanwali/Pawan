@@ -104,6 +104,29 @@ def test_active_session_plan_data_gaps_are_critical():
     )
 
 
+def test_active_session_indicator_stale_blocker_is_called_out():
+    sla = evaluate_runtime_sla(
+        session="REGULAR",
+        price_2s=_price(),
+        price_5s=_price(),
+        scanner={
+            "scan_age_s": 10,
+            "universe_total": 400,
+            "valid_plan_count": 0,
+            "data_gap_count": 400,
+            "blocker_counts": {"INDICATOR_BAR_STALE": 300},
+        },
+        containers=_containers(),
+        valkey={"connected": True},
+    )
+
+    assert sla["status"] == "CRITICAL"
+    assert any(
+        alert["message"] == "Indicator bars stale across universe"
+        for alert in sla["alerts"]
+    )
+
+
 def test_closed_session_still_requires_scalp_learner_and_watchdog():
     containers = _containers()
     containers["scalp-learner"] = {"up": False, "detail": "no scalp learner heartbeat"}

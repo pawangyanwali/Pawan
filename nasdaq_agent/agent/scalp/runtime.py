@@ -5,6 +5,7 @@ import logging
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 
 from .bar_feed import load_one_minute_frames
@@ -12,6 +13,7 @@ from .engine import create_scalp_signal_plan
 from .indicators import (
     calculate_one_minute_indicators,
     indicator_snapshot_from_frame,
+    provisional_live_indicators,
     refresh_indicator_bar_age,
 )
 from .learning import apply_context_gate
@@ -22,7 +24,7 @@ from .multi_timeframe import (
     five_minute_snapshot,
     refresh_five_minute_age,
 )
-from .models import IndicatorSnapshot, ScalpSignalConfig, ScalpSignalPlan, SignalSide
+from .models import IndicatorSnapshot, QuoteSnapshot, QuoteSource, ScalpSignalConfig, ScalpSignalPlan, SignalSide
 from .quality import has_market_data_gap
 from .quotes import quote_snapshot_from_payload
 
@@ -131,6 +133,7 @@ class ScalpRuntime:
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-bars") as pool:
             prepared = list(pool.map(prepare, self.tickers))
+        market_context = _market_direction_context(prepared)
 
         # Quotes are deliberately captured after the expensive bar/indicator pass.
         # Plan age therefore measures market-data freshness, not cycle compute time.
@@ -151,6 +154,11 @@ class ScalpRuntime:
                 _add_blocker(plan, bar_error)
                 return ticker, plan, None, 0
 
+            indicators = _with_provisional_live_indicators(
+                indicators,
+                quote,
+                signal_config,
+            )
             candidates = [
                 create_scalp_signal_plan(
                     quote=quote,
@@ -171,6 +179,7 @@ class ScalpRuntime:
                 signal_config,
                 session=session,
             )
+            _apply_directional_quality_filters(plan, market_context, signal_config)
             blocked_sessions = {
                 str(value).upper()
                 for value in config.get(
@@ -216,12 +225,23 @@ class ScalpRuntime:
             1 for plan in plans_by_ticker.values()
             if _has_actionable_data_gap(plan.blockers, session)
         )
+        blocker_counts = _blocker_counts(plans_by_ticker.values())
         elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
         meta = {
             "runtime": "SCALP_ONLY_V1",
             "universe_total": len(self.tickers),
             "valid_plan_count": valid_count,
             "data_gap_count": data_gap_count,
+            "market_context": market_context,
+            "blocker_counts": blocker_counts,
+            "top_blockers": [
+                {"blocker": key, "count": value}
+                for key, value in sorted(
+                    blocker_counts.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:10]
+            ],
             "cycle_ms": elapsed_ms,
         }
         write_latest(rows, {}, session_info, len(rows), scan_meta=meta)
@@ -402,6 +422,144 @@ def _add_blocker(plan: ScalpSignalPlan, blocker: str) -> None:
 
 def _has_actionable_data_gap(blockers: list[str], session: str) -> bool:
     return has_market_data_gap(blockers, session)
+
+
+def _with_provisional_live_indicators(
+    indicators: IndicatorSnapshot,
+    quote: QuoteSnapshot,
+    config: ScalpSignalConfig,
+) -> IndicatorSnapshot:
+    """Project one live quote onto the latest closed-bar indicator state."""
+    if not config.use_provisional_live_indicators:
+        return indicators
+    if quote.data_age_ms < 0 or quote.data_age_ms > config.max_quote_age_ms:
+        return indicators
+    if quote.normalized_source in {QuoteSource.STALE, QuoteSource.UNKNOWN}:
+        return indicators
+    bar_age = indicators.bar_age_ms
+    if bar_age is None or bar_age < 0 or bar_age > config.provisional_max_bar_age_ms:
+        return indicators
+    provisional = provisional_live_indicators(indicators, quote.last)
+    if not provisional:
+        return indicators
+    return replace(
+        indicators,
+        rsi_14=provisional.get("rsi_14"),
+        rsi_7=provisional.get("rsi_7"),
+        rsi_2=provisional.get("rsi_2"),
+        macd_hist=provisional.get("macd_hist"),
+        macd_hist_prev=indicators.macd_hist,
+        vwap_event=_live_vwap_event(indicators, quote.last),
+        bar_age_ms=max(0, int(quote.data_age_ms)),
+        indicator_close=quote.last,
+    )
+
+
+def _live_vwap_event(indicators: IndicatorSnapshot, live_price: float) -> str:
+    prior_price = _finite_float(indicators.indicator_close)
+    vwap = _finite_float(indicators.vwap)
+    current = _finite_float(live_price)
+    if prior_price is None or vwap is None or current is None:
+        return str(indicators.vwap_event or "").upper()
+    if prior_price < vwap <= current:
+        return "RECLAIM"
+    if prior_price > vwap >= current:
+        return "REJECTION"
+    if current > vwap:
+        return "ABOVE"
+    if current < vwap:
+        return "BELOW"
+    return "AT_VWAP"
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _blocker_counts(plans: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for plan in plans:
+        for blocker in getattr(plan, "blockers", []) or []:
+            key = str(blocker or "").strip()
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _market_direction_context(
+    prepared: list[
+        tuple[str, Any | None, int, Any, list[float], list[float], Any | None, str]
+    ],
+) -> dict[str, Any]:
+    """Summarize QQQ/SPY context from the same closed bars used by ticker scans."""
+    votes: list[str] = []
+    evidence: list[dict[str, Any]] = []
+    for ticker, _frame, _bar_id, indicators, _supports, _resistances, mtf, error in prepared:
+        if str(ticker).upper() not in {"QQQ", "SPY"}:
+            continue
+        mtf_state = str(getattr(mtf, "state", "NO_DATA") or "NO_DATA").upper()
+        vwap_event = str(getattr(indicators, "vwap_event", "") or "").upper()
+        macd_slope = _finite_float(getattr(indicators, "macd_slope", None))
+        vote = "UNKNOWN"
+        if not error and mtf_state in {"BULLISH", "BEARISH"}:
+            vote = mtf_state
+        elif macd_slope is not None:
+            if macd_slope < 0 and vwap_event in {"BELOW", "REJECTION"}:
+                vote = "BEARISH"
+            elif macd_slope > 0 and vwap_event in {"ABOVE", "RECLAIM"}:
+                vote = "BULLISH"
+        if vote != "UNKNOWN":
+            votes.append(vote)
+        evidence.append(
+            {
+                "ticker": str(ticker).upper(),
+                "state": mtf_state,
+                "vwap_event": vwap_event,
+                "macd_slope": macd_slope,
+                "vote": vote,
+            }
+        )
+    bearish = votes.count("BEARISH")
+    bullish = votes.count("BULLISH")
+    state = "UNKNOWN"
+    if bearish and bearish >= bullish:
+        state = "BEARISH"
+    elif bullish and bullish > bearish:
+        state = "BULLISH"
+    return {
+        "state": state,
+        "bearish_votes": bearish,
+        "bullish_votes": bullish,
+        "evidence": evidence,
+    }
+
+
+def _apply_directional_quality_filters(
+    plan: ScalpSignalPlan,
+    market_context: dict[str, Any],
+    config: ScalpSignalConfig,
+) -> None:
+    """Apply production guards that protect weak reversal entries from trend tape."""
+    if plan.side is not SignalSide.LONG:
+        return
+    if config.long_require_mtf_not_bearish and (
+        str(plan.mtf_state or "").upper() == "BEARISH"
+        or str(plan.mtf_alignment or "").upper() == "CONFLICT"
+    ):
+        _add_blocker(plan, "LONG_5M_BEARISH_CONTEXT")
+    elif config.long_require_mtf_not_bearish:
+        plan.reasons.append("LONG_5M_NOT_BEARISH")
+    if (
+        config.long_block_bearish_market
+        and str((market_context or {}).get("state") or "").upper() == "BEARISH"
+    ):
+        _add_blocker(plan, "LONG_MARKET_BEARISH_CONTEXT")
+    elif config.long_block_bearish_market:
+        plan.reasons.append("MARKET_NOT_BEARISH_FOR_LONG")
 
 
 def _apply_market_context(plan: ScalpSignalPlan, context: dict[str, Any], config: Any) -> None:

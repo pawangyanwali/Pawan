@@ -50,18 +50,28 @@ def _position_size(plan: ScalpSignalPlan, policy_size_mult: float = 1.0) -> int:
 
     budget = max(0.0, _float(config.get("paper.budget", 50_000.0)))
     max_notional = budget * max(0.0, _float(config.get("paper.max_trade_pct", 5.0))) / 100.0
-    risk_pct = max(0.0, _float(config.get("trading.risk_pct", 1.0)))
-    risk_budget = budget * risk_pct / 100.0
+    if bool(config.get("scalp.shadow_fixed_risk_enabled", True)):
+        risk_budget = max(0.0, _float(config.get("scalp.shadow_risk_per_trade_usd", 25.0)))
+    else:
+        risk_pct = max(0.0, _float(config.get("trading.risk_pct", 1.0)))
+        risk_budget = budget * risk_pct / 100.0
     risk = max(plan.risk_per_share, abs(plan.entry - plan.stop_loss))
     by_notional = int(max_notional / plan.entry) if plan.entry > 0 else 0
     by_risk = int(risk_budget / risk) if risk > 0 else 0
-    shares = min(value for value in (by_notional, by_risk) if value > 0) if by_notional > 0 or by_risk > 0 else 0
+    if bool(config.get("scalp.shadow_fixed_risk_enabled", True)) and by_risk <= 0:
+        return 0
+    max_shares = max(1, int(config.get("scalp.shadow_max_shares", 500)))
+    min_shares = max(1, int(config.get("scalp.shadow_min_shares", 1)))
+    candidates = [value for value in (by_notional, by_risk, max_shares) if value > 0]
+    shares = min(candidates) if candidates else 0
     shares = int(
         shares
         * max(0.0, min(1.0, plan.learning_size_mult))
         * max(0.0, min(1.0, policy_size_mult))
     )
-    return max(0, shares)
+    if shares <= 0:
+        return 0
+    return max(min_shares, shares)
 
 
 def _record_shadow_decision(

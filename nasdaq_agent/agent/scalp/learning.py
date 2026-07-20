@@ -44,6 +44,22 @@ def context_key_for_plan(plan: ScalpSignalPlan | dict[str, Any]) -> str:
     return "|".join(str(part).upper().replace("|", "_") for part in parts)
 
 
+def setup_session_key_for_plan(plan: ScalpSignalPlan | dict[str, Any]) -> str:
+    """Broader adaptive key: setup family, side, and session only."""
+    read = (
+        plan.get
+        if isinstance(plan, dict)
+        else lambda key, default="": getattr(plan, key, default)
+    )
+    parts = (
+        "SETUP_SESSION",
+        read("setup_type", "UNKNOWN") or "UNKNOWN",
+        _side_value(read("side", "NONE")),
+        read("session", "UNKNOWN") or "UNKNOWN",
+    )
+    return "|".join(str(part).upper().replace("|", "_") for part in parts)
+
+
 def apply_context_gate(plan: ScalpSignalPlan) -> ScalpSignalPlan:
     """Apply only expiring risk-tightening actions; bracket levels never change."""
     from agent.config_manager import config
@@ -70,11 +86,42 @@ def apply_context_gate(plan: ScalpSignalPlan) -> ScalpSignalPlan:
         _block_plan(plan, "LEARNING_CONFIDENCE_FLOOR")
     elif plan.learning_gate == SIZE_REDUCE:
         plan.reasons.append("LEARNING_SIZE_REDUCED")
+
+    if bool(config.get("scalp_learn.setup_session_gate_enabled", True)):
+        setup_gate = get_context_gate(setup_session_key_for_plan(plan))
+        setup_state = str(setup_gate.get("gate_state") or ALLOW)
+        setup_floor = float(setup_gate.get("confidence_floor") or 0.0)
+        setup_size_mult = min(
+            1.0, max(0.05, float(setup_gate.get("size_mult") or 1.0))
+        )
+        if setup_state == BLOCK:
+            plan.learning_gate = BLOCK
+            plan.learned_expectancy_r = min(
+                plan.learned_expectancy_r,
+                float(setup_gate.get("ewma_expectancy_r") or 0.0),
+            )
+            _block_plan(plan, "LEARNING_SETUP_SESSION_BLOCK")
+        elif setup_state == CONFIDENCE_RAISE and plan.confidence < setup_floor:
+            plan.learning_gate = CONFIDENCE_RAISE
+            plan.learning_confidence_floor = max(
+                plan.learning_confidence_floor, setup_floor
+            )
+            _block_plan(plan, "LEARNING_SETUP_SESSION_CONFIDENCE_FLOOR")
+        elif setup_state == SIZE_REDUCE:
+            plan.learning_gate = SIZE_REDUCE
+            plan.learning_size_mult = min(plan.learning_size_mult, setup_size_mult)
+            plan.learned_expectancy_r = min(
+                plan.learned_expectancy_r,
+                float(setup_gate.get("ewma_expectancy_r") or 0.0),
+            )
+            plan.reasons.append("LEARNING_SETUP_SESSION_SIZE_REDUCED")
     return plan
 
 
 def record_closed_trade(conn, trade_id: int) -> dict[str, Any] | None:
     """Persist one idempotent scalp outcome and synchronously refresh its gate."""
+    from agent.config_manager import config
+
     init_scalp_tables()
     row = conn.execute(
         """
@@ -171,6 +218,10 @@ def record_closed_trade(conn, trade_id: int) -> dict[str, Any] | None:
             tuple(outcome[key] for key in keys),
         )
     _refresh_context(conn, context_key)
+    if bool(config.get("scalp_learn.setup_session_gate_enabled", True)):
+        setup_key = setup_session_key_for_plan({**plan, "session": row["session"]})
+        _refresh_setup_session_context(conn, setup_key)
+        _invalidate_gate(setup_key)
     _invalidate_gate(context_key)
     return outcome
 
@@ -269,6 +320,10 @@ def record_closed_shadow_trade(conn, shadow_trade_id: int) -> dict[str, Any] | N
             tuple(outcome[key] for key in keys),
         )
     _refresh_context(conn, context_key)
+    if bool(config.get("scalp_learn.setup_session_gate_enabled", True)):
+        setup_key = setup_session_key_for_plan({**plan, "session": row["session"]})
+        _refresh_setup_session_context(conn, setup_key)
+        _invalidate_gate(setup_key)
     _invalidate_gate(context_key)
     return outcome
 
@@ -301,8 +356,6 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
     from agent.config_manager import config
 
     now = datetime.now(timezone.utc)
-    window_min = max(1, int(config.get("scalp_learn.rolling_window_min", 120)))
-    cutoff = now - timedelta(minutes=window_min)
     rows = conn.execute(
         """
         SELECT closed_at, pnl_r, pnl_dollar, exit_reason FROM scalp_trade_outcomes
@@ -310,6 +363,37 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
         """,
         (context_key,),
     ).fetchall()
+    return _refresh_gate_from_rows(conn, context_key, rows, now=now, config=config)
+
+
+def _refresh_setup_session_context(conn, setup_key: str) -> dict[str, Any]:
+    from agent.config_manager import config
+
+    parts = str(setup_key or "").split("|")
+    if len(parts) < 4 or parts[0] != "SETUP_SESSION":
+        return _allow_gate(setup_key)
+    now = datetime.now(timezone.utc)
+    rows = conn.execute(
+        """
+        SELECT closed_at, pnl_r, pnl_dollar, exit_reason FROM scalp_trade_outcomes
+        WHERE setup_type=? AND side=? AND session=?
+        ORDER BY closed_at ASC
+        """,
+        (parts[1], parts[2], parts[3]),
+    ).fetchall()
+    return _refresh_gate_from_rows(conn, setup_key, rows, now=now, config=config)
+
+
+def _refresh_gate_from_rows(
+    conn,
+    context_key: str,
+    rows: list[Any],
+    *,
+    now: datetime,
+    config: Any,
+) -> dict[str, Any]:
+    window_min = max(1, int(config.get("scalp_learn.rolling_window_min", 120)))
+    cutoff = now - timedelta(minutes=window_min)
     samples = [row for row in rows if _parse_ts(row["closed_at"]) >= cutoff]
     pnl_values = [float(row["pnl_r"] or 0.0) for row in samples]
     dollar_values = [float(row["pnl_dollar"] or 0.0) for row in samples]

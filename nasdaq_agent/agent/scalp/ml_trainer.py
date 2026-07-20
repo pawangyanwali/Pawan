@@ -64,7 +64,7 @@ def _train_locked() -> dict[str, Any]:
     created_at = datetime.now(timezone.utc)
     version_id = f"scalp-ml-{created_at:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
     dataset = load_training_dataset()
-    minimum = max(50, int(config.get("scalp_ml.minimum_samples", 200)))
+    minimum = _effective_training_minimum(config)
     if len(dataset) < minimum:
         return _reject(
             version_id, created_at, dataset,
@@ -117,8 +117,13 @@ def _train_locked() -> dict[str, Any]:
         "selected_profit_factor": _profit_factor(selected_pnl),
         "selection_threshold_r": threshold,
         "session_metrics": session_metrics,
+        "training_minimum_samples": minimum,
+        "promotion_minimum_samples": _promotion_minimum(config),
+        "bootstrap_training_enabled": bool(
+            config.get("scalp_ml.bootstrap_training_enabled", True)
+        ),
     }
-    reasons = _promotion_reasons(metrics, len(selected_indices), config)
+    reasons = _promotion_reasons(metrics, len(selected_indices), len(dataset), config)
     metadata = _metadata(
         version_id, created_at, dataset, split, len(selected_indices), metrics,
         status="REJECTED" if reasons else "CHAMPION",
@@ -237,8 +242,30 @@ def _fit_classifier(x: np.ndarray, labels: np.ndarray):
     return model
 
 
-def _promotion_reasons(metrics: dict[str, Any], selected: int, config) -> list[str]:
+def _effective_training_minimum(config) -> int:
+    promotion_minimum = _promotion_minimum(config)
+    if not bool(config.get("scalp_ml.bootstrap_training_enabled", True)):
+        return promotion_minimum
+    bootstrap_minimum = max(
+        50,
+        int(config.get("scalp_ml.bootstrap_minimum_samples", 75)),
+    )
+    return min(promotion_minimum, bootstrap_minimum)
+
+
+def _promotion_minimum(config) -> int:
+    return max(50, int(config.get("scalp_ml.minimum_samples", 200)))
+
+
+def _promotion_reasons(
+    metrics: dict[str, Any],
+    selected: int,
+    sample_count: int,
+    config,
+) -> list[str]:
     reasons = []
+    if sample_count < _promotion_minimum(config):
+        reasons.append("promotion sample floor not met")
     if selected < int(config.get("scalp_ml.minimum_selected_holdout", 30)):
         reasons.append("selected holdout sample floor not met")
     minimum_auc = float(config.get("scalp_ml.minimum_auc", 0.52))

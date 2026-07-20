@@ -44,6 +44,8 @@ class ScalpSignalConfig:
     tick_size: float = 0.01
     max_quote_age_ms: int = 2_000
     max_bar_age_ms: int = 120_000
+    use_provisional_live_indicators: bool = True
+    provisional_max_bar_age_ms: int = 300_000
     max_spread_to_risk: float = 0.25
     min_rvol_regular: float = 0.8
     min_rvol_extended: float = 0.4
@@ -54,6 +56,10 @@ class ScalpSignalConfig:
     require_vwap_event: bool = True
     require_macd_confirm: bool = True
     require_rsi_zone: bool = True
+    long_require_fast_rsi_confirmation: bool = True
+    long_require_vwap_reclaim: bool = True
+    long_require_mtf_not_bearish: bool = True
+    long_block_bearish_market: bool = True
     allow_rest_fallback_trading: bool = False
     block_when_path_obstructed: bool = True
     block_when_risk_capped: bool = True
@@ -84,6 +90,8 @@ class ScalpSignalConfig:
             raise ValueError("max_quote_age_ms must be positive")
         if self.max_bar_age_ms <= 0:
             raise ValueError("max_bar_age_ms must be positive")
+        if self.provisional_max_bar_age_ms <= 0:
+            raise ValueError("provisional_max_bar_age_ms must be positive")
         if self.max_spread_to_risk <= 0:
             raise ValueError("max_spread_to_risk must be positive")
         if self.min_rvol_regular < 0 or self.min_rvol_extended < 0:
@@ -122,6 +130,12 @@ class ScalpSignalConfig:
             tick_size=float(read("scalp.tick_size", 0.01)),
             max_quote_age_ms=int(read("scalp.max_quote_age_ms", 2_000)),
             max_bar_age_ms=int(read("scalp.max_bar_age_ms", 120_000)),
+            use_provisional_live_indicators=bool(
+                read("scalp.use_provisional_live_indicators", True)
+            ),
+            provisional_max_bar_age_ms=int(
+                read("scalp.provisional_max_bar_age_ms", 300_000)
+            ),
             max_spread_to_risk=float(read("scalp.max_spread_to_risk", 0.25)),
             min_rvol_regular=float(read("scalp.min_rvol_regular", 0.8)),
             min_rvol_extended=float(read("scalp.min_rvol_extended", 0.4)),
@@ -132,6 +146,18 @@ class ScalpSignalConfig:
             require_vwap_event=bool(read("scalp.require_vwap_event", True)),
             require_macd_confirm=bool(read("scalp.require_macd_confirm", True)),
             require_rsi_zone=bool(read("scalp.require_rsi_zone", True)),
+            long_require_fast_rsi_confirmation=bool(
+                read("scalp.long_require_fast_rsi_confirmation", True)
+            ),
+            long_require_vwap_reclaim=bool(
+                read("scalp.long_require_vwap_reclaim", True)
+            ),
+            long_require_mtf_not_bearish=bool(
+                read("scalp.long_require_mtf_not_bearish", True)
+            ),
+            long_block_bearish_market=bool(
+                read("scalp.long_block_bearish_market", True)
+            ),
             allow_rest_fallback_trading=bool(
                 read("scalp.allow_rest_fallback_trading", False)
             ),

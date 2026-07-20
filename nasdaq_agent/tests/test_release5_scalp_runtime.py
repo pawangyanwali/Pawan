@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -93,6 +94,35 @@ def test_provisional_indicators_match_appending_one_live_price_observation():
     )
 
 
+def test_runtime_uses_provisional_live_indicator_snapshot_for_recent_stale_bar():
+    from agent.scalp.models import QuoteSnapshot, QuoteSource, ScalpSignalConfig
+    from agent.scalp.runtime import _with_provisional_live_indicators
+
+    frame = _frame_from_payload(_bars())
+    enriched = calculate_one_minute_indicators(frame)
+    snapshot = replace(indicator_snapshot_from_frame(enriched), bar_age_ms=180_000)
+    live_price = float(frame["Close"].iloc[-1]) + 0.42
+    quote = QuoteSnapshot(
+        ticker="AAA",
+        last=live_price,
+        bid=live_price - 0.01,
+        ask=live_price + 0.01,
+        data_age_ms=150,
+        source=QuoteSource.WS,
+    )
+
+    refreshed = _with_provisional_live_indicators(
+        snapshot,
+        quote,
+        ScalpSignalConfig(max_bar_age_ms=120_000, provisional_max_bar_age_ms=300_000),
+    )
+
+    assert refreshed.bar_age_ms == 150
+    assert refreshed.indicator_close == live_price
+    assert refreshed.macd_hist_prev == snapshot.macd_hist
+    assert refreshed.macd_hist != snapshot.macd_hist
+
+
 def test_compose_has_only_canonical_signal_and_learning_owners():
     import yaml
 
@@ -147,10 +177,15 @@ def test_runtime_controls_are_ui_catalogued():
         "scalp_runtime.workers",
         "scalp_runtime.bar_lookback",
         "scalp_runtime.blocked_sessions",
+        "scalp.long_require_mtf_not_bearish",
+        "scalp.long_block_bearish_market",
+        "scalp.shadow_fixed_risk_enabled",
+        "scalp.shadow_risk_per_trade_usd",
+        "scalp_learn.setup_session_gate_enabled",
     ):
         assert key in fields
-        assert fields[key]["advanced"] is False
         assert fields[key]["description"]
+    assert fields["scalp_runtime.cycle_interval_s"]["advanced"] is False
     assert fields["scalp_runtime.bar_lookback"]["default"] == 500
 
 
@@ -289,6 +324,50 @@ def test_market_context_is_present_before_ml_inference(monkeypatch):
         "sentiment_30m": 0.4,
         "earnings_phase": "CLEAR",
     }
+
+
+def test_bearish_market_context_blocks_long_reversal():
+    from agent.scalp.models import ScalpSignalConfig, ScalpSignalPlan, SignalSide
+    from agent.scalp.runtime import _apply_directional_quality_filters
+
+    plan = ScalpSignalPlan(
+        ticker="AAPL",
+        side=SignalSide.LONG,
+        valid=True,
+        invalid_reason="",
+        mtf_state="BULLISH",
+        mtf_alignment="ALIGNED",
+    )
+    _apply_directional_quality_filters(
+        plan,
+        {"state": "BEARISH", "bearish_votes": 1, "bullish_votes": 0},
+        ScalpSignalConfig(),
+    )
+
+    assert plan.valid is False
+    assert "LONG_MARKET_BEARISH_CONTEXT" in plan.blockers
+
+
+def test_bearish_five_minute_context_blocks_long_reversal():
+    from agent.scalp.models import ScalpSignalConfig, ScalpSignalPlan, SignalSide
+    from agent.scalp.runtime import _apply_directional_quality_filters
+
+    plan = ScalpSignalPlan(
+        ticker="AAPL",
+        side=SignalSide.LONG,
+        valid=True,
+        invalid_reason="",
+        mtf_state="BEARISH",
+        mtf_alignment="CONFLICT",
+    )
+    _apply_directional_quality_filters(
+        plan,
+        {"state": "BULLISH", "bearish_votes": 0, "bullish_votes": 1},
+        ScalpSignalConfig(),
+    )
+
+    assert plan.valid is False
+    assert "LONG_5M_BEARISH_CONTEXT" in plan.blockers
 
 
 class _ConfigStub:

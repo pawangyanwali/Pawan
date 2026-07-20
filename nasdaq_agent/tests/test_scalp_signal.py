@@ -22,7 +22,7 @@ def _long_indicators(**overrides):
     values = {
         "rsi_14": 25.0,
         "rsi_7": 20.0,
-        "rsi_2": 8.0,
+        "rsi_2": 32.0,
         "macd_hist": -0.04,
         "macd_hist_prev": -0.10,
         "atr_14": 1.0,
@@ -238,12 +238,58 @@ def test_runtime_config_reads_only_new_scalp_namespace():
         {
             "scalp.reward_r": 2.5,
             "scalp.max_quote_age_ms": 750,
+            "scalp.use_provisional_live_indicators": False,
+            "scalp.provisional_max_bar_age_ms": 240_000,
+            "scalp.long_require_fast_rsi_confirmation": False,
+            "scalp.long_require_vwap_reclaim": False,
+            "scalp.long_require_mtf_not_bearish": False,
+            "scalp.long_block_bearish_market": False,
             "prediction.min_rr": 9.0,
         }
     )
 
     assert cfg.reward_r == 2.5
     assert cfg.max_quote_age_ms == 750
+    assert cfg.use_provisional_live_indicators is False
+    assert cfg.provisional_max_bar_age_ms == 240_000
+    assert cfg.long_require_fast_rsi_confirmation is False
+    assert cfg.long_require_vwap_reclaim is False
+    assert cfg.long_require_mtf_not_bearish is False
+    assert cfg.long_block_bearish_market is False
+
+
+def test_long_requires_fast_rsi_turn_by_default():
+    plan = create_scalp_signal_plan(
+        quote=_quote(),
+        indicators=_long_indicators(rsi_2=8.0, rsi_7=20.0),
+        side="LONG",
+        session="REGULAR",
+        resistances=[103.0],
+    )
+
+    assert plan.valid is False
+    assert "LONG_FAST_RSI_NOT_CONFIRMING" in plan.blockers
+
+
+def test_long_requires_true_vwap_reclaim_by_default():
+    blocked = create_scalp_signal_plan(
+        quote=_quote(),
+        indicators=_long_indicators(vwap_event="ABOVE"),
+        side="LONG",
+        session="REGULAR",
+        resistances=[103.0],
+    )
+    allowed = create_scalp_signal_plan(
+        quote=_quote(),
+        indicators=_long_indicators(vwap_event="ABOVE"),
+        side="LONG",
+        session="REGULAR",
+        config=ScalpSignalConfig(long_require_vwap_reclaim=False),
+        resistances=[103.0],
+    )
+
+    assert "LONG_VWAP_RECLAIM_MISSING" in blocked.blockers
+    assert allowed.valid is True
 
 
 def test_plan_serializes_enums_for_versioned_api_payloads():

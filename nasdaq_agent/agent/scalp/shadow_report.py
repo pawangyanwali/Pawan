@@ -26,6 +26,7 @@ _GROUP_VALUE_FIELDS = {
     "setup": "setup_type",
     "side": "side",
     "session": "session",
+    "setup_side_session": "setup_side_session",
     "exit_reason": "exit_reason",
     "rsi_zone": "rsi_zone",
     "vwap_event": "vwap_event",
@@ -98,6 +99,7 @@ def generate_shadow_daily_report(
             "setup": _group_stats(closed, "setup_type"),
             "side": _group_stats(closed, "side"),
             "session": _group_stats(closed, "session"),
+            "setup_side_session": _group_stats(closed, "setup_side_session"),
             "exit_reason": _group_stats(closed, "exit_reason"),
             "rsi_zone": _group_stats(closed, "rsi_zone"),
             "vwap_event": _group_stats(closed, "vwap_event"),
@@ -271,6 +273,15 @@ def _enrich_trade(trade: dict[str, Any]) -> None:
     plan = _safe_json(trade.get("plan_json"))
     trade["_plan"] = plan
     trade["setup_type"] = trade.get("setup_type") or plan.get("setup_type") or "UNKNOWN"
+    trade["side"] = str(trade.get("side") or plan.get("side") or "UNKNOWN").upper()
+    trade["session"] = str(trade.get("session") or plan.get("session") or "UNKNOWN").upper()
+    trade["setup_side_session"] = "|".join(
+        (
+            str(trade["setup_type"] or "UNKNOWN").upper(),
+            str(trade["side"] or "UNKNOWN").upper(),
+            str(trade["session"] or "UNKNOWN").upper(),
+        )
+    )
     trade["rsi_zone"] = plan.get("rsi_zone") or "UNKNOWN"
     trade["vwap_event"] = plan.get("vwap_event") or "UNKNOWN"
     trade["atr_bucket"] = plan.get("atr_bucket") or "UNKNOWN"
@@ -505,6 +516,16 @@ def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
             f"Shadow validation was positive: expectancy {expectancy:.3f}R, PF {profit_factor:.2f}."
         )
 
+    avg_win_dollar = abs(_float(summary.get("avg_win_dollar")))
+    avg_loss_dollar = abs(_float(summary.get("avg_loss_dollar")))
+    if avg_win_dollar > 0 and avg_loss_dollar > avg_win_dollar * 1.5:
+        findings.append(
+            f"Dollar asymmetry is unfavorable: average loss ${avg_loss_dollar:.2f} versus average win ${avg_win_dollar:.2f}."
+        )
+        recommendations.append(
+            "Keep fixed-risk shadow sizing enabled and review fill/slippage because wins must not be materially smaller than losses."
+        )
+
     stop_group = _find_group(report, "exit_reason", "STOP")
     if stop_group and _float(stop_group.get("pnl_r")) < 0:
         findings.append(
@@ -540,7 +561,7 @@ def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
             "Review TP2 distance and trailing capture by setup before allowing canonical execution."
         )
 
-    for key in ("setup", "session", "vwap_event", "rsi_zone"):
+    for key in ("setup_side_session", "setup", "session", "vwap_event", "rsi_zone"):
         bad = _worst_group(report, key)
         if bad:
             bad_value = _group_value(bad, key)
@@ -608,7 +629,7 @@ def _autonomous_diagnosis(report: dict[str, Any]) -> dict[str, Any]:
         add(
             "DOLLAR_GUARD",
             f"R outcome was non-negative ({pnl_r:.2f}R) but real dollar P&L was ${pnl_dollar:.2f}.",
-            "Keep dollar-aware context reduction enabled so same-context trades shrink when fills or sizing lose money.",
+            "Keep fixed-risk shadow sizing and dollar-aware context reduction enabled so same-context trades shrink when fills or sizing lose money.",
             "WARN",
         )
     elif expectancy < 0 or pnl_dollar < 0:
@@ -617,6 +638,16 @@ def _autonomous_diagnosis(report: dict[str, Any]) -> dict[str, Any]:
             f"Daily shadow expectancy was {expectancy:.3f}R with dollar P&L ${pnl_dollar:.2f}.",
             "Keep canonical execution disabled and let learning gates tighten the losing contexts.",
             "CRITICAL",
+        )
+
+    avg_win_dollar = abs(_float(summary.get("avg_win_dollar")))
+    avg_loss_dollar = abs(_float(summary.get("avg_loss_dollar")))
+    if avg_win_dollar > 0 and avg_loss_dollar > avg_win_dollar * 1.5:
+        add(
+            "FIX_WIN_LOSS_ASYMMETRY",
+            f"Average loss ${avg_loss_dollar:.2f} is materially larger than average win ${avg_win_dollar:.2f}.",
+            "Use fixed-risk sizing and keep activation blocked until exit calibration shows average wins can cover average losses.",
+            "CRITICAL" if pnl_dollar < 0 else "WARN",
         )
 
     if int(exit_cal.get("tp1_hits") or 0) >= 3 and _float(
@@ -635,6 +666,16 @@ def _autonomous_diagnosis(report: dict[str, Any]) -> dict[str, Any]:
             f"{exit_cal.get('stop_exits')} trades exited at the initial stop.",
             "Use same-context cluster throttling and one extra confirmation after clustered pre-TP1 stops.",
             "WARN",
+        )
+
+    worst_combo = _worst_group(report, "setup_side_session")
+    if worst_combo:
+        combo = _group_value(worst_combo, "setup_side_session")
+        add(
+            "AUTO_TIGHTEN_SETUP_SESSION",
+            f"Worst setup/side/session was {combo} with {worst_combo.get('closed')} trades and {worst_combo.get('expectancy_r'):.3f}R EV.",
+            f"Let the setup-session learning gate reduce or block {combo} until later outcomes recover.",
+            "CRITICAL" if _float(worst_combo.get("expectancy_r")) <= -0.25 else "WARN",
         )
 
     if int((report.get("learning") or {}).get("actions_count") or 0) == 0:

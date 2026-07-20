@@ -251,9 +251,14 @@ def _evaluate_long_setup(
         blockers.append("LONG_MACD_NOT_RISING")
     else:
         reasons.append("MACD_RISING")
-    if config.require_vwap_event and vwap_event not in {
-        "RECLAIM", "ABOVE", "BOUNCE_SUPPORT"
-    }:
+    if config.long_require_fast_rsi_confirmation and not _long_fast_rsi_confirmed(indicators):
+        blockers.append("LONG_FAST_RSI_NOT_CONFIRMING")
+    elif config.long_require_fast_rsi_confirmation:
+        reasons.append("FAST_RSI_CONFIRMING")
+    long_vwap_events = {"RECLAIM", "BOUNCE_SUPPORT"}
+    if not config.long_require_vwap_reclaim:
+        long_vwap_events.add("ABOVE")
+    if config.require_vwap_event and vwap_event not in long_vwap_events:
         blockers.append("LONG_VWAP_RECLAIM_MISSING")
     else:
         reasons.append(f"VWAP_{vwap_event or 'CONFIRMED'}")
@@ -323,6 +328,12 @@ def _long_macd_confirmed(indicators: IndicatorSnapshot) -> bool:
     current = float(indicators.macd_hist)
     previous = float(indicators.macd_hist_prev)
     return current > previous or (previous <= 0 < current)
+
+
+def _long_fast_rsi_confirmed(indicators: IndicatorSnapshot) -> bool:
+    if not finite(indicators.rsi_2) or not finite(indicators.rsi_7):
+        return False
+    return float(indicators.rsi_2) > float(indicators.rsi_7)
 
 
 def _short_macd_confirmed(indicators: IndicatorSnapshot) -> bool:
