@@ -271,6 +271,8 @@ def test_scalp_learning_configuration_rejects_unsafe_ordering():
         "scalp_learn.fast_stop_window_min": 10,
         "scalp_learn.fast_stop_count": 3,
         "scalp_learn.fast_stop_size_mult": 0.25,
+        "scalp_learn.setup_session_fast_stop_block_enabled": True,
+        "scalp_learn.setup_session_fast_stop_block_count": 2,
         "scalp_learn.action_ttl_min": 60,
     }
     _validate_scalp_learning(values)

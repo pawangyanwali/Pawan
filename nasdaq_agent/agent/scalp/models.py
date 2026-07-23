@@ -60,6 +60,10 @@ class ScalpSignalConfig:
     long_require_vwap_reclaim: bool = True
     long_require_mtf_not_bearish: bool = True
     long_block_bearish_market: bool = True
+    short_require_fast_rsi_confirmation: bool = True
+    short_premarket_require_vwap_rejection: bool = True
+    short_require_mtf_not_bullish: bool = True
+    short_block_bullish_market: bool = True
     allow_rest_fallback_trading: bool = False
     block_when_path_obstructed: bool = True
     block_when_risk_capped: bool = True
@@ -157,6 +161,18 @@ class ScalpSignalConfig:
             ),
             long_block_bearish_market=bool(
                 read("scalp.long_block_bearish_market", True)
+            ),
+            short_require_fast_rsi_confirmation=bool(
+                read("scalp.short_require_fast_rsi_confirmation", True)
+            ),
+            short_premarket_require_vwap_rejection=bool(
+                read("scalp.short_premarket_require_vwap_rejection", True)
+            ),
+            short_require_mtf_not_bullish=bool(
+                read("scalp.short_require_mtf_not_bullish", True)
+            ),
+            short_block_bullish_market=bool(
+                read("scalp.short_block_bullish_market", True)
             ),
             allow_rest_fallback_trading=bool(
                 read("scalp.allow_rest_fallback_trading", False)

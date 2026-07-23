@@ -165,6 +165,26 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Blocks LONG entries when QQQ/SPY market context is bearish, using five-minute state and one-minute VWAP/MACD evidence from the same scan.",
         "Enabled keeps individual oversold bounces observational while the broader market is selling off.",
     ),
+    "scalp.short_require_fast_rsi_confirmation": (
+        "Require fast RSI short rollover",
+        "Requires RSI-2 to fall below RSI-7 before an overbought SHORT reversal can become actionable, reducing early shorts while price is still squeezing upward.",
+        "Enabled means RSI-14 can be overbought, but the fast RSI must show an actual rollover.",
+    ),
+    "scalp.short_premarket_require_vwap_rejection": (
+        "Require pre-market short VWAP rejection",
+        "During pre-market only, requires a true VWAP rejection or resistance rejection for SHORT entries instead of accepting a generic below-VWAP state.",
+        "Enabled prevents clustered pre-market shorts from firing just because price is below VWAP.",
+    ),
+    "scalp.short_require_mtf_not_bullish": (
+        "Block bullish 5-minute shorts",
+        "Blocks SHORT reversal entries when the completed five-minute context is bullish or directly conflicts with the short setup.",
+        "Enabled prevents a one-minute overbought signal from shorting into a larger bullish tape.",
+    ),
+    "scalp.short_block_bullish_market": (
+        "Block shorts in bullish market",
+        "Blocks SHORT entries when QQQ/SPY market context is bullish, using five-minute state and one-minute VWAP/MACD evidence from the same scan.",
+        "Enabled keeps individual overbought shorts observational while the broader market is squeezing higher.",
+    ),
     "scalp.allow_rest_fallback_trading": (
         "Allow REST fallback entries",
         "Allows paper execution from fresh REST quotes when WebSocket data is unavailable. Source remains visible on every plan.",
@@ -268,6 +288,8 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.fast_stop_window_min": ("Fast stop window", "Minutes used to count clustered stop exits for the fast circuit.", "10 means only stops from the last ten minutes count toward the circuit."),
     "scalp_learn.fast_stop_count": ("Fast stop count", "Number of losing stop exits in the fast-stop window required to trigger immediate size reduction.", "3 turns three same-context stop exits into an automatic risk tightening action."),
     "scalp_learn.fast_stop_size_mult": ("Fast stop size multiplier", "Temporary position-size multiplier applied by the fast stop circuit. It can only reduce exposure.", "0.25 means the next matching setup trades at one-quarter size until the action expires or context recovers."),
+    "scalp_learn.setup_session_fast_stop_block_enabled": ("Setup-session fast stop block", "Escalates the broad setup + side + session gate to a temporary block when repeated stop exits cluster inside the fast-stop window.", "Enabled blocks the next PRE_MARKET short cluster after two rapid stop exits instead of only reducing size after three."),
+    "scalp_learn.setup_session_fast_stop_block_count": ("Setup-session stop block count", "Number of rapid stop exits in the same setup + side + session required to trigger a temporary cooldown block.", "2 blocks the third matching setup/session attempt inside the fast-stop window."),
     "scalp_learn.setup_session_gate_enabled": ("Broad setup-session learning", "Maintains an additional setup + side + session gate so clustered failures tighten even when RSI/VWAP buckets differ slightly.", "Enabled lets losing OVERSOLD_MACD_TURN_LONG + LONG + STANDARD trades reduce the next similar long in the same session."),
     "scalp_learn.action_ttl_min": ("Learning action lifetime", "Minutes before an automatic action expires unless refreshed by another outcome.", "60 makes every automatic action reversible within one hour."),
 }
@@ -356,6 +378,16 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
         "Max same-context entries",
         "Maximum entries allowed for the same learned context inside the cluster window before new entries are blocked.",
         "3 lets the system test a setup cluster but prevents a full-universe stampede.",
+    ),
+    "scalp_runtime.context_cluster_use_setup_session": (
+        "Throttle setup-session clusters",
+        "Counts setup + side + session entries together instead of only exact RSI/VWAP context matches, catching correlated ticker clusters earlier.",
+        "Enabled treats QQQ, TQQQ, SOXL, NVDA, and MU pre-market shorts as the same execution idea.",
+    ),
+    "scalp_runtime.setup_session_cluster_max_entries": (
+        "Max setup-session entries",
+        "Maximum entries allowed for the same setup + side + session inside the cluster window before new entries are blocked.",
+        "2 lets the engine test one or two pre-market shorts, then waits for outcomes before adding more.",
     ),
 }
 

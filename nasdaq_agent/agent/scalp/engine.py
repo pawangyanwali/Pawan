@@ -89,7 +89,10 @@ def create_scalp_signal_plan(
         _evaluate_long_setup(indicators, rsi_zone, vwap_event, cfg, reasons, blockers)
     elif normalized_side is SignalSide.SHORT:
         setup_type = "OVERBOUGHT_MACD_TURN_SHORT"
-        _evaluate_short_setup(indicators, rsi_zone, vwap_event, cfg, reasons, blockers)
+        _evaluate_short_setup(
+            indicators, rsi_zone, vwap_event, str(session or "").upper(), cfg,
+            reasons, blockers,
+        )
 
     min_rvol = (
         cfg.min_rvol_extended
@@ -268,6 +271,7 @@ def _evaluate_short_setup(
     indicators: IndicatorSnapshot,
     rsi_zone: str,
     vwap_event: str,
+    session: str,
     config: ScalpSignalConfig,
     reasons: list[str],
     blockers: list[str],
@@ -280,9 +284,20 @@ def _evaluate_short_setup(
         blockers.append("SHORT_MACD_NOT_FALLING")
     else:
         reasons.append("MACD_FALLING")
-    if config.require_vwap_event and vwap_event not in {
-        "REJECTION", "BELOW", "REJECT_RESISTANCE"
-    }:
+    if (
+        config.short_require_fast_rsi_confirmation
+        and not _short_fast_rsi_confirmed(indicators)
+    ):
+        blockers.append("SHORT_FAST_RSI_NOT_CONFIRMING")
+    elif config.short_require_fast_rsi_confirmation:
+        reasons.append("FAST_RSI_CONFIRMING")
+    short_vwap_events = {"REJECTION", "BELOW", "REJECT_RESISTANCE"}
+    if (
+        str(session or "").upper() == "PRE_MARKET"
+        and config.short_premarket_require_vwap_rejection
+    ):
+        short_vwap_events = {"REJECTION", "REJECT_RESISTANCE"}
+    if config.require_vwap_event and vwap_event not in short_vwap_events:
         blockers.append("SHORT_VWAP_REJECTION_MISSING")
     else:
         reasons.append(f"VWAP_{vwap_event or 'CONFIRMED'}")
@@ -334,6 +349,12 @@ def _long_fast_rsi_confirmed(indicators: IndicatorSnapshot) -> bool:
     if not finite(indicators.rsi_2) or not finite(indicators.rsi_7):
         return False
     return float(indicators.rsi_2) > float(indicators.rsi_7)
+
+
+def _short_fast_rsi_confirmed(indicators: IndicatorSnapshot) -> bool:
+    if not finite(indicators.rsi_2) or not finite(indicators.rsi_7):
+        return False
+    return float(indicators.rsi_2) < float(indicators.rsi_7)
 
 
 def _short_macd_confirmed(indicators: IndicatorSnapshot) -> bool:

@@ -174,12 +174,18 @@ def _same_context_entries(
     *,
     window_min: int,
     mode: str,
+    use_setup_session: bool = False,
 ) -> dict[str, Any]:
     """Count recent entries with the same learned context across shadow/paper."""
-    from .learning import context_key_for_plan
+    from .learning import context_key_for_plan, setup_session_key_for_plan
 
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(window_min)))
-    current_key = context_key_for_plan(plan)
+    current_key = (
+        setup_session_key_for_plan(plan)
+        if use_setup_session
+        else context_key_for_plan(plan)
+    )
+    key_name = "setup_session_key" if use_setup_session else "context_key"
     rows: list[dict[str, Any]] = []
     try:
         with get_conn(read_only=True) as conn:
@@ -218,7 +224,8 @@ def _same_context_entries(
     except Exception as exc:
         return {
             "enabled": True,
-            "context_key": current_key,
+            key_name: current_key,
+            "scope": "SETUP_SESSION" if use_setup_session else "CONTEXT",
             "window_min": window_min,
             "entry_count": 0,
             "open_count": 0,
@@ -231,12 +238,18 @@ def _same_context_entries(
             payload = json.loads(row.get("plan_json") or "{}")
         except Exception:
             payload = {}
-        if payload and context_key_for_plan(payload) == current_key:
+        row_key = (
+            setup_session_key_for_plan(payload)
+            if use_setup_session
+            else context_key_for_plan(payload)
+        )
+        if payload and row_key == current_key:
             matches.append(row)
     return {
         "enabled": True,
         "mode": str(mode or "").upper(),
-        "context_key": current_key,
+        key_name: current_key,
+        "scope": "SETUP_SESSION" if use_setup_session else "CONTEXT",
         "window_min": window_min,
         "entry_count": len(matches),
         "open_count": sum(
@@ -312,13 +325,22 @@ def evaluate_execution_policy(
         cluster_window = max(
             1, int(config.get("scalp_runtime.context_cluster_window_min", 10))
         )
+        use_setup_session = bool(
+            config.get("scalp_runtime.context_cluster_use_setup_session", True)
+        )
+        max_key = (
+            "scalp_runtime.setup_session_cluster_max_entries"
+            if use_setup_session
+            else "scalp_runtime.context_cluster_max_entries"
+        )
         cluster_max = max(
-            1, int(config.get("scalp_runtime.context_cluster_max_entries", 3))
+            1, int(config.get(max_key, 2 if use_setup_session else 3))
         )
         cluster = _same_context_entries(
             plan,
             window_min=cluster_window,
             mode=mode,
+            use_setup_session=use_setup_session,
         )
         checks["context_cluster"] = cluster
         checks["context_cluster_max_entries"] = cluster_max

@@ -38,7 +38,7 @@ def _short_indicators(**overrides):
     values = {
         "rsi_14": 75.0,
         "rsi_7": 80.0,
-        "rsi_2": 92.0,
+        "rsi_2": 68.0,
         "macd_hist": 0.04,
         "macd_hist_prev": 0.10,
         "atr_14": 1.0,
@@ -244,6 +244,10 @@ def test_runtime_config_reads_only_new_scalp_namespace():
             "scalp.long_require_vwap_reclaim": False,
             "scalp.long_require_mtf_not_bearish": False,
             "scalp.long_block_bearish_market": False,
+            "scalp.short_require_fast_rsi_confirmation": False,
+            "scalp.short_premarket_require_vwap_rejection": False,
+            "scalp.short_require_mtf_not_bullish": False,
+            "scalp.short_block_bullish_market": False,
             "prediction.min_rr": 9.0,
         }
     )
@@ -256,6 +260,10 @@ def test_runtime_config_reads_only_new_scalp_namespace():
     assert cfg.long_require_vwap_reclaim is False
     assert cfg.long_require_mtf_not_bearish is False
     assert cfg.long_block_bearish_market is False
+    assert cfg.short_require_fast_rsi_confirmation is False
+    assert cfg.short_premarket_require_vwap_rejection is False
+    assert cfg.short_require_mtf_not_bullish is False
+    assert cfg.short_block_bullish_market is False
 
 
 def test_long_requires_fast_rsi_turn_by_default():
@@ -290,6 +298,39 @@ def test_long_requires_true_vwap_reclaim_by_default():
 
     assert "LONG_VWAP_RECLAIM_MISSING" in blocked.blockers
     assert allowed.valid is True
+
+
+def test_short_requires_fast_rsi_rollover_by_default():
+    plan = create_scalp_signal_plan(
+        quote=_quote(),
+        indicators=_short_indicators(rsi_2=92.0, rsi_7=80.0),
+        side="SHORT",
+        session="REGULAR",
+        supports=[97.0],
+    )
+
+    assert plan.valid is False
+    assert "SHORT_FAST_RSI_NOT_CONFIRMING" in plan.blockers
+
+
+def test_premarket_short_requires_true_vwap_rejection_by_default():
+    blocked = create_scalp_signal_plan(
+        quote=_quote(),
+        indicators=_short_indicators(vwap_event="BELOW"),
+        side="SHORT",
+        session="PRE_MARKET",
+        supports=[97.0],
+    )
+    regular = create_scalp_signal_plan(
+        quote=_quote(),
+        indicators=_short_indicators(vwap_event="BELOW"),
+        side="SHORT",
+        session="REGULAR",
+        supports=[97.0],
+    )
+
+    assert "SHORT_VWAP_REJECTION_MISSING" in blocked.blockers
+    assert regular.valid is True
 
 
 def test_plan_serializes_enums_for_versioned_api_payloads():

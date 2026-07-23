@@ -179,9 +179,17 @@ def test_runtime_controls_are_ui_catalogued():
         "scalp_runtime.blocked_sessions",
         "scalp.long_require_mtf_not_bearish",
         "scalp.long_block_bearish_market",
+        "scalp.short_require_fast_rsi_confirmation",
+        "scalp.short_premarket_require_vwap_rejection",
+        "scalp.short_require_mtf_not_bullish",
+        "scalp.short_block_bullish_market",
         "scalp.shadow_fixed_risk_enabled",
         "scalp.shadow_risk_per_trade_usd",
         "scalp_learn.setup_session_gate_enabled",
+        "scalp_learn.setup_session_fast_stop_block_enabled",
+        "scalp_learn.setup_session_fast_stop_block_count",
+        "scalp_runtime.context_cluster_use_setup_session",
+        "scalp_runtime.setup_session_cluster_max_entries",
     ):
         assert key in fields
         assert fields[key]["description"]
@@ -368,6 +376,50 @@ def test_bearish_five_minute_context_blocks_long_reversal():
 
     assert plan.valid is False
     assert "LONG_5M_BEARISH_CONTEXT" in plan.blockers
+
+
+def test_bullish_market_context_blocks_short_reversal():
+    from agent.scalp.models import ScalpSignalConfig, ScalpSignalPlan, SignalSide
+    from agent.scalp.runtime import _apply_directional_quality_filters
+
+    plan = ScalpSignalPlan(
+        ticker="QQQ",
+        side=SignalSide.SHORT,
+        valid=True,
+        invalid_reason="",
+        mtf_state="BEARISH",
+        mtf_alignment="ALIGNED",
+    )
+    _apply_directional_quality_filters(
+        plan,
+        {"state": "BULLISH", "bearish_votes": 0, "bullish_votes": 1},
+        ScalpSignalConfig(),
+    )
+
+    assert plan.valid is False
+    assert "SHORT_MARKET_BULLISH_CONTEXT" in plan.blockers
+
+
+def test_bullish_five_minute_context_blocks_short_reversal():
+    from agent.scalp.models import ScalpSignalConfig, ScalpSignalPlan, SignalSide
+    from agent.scalp.runtime import _apply_directional_quality_filters
+
+    plan = ScalpSignalPlan(
+        ticker="QQQ",
+        side=SignalSide.SHORT,
+        valid=True,
+        invalid_reason="",
+        mtf_state="BULLISH",
+        mtf_alignment="CONFLICT",
+    )
+    _apply_directional_quality_filters(
+        plan,
+        {"state": "BEARISH", "bearish_votes": 1, "bullish_votes": 0},
+        ScalpSignalConfig(),
+    )
+
+    assert plan.valid is False
+    assert "SHORT_5M_BULLISH_CONTEXT" in plan.blockers
 
 
 class _ConfigStub:

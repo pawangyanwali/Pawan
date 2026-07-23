@@ -544,22 +544,31 @@ def _apply_directional_quality_filters(
     config: ScalpSignalConfig,
 ) -> None:
     """Apply production guards that protect weak reversal entries from trend tape."""
-    if plan.side is not SignalSide.LONG:
-        return
-    if config.long_require_mtf_not_bearish and (
-        str(plan.mtf_state or "").upper() == "BEARISH"
-        or str(plan.mtf_alignment or "").upper() == "CONFLICT"
-    ):
-        _add_blocker(plan, "LONG_5M_BEARISH_CONTEXT")
-    elif config.long_require_mtf_not_bearish:
-        plan.reasons.append("LONG_5M_NOT_BEARISH")
-    if (
-        config.long_block_bearish_market
-        and str((market_context or {}).get("state") or "").upper() == "BEARISH"
-    ):
-        _add_blocker(plan, "LONG_MARKET_BEARISH_CONTEXT")
-    elif config.long_block_bearish_market:
-        plan.reasons.append("MARKET_NOT_BEARISH_FOR_LONG")
+    market_state = str((market_context or {}).get("state") or "").upper()
+    mtf_state = str(plan.mtf_state or "").upper()
+    mtf_alignment = str(plan.mtf_alignment or "").upper()
+    if plan.side is SignalSide.LONG:
+        if config.long_require_mtf_not_bearish and (
+            mtf_state == "BEARISH" or mtf_alignment == "CONFLICT"
+        ):
+            _add_blocker(plan, "LONG_5M_BEARISH_CONTEXT")
+        elif config.long_require_mtf_not_bearish:
+            plan.reasons.append("LONG_5M_NOT_BEARISH")
+        if config.long_block_bearish_market and market_state == "BEARISH":
+            _add_blocker(plan, "LONG_MARKET_BEARISH_CONTEXT")
+        elif config.long_block_bearish_market:
+            plan.reasons.append("MARKET_NOT_BEARISH_FOR_LONG")
+    elif plan.side is SignalSide.SHORT:
+        if config.short_require_mtf_not_bullish and (
+            mtf_state == "BULLISH" or mtf_alignment == "CONFLICT"
+        ):
+            _add_blocker(plan, "SHORT_5M_BULLISH_CONTEXT")
+        elif config.short_require_mtf_not_bullish:
+            plan.reasons.append("SHORT_5M_NOT_BULLISH")
+        if config.short_block_bullish_market and market_state == "BULLISH":
+            _add_blocker(plan, "SHORT_MARKET_BULLISH_CONTEXT")
+        elif config.short_block_bullish_market:
+            plan.reasons.append("MARKET_NOT_BULLISH_FOR_SHORT")
 
 
 def _apply_market_context(plan: ScalpSignalPlan, context: dict[str, Any], config: Any) -> None:

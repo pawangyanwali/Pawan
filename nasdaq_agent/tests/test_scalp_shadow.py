@@ -153,6 +153,7 @@ def test_shadow_fast_stop_circuit_tightens_before_normal_sample_floor(monkeypatc
         "scalp_learn.fast_stop_window_min": 10,
         "scalp_learn.fast_stop_count": 3,
         "scalp_learn.fast_stop_size_mult": 0.25,
+        "scalp_runtime.context_cluster_throttle_enabled": False,
     }
     for key, value in overrides.items():
         monkeypatch.setitem(config._cache, key, value)
@@ -426,6 +427,7 @@ def test_setup_session_learning_reduces_near_duplicate_losing_longs(monkeypatch)
         "scalp_learn.min_samples_to_block": 4,
         "scalp_learn.negative_reduce_r": -0.05,
         "scalp_learn.size_reduce_mult": 0.5,
+        "scalp_learn.setup_session_fast_stop_block_enabled": False,
         "scalp.shadow_fixed_risk_enabled": True,
         "scalp.shadow_risk_per_trade_usd": 25.0,
     }
@@ -453,6 +455,98 @@ def test_setup_session_learning_reduces_near_duplicate_losing_longs(monkeypatch)
     assert gated.learning_gate == SIZE_REDUCE
     assert gated.learning_size_mult == pytest.approx(0.5)
     assert "LEARNING_SETUP_SESSION_SIZE_REDUCED" in gated.reasons
+
+
+def test_setup_session_fast_stop_cooldown_blocks_third_cluster_entry(monkeypatch):
+    from agent.config_manager import config
+    from agent.scalp.learning import (
+        BLOCK,
+        apply_context_gate,
+        get_context_gate,
+        setup_session_key_for_plan,
+    )
+    from agent.scalp.shadow import mark_shadow_trades, open_shadow_trade
+
+    overrides = {
+        "scalp_learn.enabled": True,
+        "scalp_learn.shadow_outcomes_enabled": True,
+        "scalp_learn.setup_session_gate_enabled": True,
+        "scalp_learn.rolling_window_min": 120,
+        "scalp_learn.min_samples_to_adjust": 10,
+        "scalp_learn.min_samples_to_block": 12,
+        "scalp_learn.negative_reduce_r": -0.05,
+        "scalp_learn.fast_stop_circuit_enabled": True,
+        "scalp_learn.fast_stop_window_min": 10,
+        "scalp_learn.fast_stop_count": 3,
+        "scalp_learn.fast_stop_size_mult": 0.25,
+        "scalp_learn.setup_session_fast_stop_block_enabled": True,
+        "scalp_learn.setup_session_fast_stop_block_count": 2,
+        "scalp_runtime.context_cluster_throttle_enabled": False,
+    }
+    for key, value in overrides.items():
+        monkeypatch.setitem(config._cache, key, value)
+
+    first = _plan(SignalSide.SHORT, ticker="LOSS1")
+    first.session = "PRE_MARKET"
+    first.setup_type = "OVERBOUGHT_MACD_TURN_SHORT"
+    first.vwap_event = "REJECTION"
+    second = _plan(SignalSide.SHORT, ticker="LOSS2")
+    second.session = "PRE_MARKET"
+    second.setup_type = first.setup_type
+    second.vwap_event = "BELOW"
+    third = _plan(SignalSide.SHORT, ticker="NEXT")
+    third.session = "PRE_MARKET"
+    third.setup_type = first.setup_type
+    third.vwap_event = "REJECTION"
+    setup_key = setup_session_key_for_plan(first)
+
+    assert open_shadow_trade(first, entry_bar_id=9101, market_health=_LIVE_HEALTH) is True
+    mark_shadow_trades({"LOSS1": _quote(last=101.1, bid=101.0, ask=101.2)}, session="PRE_MARKET")
+    assert open_shadow_trade(second, entry_bar_id=9102, market_health=_LIVE_HEALTH) is True
+    mark_shadow_trades({"LOSS2": _quote(last=101.1, bid=101.0, ask=101.2)}, session="PRE_MARKET")
+
+    gate = get_context_gate(setup_key)
+    gated = apply_context_gate(third)
+
+    assert gate["sample_count"] == 2
+    assert gate["gate_state"] == BLOCK
+    assert gated.valid is False
+    assert "LEARNING_SETUP_SESSION_BLOCK" in gated.blockers
+
+
+def test_setup_session_cluster_throttle_blocks_third_entry(monkeypatch):
+    from agent.config_manager import config
+    from agent.scalp.shadow import open_shadow_trade, shadow_dashboard_data
+
+    overrides = {
+        "scalp_runtime.context_cluster_throttle_enabled": True,
+        "scalp_runtime.context_cluster_use_setup_session": True,
+        "scalp_runtime.context_cluster_window_min": 10,
+        "scalp_runtime.setup_session_cluster_max_entries": 2,
+        "paper.max_open_trades": 10,
+    }
+    for key, value in overrides.items():
+        monkeypatch.setitem(config._cache, key, value)
+
+    first = _plan(SignalSide.SHORT, ticker="QQQ")
+    first.setup_type = "OVERBOUGHT_MACD_TURN_SHORT"
+    first.session = "PRE_MARKET"
+    first.vwap_event = "REJECTION"
+    second = _plan(SignalSide.SHORT, ticker="TQQQ")
+    second.setup_type = first.setup_type
+    second.session = "PRE_MARKET"
+    second.vwap_event = "BELOW"
+    third = _plan(SignalSide.SHORT, ticker="SOXL")
+    third.setup_type = first.setup_type
+    third.session = "PRE_MARKET"
+    third.vwap_event = "REJECT_RESISTANCE"
+
+    assert open_shadow_trade(first, entry_bar_id=9201, market_health=_LIVE_HEALTH) is True
+    assert open_shadow_trade(second, entry_bar_id=9202, market_health=_LIVE_HEALTH) is True
+    assert open_shadow_trade(third, entry_bar_id=9203, market_health=_LIVE_HEALTH) is False
+
+    dashboard = shadow_dashboard_data()
+    assert dashboard["metrics"]["rejection_reasons"]["CONTEXT_CLUSTER_THROTTLE"] == 1
 
 
 def test_auth_required_rejects_new_shadow_risk():

@@ -87,6 +87,10 @@ _DEFAULTS: dict[str, Any] = {
     "scalp.long_require_vwap_reclaim":     lambda: True,
     "scalp.long_require_mtf_not_bearish":  lambda: True,
     "scalp.long_block_bearish_market":     lambda: True,
+    "scalp.short_require_fast_rsi_confirmation": lambda: True,
+    "scalp.short_premarket_require_vwap_rejection": lambda: True,
+    "scalp.short_require_mtf_not_bullish": lambda: True,
+    "scalp.short_block_bullish_market":    lambda: True,
     "scalp.allow_rest_fallback_trading":   lambda: False,
     "scalp.block_when_path_obstructed":    lambda: True,
     "scalp.block_when_risk_capped":        lambda: True,
@@ -133,6 +137,8 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_runtime.context_cluster_throttle_enabled": lambda: True,
     "scalp_runtime.context_cluster_window_min": lambda: 10,
     "scalp_runtime.context_cluster_max_entries": lambda: 3,
+    "scalp_runtime.context_cluster_use_setup_session": lambda: True,
+    "scalp_runtime.setup_session_cluster_max_entries": lambda: 2,
     # Bounded scalp outcome learning. Actions only tighten execution and expire.
     "scalp_learn.enabled":                  lambda: True,
     "scalp_learn.shadow_outcomes_enabled":  lambda: True,
@@ -154,6 +160,8 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_learn.fast_stop_window_min":     lambda: 10,
     "scalp_learn.fast_stop_count":          lambda: 3,
     "scalp_learn.fast_stop_size_mult":      lambda: 0.25,
+    "scalp_learn.setup_session_fast_stop_block_enabled": lambda: True,
+    "scalp_learn.setup_session_fast_stop_block_count": lambda: 2,
     "scalp_learn.setup_session_gate_enabled": lambda: True,
     "scalp_learn.action_ttl_min":           lambda: 60,
     # Release 4 advisory ML. Auto-arm waits for the sample floor, then begins

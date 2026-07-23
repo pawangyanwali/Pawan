@@ -196,10 +196,17 @@ async def update_config(
                 detail=f"Invalid scalp ML configuration: {exc}",
             ) from exc
 
-    if "scalp_runtime.bar_lookback" in updates:
+    if any(key.startswith("scalp_runtime.") for key in updates):
+        candidate: dict[str, Any] = {}
+        for key, factory in _DEFAULTS.items():
+            try:
+                candidate[key] = factory()
+            except Exception:
+                continue
+        candidate.update(current_before)
+        candidate.update(updates)
         try:
-            if int(updates["scalp_runtime.bar_lookback"]) < 390:
-                raise ValueError("must be at least 390 bars for full-session VWAP")
+            _validate_scalp_runtime(candidate)
         except (TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=422,
@@ -268,8 +275,16 @@ def _validate_scalp_learning(values: dict[str, Any]) -> None:
     fast_window = int(values["scalp_learn.fast_stop_window_min"])
     fast_count = int(values["scalp_learn.fast_stop_count"])
     fast_size_mult = float(values["scalp_learn.fast_stop_size_mult"])
+    setup_block_count = int(values["scalp_learn.setup_session_fast_stop_block_count"])
     ttl = int(values["scalp_learn.action_ttl_min"])
-    if window <= 0 or min_adjust <= 0 or ttl <= 0 or fast_window <= 0 or fast_count <= 0:
+    if (
+        window <= 0
+        or min_adjust <= 0
+        or ttl <= 0
+        or fast_window <= 0
+        or fast_count <= 0
+        or setup_block_count <= 0
+    ):
         raise ValueError("window, sample floors, fast-stop settings, and action lifetime must be positive")
     if min_block < min_adjust:
         raise ValueError("min_samples_to_block cannot be below min_samples_to_adjust")
@@ -289,6 +304,21 @@ def _validate_scalp_learning(values: dict[str, Any]) -> None:
         raise ValueError("negative_block_dollar must be no greater than negative_reduce_dollar, and both must be non-positive")
     if not 0 < fast_size_mult <= 1:
         raise ValueError("fast_stop_size_mult must be greater than 0 and no greater than 1")
+
+
+def _validate_scalp_runtime(values: dict[str, Any]) -> None:
+    if int(values["scalp_runtime.bar_lookback"]) < 390:
+        raise ValueError("bar_lookback must be at least 390 bars for full-session VWAP")
+    if float(values["scalp_runtime.cycle_interval_s"]) <= 0:
+        raise ValueError("cycle_interval_s must be positive")
+    if int(values["scalp_runtime.workers"]) <= 0:
+        raise ValueError("workers must be positive")
+    if int(values["scalp_runtime.context_cluster_window_min"]) <= 0:
+        raise ValueError("context_cluster_window_min must be positive")
+    if int(values["scalp_runtime.context_cluster_max_entries"]) <= 0:
+        raise ValueError("context_cluster_max_entries must be positive")
+    if int(values["scalp_runtime.setup_session_cluster_max_entries"]) <= 0:
+        raise ValueError("setup_session_cluster_max_entries must be positive")
 
 
 def _validate_scalp_ml(values: dict[str, Any]) -> None:

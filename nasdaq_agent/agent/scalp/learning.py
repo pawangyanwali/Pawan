@@ -428,7 +428,7 @@ def _refresh_gate_from_rows(
     old_state = str(old["gate_state"] if old else ALLOW)
     gate_state, confidence_floor, size_mult, reason = _decide_gate(
         len(pnl_values), posterior, ewma, fast_stop_losses, sum_dollar,
-        mean_dollar,
+        mean_dollar, context_key=context_key,
     )
     ttl = max(1, int(config.get("scalp_learn.action_ttl_min", 60)))
     expires = now + timedelta(minutes=ttl) if gate_state != ALLOW else None
@@ -503,6 +503,7 @@ def _decide_gate(
     fast_stop_losses: int = 0,
     sum_dollar: float = 0.0,
     mean_dollar: float = 0.0,
+    context_key: str = "",
 ) -> tuple[str, float, float, str]:
     from agent.config_manager import config
 
@@ -516,9 +517,27 @@ def _decide_gate(
     block_wr = float(config.get("scalp_learn.block_win_rate", 0.40))
     reduce_r = float(config.get("scalp_learn.negative_reduce_r", -0.05))
     confidence_wr = float(config.get("scalp_learn.confidence_win_rate", 0.48))
+    is_setup_session = str(context_key or "").upper().startswith("SETUP_SESSION|")
     if samples >= min_block and ewma <= block_r and posterior <= block_wr:
         return BLOCK, 0.0, 1.0, f"EWMA {ewma:.3f}R; posterior WR {posterior:.1%}"
     if bool(config.get("scalp_learn.fast_stop_circuit_enabled", True)):
+        if is_setup_session and bool(
+            config.get("scalp_learn.setup_session_fast_stop_block_enabled", True)
+        ):
+            block_count = max(
+                1,
+                int(config.get("scalp_learn.setup_session_fast_stop_block_count", 2)),
+            )
+            if fast_stop_losses >= block_count:
+                fast_window = max(
+                    1, int(config.get("scalp_learn.fast_stop_window_min", 10))
+                )
+                return (
+                    BLOCK,
+                    0.0,
+                    1.0,
+                    f"{fast_stop_losses} setup/session stop exits in {fast_window}m",
+                )
         fast_count = max(1, int(config.get("scalp_learn.fast_stop_count", 3)))
         if fast_stop_losses >= fast_count:
             fast_window = max(
