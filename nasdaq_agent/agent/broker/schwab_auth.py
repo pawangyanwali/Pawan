@@ -531,6 +531,28 @@ class _TokenManager:
             old_access_token = self._tokens.get("access_token", "")
         if not rt:
             logger.warning(f"[Schwab/{self.name}] No refresh token — re-auth required.")
+            try:
+                from agent.system_alerts import raise_alert
+
+                _auth_url = "/schwab/auth/md" if self.name.lower() == "marketdata" else "/schwab/auth/at"
+                raise_alert(
+                    alert_type="SCHWAB_AUTH",
+                    severity="CRITICAL",
+                    source=self.name.lower(),
+                    title=f"Schwab {self.name} re-authentication required",
+                    message=(
+                        f"No refresh token is available. Re-authenticate via "
+                        f"{_auth_url} to restore live market data and trading."
+                    ),
+                    metadata={
+                        "app": self.name.lower(),
+                        "auth_path": _auth_url,
+                        "reason": "missing_refresh_token",
+                    },
+                    dedup_key=f"SCHWAB_AUTH:{self.name.lower()}",
+                )
+            except Exception:
+                pass
             return False
 
         # ── Distributed refresh lock ───────────────────────────────────────────

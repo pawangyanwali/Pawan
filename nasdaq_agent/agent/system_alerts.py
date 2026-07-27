@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import threading
 import time
 from typing import Any, Optional
@@ -114,6 +115,46 @@ def _publish(event: str, payload: dict) -> None:
         logger.debug("[system_alerts] publish failed: %s", exc)
 
 
+def _severity_at_least(severity: str, minimum: str) -> bool:
+    sev = severity.upper() if severity else "WARNING"
+    min_sev = minimum.upper() if minimum else "CRITICAL"
+    return _SEVERITY_RANK.get(sev, 0) >= _SEVERITY_RANK.get(min_sev, 3)
+
+
+def _maybe_send_email(alert: dict[str, Any]) -> None:
+    """Send alert email in the background when configured.
+
+    Email is intentionally sent only for the first occurrence of an open alert.
+    Repeated raise_alert() calls update the dashboard occurrence count without
+    creating an email loop.  If the alert resolves and later reopens, the new
+    row has occurrence=1 and sends a fresh email.
+    """
+    if int(alert.get("occurrences") or 1) != 1:
+        return
+    min_sev = os.getenv("ALERT_EMAIL_MIN_SEVERITY", "CRITICAL")
+    if not _severity_at_least(str(alert.get("severity") or ""), min_sev):
+        return
+
+    def _send() -> None:
+        try:
+            from agent.alert_email import is_configured, send_alert_email
+            if not is_configured():
+                logger.debug("[system_alerts] email alert skipped; SMTP not configured")
+                return
+            ok, err = send_alert_email(alert)
+            if ok:
+                logger.info("[system_alerts] email sent for %s", alert.get("alert_key"))
+            else:
+                logger.warning(
+                    "[system_alerts] email send failed for %s: %s",
+                    alert.get("alert_key"), err,
+                )
+        except Exception as exc:
+            logger.warning("[system_alerts] email alert error: %s", exc)
+
+    threading.Thread(target=_send, daemon=True, name="system-alert-email").start()
+
+
 def raise_alert(
     alert_type: str,
     title:      str,
@@ -171,11 +212,14 @@ def raise_alert(
             "[system_alerts] %s [%s] %s — %s (occ=%d)",
             sev, alert_type, title, message, occ,
         )
-        _publish("raised", {
+        alert_payload = {
             "id": alert_id, "alert_key": key, "alert_type": alert_type,
             "severity": sev, "source": source, "title": title,
-            "message": message, "occurrences": occ, "ts": time.time(),
-        })
+            "message": message, "metadata": meta, "occurrences": occ,
+            "ts": time.time(),
+        }
+        _publish("raised", alert_payload)
+        _maybe_send_email(alert_payload)
         return True
     except Exception as exc:
         # Even if persistence fails, make sure the failure is in the log.

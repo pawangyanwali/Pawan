@@ -32,6 +32,38 @@ logging.basicConfig(
 logger = logging.getLogger("token-service")
 
 
+def _raise_missing_token_alert(app_name: str, auth_path: str) -> None:
+    """Surface missing/expired Schwab tokens at startup."""
+    try:
+        from agent.system_alerts import raise_alert
+
+        source = app_name.lower()
+        raise_alert(
+            alert_type="SCHWAB_AUTH",
+            severity="CRITICAL",
+            source=source,
+            title=f"Schwab {app_name} re-authentication required",
+            message=(
+                f"{app_name} tokens were missing or expired when token-service "
+                f"started. Re-authenticate via {auth_path} to restore live "
+                f"market data and trading."
+            ),
+            metadata={"app": source, "auth_path": auth_path, "reason": "missing_or_expired"},
+            dedup_key=f"SCHWAB_AUTH:{source}",
+        )
+    except Exception as exc:
+        logger.debug("[token-service] missing-token alert failed for %s: %s", app_name, exc)
+
+
+def _resolve_token_alert(app_name: str) -> None:
+    try:
+        from agent.system_alerts import resolve_alert
+
+        resolve_alert(alert_key=f"SCHWAB_AUTH:{app_name.lower()}")
+    except Exception as exc:
+        logger.debug("[token-service] resolve-token alert failed for %s: %s", app_name, exc)
+
+
 # ── Health HTTP server (port 8080) ────────────────────────────────────────────
 
 def _start_health_server() -> None:
@@ -118,7 +150,8 @@ def _new_auth_listener() -> None:
                         "[token-service] New OAuth tokens received for %s — reloading", mgr.name
                     )
                     # Reload fresh token into memory and restart the refresh timer.
-                    mgr.load_stored(schedule_refresh=True)
+                    if mgr.load_stored(schedule_refresh=True):
+                        _resolve_token_alert(mgr.name)
 
         except Exception as exc:
             logger.warning("[token-service] new_auth listener error: %s — retrying in 30s", exc)
@@ -149,6 +182,9 @@ def main() -> None:
                 "[token-service] Trader tokens not found or expired — "
                 "visit /schwab/auth/at to re-authenticate."
             )
+            _raise_missing_token_alert("Trader", "/schwab/auth/at")
+        else:
+            _resolve_token_alert("Trader")
     else:
         logger.info("[token-service] SCHWAB_CLIENT_ID not set — Trader app disabled.")
 
@@ -160,6 +196,9 @@ def main() -> None:
                 "[token-service] MarketData tokens not found or expired — "
                 "visit /schwab/auth/md to re-authenticate."
             )
+            _raise_missing_token_alert("MarketData", "/schwab/auth/md")
+        else:
+            _resolve_token_alert("MarketData")
     else:
         logger.info("[token-service] SCHWAB_MD_CLIENT_ID not set — MarketData app disabled.")
 

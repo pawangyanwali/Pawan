@@ -55,6 +55,19 @@ x-log-env: &log-env
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_DIR:   /app/logs
 
+x-alert-env: &alert-env
+  ALERT_EMAIL_ENABLED: ${ALERT_EMAIL_ENABLED:-true}
+  ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+  ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+  ALERT_EMAIL_MIN_SEVERITY: ${ALERT_EMAIL_MIN_SEVERITY:-CRITICAL}
+  ALERT_EMAIL_SUBJECT_PREFIX: ${ALERT_EMAIL_SUBJECT_PREFIX:-[NASDAQ Agent]}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+  SMTP_SSL: ${SMTP_SSL:-false}
+
 # ── Shared service defaults ───────────────────────────────────────────────────
 
 x-common: &common
@@ -90,7 +103,7 @@ services:
       - cache:/app/data/cache
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *schwab-env, *log-env]
+      <<: [*db-env, *valkey-env, *schwab-env, *log-env, *alert-env]
       # All background services run in their own containers.
       NASDAQ_SCANNER_ENABLED:     "0"
       NASDAQ_LEARNER_ENABLED:     "0"
@@ -133,7 +146,7 @@ services:
       - models:/app/data/models   # promoted scalp ML artifact (read)
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *log-env]
+      <<: [*db-env, *valkey-env, *log-env, *alert-env]
       # Market data runs in its own container; scalp-engine reads Valkey only.
       NASDAQ_MARKET_DATA_ENABLED: "0"
     deploy:
@@ -170,7 +183,7 @@ services:
       - tokens:/app/data/tokens   # read existing token files; write refreshed tokens
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *schwab-env, *log-env]
+      <<: [*db-env, *valkey-env, *schwab-env, *log-env, *alert-env]
     deploy:
       resources:
         limits:
@@ -200,7 +213,7 @@ services:
       - tokens:/app/data/tokens   # Schwab OAuth token files
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *schwab-env, *log-env]
+      <<: [*db-env, *valkey-env, *schwab-env, *log-env, *alert-env]
       NASDAQ_MD_STARTUP_DELAY_S: ${NASDAQ_MD_STARTUP_DELAY_S:-10}
       UNIVERSE_TARGET_ELIGIBLE: ${UNIVERSE_TARGET_ELIGIBLE:-450}
     deploy:
@@ -229,7 +242,7 @@ services:
       - models:/app/data/models   # versioned scalp ML artifacts (read + write)
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *log-env]
+      <<: [*db-env, *valkey-env, *log-env, *alert-env]
     deploy:
       resources:
         limits:
@@ -256,7 +269,7 @@ services:
     volumes:
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *log-env]
+      <<: [*db-env, *valkey-env, *log-env, *alert-env]
       SCHEDULER_HEARTBEAT_S: ${SCHEDULER_HEARTBEAT_S:-30}
     deploy:
       resources:
@@ -287,7 +300,7 @@ services:
       - cache:/app/data/cache
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *log-env]
+      <<: [*db-env, *valkey-env, *log-env, *alert-env]
       FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
     deploy:
       resources:
@@ -321,7 +334,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # Docker Engine access
       - logs:/app/logs
     environment:
-      <<: [*db-env, *valkey-env, *log-env]
+      <<: [*db-env, *valkey-env, *log-env, *alert-env]
       WATCHDOG_DOCKER_SOCKET:    /var/run/docker.sock
       WATCHDOG_INTERVAL_S:       ${WATCHDOG_INTERVAL_S:-30}
       WATCHDOG_UNHEALTHY_STRIKES: ${WATCHDOG_UNHEALTHY_STRIKES:-2}
