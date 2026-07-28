@@ -44,7 +44,7 @@ def _plan(ticker="MLTEST"):
             data_age_ms=100, source=QuoteSource.WS,
         ),
         indicators=IndicatorSnapshot(
-            rsi_14=25.0, rsi_7=20.0, rsi_2=8.0,
+            rsi_14=25.0, rsi_7=20.0, rsi_2=32.0,
             macd_hist=-0.04, macd_hist_prev=-0.10,
             atr_14=1.0, vwap=99.8, rvol=1.2,
             vwap_event="RECLAIM", bar_age_ms=30_000,
@@ -160,6 +160,10 @@ def test_overlay_changes_confidence_only(monkeypatch):
     )
     monkeypatch.setattr(overlay, "_record_prediction", lambda _plan: None)
     plan = _plan()
+    # Keep this unit test below the 100-point cap so a positive overlay is
+    # observable without weakening the otherwise valid scalp fixture.
+    plan.base_confidence = 70.0
+    plan.confidence = 70.0
     geometry = (plan.valid, plan.entry, plan.stop_loss, plan.tp1, plan.tp2, plan.learning_size_mult)
     base = plan.confidence
 
@@ -208,7 +212,7 @@ def test_promotion_requires_economic_and_session_stability():
         ],
     }
 
-    reasons = _promotion_reasons(metrics, 20, config)
+    reasons = _promotion_reasons(metrics, 20, 20, config)
 
     assert "out-of-sample expectancy below floor" in reasons
     assert "out-of-sample profit factor below floor" in reasons

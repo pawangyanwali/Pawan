@@ -347,6 +347,16 @@ class ScalpSignalPlan:
     setup_score: float = 0.0
     confidence: float = 0.0
     base_confidence: float = 0.0
+    entry_quality_assessed: bool = False
+    entry_quality_score: float = 0.0
+    entry_quality_min_score: float = 0.0
+    entry_quality_gate: str = "NOT_ASSESSED"
+    entry_quality_reasons: list[str] = field(default_factory=list)
+    entry_confirmation_state: str = "NOT_EVALUATED"
+    entry_confirmation_age_s: float = 0.0
+    entry_confirmation_observations: int = 0
+    entry_expected_r: float = 0.0
+    entry_expected_r_source: str = "NONE"
     ml_tp1_probability: float = 0.0
     ml_tp2_probability: float = 0.0
     ml_expected_r: float = 0.0
@@ -355,6 +365,9 @@ class ScalpSignalPlan:
     ml_overlay_applied: bool = False
     learned_expectancy_r: float = 0.0
     learned_win_rate: float = 0.0
+    learning_sample_count: int = 0
+    learning_mean_expectancy_r: float = 0.0
+    learning_context_scope: str = "NONE"
     context_key: str = ""
     learning_gate: str = "ALLOW"
     learning_size_mult: float = 1.0

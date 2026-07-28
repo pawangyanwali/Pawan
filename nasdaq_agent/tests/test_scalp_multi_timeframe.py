@@ -160,7 +160,7 @@ def test_five_minute_conflict_is_shadow_evidence_not_live_blocker():
     one = _one_minute(
         rsi_14=25.0,
         rsi_7=20.0,
-        rsi_2=8.0,
+        rsi_2=32.0,
         macd_hist=-0.02,
         macd_hist_prev=-0.08,
         vwap_event="RECLAIM",
@@ -192,7 +192,7 @@ def test_missing_five_minute_context_fails_open_in_shadow_mode():
     one = _one_minute(
         rsi_14=25.0,
         rsi_7=20.0,
-        rsi_2=8.0,
+        rsi_2=32.0,
         macd_hist=-0.02,
         macd_hist_prev=-0.08,
         vwap_event="RECLAIM",

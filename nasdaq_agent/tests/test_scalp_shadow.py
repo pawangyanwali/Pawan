@@ -103,6 +103,7 @@ def test_shadow_loss_immediately_updates_learning_gate(monkeypatch):
         "scalp_learn.negative_block_r": -0.20,
         "scalp_learn.block_win_rate": 0.40,
         "scalp_learn.size_reduce_mult": 0.5,
+        "scalp_learn.pre_tp1_failure_circuit_enabled": False,
     }
     for key, value in overrides.items():
         monkeypatch.setitem(config._cache, key, value)
@@ -428,6 +429,7 @@ def test_setup_session_learning_reduces_near_duplicate_losing_longs(monkeypatch)
         "scalp_learn.negative_reduce_r": -0.05,
         "scalp_learn.size_reduce_mult": 0.5,
         "scalp_learn.setup_session_fast_stop_block_enabled": False,
+        "scalp_learn.pre_tp1_failure_circuit_enabled": False,
         "scalp.shadow_fixed_risk_enabled": True,
         "scalp.shadow_risk_per_trade_usd": 25.0,
     }

@@ -182,6 +182,82 @@ def test_learning_gate_tightens_size_without_rewriting_bracket():
     assert plan.valid
 
 
+def test_empirical_guard_keeps_worse_mature_context(monkeypatch):
+    import agent.scalp.learning as learning
+
+    monkeypatch.setitem(
+        config._cache, "scalp.entry_quality_empirical_min_samples", 10
+    )
+    monkeypatch.setitem(config._cache, "scalp_learn.setup_session_gate_enabled", True)
+    exact_key = context_key_for_plan(_plan("MATURE1"))
+
+    def gate_for(key):
+        if key == exact_key:
+            return {
+                "gate_state": ALLOW,
+                "sample_count": 10,
+                "mean_expectancy_r": -0.30,
+                "ewma_expectancy_r": -0.20,
+                "posterior_win_rate": 0.40,
+                "size_mult": 1.0,
+            }
+        return {
+            "gate_state": ALLOW,
+            "sample_count": 30,
+            "mean_expectancy_r": 0.20,
+            "ewma_expectancy_r": 0.10,
+            "posterior_win_rate": 0.60,
+            "size_mult": 1.0,
+        }
+
+    monkeypatch.setattr(learning, "get_context_gate", gate_for)
+    plan = _plan("MATURE1")
+
+    apply_context_gate(plan)
+
+    assert plan.learning_context_scope == "CONTEXT"
+    assert plan.learning_sample_count == 10
+    assert plan.learning_mean_expectancy_r == pytest.approx(-0.30)
+
+
+def test_empirical_guard_uses_worse_mature_setup_session(monkeypatch):
+    import agent.scalp.learning as learning
+
+    monkeypatch.setitem(
+        config._cache, "scalp.entry_quality_empirical_min_samples", 10
+    )
+    monkeypatch.setitem(config._cache, "scalp_learn.setup_session_gate_enabled", True)
+    exact_key = context_key_for_plan(_plan("MATURE2"))
+
+    def gate_for(key):
+        if key == exact_key:
+            return {
+                "gate_state": ALLOW,
+                "sample_count": 20,
+                "mean_expectancy_r": 0.10,
+                "ewma_expectancy_r": 0.08,
+                "posterior_win_rate": 0.55,
+                "size_mult": 1.0,
+            }
+        return {
+            "gate_state": ALLOW,
+            "sample_count": 12,
+            "mean_expectancy_r": -0.15,
+            "ewma_expectancy_r": -0.12,
+            "posterior_win_rate": 0.42,
+            "size_mult": 1.0,
+        }
+
+    monkeypatch.setattr(learning, "get_context_gate", gate_for)
+    plan = _plan("MATURE2")
+
+    apply_context_gate(plan)
+
+    assert plan.learning_context_scope == "SETUP_SESSION"
+    assert plan.learning_sample_count == 12
+    assert plan.learning_mean_expectancy_r == pytest.approx(-0.15)
+
+
 def test_dollar_guard_reduces_size_even_when_recent_r_is_positive():
     init_scalp_tables()
     plan = _plan("DOLLAR1")

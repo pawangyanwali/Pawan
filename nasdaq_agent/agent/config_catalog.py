@@ -220,6 +220,71 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Hard cap on share count after fixed-risk sizing so very tight stops cannot create unrealistic share counts.",
         "500 prevents penny-wide stops from opening thousands of simulated shares.",
     ),
+    "scalp.entry_quality_gate_enabled": (
+        "TP1 reachability gate",
+        "Requires a valid directional setup to pass a separate execution-quality assessment using spread-to-risk, RVOL, ATR regime, RSI extremity, and an actual VWAP reclaim or rejection. It never changes side, stop, TP1, or TP2.",
+        "Enabled rejects technically valid setups whose evidence is too weak to justify risking one stop unit before TP1.",
+    ),
+    "scalp.entry_quality_min_score": (
+        "Regular-session reachability score",
+        "Minimum transparent TP1-reachability score required for PRIME and STANDARD entries. The score ranks execution quality; it is not presented as a calibrated probability.",
+        "65 was selected from a 30-day shadow audit and must be forward-validated before canonical execution.",
+    ),
+    "scalp.entry_quality_min_score_extended": (
+        "Extended-session reachability score",
+        "Minimum reachability score for PRE_MARKET and AFTER_HOURS entries, where spreads and quote depth are less reliable.",
+        "70 is deliberately stricter than regular hours because extended-session execution has greater liquidity risk.",
+    ),
+    "scalp.entry_quality_require_positive_ml_ev": (
+        "Require positive champion EV",
+        "When a validated ML champion exists, requires its pre-entry expected-R estimate to clear the configured floor. No unpromoted or missing model can block a trade through this rule.",
+        "Enabled makes ML a downside gate only after chronological economic promotion succeeds.",
+    ),
+    "scalp.entry_quality_min_ml_expected_r": (
+        "Minimum champion expected R",
+        "Minimum model-implied expected return after the champion estimates TP1-before-stop and TP2-before-stop probabilities.",
+        "0.05 requires at least +0.05R modeled expectancy after the configured two-stage payoff.",
+    ),
+    "scalp.entry_quality_empirical_gate_enabled": (
+        "Empirical context EV guard",
+        "Uses closed outcomes from the matching context or broader setup + side + session to prevent repeatedly funding a context with negative observed expectancy.",
+        "In shadow mode a negative mature context receives a small probe allocation; canonical paper execution is blocked.",
+    ),
+    "scalp.entry_quality_empirical_min_samples": (
+        "Empirical EV sample floor",
+        "Minimum matching closed outcomes required before observed mean expectancy may control execution.",
+        "10 avoids treating one or two random outcomes as a durable economic conclusion.",
+    ),
+    "scalp.entry_quality_min_empirical_expectancy_r": (
+        "Minimum empirical expected R",
+        "Lowest accepted mean R expectancy for a mature learned context.",
+        "0.0 requires the context to be non-negative; shadow probes continue collecting recovery evidence below the floor.",
+    ),
+    "scalp.entry_quality_shadow_probe_size_mult": (
+        "Negative-context probe size",
+        "Shadow-only size multiplier used when a mature context is empirically negative, preserving forward evidence while sharply reducing simulated dollar exposure.",
+        "0.10 observes the context at ten percent of normal shadow risk; canonical paper remains blocked.",
+    ),
+    "scalp.entry_confirmation_enabled": (
+        "Stable-entry confirmation",
+        "Requires an eligible plan to remain valid across several scalp-engine cycles before execution. It filters transient provisional RSI, MACD, and VWAP flips.",
+        "Enabled confirms inside the current scalp minute instead of waiting a full bar and entering late.",
+    ),
+    "scalp.entry_confirmation_seconds": (
+        "Confirmation dwell seconds",
+        "Minimum continuous time the same ticker, side, and setup must remain eligible before entry.",
+        "15 seconds spans roughly three five-second runtime observations.",
+    ),
+    "scalp.entry_confirmation_min_observations": (
+        "Confirmation observations",
+        "Minimum number of independent runtime observations required during the dwell window.",
+        "3 prevents a delayed second cycle from counting as stable evidence by itself.",
+    ),
+    "scalp.entry_confirmation_max_chase_r": (
+        "Maximum confirmation chase",
+        "Maximum favorable price movement, measured in initial R, allowed between first detection and confirmed entry. Larger moves reset confirmation rather than chasing.",
+        "0.25 prevents entering after price has already consumed more than one-quarter of the route to TP1.",
+    ),
     "scalp.mtf_enabled": (
         "Five-minute scalp context",
         "Calculates context from fully closed five-minute bars while live quotes and one-minute bars remain the only execution clock.",
@@ -290,6 +355,11 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp_learn.fast_stop_size_mult": ("Fast stop size multiplier", "Temporary position-size multiplier applied by the fast stop circuit. It can only reduce exposure.", "0.25 means the next matching setup trades at one-quarter size until the action expires or context recovers."),
     "scalp_learn.setup_session_fast_stop_block_enabled": ("Setup-session fast stop block", "Escalates the broad setup + side + session gate to a temporary block when repeated stop exits cluster inside the fast-stop window.", "Enabled blocks the next PRE_MARKET short cluster after two rapid stop exits instead of only reducing size after three."),
     "scalp_learn.setup_session_fast_stop_block_count": ("Setup-session stop block count", "Number of rapid stop exits in the same setup + side + session required to trigger a temporary cooldown block.", "2 blocks the third matching setup/session attempt inside the fast-stop window."),
+    "scalp_learn.pre_tp1_failure_circuit_enabled": ("Pre-TP1 failure circuit", "Counts every losing trade that failed to reach TP1, including TIME_STOP as well as STOP. This catches weak follow-through that the stop-only circuit misses.", "Enabled lets two non-follow-through outcomes tighten the next matching setup immediately."),
+    "scalp_learn.pre_tp1_failure_window_min": ("Pre-TP1 failure window", "Rolling minutes used to count losing outcomes that never reached TP1.", "120 captures recurring non-follow-through across the current two-hour market context."),
+    "scalp_learn.pre_tp1_failure_count": ("Pre-TP1 failure count", "Number of losing no-TP1 outcomes required to trigger the immediate circuit.", "2 reacts to a repeated failure while still ignoring one isolated loss."),
+    "scalp_learn.pre_tp1_failure_size_mult": ("Pre-TP1 probe size", "Temporary multiplier for the exact learned context after the pre-TP1 failure count is reached.", "0.25 keeps exact-context observation at one-quarter size."),
+    "scalp_learn.setup_session_pre_tp1_block_enabled": ("Block repeated setup-session failures", "Escalates repeated pre-TP1 failures across the broader setup + side + session into a temporary block.", "Enabled prevents a third same-session reversal after two different tickers both fail before TP1."),
     "scalp_learn.setup_session_gate_enabled": ("Broad setup-session learning", "Maintains an additional setup + side + session gate so clustered failures tighten even when RSI/VWAP buckets differ slightly.", "Enabled lets losing OVERSOLD_MACD_TURN_LONG + LONG + STANDARD trades reduce the next similar long in the same session."),
     "scalp_learn.action_ttl_min": ("Learning action lifetime", "Minutes before an automatic action expires unless refreshed by another outcome.", "60 makes every automatic action reversible within one hour."),
 }

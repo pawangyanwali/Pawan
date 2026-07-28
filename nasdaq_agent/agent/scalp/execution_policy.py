@@ -312,6 +312,103 @@ def evaluate_execution_policy(
         if checks["quote_age_ms"] > maximum_age:
             return ExecutionPolicyDecision(False, "QUOTE_TOO_OLD", 0.0, checks)
 
+    if (
+        bool(config.get("scalp.entry_quality_gate_enabled", True))
+        and bool(plan.entry_quality_assessed)
+    ):
+        quality_score = _number(plan.entry_quality_score)
+        quality_minimum = _number(plan.entry_quality_min_score)
+        checks["entry_quality_score"] = quality_score
+        checks["entry_quality_minimum"] = quality_minimum
+        checks["entry_confirmation_state"] = plan.entry_confirmation_state
+        if quality_score < quality_minimum:
+            return ExecutionPolicyDecision(
+                False,
+                "TP1_REACH_SCORE_BELOW_MINIMUM",
+                0.0,
+                checks,
+            )
+
+        if (
+            bool(
+                config.get(
+                    "scalp.entry_quality_require_positive_ml_ev", True
+                )
+            )
+            and bool(plan.ml_model_version)
+        ):
+            minimum_ml_ev = _number(
+                config.get("scalp.entry_quality_min_ml_expected_r", 0.05),
+                0.05,
+            )
+            plan.entry_expected_r = _number(plan.ml_expected_r)
+            plan.entry_expected_r_source = "ML_CHAMPION"
+            checks["ml_expected_r"] = plan.entry_expected_r
+            checks["ml_expected_r_minimum"] = minimum_ml_ev
+            if plan.entry_expected_r < minimum_ml_ev:
+                return ExecutionPolicyDecision(
+                    False,
+                    "ML_EXPECTED_R_BELOW_MINIMUM",
+                    0.0,
+                    checks,
+                )
+
+        if bool(config.get("scalp.entry_quality_empirical_gate_enabled", True)):
+            empirical_samples = max(0, int(plan.learning_sample_count or 0))
+            minimum_samples = max(
+                1,
+                int(
+                    config.get(
+                        "scalp.entry_quality_empirical_min_samples", 10
+                    )
+                ),
+            )
+            empirical_expectancy = _number(plan.learning_mean_expectancy_r)
+            minimum_empirical_ev = _number(
+                config.get(
+                    "scalp.entry_quality_min_empirical_expectancy_r", 0.0
+                )
+            )
+            checks["empirical_samples"] = empirical_samples
+            checks["empirical_scope"] = plan.learning_context_scope
+            checks["empirical_expected_r"] = empirical_expectancy
+            checks["empirical_expected_r_minimum"] = minimum_empirical_ev
+            if (
+                not plan.ml_model_version
+                and empirical_samples >= minimum_samples
+            ):
+                plan.entry_expected_r = empirical_expectancy
+                plan.entry_expected_r_source = (
+                    f"EMPIRICAL_{plan.learning_context_scope}"
+                )
+            if (
+                empirical_samples >= minimum_samples
+                and empirical_expectancy < minimum_empirical_ev
+            ):
+                if str(mode or "").upper() != "SHADOW":
+                    return ExecutionPolicyDecision(
+                        False,
+                        "EMPIRICAL_EXPECTANCY_BELOW_MINIMUM",
+                        0.0,
+                        checks,
+                    )
+                probe_mult = min(
+                    1.0,
+                    max(
+                        0.05,
+                        _number(
+                            config.get(
+                                "scalp.entry_quality_shadow_probe_size_mult",
+                                0.10,
+                            ),
+                            0.10,
+                        ),
+                    ),
+                )
+                size_mult *= probe_mult
+                checks["empirical_probe"] = True
+                checks["empirical_probe_size_mult"] = probe_mult
+
     if bool(limits["risk_controls_enabled"]):
         halt = _number(limits["daily_loss_halt_usd"])
         if halt > 0 and _number(ledger["daily_pnl"]) <= -halt:
@@ -352,6 +449,7 @@ def evaluate_execution_policy(
                 checks,
             )
 
+    checks["effective_size_mult"] = size_mult
     return ExecutionPolicyDecision(True, "ALLOWED", size_mult, checks)
 
 

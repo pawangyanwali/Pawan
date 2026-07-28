@@ -71,6 +71,11 @@ def apply_context_gate(plan: ScalpSignalPlan) -> ScalpSignalPlan:
     plan.learning_gate = gate["gate_state"]
     plan.learned_expectancy_r = float(gate.get("ewma_expectancy_r") or 0.0)
     plan.learned_win_rate = float(gate.get("posterior_win_rate") or 0.0)
+    plan.learning_sample_count = int(gate.get("sample_count") or 0)
+    plan.learning_mean_expectancy_r = float(
+        gate.get("mean_expectancy_r") or 0.0
+    )
+    plan.learning_context_scope = "CONTEXT"
     plan.learning_size_mult = min(
         1.0, max(0.05, float(gate.get("size_mult") or 1.0))
     )
@@ -90,6 +95,37 @@ def apply_context_gate(plan: ScalpSignalPlan) -> ScalpSignalPlan:
     if bool(config.get("scalp_learn.setup_session_gate_enabled", True)):
         setup_gate = get_context_gate(setup_session_key_for_plan(plan))
         setup_state = str(setup_gate.get("gate_state") or ALLOW)
+        setup_samples = int(setup_gate.get("sample_count") or 0)
+        setup_mean = float(setup_gate.get("mean_expectancy_r") or 0.0)
+        empirical_minimum = max(
+            1,
+            int(config.get("scalp.entry_quality_empirical_min_samples", 10)),
+        )
+        exact_mature = plan.learning_sample_count >= empirical_minimum
+        setup_mature = setup_samples >= empirical_minimum
+        use_setup_evidence = (
+            (setup_mature and not exact_mature)
+            or (
+                setup_mature
+                and exact_mature
+                and setup_mean < plan.learning_mean_expectancy_r
+            )
+            or (
+                not setup_mature
+                and not exact_mature
+                and (
+                    setup_samples > plan.learning_sample_count
+                    or (
+                        setup_samples == plan.learning_sample_count
+                        and setup_mean < plan.learning_mean_expectancy_r
+                    )
+                )
+            )
+        )
+        if use_setup_evidence:
+            plan.learning_sample_count = setup_samples
+            plan.learning_mean_expectancy_r = setup_mean
+            plan.learning_context_scope = "SETUP_SESSION"
         setup_floor = float(setup_gate.get("confidence_floor") or 0.0)
         setup_size_mult = min(
             1.0, max(0.05, float(setup_gate.get("size_mult") or 1.0))
@@ -358,7 +394,8 @@ def _refresh_context(conn, context_key: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     rows = conn.execute(
         """
-        SELECT closed_at, pnl_r, pnl_dollar, exit_reason FROM scalp_trade_outcomes
+        SELECT closed_at, pnl_r, pnl_dollar, exit_reason, tp1_hit
+        FROM scalp_trade_outcomes
         WHERE context_key=? ORDER BY closed_at ASC
         """,
         (context_key,),
@@ -375,7 +412,8 @@ def _refresh_setup_session_context(conn, setup_key: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     rows = conn.execute(
         """
-        SELECT closed_at, pnl_r, pnl_dollar, exit_reason FROM scalp_trade_outcomes
+        SELECT closed_at, pnl_r, pnl_dollar, exit_reason, tp1_hit
+        FROM scalp_trade_outcomes
         WHERE setup_type=? AND side=? AND session=?
         ORDER BY closed_at ASC
         """,
@@ -406,6 +444,17 @@ def _refresh_gate_from_rows(
         and float(row["pnl_r"] or 0.0) <= 0
         and "STOP" in str(row["exit_reason"] or "").upper()
     )
+    pre_tp1_window_min = max(
+        1, int(config.get("scalp_learn.pre_tp1_failure_window_min", 120))
+    )
+    pre_tp1_cutoff = now - timedelta(minutes=pre_tp1_window_min)
+    pre_tp1_failures = sum(
+        1
+        for row in samples
+        if _parse_ts(row["closed_at"]) >= pre_tp1_cutoff
+        and float(row["pnl_r"] or 0.0) <= 0
+        and not bool(row["tp1_hit"])
+    )
     wins = sum(1 for value in pnl_values if value > 0)
     losses = len(pnl_values) - wins
     posterior = (wins + 1.0) / (len(pnl_values) + 2.0)
@@ -429,6 +478,7 @@ def _refresh_gate_from_rows(
     gate_state, confidence_floor, size_mult, reason = _decide_gate(
         len(pnl_values), posterior, ewma, fast_stop_losses, sum_dollar,
         mean_dollar, context_key=context_key,
+        pre_tp1_failures=pre_tp1_failures,
     )
     ttl = max(1, int(config.get("scalp_learn.action_ttl_min", 60)))
     expires = now + timedelta(minutes=ttl) if gate_state != ALLOW else None
@@ -493,6 +543,7 @@ def _refresh_gate_from_rows(
         "size_mult": size_mult,
         "expires_at": expires.isoformat() if expires else None,
         "fast_stop_losses": fast_stop_losses,
+        "pre_tp1_failures": pre_tp1_failures,
     }
 
 
@@ -504,6 +555,7 @@ def _decide_gate(
     sum_dollar: float = 0.0,
     mean_dollar: float = 0.0,
     context_key: str = "",
+    pre_tp1_failures: int = 0,
 ) -> tuple[str, float, float, str]:
     from agent.config_manager import config
 
@@ -520,6 +572,42 @@ def _decide_gate(
     is_setup_session = str(context_key or "").upper().startswith("SETUP_SESSION|")
     if samples >= min_block and ewma <= block_r and posterior <= block_wr:
         return BLOCK, 0.0, 1.0, f"EWMA {ewma:.3f}R; posterior WR {posterior:.1%}"
+    if bool(config.get("scalp_learn.pre_tp1_failure_circuit_enabled", True)):
+        failure_count = max(
+            1, int(config.get("scalp_learn.pre_tp1_failure_count", 2))
+        )
+        if pre_tp1_failures >= failure_count:
+            failure_window = max(
+                1, int(config.get("scalp_learn.pre_tp1_failure_window_min", 120))
+            )
+            if is_setup_session and bool(
+                config.get(
+                    "scalp_learn.setup_session_pre_tp1_block_enabled", True
+                )
+            ):
+                return (
+                    BLOCK,
+                    0.0,
+                    1.0,
+                    f"{pre_tp1_failures} pre-TP1 losses in {failure_window}m",
+                )
+            mult = min(
+                1.0,
+                max(
+                    0.05,
+                    float(
+                        config.get(
+                            "scalp_learn.pre_tp1_failure_size_mult", 0.25
+                        )
+                    ),
+                ),
+            )
+            return (
+                SIZE_REDUCE,
+                0.0,
+                mult,
+                f"{pre_tp1_failures} pre-TP1 losses in {failure_window}m",
+            )
     if bool(config.get("scalp_learn.fast_stop_circuit_enabled", True)):
         if is_setup_session and bool(
             config.get("scalp_learn.setup_session_fast_stop_block_enabled", True)

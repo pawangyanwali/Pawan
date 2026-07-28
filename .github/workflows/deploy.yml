@@ -55,6 +55,10 @@ jobs:
                  tests/test_exit_signals.py \
                  tests/test_opening_range.py \
                  tests/test_macro_calendar.py \
+                 tests/test_scalp_entry_quality.py \
+                 tests/test_scalp_execution_policy.py \
+                 tests/test_scalp_learning.py \
+                 tests/test_release5_scalp_runtime.py \
                  --timeout=8 -x -q 2>&1 | tail -30
 
   deploy:

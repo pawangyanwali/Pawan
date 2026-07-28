@@ -10,6 +10,7 @@ from typing import Any
 
 from .bar_feed import load_one_minute_frames
 from .engine import create_scalp_signal_plan
+from .entry_quality import assess_entry_quality, clear_pending, confirmation_ready
 from .indicators import (
     calculate_one_minute_indicators,
     indicator_snapshot_from_frame,
@@ -41,6 +42,8 @@ class ScalpRuntime:
         self._last_execution_bar: dict[str, int] = {}
         self._last_shadow_bar: dict[str, int] = {}
         self._last_position_bar: dict[str, int] = {}
+        self._shadow_pending: dict[str, dict[str, Any]] = {}
+        self._execution_pending: dict[str, dict[str, Any]] = {}
         self.last_cycle: dict[str, Any] = {}
 
     def update_tickers(self, tickers: list[str]) -> bool:
@@ -68,6 +71,14 @@ class ScalpRuntime:
         }
         self._last_position_bar = {
             ticker: value for ticker, value in self._last_position_bar.items()
+            if ticker in keep
+        }
+        self._shadow_pending = {
+            ticker: value for ticker, value in self._shadow_pending.items()
+            if ticker in keep
+        }
+        self._execution_pending = {
+            ticker: value for ticker, value in self._execution_pending.items()
             if ticker in keep
         }
         logger.warning("[ScalpRuntime] Eligible universe updated to %d tickers", len(normalized))
@@ -191,6 +202,7 @@ class ScalpRuntime:
                 _add_blocker(plan, f"SESSION_{session}_BLOCKED")
             _apply_market_context(plan, contexts.get(ticker) or {}, config)
             if plan.valid:
+                plan = assess_entry_quality(plan, config)
                 plan = apply_ml_overlay(plan)
                 plan = apply_context_gate(plan)
             return ticker, plan, enriched, bar_id
@@ -198,12 +210,10 @@ class ScalpRuntime:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-plan") as pool:
             analyzed = list(pool.map(analyze, prepared))
 
-        rows: list[dict[str, Any]] = []
         plans_by_ticker: dict[str, ScalpSignalPlan] = {}
         frames_by_ticker: dict[str, Any] = {}
         bars_by_ticker: dict[str, int] = {}
         for ticker, plan, frame, bar_id in analyzed:
-            rows.append({"ticker": ticker, "scalp_plan": plan.to_dict()})
             plans_by_ticker[ticker] = plan
             if frame is not None:
                 frames_by_ticker[ticker] = frame
@@ -219,6 +229,10 @@ class ScalpRuntime:
                 bars_by_ticker,
                 market_health,
             )
+        rows = [
+            {"ticker": ticker, "scalp_plan": plan.to_dict()}
+            for ticker, plan in plans_by_ticker.items()
+        ]
 
         valid_count = sum(1 for plan in plans_by_ticker.values() if plan.valid)
         data_gap_count = sum(
@@ -291,11 +305,22 @@ class ScalpRuntime:
         market_health: dict[str, Any],
     ) -> None:
         """Open isolated hypothetical trades once per ticker/bar."""
+        from agent.config_manager import config
         from agent.scalp.shadow import open_shadow_trade
 
         for ticker, plan in plans.items():
             bar_id = bars.get(ticker, 0)
-            if not plan.valid or not bar_id or self._last_shadow_bar.get(ticker) == bar_id:
+            if not plan.valid or not bar_id:
+                clear_pending(self._shadow_pending, ticker)
+                continue
+            if self._last_shadow_bar.get(ticker) == bar_id:
+                continue
+            if not confirmation_ready(
+                plan,
+                bar_id=bar_id,
+                pending=self._shadow_pending,
+                config=config,
+            ):
                 continue
             self._last_shadow_bar[ticker] = bar_id
             try:
@@ -314,13 +339,24 @@ class ScalpRuntime:
         bars: dict[str, int],
         market_health: dict[str, Any],
     ) -> None:
+        from agent.config_manager import config
         from agent.paper_trading import maybe_open_trade
         from agent.scalp.execution_policy import evaluate_execution_policy
         from agent.scalp.store import record_execution_decision
 
         for ticker, plan in plans.items():
             bar_id = bars.get(ticker, 0)
-            if not plan.valid or not bar_id or self._last_execution_bar.get(ticker) == bar_id:
+            if not plan.valid or not bar_id:
+                clear_pending(self._execution_pending, ticker)
+                continue
+            if self._last_execution_bar.get(ticker) == bar_id:
+                continue
+            if not confirmation_ready(
+                plan,
+                bar_id=bar_id,
+                pending=self._execution_pending,
+                config=config,
+            ):
                 continue
             self._last_execution_bar[ticker] = bar_id
             policy = evaluate_execution_policy(
