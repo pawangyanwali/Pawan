@@ -34,7 +34,7 @@ def main() -> int:
         {
             "scalp.shadow_enabled": True,
             "scalp.execution_enabled": False,
-            "scalp_runtime.bar_lookback": 500,
+            "scalp_runtime.bar_lookback": 2500,
         },
         updated_by="release5_health_gated_cutover",
     )

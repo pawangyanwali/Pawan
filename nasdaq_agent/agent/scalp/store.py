@@ -213,6 +213,63 @@ def init_scalp_tables() -> None:
                 report_json         TEXT NOT NULL
             )
             """,
+            f"""
+            CREATE TABLE IF NOT EXISTS scalp_candidate_trials (
+                id                  {id_type},
+                candidate_key       TEXT NOT NULL UNIQUE,
+                plan_id             TEXT NOT NULL,
+                observed_at         {timestamp_type} NOT NULL,
+                resolved_at         {timestamp_type},
+                ticker              TEXT NOT NULL,
+                side                TEXT NOT NULL,
+                candidate_type      TEXT NOT NULL,
+                strategy_family     TEXT DEFAULT '',
+                session             TEXT DEFAULT '',
+                entry_bar_id        BIGINT NOT NULL,
+                status              TEXT NOT NULL DEFAULT 'OPEN',
+                admission_state     TEXT NOT NULL DEFAULT 'OBSERVED',
+                admission_reason    TEXT DEFAULT '',
+                entry_price         DOUBLE PRECISION NOT NULL,
+                current_price       DOUBLE PRECISION NOT NULL,
+                stop_loss           DOUBLE PRECISION NOT NULL,
+                original_stop       DOUBLE PRECISION NOT NULL,
+                tp1                 DOUBLE PRECISION NOT NULL,
+                tp2                 DOUBLE PRECISION NOT NULL,
+                risk_per_share      DOUBLE PRECISION NOT NULL,
+                t1_hit              INTEGER NOT NULL DEFAULT 0,
+                t2_hit              INTEGER NOT NULL DEFAULT 0,
+                realized_partial_r  DOUBLE PRECISION NOT NULL DEFAULT 0,
+                remaining_fraction  DOUBLE PRECISION NOT NULL DEFAULT 1,
+                pnl_r               DOUBLE PRECISION NOT NULL DEFAULT 0,
+                mfe_r               DOUBLE PRECISION NOT NULL DEFAULT 0,
+                mae_r               DOUBLE PRECISION NOT NULL DEFAULT 0,
+                high_watermark      DOUBLE PRECISION NOT NULL,
+                low_watermark       DOUBLE PRECISION NOT NULL,
+                trigger_source      TEXT DEFAULT '',
+                trigger_quote_age_ms INTEGER DEFAULT 0,
+                exit_price          DOUBLE PRECISION,
+                exit_reason         TEXT DEFAULT '',
+                quality_score       DOUBLE PRECISION DEFAULT 0,
+                metadata_json       TEXT NOT NULL DEFAULT '{{}}',
+                plan_json           TEXT NOT NULL
+            )
+            """,
+            f"""
+            CREATE TABLE IF NOT EXISTS scalp_cycle_metrics (
+                bucket_ts               {timestamp_type} PRIMARY KEY,
+                session                 TEXT NOT NULL,
+                universe_total          INTEGER NOT NULL DEFAULT 0,
+                valid_plan_count        INTEGER NOT NULL DEFAULT 0,
+                data_gap_count          INTEGER NOT NULL DEFAULT 0,
+                execution_ineligible_count INTEGER NOT NULL DEFAULT 0,
+                cycle_ms                DOUBLE PRECISION NOT NULL DEFAULT 0,
+                live_count              INTEGER NOT NULL DEFAULT 0,
+                rest_count              INTEGER NOT NULL DEFAULT 0,
+                stale_count             INTEGER NOT NULL DEFAULT 0,
+                blocker_counts_json     TEXT NOT NULL DEFAULT '{{}}',
+                market_context_json     TEXT NOT NULL DEFAULT '{{}}'
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_created ON scalp_signal_plans(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_plans_ticker ON scalp_signal_plans(ticker, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_decisions_plan ON scalp_execution_decisions(plan_id)",
@@ -223,27 +280,7 @@ def init_scalp_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scalp_ml_predictions_model ON scalp_ml_predictions(model_version, predicted_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_status ON scalp_shadow_trades(status, opened_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_closed ON scalp_shadow_trades(closed_at)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_scalp_shadow_open_ticker ON scalp_shadow_trades(ticker) WHERE status='OPEN'",
-            "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_reports_generated ON scalp_shadow_daily_reports(generated_at)",
-        ]
-        migrations = [
-            "ALTER TABLE scalp_trade_outcomes ADD COLUMN IF NOT EXISTS plan_json TEXT DEFAULT ''",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_size_mult DOUBLE PRECISION NOT NULL DEFAULT 1",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_json TEXT NOT NULL DEFAULT '{}'",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_price DOUBLE PRECISION",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_source TEXT DEFAULT ''",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_quote_age_ms INTEGER DEFAULT 0",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_bid DOUBLE PRECISION",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_ask DOUBLE PRECISION",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_spread_bps DOUBLE PRECISION DEFAULT 0",
-            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_slippage_bps DOUBLE PRECISION DEFAULT 0",
-            "ALTER TABLE scalp_context_stats ADD COLUMN IF NOT EXISTS sum_pnl_dollar DOUBLE PRECISION DEFAULT 0",
-            "ALTER TABLE scalp_context_stats ADD COLUMN IF NOT EXISTS mean_pnl_dollar DOUBLE PRECISION DEFAULT 0",
-        ]
-        try:
-            with get_conn() as conn:
-                for statement in statements:
-                    conn.execute(statement)
+            "CREATE UNIQUE INDEX IF NOT EXISTS uï¯m¢G§²ÚîÆ­yÕxecute(statement)
                 if using_postgres():
                     for statement in migrations:
                         conn.execute(statement)
@@ -473,6 +510,55 @@ def scalp_outcome_count() -> int:
             "SELECT COUNT(*) AS count FROM scalp_trade_outcomes"
         ).fetchone()
     return int((row or {}).get("count") or 0)
+
+
+def record_cycle_metrics(metrics: dict[str, Any], *, observed_at: float | None = None) -> str:
+    """Persist one idempotent minute bucket of runtime health telemetry."""
+    init_scalp_tables()
+    observed = datetime.fromtimestamp(
+        observed_at if observed_at is not None else datetime.now(timezone.utc).timestamp(),
+        tz=timezone.utc,
+    ).replace(second=0, microsecond=0)
+    source_counts = metrics.get("source_counts") or {}
+    values = (
+        observed.isoformat(),
+        str(metrics.get("session") or "UNKNOWN").upper(),
+        int(metrics.get("universe_total") or 0),
+        int(metrics.get("valid_plan_count") or 0),
+        int(metrics.get("data_gap_count") or 0),
+        int(metrics.get("execution_ineligible_count") or 0),
+        float(metrics.get("cycle_ms") or 0.0),
+        int(source_counts.get("WS") or 0),
+        int(source_counts.get("REST") or 0),
+        int(source_counts.get("STALE") or source_counts.get("UNKNOWN") or 0),
+        json.dumps(metrics.get("blocker_counts") or {}, separators=(",", ":")),
+        json.dumps(metrics.get("market_context") or {}, separators=(",", ":")),
+    )
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO scalp_cycle_metrics
+              (bucket_ts, session, universe_total, valid_plan_count,
+               data_gap_count, execution_ineligible_count, cycle_ms,
+               live_count, rest_count, stale_count, blocker_counts_json,
+               market_context_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (bucket_ts) DO UPDATE SET
+              session=excluded.session,
+              universe_total=excluded.universe_total,
+              valid_plan_count=excluded.valid_plan_count,
+              data_gap_count=excluded.data_gap_count,
+              execution_ineligible_count=excluded.execution_ineligible_count,
+              cycle_ms=excluded.cycle_ms,
+              live_count=excluded.live_count,
+              rest_count=excluded.rest_count,
+              stale_count=excluded.stale_count,
+              blocker_counts_json=excluded.blocker_counts_json,
+              market_context_json=excluded.market_context_json
+            """,
+            values,
+        )
+    return observed.isoformat()
 
 
 def record_ml_evaluation(metadata: dict[str, Any]) -> None:

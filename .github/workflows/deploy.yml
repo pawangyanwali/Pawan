@@ -59,6 +59,10 @@ jobs:
                  tests/test_scalp_execution_policy.py \
                  tests/test_scalp_learning.py \
                  tests/test_release5_scalp_runtime.py \
+                 tests/test_scalp_candidate_tracker.py \
+                 tests/test_schwab_streamer_subscriptions.py \
+                 tests/test_scalp_command_center.py \
+                 tests/test_health_page_static.py \
                  --timeout=8 -x -q 2>&1 | tail -30
 
   deploy:
@@ -94,6 +98,12 @@ jobs:
             echo "=== Pulling latest code ==="
             sudo -u "$APP_USER" git -C "$APP_DIR" fetch origin
             sudo -u "$APP_USER" git -C "$APP_DIR" reset --hard origin/claude/nasdaq-stock-prediction-agent-kDe60
+            EXPECTED_SHA="${{ github.sha }}"
+            DEPLOYED_SHA=$(sudo -u "$APP_USER" git -C "$APP_DIR" rev-parse HEAD)
+            if [ "$DEPLOYED_SHA" != "$EXPECTED_SHA" ]; then
+              echo "ERROR: checked-out commit $DEPLOYED_SHA does not match workflow commit $EXPECTED_SHA"
+              exit 1
+            fi
 
             # ── Docker Compose path ────────────────────────────────────────────
             if command -v docker &>/dev/null && sudo -u "$APP_USER" docker info &>/dev/null; then
@@ -293,6 +303,23 @@ jobs:
 
               echo "=== Activating health-gated scalp-only shadow validation ==="
               _dc exec -T scalp-engine python -m scripts.activate_scalp_only
+
+              echo "=== Functional production readiness gate (max 2 min) ==="
+              PRODUCTION_READY=0
+              for i in $(seq 1 12); do
+                if _dc exec -T scalp-engine python -m scripts.validate_production_release; then
+                  PRODUCTION_READY=1
+                  echo "  Functional readiness passed after $((i*10))s"
+                  break
+                fi
+                echo "  Attempt $i/12 failed; waiting for subscriptions, bars, and first full cycle"
+                sleep 10
+              done
+              if [ "$PRODUCTION_READY" = "0" ]; then
+                echo "ERROR: functional production readiness gate failed"
+                _dc logs --tail 80 market-data scalp-engine 2>/dev/null || true
+                exit 1
+              fi
 
               # ── Wait for watchdog (non-fatal; quick 15s start_period) ─────────
               echo "=== Waiting for watchdog to become healthy (max 1 min) ==="

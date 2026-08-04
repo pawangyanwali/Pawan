@@ -357,7 +357,8 @@ def _token_reload_loop() -> None:
 # ── Bar-history gap filler ────────────────────────────────────────────────────
 
 def _universe_recheck_loop() -> None:
-    """Consume explicit rechecks and hot-reload validated REST subscriptions."""
+    """Consume registry changes and reconcile both WS and REST universes."""
+    last_runtime: tuple[str, ...] = ()
     while not _runner.stopped:
         try:
             from agent.universe_registry import (
@@ -390,12 +391,34 @@ def _universe_recheck_loop() -> None:
                 )
                 if client:
                     client.srem("universe:recheck:requested", *symbols)
-                from agent.broker.schwab_streamer import update_md_poller_tickers
-
-                update_md_poller_tickers(get_runtime_universe())
                 _log.warning(
                     "Universe recheck completed: %d requested, %d promoted",
                     len(symbols), promoted,
+                )
+            runtime = tuple(sorted({
+                str(ticker).upper()
+                for ticker in get_runtime_universe()
+                if ticker
+            }))
+            if not runtime:
+                _log.warning(
+                    "Registry returned an empty runtime universe; preserving "
+                    "existing WS and REST subscriptions"
+                )
+                _runner._stop.wait(30.0)
+                continue
+            if runtime != last_runtime:
+                from agent.broker.schwab_streamer import (
+                    update_md_poller_tickers,
+                    update_streamer_tickers,
+                )
+
+                update_md_poller_tickers(list(runtime))
+                update_streamer_tickers(list(runtime))
+                last_runtime = runtime
+                _log.info(
+                    "Market-data universes reconciled to %d eligible tickers",
+                    len(runtime),
                 )
         except Exception as exc:
             _log.warning("Universe recheck cycle failed: %s", exc)
@@ -463,7 +486,11 @@ def _bar_hydration_loop(tickers: list[str]) -> None:
                 and now_et.hour >= 20
                 and last_nightly_refresh != now_et.date()
             )
-            missing = missing_valkey_history(tickers)
+            missing = missing_valkey_history(
+                tickers,
+                require_fresh=active,
+                max_age_s=180.0,
+            )
             if not last_session or session_opened:
                 targets = tickers
                 hydrate(

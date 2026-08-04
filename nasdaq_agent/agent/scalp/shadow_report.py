@@ -78,6 +78,14 @@ def generate_shadow_daily_report(
         """,
         (start_utc.isoformat(), end_utc.isoformat()),
     )
+    cycle_metrics = _rows(
+        """
+        SELECT * FROM scalp_cycle_metrics
+        WHERE bucket_ts >= ? AND bucket_ts < ?
+        ORDER BY bucket_ts ASC
+        """,
+        (start_utc.isoformat(), end_utc.isoformat()),
+    )
 
     for trade in trades:
         _enrich_trade(trade)
@@ -93,8 +101,9 @@ def generate_shadow_daily_report(
             "start_utc": start_utc.isoformat(),
             "end_utc": end_utc.isoformat(),
         },
-        "status": _status(overall),
+        "status": _status(overall, cycle_metrics),
         "summary": overall,
+        "pipeline": _pipeline_summary(cycle_metrics),
         "groups": {
             "setup": _group_stats(closed, "setup_type"),
             "side": _group_stats(closed, "side"),
@@ -439,59 +448,21 @@ def _exit_calibration(closed: list[dict[str, Any]]) -> dict[str, Any]:
         "trail_exits": trail_exits,
         "breakeven_like_after_tp1": breakeven_like,
         "avg_mfe_r": _round(
-            sum(_float(row.get("mfe_r")) for row in closed) / total, 4
-        )
-        if total
-        else 0.0,
-        "avg_mae_r": _round(
-            sum(_float(row.get("mae_r")) for row in closed) / total, 4
-        )
-        if total
-        else 0.0,
-    }
-
-
-def _worst_trades(closed: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
-    result = []
-    for trade in sorted(closed, key=lambda row: _float(row.get("pnl_r")))[:limit]:
-        plan = trade.get("_plan") or {}
-        result.append(
-            {
-                "ticker": trade.get("ticker"),
-                "side": trade.get("side"),
-                "setup_type": trade.get("setup_type"),
-                "session": trade.get("session"),
-                "opened_at": _clean(trade.get("opened_at")),
-                "closed_at": _clean(trade.get("closed_at")),
-                "exit_reason": trade.get("exit_reason"),
-                "pnl_r": _round(_float(trade.get("pnl_r")), 4),
-                "pnl_dollar": _round(_float(trade.get("pnl_dollar")), 2),
-                "mfe_r": _round(_float(trade.get("mfe_r")), 4),
-                "mae_r": _round(_float(trade.get("mae_r")), 4),
-                "t1_hit": _int(trade.get("t1_hit")),
-                "t2_hit": _int(trade.get("t2_hit")),
-                "confidence": _round(_float(plan.get("confidence")), 2),
-                "rsi_14": _round(_float(plan.get("rsi_14")), 2),
-                "rsi_7": _round(_float(plan.get("rsi_7")), 2),
-                "rsi_2": _round(_float(plan.get("rsi_2")), 2),
-                "vwap_event": plan.get("vwap_event") or "UNKNOWN",
-                "rvol": _round(_float(plan.get("rvol")), 3),
-                "reasons": list(plan.get("reasons") or [])[:8],
-            }
-        )
-    return result
-
-
-def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
-    summary = report["summary"]
-    findings: list[str] = []
-    recommendations: list[str] = []
-    closed = int(summary.get("closed") or 0)
-    if closed == 0:
-        findings.append("No closed shadow trades were recorded for this ET date.")
-        recommendations.append(
-            "Confirm whether the date was a market holiday or whether data/auth blocked signal generation."
-        )
+  ë½­¢G§²ÚîÆ­yÐ   pipeline = report.get("pipeline") or {}
+        if pipeline.get("status") == "DEGRADED":
+            findings.append(
+                "No closed shadow trades were recorded while the market-data pipeline was degraded "
+                f"({pipeline.get('avg_data_gap_pct', 0):.1f}% average gaps, "
+                f"{pipeline.get('avg_live_pct', 0):.1f}% live WS coverage)."
+            )
+            recommendations.append(
+                "Repair quote and one-minute-bar coverage before interpreting this as a strategy no-trade day."
+            )
+        else:
+            findings.append("No closed shadow trades were recorded for this ET date.")
+            recommendations.append(
+                "Confirm whether the date was a market holiday or whether policy blocked otherwise valid setups."
+            )
         return findings, recommendations
 
     expectancy = _float(summary.get("expectancy_r"))
@@ -756,7 +727,9 @@ def _persist_report(report: dict[str, Any]) -> None:
     )
 
 
-def _status(summary: dict[str, Any]) -> str:
+def _status(summary: dict[str, Any], cycle_metrics: list[dict[str, Any]]) -> str:
+    if int(summary.get("closed") or 0) == 0 and _pipeline_degraded(cycle_metrics):
+        return "DATA_DEGRADED"
     if int(summary.get("closed") or 0) == 0:
         return "NO_TRADES"
     expectancy = _float(summary.get("expectancy_r"))
@@ -766,6 +739,58 @@ def _status(summary: dict[str, Any]) -> str:
     if expectancy < 0.05 or profit_factor < 1.2:
         return "FRAGILE"
     return "POSITIVE"
+
+
+def _pipeline_degraded(rows: list[dict[str, Any]]) -> bool:
+    active = [
+        row for row in rows
+        if str(row.get("session") or "").upper() not in {"", "CLOSED"}
+    ]
+    if not active:
+        return False
+    gap_ratios = [
+        _float(row.get("data_gap_count")) / max(1, _int(row.get("universe_total")))
+        for row in active
+    ]
+    live_ratios = [
+        _float(row.get("live_count")) / max(1, _int(row.get("universe_total")))
+        for row in active
+    ]
+    return (
+        sum(gap_ratios) / len(gap_ratios) >= 0.20
+        or sum(live_ratios) / len(live_ratios) < 0.50
+    )
+
+
+def _pipeline_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {"samples": 0, "status": "NO_TELEMETRY"}
+    universe = [max(1, _int(row.get("universe_total"))) for row in rows]
+    return {
+        "samples": len(rows),
+        "status": "DEGRADED" if _pipeline_degraded(rows) else "HEALTHY",
+        "avg_universe": _round(sum(universe) / len(universe), 1),
+        "avg_valid_plans": _round(
+            sum(_int(row.get("valid_plan_count")) for row in rows) / len(rows), 2
+        ),
+        "avg_data_gap_pct": _round(
+            100.0 * sum(
+                _int(row.get("data_gap_count")) / total
+                for row, total in zip(rows, universe)
+            ) / len(rows),
+            1,
+        ),
+        "avg_live_pct": _round(
+            100.0 * sum(
+                _int(row.get("live_count")) / total
+                for row, total in zip(rows, universe)
+            ) / len(rows),
+            1,
+        ),
+        "avg_cycle_ms": _round(
+            sum(_float(row.get("cycle_ms")) for row in rows) / len(rows), 1
+        ),
+    }
 
 
 def _float(value: Any, default: float = 0.0) -> float:

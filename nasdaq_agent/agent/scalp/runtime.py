@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import Counter
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any
@@ -44,6 +46,7 @@ class ScalpRuntime:
         self._last_position_bar: dict[str, int] = {}
         self._shadow_pending: dict[str, dict[str, Any]] = {}
         self._execution_pending: dict[str, dict[str, Any]] = {}
+        self._last_metrics_bucket: int = -1
         self.last_cycle: dict[str, Any] = {}
 
     def update_tickers(self, tickers: list[str]) -> bool:
@@ -98,7 +101,7 @@ class ScalpRuntime:
         contexts = get_context_snapshots(self.tickers)
         frames, bar_errors = load_one_minute_frames(
             self.tickers,
-            limit=max(390, int(config.get("scalp_runtime.bar_lookback", 500))),
+            limit=max(390, int(config.get("scalp_runtime.bar_lookback", 2500))),
         )
         signal_config = ScalpSignalConfig.from_runtime(config)
         workers = max(1, min(16, int(config.get("scalp_runtime.workers", 8))))
@@ -151,7 +154,17 @@ class ScalpRuntime:
         quotes = get_all_prices()
         market_health = execution_market_health(max_age_s=2.0)
 
-        def analyze(item: tuple[str, Any | None, int, Any, list[float], list[float], Any | None, str]) -> tuple[str, ScalpSignalPlan, Any | None, int]:
+        def analyze(
+            item: tuple[
+                str, Any | None, int, Any, list[float], list[float], Any | None, str
+            ]
+        ) -> tuple[
+            str,
+            ScalpSignalPlan,
+            Any | None,
+            int,
+            list[tuple[str, ScalpSignalPlan, dict[str, Any]]],
+        ]:
             ticker, enriched, bar_id, indicators, supports, resistances, mtf_context, bar_error = item
             quote = quote_snapshot_from_payload(ticker, quotes.get(ticker) or {})
             if enriched is None:
@@ -163,7 +176,7 @@ class ScalpRuntime:
                     config=signal_config,
                 )
                 _add_blocker(plan, bar_error)
-                return ticker, plan, None, 0
+                return ticker, plan, None, 0, []
 
             indicators = _with_provisional_live_indicators(
                 indicators,
@@ -190,6 +203,36 @@ class ScalpRuntime:
                 signal_config,
                 session=session,
             )
+            trial_specs: list[
+                tuple[str, ScalpSignalPlan, dict[str, Any]]
+            ] = []
+            if plan.shadow_setup_ready and plan.shadow_side in {"LONG", "SHORT"}:
+                shadow_side = SignalSide(plan.shadow_side)
+                shadow_plan = deepcopy(next(
+                    candidate for candidate in candidates
+                    if candidate.side is shadow_side
+                ))
+                apply_multi_timeframe_shadow(
+                    shadow_plan,
+                    indicators,
+                    mtf_context,
+                    signal_config,
+                    session=session,
+                )
+                shadow_plan.strategy_family = plan.shadow_strategy_family
+                shadow_plan.setup_type = (
+                    f"MTF_{plan.shadow_strategy_family}_{plan.shadow_side}"
+                )
+                trial_specs.append((
+                    "MTF_SHADOW_READY",
+                    shadow_plan,
+                    {
+                        "setup_score": plan.shadow_setup_score,
+                        "reasons": list(plan.shadow_reasons),
+                        "blockers": list(plan.shadow_blockers),
+                        "observation_only": True,
+                    },
+                ))
             _apply_directional_quality_filters(plan, market_context, signal_config)
             blocked_sessions = {
                 str(value).upper()
@@ -205,7 +248,18 @@ class ScalpRuntime:
                 plan = assess_entry_quality(plan, config)
                 plan = apply_ml_overlay(plan)
                 plan = apply_context_gate(plan)
-            return ticker, plan, enriched, bar_id
+            if plan.valid:
+                trial_specs.append((
+                    "CANONICAL_VALID",
+                    deepcopy(plan),
+                    {
+                        "quality_gate": plan.entry_quality_gate,
+                        "quality_score": plan.entry_quality_score,
+                        "quality_minimum": plan.entry_quality_min_score,
+                        "observation_only": True,
+                    },
+                ))
+            return ticker, plan, enriched, bar_id, trial_specs
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-plan") as pool:
             analyzed = list(pool.map(analyze, prepared))
@@ -213,11 +267,28 @@ class ScalpRuntime:
         plans_by_ticker: dict[str, ScalpSignalPlan] = {}
         frames_by_ticker: dict[str, Any] = {}
         bars_by_ticker: dict[str, int] = {}
-        for ticker, plan, frame, bar_id in analyzed:
+        candidate_specs: list[
+            tuple[str, ScalpSignalPlan, int, dict[str, Any]]
+        ] = []
+        for ticker, plan, frame, bar_id, trial_specs in analyzed:
             plans_by_ticker[ticker] = plan
             if frame is not None:
                 frames_by_ticker[ticker] = frame
                 bars_by_ticker[ticker] = bar_id
+            candidate_specs.extend(
+                (candidate_type, candidate_plan, bar_id, metadata)
+                for candidate_type, candidate_plan, metadata in trial_specs
+            )
+
+        if bool(config.get("scalp.candidate_tracking_enabled", True)):
+            from agent.scalp.candidate_tracker import register_candidate_batch
+
+            try:
+                register_candidate_batch(candidate_specs)
+            except Exception:
+                logger.exception(
+                    "[ScalpRuntime] candidate batch registration failed"
+                )
 
         self._manage_positions(frames_by_ticker, bars_by_ticker, quotes)
         if bool(config.get("scalp.shadow_enabled", True)):
@@ -240,12 +311,21 @@ class ScalpRuntime:
             if _has_actionable_data_gap(plan.blockers, session)
         )
         blocker_counts = _blocker_counts(plans_by_ticker.values())
+        source_counts = Counter(plan.source.value for plan in plans_by_ticker.values())
+        execution_ineligible_count = sum(
+            1
+            for plan in plans_by_ticker.values()
+            if plan.valid and not plan.execution_eligible
+        )
         elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
         meta = {
             "runtime": "SCALP_ONLY_V1",
             "universe_total": len(self.tickers),
             "valid_plan_count": valid_count,
             "data_gap_count": data_gap_count,
+            "execution_ineligible_count": execution_ineligible_count,
+            "source_counts": dict(source_counts),
+            "session": str(session or "UNKNOWN").upper(),
             "market_context": market_context,
             "blocker_counts": blocker_counts,
             "top_blockers": [
@@ -259,6 +339,15 @@ class ScalpRuntime:
             "cycle_ms": elapsed_ms,
         }
         write_latest(rows, {}, session_info, len(rows), scan_meta=meta)
+        metrics_bucket = int(time.time() // 60)
+        if metrics_bucket != self._last_metrics_bucket:
+            try:
+                from agent.scalp.store import record_cycle_metrics
+
+                record_cycle_metrics(meta)
+                self._last_metrics_bucket = metrics_bucket
+            except Exception:
+                logger.exception("[ScalpRuntime] cycle telemetry persistence failed")
         self.last_cycle = {"ts": time.time(), **meta}
         logger.info(
             "Scalp cycle: %d/%d valid, %d data gaps, %.1fms",
@@ -267,50 +356,15 @@ class ScalpRuntime:
         return self.last_cycle
 
     def run_position_tick(self) -> None:
-        """Check live stop, TP1, and TP2 conditions from the current price bus."""
-        from agent.paper_trading import get_open_trades, rt_check_positions
-        from agent.valkey_client import get_all_prices
-
-        quotes = get_all_prices()
-        try:
-            from agent.config_manager import config
-            from agent.market_hours import get_session
-            from agent.scalp.shadow import mark_shadow_trades
-
-            if bool(config.get("scalp.shadow_enabled", True)):
-                mark_shadow_trades(quotes, session=get_session())
-        except Exception:
-            logger.exception("[ScalpRuntime] shadow position tick failed")
-        for ticker in {
-            str(row.get("ticker") or "").upper() for row in get_open_trades()
-        }:
-            if not ticker:
-                continue
-            quote = quotes.get(ticker) or {}
-            try:
-                current = float(quote.get("last") or quote.get("mark") or 0.0)
-            except (TypeError, ValueError):
-                current = 0.0
-            if current <= 0:
-                continue
-            try:
-                rt_check_positions(ticker, current)
-            except Exception:
-                logger.exception("[ScalpRuntime] live position tick failed for %s", ticker)
-
-    def _shadow_execute(
-        self,
-        plans: dict[str, ScalpSignalPlan],
-        bars: dict[str, int],
-        market_health: dict[str, Any],
-    ) -> None:
-        """Open isolated hypothetical trades once per ticker/bar."""
-        from agent.config_manager import config
-        from agent.scalp.shadow import open_shadow_trade
-
-        for ticker, plan in plans.items():
-            bar_id = bars.get(ticker, 0)
-            if not plan.valid or not bar_id:
+        """Check live stop, TP1, and TP2 conditions from tÎ≠≠¢Gß≤⁄Óù∆≠y–not bar_id:
+                pending_state = self._shadow_pending.get(ticker) or {}
+                if pending_state:
+                    update_candidate_admission(
+                        ticker=ticker,
+                        entry_bar_id=int(pending_state.get("bar_id") or bar_id),
+                        admission_state="CONFIRMATION_LOST",
+                        admission_reason=plan.invalid_reason or "SETUP_INVALIDATED",
+                    )
                 clear_pending(self._shadow_pending, ticker)
                 continue
             if self._last_shadow_bar.get(ticker) == bar_id:
@@ -321,7 +375,19 @@ class ScalpRuntime:
                 pending=self._shadow_pending,
                 config=config,
             ):
+                update_candidate_admission(
+                    ticker=ticker,
+                    entry_bar_id=bar_id,
+                    admission_state=plan.entry_confirmation_state or "PENDING_CONFIRMATION",
+                    admission_reason="ENTRY_CONFIRMATION_NOT_READY",
+                )
                 continue
+            update_candidate_admission(
+                ticker=ticker,
+                entry_bar_id=bar_id,
+                admission_state="CONFIRMED",
+                admission_reason="ENTRY_CONFIRMATION_CONFIRMED",
+            )
             self._last_shadow_bar[ticker] = bar_id
             try:
                 open_shadow_trade(

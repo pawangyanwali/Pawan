@@ -202,6 +202,7 @@ class _PgCursor:
     def __init__(self, cur, lastrowid=None):
         self._cur = cur
         self.lastrowid = lastrowid
+        self.rowcount = cur.rowcount
 
     def fetchone(self):
         return self._cur.fetchone()

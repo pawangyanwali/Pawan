@@ -31,6 +31,15 @@ async def scalp_learning(_user: AuthenticatedUser = Depends(require_viewer)):
     return await loop.run_in_executor(None, _learning_snapshot)
 
 
+@router.get("/api/scalp/candidates")
+async def scalp_candidates(
+    recent_limit: int = 40,
+    _user: AuthenticatedUser = Depends(require_viewer),
+):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _candidate_snapshot, recent_limit)
+
+
 @router.get("/api/scalp/readiness")
 async def scalp_readiness(_user: AuthenticatedUser = Depends(require_viewer)):
     loop = asyncio.get_running_loop()
@@ -123,6 +132,14 @@ def _dashboard_snapshot() -> dict[str, Any]:
         shadow_reports = latest_shadow_daily_reports(limit=5)
     except Exception:
         shadow_reports = []
+    try:
+        candidates = _candidate_snapshot(recent_limit=40)
+    except Exception:
+        candidates = {
+            "metrics": {},
+            "recent": [],
+            "learning_isolation": True,
+        }
     health = price_bus_health(max_age_s=2.0)
     counts = {
         "actionable": sum(plan["state"] == "ACTIONABLE" for plan in plans),
@@ -175,15 +192,25 @@ def _dashboard_snapshot() -> dict[str, Any]:
             "tp2_r": round(float(config.get("scalp.reward_r", 2.0)), 3),
             "execution_enabled": bool(config.get("scalp.execution_enabled", False)),
             "shadow_enabled": bool(config.get("scalp.shadow_enabled", True)),
+            "candidate_tracking_enabled": bool(
+                config.get("scalp.candidate_tracking_enabled", True)
+            ),
         },
         "learning": learning,
         "shadow": shadow,
         "shadow_reports": shadow_reports,
+        "candidate_trials": candidates,
     }
     with _cache_lock:
         _cache_ts = now
         _cache_value = result
     return result
+
+
+def _candidate_snapshot(recent_limit: int = 40) -> dict[str, Any]:
+    from agent.scalp.candidate_tracker import candidate_dashboard_data
+
+    return candidate_dashboard_data(recent_limit=recent_limit)
 
 
 def _shadow_reports_snapshot(
@@ -404,6 +431,31 @@ def _readiness_snapshot() -> dict[str, Any]:
         f"{int(learning.get('action_count') or 0)} durable actions; "
         f"{int(learning.get('context_count') or 0)} observed contexts",
     ))
+    candidate_metrics = (
+        (dashboard.get("candidate_trials") or {}).get("metrics") or {}
+    )
+    candidate_tracking = bool(
+        risk.get(
+            "candidate_tracking_enabled",
+            config.get("scalp.candidate_tracking_enabled", True),
+        )
+    )
+    candidate_observed = int(candidate_metrics.get("observed_today") or 0)
+    candidate_closed = int(candidate_metrics.get("closed") or 0)
+    checks.append(check(
+        "Counterfactual gate evidence",
+        (
+            "PASS"
+            if candidate_tracking and candidate_observed > 0
+            else "WAITING"
+            if candidate_tracking
+            else "FAIL"
+        ),
+        f"{candidate_observed} observed / {candidate_closed} resolved",
+        "tracking enabled; rejected candidates measured outside learning",
+        "Candidate trials never create positions, consume risk budget, or update "
+        "canonical learning outcomes.",
+    ))
     checks.append(check(
         "Challenger ML lifecycle",
         "PASS" if outcomes >= minimum_ml_samples else "WAITING",
@@ -424,6 +476,7 @@ def _readiness_snapshot() -> dict[str, Any]:
             "scalp_engine": engine_up,
             "paper_execution": bool(risk.get("execution_enabled")),
             "shadow_execution": bool(risk.get("shadow_enabled")),
+            "candidate_tracking": candidate_tracking,
             "immediate_learning": learner_up,
             "scheduled_ml_training": learner_up and (ml_manual or ml_auto_armed),
             "universe_self_healing": market_up,
@@ -439,6 +492,7 @@ def _readiness_snapshot() -> dict[str, Any]:
             "active_actions": len(learning.get("active_actions") or []),
             "champion": bool(learning.get("ml_champion")),
         },
+        "candidate_trials": candidate_metrics,
         "containers": containers,
     }
 
@@ -473,6 +527,11 @@ def _enrich_plan(plan: dict[str, Any], prices: dict[str, dict] | None = None) ->
         if live
         else "CLOSED_1M"
     )
+    if "execution_eligible" not in result:
+        result["execution_eligible"] = bool(
+            fresh_quote and source_status in live_sources
+        )
+        result.setdefault("execution_blockers", [])
     result.update(
         state=_plan_state(result),
         display_reason=_plan_reason(result),
@@ -518,8 +577,14 @@ def _plan_state(plan: dict[str, Any]) -> str:
     blockers = [str(item) for item in plan.get("blockers") or []]
     if has_market_data_gap(blockers, str(plan.get("session") or "")):
         return "DATA_GAP"
-    if bool(plan.get("valid")) and plan.get("side") in {"LONG", "SHORT"}:
+    if (
+        bool(plan.get("valid"))
+        and _plan_execution_eligible(plan)
+        and plan.get("side") in {"LONG", "SHORT"}
+    ):
         return "ACTIONABLE"
+    if bool(plan.get("valid")) and plan.get("side") in {"LONG", "SHORT"}:
+        return "WATCH"
     hard_prefixes = (
         "SESSION_", "EARNINGS_", "MACRO_", "LEARNING_", "BRACKET_",
         "REQUIRED_", "SPREAD_", "RVOL_", "BLOCKED_BY_", "CONTEXT_",
@@ -534,10 +599,20 @@ def _plan_state(plan: dict[str, Any]) -> str:
 def _plan_reason(plan: dict[str, Any]) -> str:
     if str(plan.get("session") or "").upper() == "CLOSED":
         return "MARKET_CLOSED_LAST_SESSION_DATA"
+    if plan.get("valid") and not _plan_execution_eligible(plan):
+        blockers = plan.get("execution_blockers") or []
+        return str(blockers[0] if blockers else "EXECUTION_FEED_NOT_ELIGIBLE")
     if plan.get("valid"):
         reasons = plan.get("reasons") or []
         return str(reasons[0] if reasons else "VALID_SETUP")
     return str(plan.get("invalid_reason") or "NO_VALID_SETUP")
+
+
+def _plan_execution_eligible(plan: dict[str, Any]) -> bool:
+    """Support pre-migration snapshots while preferring the explicit contract."""
+    if "execution_eligible" in plan:
+        return bool(plan.get("execution_eligible"))
+    return str(plan.get("source") or "").upper() == "WS"
 
 
 def _enrich_position(row: dict[str, Any], prices: dict[str, dict]) -> dict[str, Any]:

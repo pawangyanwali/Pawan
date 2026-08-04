@@ -71,7 +71,21 @@ _streamer_start_lock = threading.Lock()
 _event_loop:       Optional[asyncio.AbstractEventLoop] = None
 _ws_connected:     bool = False
 _ws_error:         Optional[str] = None
-_subscribed_tickers: list[str] = []
+_ws_desired_tickers: list[str] = []
+_ws_active_tickers: set[str] = set()
+_ws_acknowledged_tickers: set[str] = set()
+_ws_seen_at: dict[str, float] = {}
+_ws_subscription_requests: dict[
+    str, tuple[str, tuple[str, ...], float]
+] = {}
+# Keep dynamic equity request IDs away from fixed ADMIN, screener, and futures
+# IDs (1, 300, 400) so a long-running socket cannot misattribute an ACK.
+_ws_request_id: int = 1000
+
+# REST and WebSocket subscriptions are deliberately independent. A previous
+# shared list let a REST universe refresh make WS health claim symbols that
+# had never been added to the active socket.
+_mdpoller_tickers: list[str] = []
 
 # Prices accumulated from WS stream â€” flushed to Valkey every 500 ms
 _pending_ws_prices: dict[str, dict] = {}
@@ -90,8 +104,11 @@ _mdpoller_error:     Optional[str] = None
 # MDPoller checks this to decide whether to fire a REST call or stand down.
 _last_ws_data_at: float = 0.0
 
-MAX_CANDLE_HISTORY = 500   # complete regular session plus warm-up history
+MAX_CANDLE_HISTORY = 2500  # several sessions for time-of-day RVOL baselines
 _WS_STANDDOWN_FRESH_PCT = float(os.getenv("NASDAQ_WS_STANDDOWN_FRESH_PCT", "0.95"))
+_WS_QUOTE_PRIORITY_TTL_S = max(
+    1.0, float(os.getenv("NASDAQ_WS_QUOTE_PRIORITY_TTL_S", "5.0"))
+)
 
 # â”€â”€ Real-time tick callback registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Registered functions are called on every LEVELONE_EQUITIES update.
@@ -175,6 +192,104 @@ def _req(service: str, command: str, reqid: int, params: dict,
     }
 
 
+def _next_ws_request_id() -> int:
+    global _ws_request_id
+    with _lock:
+        _ws_request_id += 1
+        return _ws_request_id
+
+
+async def _send_equity_subscription(
+    ws,
+    *,
+    command: str,
+    tickers: list[str],
+    fields: str,
+    customer_id: str,
+    correl_id: str,
+) -> None:
+    """Send one tracked LEVELONE_EQUITIES subscription command."""
+    if not tickers:
+        return
+    request_id = _next_ws_request_id()
+    symbols = tuple(dict.fromkeys(str(t).upper() for t in tickers if t))
+    with _lock:
+        _ws_subscription_requests[str(request_id)] = (
+            command,
+            symbols,
+            time.monotonic(),
+        )
+    try:
+        await ws.send(json.dumps({"requests": [_req(
+            "LEVELONE_EQUITIES",
+            command,
+            request_id,
+            {"keys": ",".join(symbols), "fields": fields},
+            customer_id,
+            correl_id,
+        )]}))
+    except Exception:
+        with _lock:
+            _ws_subscription_requests.pop(str(request_id), None)
+        raise
+    with _lock:
+        if command == "UNSUBS":
+            _ws_active_tickers.difference_update(symbols)
+        else:
+            _ws_active_tickers.update(symbols)
+
+
+async def _reconcile_equity_subscriptions(
+    ws,
+    *,
+    fields: str,
+    customer_id: str,
+    correl_id: str,
+) -> None:
+    """Make the active socket match the latest registry-owned universe."""
+    with _lock:
+        expired = [
+            request_id
+            for request_id, (_, _, sent_at) in _ws_subscription_requests.items()
+            if time.monotonic() - sent_at >= 10.0
+        ]
+        for request_id in expired:
+            command, symbols, _ = _ws_subscription_requests.pop(request_id)
+            if command == "UNSUBS":
+                _ws_active_tickers.update(symbols)
+            else:
+                _ws_active_tickers.difference_update(symbols)
+        if expired:
+            logger.warning(
+                "[Streamer] %d subscription request(s) timed out; retrying",
+                len(expired),
+            )
+        desired = set(_ws_desired_tickers)
+        active = set(_ws_active_tickers)
+    additions = sorted(desired - active)
+    removals = sorted(active - desired)
+    batch_size = 100
+
+    for index in range(0, len(removals), batch_size):
+        batch = removals[index:index + batch_size]
+        await _send_equity_subscription(
+            ws,
+            command="UNSUBS",
+            tickers=batch,
+            fields=fields,
+            customer_id=customer_id,
+            correl_id=correl_id,
+        )
+    for index in range(0, len(additions), batch_size):
+        batch = additions[index:index + batch_size]
+        await _send_equity_subscription(
+            ws,
+            command="ADD" if active or index else "SUBS",
+            tickers=batch,
+            fields=fields,
+            customer_id=customer_id,
+            correl_id=correl_id,
+        )
 # â”€â”€ Message processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _EQUITY_FIELDS = {
@@ -216,10 +331,14 @@ def _accumulate_one_minute_bar_locked(
     previous_total = _last_cumulative_volume.get(sym)
     volume_delta = (
         cumulative - previous_total
-        if previous_total is not None and cumulative >= previous_total
+        if cumulative > 0 and previous_total is not None and cumulative >= previous_total
         else 0.0
     )
-    _last_cumulative_volume[sym] = cumulative
+    # A transient REST payload can omit total volume. Do not reset a valid
+    # cumulative baseline to zero or the next WS tick would count the entire
+    # session as one minute's volume.
+    if cumulative > 0:
+        _last_cumulative_volume[sym] = cumulative
 
     current = _forming_bars.get(sym)
     completed = None
@@ -246,1145 +365,5 @@ def _accumulate_one_minute_bar_locked(
     # REST quote polling continues on weekends and outside equity sessions.
     # Repeated snapshots can advance the wall-clock minute without a trade;
     # those are not market bars and would poison VWAP/RVOL with zero volume.
-    if completed and float(completed.get("volume") or 0.0) > 0:
-        return completed
-    return None
-
-
-def _dispatch_completed_bars(bars: list[tuple[str, dict]]) -> None:
-    """Fan completed bars to memory, Valkey, PostgreSQL, and callbacks once."""
-    if not bars:
-        return
-    with _lock:
-        for sym, candle in bars:
-            if sym not in _live_candles:
-                _live_candles[sym] = deque(maxlen=MAX_CANDLE_HISTORY)
-            _live_candles[sym].append(candle)
-    for sym, candle in bars:
-        try:
-            _bar_close_queue.put_nowait((sym, candle))
-        except _q.Full:
-            pass
-        for fn in _bar_close_callbacks:
-            try:
-                fn(sym, candle)
-            except Exception:
-                pass
-        try:
-            _bar_persist_queue.put_nowait((sym, candle))
-        except _q.Full:
-            pass
-    _publish_candles_to_valkey(bars)
-
-
-def _process_levelone_equities(content: list) -> None:
-    global _last_ws_data_at
-    if content:
-        _last_ws_data_at = time.time()
-    updated: list[tuple[str, dict]] = []
-    need_open_backfill: list[str] = []
-    completed_bars: list[tuple[str, dict]] = []
-    with _lock:
-        for item in content:
-            sym = item.get("key", "")
-            if not sym:
-                continue
-            quote = _live_quotes.setdefault(sym, {})
-            for raw, name in _EQUITY_FIELDS.items():
-                if raw in item:
-                    quote[name] = item[raw]
-
-            # Derived: bid/ask imbalance â€” the #1 real-time directional signal
-            bid_sz = float(quote.get("bid_size", 0) or 0)
-            ask_sz = float(quote.get("ask_size", 0) or 0)
-            total  = bid_sz + ask_sz
-            quote["bid_ask_imbalance"] = (bid_sz - ask_sz) / total if total > 0 else 0.0
-            quote["updated_at"] = time.time()
-
-            # Halt detection
-            status = str(quote.get("status", "")).lower()
-            if "halt" in status:
-                _halted.add(sym)
-                logger.warning(f"[Streamer] {sym} HALTED")
-            else:
-                _halted.discard(sym)
-
-            quote["source"] = "SCHWAB_WS"
-            quote["source_status"] = "LIVE"
-            quote["is_live"] = True
-            updated.append((sym, dict(quote)))   # snapshot for callbacks (outside lock)
-            completed = _accumulate_one_minute_bar_locked(sym, quote)
-            if completed:
-                completed_bars.append((sym, completed))
-
-            # Accumulate compact quote for the 500ms Valkey flush
-            # updated_at is required so the dashboard freshness filter (main.py)
-            # can distinguish live quotes from stale Valkey cache entries.
-            _pending_ws_prices[sym] = {
-                "last":       float(quote.get("last") or 0),
-                "mark":       float(quote.get("mark") or 0),
-                "bid":        float(quote.get("bid")  or 0),
-                "ask":        float(quote.get("ask")  or 0),
-                "volume":     float(quote.get("volume") or 0),
-                "open":       float(quote.get("open") or 0),
-                "high":       float(quote.get("high") or 0),
-                "low":        float(quote.get("low")  or 0),
-                "pct_change": float(quote.get("net_pct_change") or 0),
-                "updated_at": quote["updated_at"],   # set above; required for freshness filter
-                "source": "SCHWAB_WS",
-                "source_status": "LIVE",
-                "is_live": True,
-            }
-            if (
-                _mdpoller_last_ok > 0
-                and float(quote.get("open") or 0) <= 0
-                and float(quote.get("last") or quote.get("mark") or 0) > 0
-            ):
-                need_open_backfill.append(sym)
-
-    _dispatch_completed_bars(completed_bars)
-
-    # Fire tick callbacks outside the lock â€” 250ms throttle per ticker
-    _schedule_open_backfill(need_open_backfill)
-
-    if updated and _tick_callbacks:
-        now = time.time()
-        for sym, quote in updated:
-            if now - _last_tick_ts.get(sym, 0.0) >= _TICK_MIN_INTERVAL:
-                _last_tick_ts[sym] = now
-                for fn in _tick_callbacks:
-                    try:
-                        fn(sym, quote)
-                    except Exception:
-                        pass
-
-
-def _process_levelone_futures(content: list) -> None:
-    with _lock:
-        for item in content:
-            sym = item.get("key", "")
-            if not sym:
-                continue
-            fq = _futures.setdefault(sym, {})
-            for raw, name in _FUTURES_FIELDS.items():
-                if raw in item:
-                    fq[name] = item[raw]
-            fq["updated_at"] = time.time()
-
-
-def _process_chart_equity(content: list) -> None:
-    new_bars: list[tuple[str, dict]] = []
-    for item in content:
-        sym = item.get("key", "")
-        if not sym:
-            continue
-        candle = {name: item[raw] for raw, name in _CHART_FIELDS.items() if raw in item}
-        if candle:
-            new_bars.append((sym, candle))
-    _dispatch_completed_bars(new_bars)
-
-
-def _bar_persist_worker() -> None:
-    """
-    Daemon thread: drain _bar_persist_queue â†’ batch-write to ohlcv_bars.
-
-    Collects bars for up to 2 seconds (or up to 500 at once) before
-    flushing, so a burst of 300 simultaneous minute-closes is written
-    in one executemany rather than 300 individual inserts.
-    """
-    import pandas as pd
-    from agent.historical_cache import _upsert_bars
-
-    buf: list[tuple[str, dict]] = []
-    while True:
-        # Block for up to 2 s waiting for the first item, then drain quickly
-        try:
-            item = _bar_persist_queue.get(timeout=2.0)
-            buf.append(item)
-        except _q.Empty:
-            pass
-
-        while buf and len(buf) < 500:
-            try:
-                buf.append(_bar_persist_queue.get_nowait())
-            except _q.Empty:
-                break
-
-        if not buf:
-            continue
-
-        # Group candles by ticker so we do one DataFrame per ticker
-        by_ticker: dict[str, list] = {}
-        for sym, candle in buf:
-            by_ticker.setdefault(sym, []).append(candle)
-        buf.clear()
-
-        for sym, candles in by_ticker.items():
-            try:
-                df = pd.DataFrame(candles)
-                # candle keys: open, high, low, close, volume, time_ms
-                if "time_ms" not in df.columns:
-                    continue
-                df.index = pd.to_datetime(df["time_ms"], unit="ms", utc=True)
-                df = df.drop(columns=["time_ms"], errors="ignore")
-                df = df.rename(columns={
-                    "open": "Open", "high": "High", "low": "Low",
-                    "close": "Close", "volume": "Volume",
-                })
-                _upsert_bars(sym, "1min", df)
-            except Exception:
-                pass
-
-
-def _ensure_bar_persist_worker() -> None:
-    """Start the bar-persist daemon thread once (idempotent)."""
-    global _bar_persist_worker_started
-    if _bar_persist_worker_started:
-        return
-    _bar_persist_worker_started = True
-    t = threading.Thread(target=_bar_persist_worker, daemon=True, name="BarPersist")
-    t.start()
-    logger.info("[Streamer] CHART_EQUITY persistence worker started â†’ ohlcv_bars")
-
-
-def _publish_candles_to_valkey(bars: list[tuple[str, dict]]) -> None:
-    """
-    Push new 1-min candles to Valkey LIST keys (md:1m:{ticker}).
-    Each list holds a complete regular-session working set.
-    Seven-day TTL preserves Friday history across weekends and holidays.
-    Called from _process_chart_equity â€” errors are suppressed (non-fatal).
-    """
-    try:
-        import json as _json
-        from agent.valkey_client import _get_client as _vk_get
-        client = _vk_get()
-        if not client:
-            return
-        pipe = client.pipeline(transaction=False)
-        for sym, candle in bars:
-            key = f"md:1m:{sym}"
-            pipe.rpush(key, _json.dumps(candle))
-            pipe.ltrim(key, -MAX_CANDLE_HISTORY, -1)
-            pipe.expire(key, 7 * 24 * 60 * 60)
-        pipe.execute()
-    except Exception:
-        pass  # non-fatal â€” scanner falls back to in-process cache or REST
-
-
-def _extract_today_open_from_df(df) -> float:
-    """Return today's regular-session open from a Schwab 1-min history frame."""
-    try:
-        if df is None or df.empty or "Open" not in df.columns:
-            return 0.0
-        tz = ZoneInfo("America/New_York")
-        idx = df.index
-        if getattr(idx, "tz", None) is None:
-            idx = idx.tz_localize("UTC")
-        idx = idx.tz_convert(tz)
-        local_df = df.copy()
-        local_df.index = idx
-        today = datetime.now(tz).date()
-        today_df = local_df[local_df.index.date == today]
-        if today_df.empty:
-            return 0.0
-        return float(today_df.iloc[0]["Open"] or 0.0)
-    except Exception:
-        return 0.0
-
-
-def _schedule_open_backfill(tickers: list[str]) -> None:
-    """
-    Backfill missing opens from 1-min price history once per ticker per process.
-
-    Schwab /quotes sometimes omits openPrice for thin/no-print symbols even when
-    LEVELONE streams bid/ask/last. This background path fills the dashboard open
-    column without blocking the 1-second quote poller.
-    """
-    todo = sorted({t for t in tickers if t})
-    if not todo:
-        return
-    with _open_backfill_lock:
-        todo = [t for t in todo if t not in _open_backfill_started]
-        _open_backfill_started.update(todo)
-    if not todo:
-        return
-    threading.Thread(
-        target=_backfill_open_prices,
-        args=(todo,),
-        daemon=True,
-        name=f"open-backfill-{len(todo)}",
-    ).start()
-
-
-def _backfill_open_prices(tickers: list[str]) -> None:
-    try:
-        from agent.broker.schwab_market_data import fetch_price_history_batch_async
-
-        logger.info("[MDPoller] Backfilling missing opens for %d tickers", len(tickers))
-        frames = fetch_price_history_batch_async(
-            tickers,
-            interval="1min",
-            outputsize=390,
-            extended_hours=False,
-            background=True,
-        )
-        bulk: dict[str, dict] = {}
-        with _lock:
-            for sym, df in frames.items():
-                open_price = _extract_today_open_from_df(df)
-                if open_price <= 0:
-                    continue
-                quote = _live_quotes.setdefault(sym, {})
-                quote["open"] = open_price
-                last = float(quote.get("last") or quote.get("mark") or 0)
-                if last <= 0:
-                    continue
-                status = str(quote.get("source_status") or "REST_FALLBACK")
-                source = str(quote.get("source") or "SCHWAB_REST")
-                is_live = bool(quote.get("is_live") or status == "LIVE")
-                bulk[sym] = {
-                    "last":       last,
-                    "mark":       float(quote.get("mark") or last),
-                    "open":       open_price,
-                    "bid":        float(quote.get("bid") or 0),
-                    "ask":        float(quote.get("ask") or 0),
-                    "volume":     float(quote.get("volume") or 0),
-                    "high":       float(quote.get("high") or 0),
-                    "low":        float(quote.get("low") or 0),
-                    "pct_change": float(quote.get("net_pct_change") or 0),
-                    "updated_at": float(quote.get("updated_at") or time.time()),
-                    "source": source,
-                    "source_status": status,
-                    "is_live": is_live,
-                }
-
-        if not bulk:
-            logger.info("[MDPoller] Missing-open backfill found no regular-session opens")
-            return
-        try:
-            from agent.valkey_client import publish_prices as _vk_publish
-            _vk_publish(bulk)
-        except Exception:
-            pass
-        for fn in _bulk_price_callbacks:
-            try:
-                fn(bulk)
-            except Exception:
-                pass
-        logger.info("[MDPoller] Backfilled missing opens for %d tickers", len(bulk))
-    except Exception as exc:
-        logger.debug("[MDPoller] Missing-open backfill failed: %s", exc)
-
-
-def _process_screener(service: str, content: list) -> None:
-    global _screener_up, _screener_down, _screener_vol
-    parsed = []
-    for item in content:
-        items_list = item.get("4", []) or item.get("items", [])
-        sort_field = item.get("2", "")
-        for entry in items_list:
-            parsed.append({
-                "symbol":      entry.get("symbol", ""),
-                "last_price":  entry.get("lastPrice", 0),
-                "pct_change":  entry.get("netPercentChange", 0),
-                "volume":      entry.get("totalVolume", 0),
-                "trades":      entry.get("trades", 0),
-            })
-        with _lock:
-            sf = str(sort_field).upper()
-            if "UP" in sf:
-                _screener_up = parsed[:]
-            elif "DOWN" in sf:
-                _screener_down = parsed[:]
-            else:
-                _screener_vol = parsed[:]
-
-
-def _process_message(raw: str) -> None:
-    try:
-        msg = json.loads(raw)
-    except Exception:
-        return
-
-    for data_block in msg.get("data", []):
-        svc     = data_block.get("service", "")
-        content = data_block.get("content", [])
-        if svc == "LEVELONE_EQUITIES":
-            _process_levelone_equities(content)
-        elif svc == "LEVELONE_FUTURES":
-            _process_levelone_futures(content)
-        elif svc == "CHART_EQUITY":
-            _process_chart_equity(content)
-        elif svc in ("SCREENER_EQUITY",):
-            _process_screener(svc, content)
-
-    for resp in msg.get("response", []):
-        code = resp.get("content", {}).get("code", -1)
-        cmd  = resp.get("command", "")
-        svc  = resp.get("service", "")
-        if code == 0:
-            logger.info(f"[Streamer] {svc}/{cmd} succeeded")
-        elif code != -1:
-            logger.warning(f"[Streamer] {svc}/{cmd} code={code}: "
-                           f"{resp.get('content', {}).get('msg', '')}")
-
-
-# â”€â”€ WebSocket main loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-async def _streamer_main(tickers: list[str]) -> None:
-    global _ws_connected, _ws_error
-
-    try:
-        info = _get_streamer_info()
-    except Exception as e:
-        _ws_error = str(e)
-        logger.error(f"[Streamer] Cannot get user preferences: {e}")
-        return
-
-    ws_url      = info.get("streamerSocketUrl", "")
-    customer_id = info.get("schwabClientCustomerId", "")
-    correl_id   = info.get("schwabClientCorrelId", "")
-    channel     = info.get("schwabClientChannel", "IO")
-    func_id     = info.get("schwabClientFunctionId", "APIAPP")
-
-    if not ws_url:
-        _ws_error = "No streamerSocketUrl in user preferences"
-        return
-
-    import websockets
-
-    retry_delay = 5
-    while True:
-        try:
-            logger.info(f"[Streamer] Connecting to {ws_url}â€¦")
-            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=30) as ws:
-                _ws_connected = True
-                _ws_error = None
-                retry_delay = 5   # reset on successful connect
-                logger.info("[Streamer] Connected.")
-
-                # â”€â”€ 1. LOGIN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                token = get_access_token()
-                login_msg = {"requests": [_req(
-                    "ADMIN", "LOGIN", 1, {
-                        "Authorization":         token,
-                        "SchwabClientChannel":   channel,
-                        "SchwabClientFunctionId": func_id,
-                    }, customer_id, correl_id,
-                )]}
-                await ws.send(json.dumps(login_msg))
-                resp = json.loads(await ws.recv())
-                login_code = resp.get("response", [{}])[0].get("content", {}).get("code", -1)
-                if login_code != 0:
-                    logger.error(f"[Streamer] LOGIN failed: {resp}")
-                    _ws_connected = False
-                    break
-
-                logger.info("[Streamer] Logged in.")
-
-                # â”€â”€ 2. LEVELONE_EQUITIES for all tickers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                # Fields: bid, ask, last, bid_size, ask_size, volume, high, low,
-                #         prev_close, net_change, 52w_high, 52w_low, status,
-                #         mark, net_pct_change, hard_to_borrow, shortable
-                equity_fields = "0,1,2,3,4,5,8,10,11,12,18,19,20,32,33,42,48,49"
-                # Subscribe in batches of 100 (streamer symbol limit per command)
-                batch_size = 100
-                for i in range(0, len(tickers), batch_size):
-                    batch = tickers[i: i + batch_size]
-                    cmd = "SUBS" if i == 0 else "ADD"
-                    subs_msg = {"requests": [_req(
-                        "LEVELONE_EQUITIES", cmd, 10 + i, {
-                            "keys":   ",".join(batch),
-                            "fields": equity_fields,
-                        }, customer_id, correl_id,
-                    )]}
-                    await ws.send(json.dumps(subs_msg))
-
-                # â”€â”€ 3. One-minute bars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                # LEVELONE cumulative-volume deltas build OHLCV bars for all 477
-                # symbols. This avoids CHART_EQUITY's lower symbol cap and gives
-                # every scalp plan the same indicator contract.
-                logger.info(
-                    "[Streamer] LEVELONE OHLCV builder active for %d tickers",
-                    len(tickers),
-                )
-
-                # â”€â”€ 4. SCREENER_EQUITY â€” NASDAQ top movers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                screener_keys = (
-                    "NASDAQ_PERCENT_CHANGE_UP_1,"
-                    "NASDAQ_PERCENT_CHANGE_DOWN_1,"
-                    "NASDAQ_VOLUME_0"
-                )
-                screener_msg = {"requests": [_req(
-                    "SCREENER_EQUITY", "SUBS", 300, {
-                        "keys":   screener_keys,
-                        "fields": "0,1,2,3,4",
-                    }, customer_id, correl_id,
-                )]}
-                await ws.send(json.dumps(screener_msg))
-
-                # â”€â”€ 5. LEVELONE_FUTURES â€” NQ + ES macro direction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                futures_msg = {"requests": [_req(
-                    "LEVELONE_FUTURES", "SUBS", 400, {
-                        "keys":   ",".join(FUTURES_SYMBOLS),
-                        "fields": "0,1,2,3,8,19,20,23",
-                    }, customer_id, correl_id,
-                )]}
-                await ws.send(json.dumps(futures_msg))
-
-                logger.info(f"[Streamer] Subscribed to {len(tickers)} equities, "
-                            f"{len(FUTURES_SYMBOLS)} futures, screener.")
-
-                # â”€â”€ 6. Price flush task â€” batch WS prices to Valkey + dashboard â”€â”€
-                # Accumulates individual tick updates and publishes a single bulk
-                # message every 500ms.  This keeps Valkey fresh (scanner reads it)
-                # and fires the same _bulk_price_callbacks the MDPoller uses, so
-                # the dashboard gets one price update per 500ms instead of 477
-                # individual tick messages.
-                async def _flush_prices():
-                    while True:
-                        await asyncio.sleep(0.5)
-                        with _lock:
-                            if not _pending_ws_prices:
-                                continue
-                            batch = dict(_pending_ws_prices)
-                            _pending_ws_prices.clear()
-                        try:
-                            from agent.valkey_client import publish_prices as _vk_pub
-                            _vk_pub(batch)
-                        except Exception:
-                            pass
-                        for _fn in _bulk_price_callbacks:
-                            try:
-                                _fn(batch)
-                            except Exception:
-                                pass
-
-                flush_task = asyncio.create_task(_flush_prices())
-
-                # â”€â”€ 7. Message loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                try:
-                    async for raw in ws:
-                        _process_message(raw)
-                finally:
-                    flush_task.cancel()
-            _ws_connected = False
-            _ws_error = "WebSocket closed by Schwab"
-            logger.warning(
-                f"[Streamer] Connection closed by Schwab - retrying in {retry_delay}s"
-            )
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 15)
-
-        except Exception as e:
-            _ws_connected = False
-            _ws_error = str(e)
-            logger.warning(f"[Streamer] Disconnected: {e} â€” retrying in {retry_delay}s")
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 15)
-
-
-# â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def is_md_poller_running() -> bool:
-    """True when the REST MDPoller thread is alive."""
-    return bool(_mdpoller_thread and _mdpoller_thread.is_alive())
-
-
-def update_md_poller_tickers(tickers: list[str]) -> None:
-    """Hot-reload the REST universe; the next poll cycle rebuilds its batches."""
-    global _subscribed_tickers
-    normalized = list(dict.fromkeys(str(t).upper() for t in tickers if t))
-    with _lock:
-        _subscribed_tickers = normalized
-    logger.info("[MDPoller] Universe updated to %d tickers", len(normalized))
-
-
-def start_md_poller(tickers: list[str], interval: float = 1.0,
-                    parallel_batches: int = 3,
-                    startup_delay_s: float = 0.0) -> None:
-    """
-    REST-based real-time quote poller â€” Market Data app only.
-
-    startup_delay_s: seconds to wait before the first poll cycle.
-    Set this to ~90 s on app startup so the scanner's cold-cache OHLCV fetch
-    (181 tickers Ã— 4 timeframes) can complete before the MDPoller starts
-    consuming the same rate-limit budget.  After a warm restart the OHLCV
-    cache is already populated, so the fetch completes in < 10 s and the delay
-    is largely free.
-
-    Rate budget: 2 req/s = 120 req/min = exactly Schwab's documented limit.
-    Using 3 batches caused 180 req/min â†’ 429 errors â†’ cycles returning empty.
-    """
-    global _mdpoller_thread, _subscribed_tickers
-
-    if _mdpoller_thread and _mdpoller_thread.is_alive():
-        logger.debug("[MDPoller] Already running.")
-        return
-
-    _ensure_bar_persist_worker()
-
-    all_tickers = list(tickers)
-    _subscribed_tickers = all_tickers
-
-    # Build balanced batches once at startup â€” fixed for the lifetime of the poller
-    n          = len(all_tickers)
-    batch_size = max(1, (n + parallel_batches - 1) // parallel_batches)
-    batches    = [all_tickers[i:i + batch_size] for i in range(0, n, batch_size)]
-
-    def _process_and_broadcast(quotes: dict) -> bool:
-        """
-        Write quotes into _live_quotes and immediately fire WebSocket callbacks.
-        Called from a worker thread the moment a batch API response arrives.
-        Thread-safe: _lock guards _live_quotes; run_coroutine_threadsafe is
-        explicitly documented as safe to call from any thread.
-        Returns True if at least one valid price was processed.
-        """
-        if not quotes:
-            return False
-        bulk: dict[str, dict] = {}
-        upd:  list[tuple[str, dict]] = []
-        need_open_backfill: list[str] = []
-        completed_bars: list[tuple[str, dict]] = []
-        with _lock:
-            for sym, q in quotes.items():
-                quote = _live_quotes.setdefault(sym, {})
-                rest_open = float(q.get("open") or 0)
-                if (
-                    quote.get("source_status") == "LIVE"
-                    and time.time() - float(quote.get("updated_at") or 0.0) <= 2.0
-                ):
-                    # Keep true WS ticks visible as LIVE instead of overwriting
-                    # them with REST fallback for the same ticker. Still seed
-                    # regular-session open from REST: Schwab WS ticks are
-                    # compact and often omit open, but the dashboard needs it.
-                    if rest_open > 0 and abs(float(quote.get("open") or 0) - rest_open) > 1e-9:
-                        quote["open"] = rest_open
-                        upd.append((sym, dict(quote)))
-                        bulk[sym] = {
-                            "last":       float(quote.get("last") or 0),
-                            "mark":       float(quote.get("mark") or 0),
-                            "open":       rest_open,
-                            "bid":        float(quote.get("bid") or 0),
-                            "ask":        float(quote.get("ask") or 0),
-                            "volume":     float(quote.get("volume") or 0),
-                            "high":       float(quote.get("high") or 0),
-                            "low":        float(quote.get("low") or 0),
-                            "pct_change": float(quote.get("net_pct_change") or 0),
-                            "updated_at": float(quote.get("updated_at") or time.time()),
-                            "source": "SCHWAB_WS",
-                            "source_status": "LIVE",
-                            "is_live": True,
-                        }
-                    elif float(quote.get("open") or 0) <= 0 and float(quote.get("last") or quote.get("mark") or 0) > 0:
-                        need_open_backfill.append(sym)
-                    continue
-                quote["last"]       = float(q.get("last") or 0)
-                quote["mark"]       = float(q.get("mark") or 0)
-                quote["bid"]        = float(q.get("bid")  or 0)
-                quote["ask"]        = float(q.get("ask")  or 0)
-                quote["volume"]     = float(q.get("volume") or 0)
-                quote["open"]       = rest_open
-                quote["high"]       = float(q.get("high")  or 0)
-                quote["low"]        = float(q.get("low")   or 0)
-                quote["prev_close"] = float(q.get("close") or 0)
-                raw_chg = float(q.get("pct_change") or 0)
-                if raw_chg == 0 and quote["last"] > 0 and quote["prev_close"] > 0:
-                    raw_chg = (quote["last"] - quote["prev_close"]) / quote["prev_close"] * 100
-                quote["net_pct_change"] = round(raw_chg, 3)
-                quote["updated_at"]    = time.time()
-                quote["source"]        = "SCHWAB_REST"
-                quote["source_status"] = "REST_FALLBACK"
-                quote["is_live"]       = False
-                completed = _accumulate_one_minute_bar_locked(sym, quote)
-                if completed:
-                    completed_bars.append((sym, completed))
-                if quote["last"] <= 0:
-                    _halted.add(sym)
-                else:
-                    _halted.discard(sym)
-                if quote["open"] <= 0 and (quote["last"] > 0 or quote["mark"] > 0):
-                    need_open_backfill.append(sym)
-                upd.append((sym, dict(quote)))
-                bulk[sym] = {
-                    "last":       quote["last"],
-                    "mark":       quote["mark"],   # bid/ask midpoint â€” more current in AH/PM
-                    "open":       quote["open"],
-                    "bid":        quote["bid"],
-                    "ask":        quote["ask"],
-                    "volume":     quote["volume"],
-                    "high":       quote["high"],
-                    "low":        quote["low"],
-                    "pct_change": quote["net_pct_change"],
-                    "updated_at": quote["updated_at"],   # required for dashboard freshness filter
-                    "source": "SCHWAB_REST",
-                    "source_status": "REST_FALLBACK",
-                    "is_live": False,
-                }
-
-        _dispatch_completed_bars(completed_bars)
-        _schedule_open_backfill(need_open_backfill)
-
-        if not bulk:
-            return False
-
-        # Publish to Valkey price bus (non-blocking â€” fire and forget)
-        try:
-            from agent.valkey_client import publish_prices as _vk_publish
-            _vk_publish(bulk)
-        except Exception:
-            pass
-
-        # Bulk WebSocket broadcast â€” one message per batch, sent immediately
-        if _bulk_price_callbacks:
-            for fn in _bulk_price_callbacks:
-                try:
-                    fn(bulk)
-                except Exception:
-                    pass
-
-        # Legacy per-ticker callbacks (throttled to _TICK_MIN_INTERVAL per symbol)
-        if upd and _tick_callbacks:
-            now = time.time()
-            for sym, quote in upd:
-                if now - _last_tick_ts.get(sym, 0.0) >= _TICK_MIN_INTERVAL:
-                    _last_tick_ts[sym] = now
-                    for fn in _tick_callbacks:
-                        try:
-                            fn(sym, quote)
-                        except Exception:
-                            pass
-        return True
-
-    def _fetch_batch_and_stream(batch_tickers: list[str]) -> bool:
-        """
-        Worker task: fetch one batch, then broadcast immediately â€” no waiting
-        for other batches.  Called concurrently from the thread pool.
-        """
-        from agent.broker.schwab_market_data import fetch_full_quotes
-        result = fetch_full_quotes(batch_tickers)
-        return _process_and_broadcast(result)
-
-    def _poll_loop() -> None:
-        import concurrent.futures as _cf
-        global _mdpoller_running, _mdpoller_cycle, _mdpoller_last_ok, _mdpoller_error
-        from agent.broker.schwab_market_data import _is_authorised
-        _mdpoller_running = True
-
-        logger.info(
-            f"[MDPoller] Started â€” {n} tickers | {len(batches)} parallel batches "
-            f"(~{batch_size}/batch) | {interval}s cycle"
-        )
-
-        # Many more workers than batches so in-flight requests from the previous
-        # cycle never block new submissions.  At 2 batches/cycle each taking up
-        # to ~4 s, up to 8 requests can be simultaneously in-flight; 16 workers
-        # ensures new cycle submits immediately even in the worst case.
-        _fetch_pool = _cf.ThreadPoolExecutor(
-            max_workers=max(16, len(batches) * 4), thread_name_prefix="md_fetch"
-        )
-
-        if startup_delay_s > 0:
-            logger.info(
-                f"[MDPoller] Waiting {startup_delay_s:.0f}s for scanner to warm "
-                f"OHLCV cache before first pollâ€¦"
-            )
-            time.sleep(startup_delay_s)
-            logger.info("[MDPoller] Startup delay complete â€” beginning polling.")
-
-        cycle            = 0
-        auth_misses      = 0
-        consecutive_miss = 0   # consecutive all-empty cycles (rate-limit indicator)
-        while True:
-            _cycle_start = time.time()
-            try:
-                if not _is_authorised():
-                    _mdpoller_error = "Schwab Market Data not authorized â€” visit /schwab/auth/md"
-                    auth_misses += 1
-                    # Back off logging frequency after extended auth failures:
-                    # first 5 min â†’ every 30 s, first hour â†’ every 5 min, after â†’ every 50 min
-                    if auth_misses <= 100:
-                        _log_interval = 10
-                    elif auth_misses <= 1200:
-                        _log_interval = 100
-                    else:
-                        _log_interval = 1000
-                    if auth_misses % _log_interval == 1:
-                        logger.warning(
-                            f"[MDPoller] Not authorised (missed {auth_misses} cycles) â€” "
-                            "visit /schwab/auth/md to re-authenticate."
-                        )
-                    time.sleep(3)   # fast retry; was 10 s which froze prices for 10+ s
-                    continue
-
-                auth_misses = 0   # reset on success
-
-                # Stand down only when the WS streamer is covering almost the
-                # whole universe.  A single active WS ticker must not make the
-                # REST fallback stop while the rest of the dashboard goes stale.
-                if ws_fresh_coverage(max_age_s=2.0) >= max(
-                    _WS_STANDDOWN_FRESH_PCT, 0.999
-                ):
-                    consecutive_miss = 0
-                    time.sleep(interval)
-                    continue
-
-                # Rebuild batches from the registry-owned universe so a
-                # validated replacement becomes available without a restart.
-                with _lock:
-                    cycle_tickers = list(_subscribed_tickers)
-                cycle_n = len(cycle_tickers)
-                cycle_batch_size = max(
-                    1, (cycle_n + parallel_batches - 1) // parallel_batches
-                )
-                cycle_batches = [
-                    cycle_tickers[i:i + cycle_batch_size]
-                    for i in range(0, cycle_n, cycle_batch_size)
-                ]
-                if not cycle_batches:
-                    _mdpoller_error = "eligible universe is empty"
-                    time.sleep(3)
-                    continue
-
-                # Submit all batches simultaneously.
-                # Each worker broadcasts the moment its API call returns â€” no merging,
-                # no waiting for siblings.  The frontend receives N separate `prices`
-                # messages in rapid succession and renders each group immediately.
-                futures = [
-                    _fetch_pool.submit(_fetch_batch_and_stream, batch)
-                    for batch in cycle_batches
-                ]
-
-                # Wait only to know when the slowest batch finishes so we can
-                # calculate the correct sleep time for the next cycle.
-                # timeout = interval*6 gives a 2s cushion over the 4s request
-                # timeout so futures never appear "timed out" for a slow-but-valid
-                # HTTPS round-trip (SSL handshake + large JSON payload).
-                done, pending = _cf.wait(futures, timeout=interval * 6)
-
-                n_ok = sum(
-                    1 for f in done
-                    if not f.cancelled() and f.exception() is None and f.result()
-                )
-                if n_ok:
-                    _mdpoller_error = None
-                    _mdpoller_last_ok = time.time()
-                    consecutive_miss = 0
-                else:
-                    consecutive_miss += 1
-                    # Only log every 10 misses (once per ~backoff window) to avoid spam
-                    if consecutive_miss == 1 or consecutive_miss % 10 == 0:
-                        logger.warning(
-                            f"[MDPoller] Cycle {cycle}: all {len(cycle_batches)} batches empty "
-                            f"({consecutive_miss} consecutive â€” rate-limited)"
-                        )
-                    _mdpoller_error = f"rate-limited ({consecutive_miss} consecutive empty cycles)"
-
-                if pending:
-                    logger.warning(f"[MDPoller] Cycle {cycle}: {len(pending)} batch(es) timed out")
-
-                # Periodic health log â€” one INFO per minute so ops can confirm it's alive
-                if cycle % 60 == 0:
-                    elapsed_ms = int((time.time() - _cycle_start) * 1000)
-                    logger.info(
-                        f"[MDPoller] âœ“ Cycle {cycle} | {n_ok}/{len(cycle_batches)} batches OK "
-                        f"| {cycle_n} tickers | {elapsed_ms}ms"
-                    )
-
-            except Exception as _e:
-                logger.warning(f"[MDPoller] poll error (cycle {cycle}): {_e}")
-                _mdpoller_error = str(_e)
-                consecutive_miss += 1
-
-            _mdpoller_cycle = cycle
-            cycle += 1
-
-            # CDN/rate-limit back-off: Akamai blocks last 30-60s. One flat 30s
-            # wait outlasts the block; the old 3s/8s/15s ladder retried 7 times
-            # inside the block window, extending it and causing 46s+ data gaps.
-            back_off = interval if consecutive_miss == 0 else 30.0
-
-            elapsed   = time.time() - _cycle_start
-            remaining = back_off - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
-
-    _mdpoller_thread = threading.Thread(
-        target=_poll_loop, daemon=True, name="SchwabMDPoller"
-    )
-    _mdpoller_thread.start()
-    logger.info(
-        f"[MDPoller] Thread started â€” {n} tickers, "
-        f"{len(batches)} non-blocking parallel batches."
-    )
-
-
-def start_streamer(tickers: list[str]) -> None:
-    """
-    Launch the Schwab WebSocket streamer in a background daemon thread.
-    Safe to call multiple times â€” only starts once.
-    Can run alongside the MDPoller (they use separate threads).
-    """
-    global _streamer_thread, _event_loop, _subscribed_tickers
-
-    with _streamer_start_lock:
-        if _streamer_thread and _streamer_thread.is_alive():
-            logger.debug("[Streamer] Already running.")
-            return
-
-        ts = get_token_status()
-        if not ts.get("connected"):
-            ttl = ts.get("refresh_token_ttl_s", 0)
-            logger.warning(
-                f"[Streamer] Schwab A+T not connected (refresh_token_ttl={ttl}s) â€” "
-                f"visit /schwab/auth/at to re-authenticate."
-            )
-            global _ws_error
-            _ws_error = "Schwab A+T not authenticated â€” visit /schwab/auth/at"
-            return
-
-        _subscribed_tickers = list(tickers)
-        _ensure_bar_persist_worker()
-
-        def _run():
-            global _event_loop
-            loop = asyncio.new_event_loop()
-            _event_loop = loop
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(_streamer_main(tickers))
-
-        _streamer_thread = threading.Thread(target=_run, daemon=True, name="SchwabStreamer")
-        _streamer_thread.start()
-        logger.info(f"[Streamer] WS streamer started for {len(tickers)} tickers.")
-
-
-def stop_streamer() -> None:
-    global _event_loop
-    if _event_loop and not _event_loop.is_closed():
-        _event_loop.call_soon_threadsafe(_event_loop.stop)
-
-
-def get_live_quote(ticker: str) -> dict:
-    """Latest Level 1 quote for a ticker. Empty dict if not streaming."""
-    with _lock:
-        return dict(_live_quotes.get(ticker, {}))
-
-
-def get_live_quotes_snapshot(max_age_s: float | None = None) -> dict[str, dict]:
-    """
-    Return a thread-safe snapshot of current Level 1 quotes.
-
-    max_age_s filters out stale quotes by updated_at. Passing None returns every
-    quote currently held in memory, which is useful for closed-session dashboard
-    observation rows where last known price is still informative.
-    """
-    now = time.time()
-    with _lock:
-        return {
-            sym: dict(quote)
-            for sym, quote in _live_quotes.items()
-            if max_age_s is None or now - float(quote.get("updated_at") or 0.0) <= max_age_s
-        }
-
-
-def get_bid_ask_imbalance(ticker: str) -> float:
-    """
-    Bid/ask size imbalance: (bid_size âˆ’ ask_size) / (bid_size + ask_size).
-    Range: âˆ’1.0 (all sellers) â†’ +1.0 (all buyers).
-    Returns 0.0 if no live data.
-    """
-    with _lock:
-        return float(_live_quotes.get(ticker, {}).get("bid_ask_imbalance", 0.0))
-
-
-def get_live_candles(ticker: str, n: int = 300) -> list[dict]:
-    """Last n completed 1-min candles for a ticker from the streamer."""
-    with _lock:
-        dq = _live_candles.get(ticker)
-        if not dq:
-            return []
-        items = list(dq)
-        return items[-n:] if len(items) > n else items
-
-
-def get_screener_priority(tickers: set[str] | None = None) -> list[str]:
-    """
-    Return symbols from SCREENER sorted by activity (gainers + losers + volume).
-    If `tickers` is provided, only return symbols that are in that set.
-    Call this to re-order the scan queue so hot tickers are scanned first.
-    """
-    with _lock:
-        combined = _screener_up[:] + _screener_down[:] + _screener_vol[:]
-    seen, ordered = set(), []
-    for item in combined:
-        sym = item.get("symbol", "")
-        if sym and sym not in seen:
-            if tickers is None or sym in tickers:
-                seen.add(sym)
-                ordered.append(sym)
-    return ordered
-
-
-def get_nq_futures_bias() -> float:
-    """
-    E-Mini NASDAQ 100 futures bias: pct_change normalised to âˆ’1â€¦+1.
-    Â±0.5 % maps to roughly Â±1.0; beyond Â±0.5 % is clipped.
-    Returns 0.0 if futures data not available yet.
-    """
-    sym = _front_month("NQ")
-    with _lock:
-        fq = _futures.get(sym, {})
-    pct = float(fq.get("pct_change", 0) or 0)
-    return max(-1.0, min(1.0, pct / 0.5))   # 0.5 % â†’ bias of 1.0
-
-
-def get_es_futures_bias() -> float:
-    """S&P 500 E-Mini futures bias (same scale as NQ)."""
-    sym = _front_month("ES")
-    with _lock:
-        fq = _futures.get(sym, {})
-    pct = float(fq.get("pct_change", 0) or 0)
-    return max(-1.0, min(1.0, pct / 0.5))
-
-
-def is_ticker_halted(ticker: str) -> bool:
-    """True if the ticker's security status is currently Halted."""
-    with _lock:
-        return ticker in _halted
-
-
-def register_bar_close_callback(fn) -> None:
-    """Register fn(ticker: str, candle: dict) â€” called when each 1-min bar closes."""
-    _bar_close_callbacks.append(fn)
-
-
-def get_bar_close_queue() -> "_q.Queue":
-    """Queue of (ticker, candle) tuples published on every one-minute close."""
-    return _bar_close_queue
-
-
-def get_streaming_bar_count(ticker: str) -> int:
-    """Number of 1-min bars currently buffered for ticker (0 if not streaming)."""
-    with _lock:
-        dq = _live_candles.get(ticker)
-        return len(dq) if dq else 0
-
-
-def get_halted_tickers() -> set[str]:
-    with _lock:
-        return set(_halted)
-
-
-def get_live_1m_df(ticker: str) -> "Optional[object]":
-    """
-    Convert the live CHART_EQUITY candle deque into a pandas DataFrame that
-    matches the Twelve Data format used by the scanner and feature engine.
-
-    Columns: Open, High, Low, Close, Volume  (float64)
-    Index:   DatetimeIndex in America/New_York tz, oldest first.
-
-    Returns None if fewer than 5 candles are available (not enough for indicators).
-    """
-    import pandas as pd
-    candles = get_live_candles(ticker, MAX_CANDLE_HISTORY)
-    if len(candles) < 5:
-        return None
-    df = pd.DataFrame({
-        "Open":   [float(c.get("open",   0)) for c in candles],
-        "High":   [float(c.get("high",   0)) for c in candles],
-        "Low":    [float(c.get("low",    0)) for c in candles],
-        "Close":  [float(c.get("close",  0)) for c in candles],
-        "Volume": [float(c.get("volume", 0)) for c in candles],
-    })
-    # Build DatetimeIndex from Schwab epoch-ms timestamps if available
-    if candles[0].get("time_ms"):
-        ts = pd.to_datetime([c.get("time_ms", 0) for c in candles],
-                            unit="ms", utc=True)
-        df.index = ts.tz_convert("America/New_York")
-    # Drop bars with zero close (incomplete / bad data)
-    df = df[df["Close"] > 0].copy()
-    return df if len(df) >= 5 else None
-
-
-def is_streamer_ready() -> bool:
-    """True when the WS streamer is connected and has live quote data."""
-    return bool(
-        _streamer_thread and _streamer_thread.is_alive()
-        and _ws_connected and _live_quotes
-    )
-
-
-def is_ws_data_live(max_age_s: float = 2.0) -> bool:
-    """True when the WS streamer has received LEVELONE_EQUITIES data within
-    max_age_s seconds. More reliable than is_streamer_ready() because it
-    confirms data is actually flowing, not just that the socket is open."""
-    return bool(
-        _streamer_thread and _streamer_thread.is_alive()
-        and _last_ws_data_at > 0
-        and time.time() - _last_ws_data_at < max_age_s
-    )
-
-
-def ws_fresh_coverage(max_age_s: float = 2.0) -> float:
-    """Return fraction of subscribed tickers with fresh Schwab WS quotes."""
-    with _lock:
-        tickers = list(_subscribed_tickers)
-        quotes = {ticker: dict(_live_quotes.get(ticker, {})) for ticker in tickers}
-    if not tickers:
-        return 0.0
-    now = time.time()
-    fresh = 0
-    for ticker in tickers:
-        quote = quotes.get(ticker) or {}
-        if quote.get("source_status") != "LIVE":
-            continue
-        if now - float(quote.get("updated_at") or 0.0) <= max_age_s:
-            fresh += 1
-    return fresh / len(tickers)
-
-
-def get_streamer_status() -> dict:
-    """
-    Return a health snapshot for both the WS streamer and the REST MDPoller.
-    Callers can read ws_streamer.* and md_poller.* independently.
-    """
-    sym_nq = _front_month("NQ")
-    sym_es = _front_month("ES")
-    with _lock:
-        nq = dict(_futures.get(sym_nq, {}))
-        es = dict(_futures.get(sym_es, {}))
-        live_count   = len(_live_quotes)
-        candle_count = len(_live_candles)
-        halted_count = len(_halted)
-
-    mdpoller_ago = round(time.time() - _mdpoller_last_ok, 1) if _mdpoller_last_ok else None
-
-    return {
-        # Legacy flat keys â€” kept for backward compat
-        "connected":      _ws_connected,
-        "error":          _ws_error,
-        "live_quotes":    live_count,
-        "live_candles":   candle_count,
-        "halted_tickers": halted_count,
-        "futures":        {sym_nq: nq, sym_es: es},
-        "nq_bias":        get_nq_futures_bias(),
-        "es_bias":        get_es_futures_bias(),
-        # New structured keys â€” used by /api/services
-        "ws_streamer": {
-            "running":   bool(_streamer_thread and _streamer_thread.is_alive()),
-            "connected": _ws_connected and bool(_streamer_thread and _streamer_thread.is_alive()),
-            "live_quotes":    live_count if (_streamer_thread and _streamer_thread.is_alive()) else 0,
-            "fresh_coverage_pct": round(ws_fresh_coverage(max_age_s=2.0) * 100, 1),
-            "live_candles":   candle_count,
-            "halted_tickers": halted_count,
-            "nq_bias":   get_nq_futures_bias(),
-            "error":     _ws_error if (_streamer_thread and _streamer_thread.is_alive()) else None,
-        },
-        "md_poller": {
-            "running":      _mdpoller_running and bool(_mdpoller_thread and _mdpoller_thread.is_alive()),
-            "cycle":        _mdpoller_cycle,
-            "last_ok_ago_s": mdpoller_ago,
-            "live_quotes":  live_count if not (_streamer_thread and _streamer_thread.is_alive()) else 0,
-            "error":        _mdpoller_error,
-        },
-    }
+    if complet×nûÖÚ$z{-®éÜj×Væ—fW'6R—2V×G’ ¢F–ÖRç6ÆVWƒ2¢6öçF–çVP ¢27V&Ö—BÆÂ&F6†W26–×VÇFæV÷W6Ç’à¢2V6‚v÷&¶W"'&öF67G2F†RÖöÖVçB—G2’6ÆÂ&WGW&ç2(	BæòÖW&v–ærÀĞ¢2æòv—F–ærf÷"6–&Æ–æw2âF†Rg&öçFVæB&V6V—fW2â6W&FR&–6W6 Ğ¢2ÖW76vW2–â&–B7V66W76–öâæB&VæFW'2V6‚w&÷W–ÖÖVF–FVÇ’àĞ¢gWGW&W2Ò°Ğ¢öfWF6…÷ööÂç7V&Ö—B…öfWF6…ö&F6…öæE÷7G&VÒÂ&F6‚Ğ¢f÷"&F6‚–â7–6ÆUö&F6†W0¢ĞĞ Ğ¢2v—BöæÇ’Fò¶æ÷rv†VâF†R6Æ÷vW7B&F6‚f–æ—6†W26òvR6àĞ¢26Æ7VÆFRF†R6÷'&V7B6ÆVWF–ÖRf÷"F†RæW‡B7–6ÆRàĞ¢2F–ÖV÷WBÒ–çFW'fÂ£bv—fW2'27W6†–öâ÷fW"F†RG2&WVW7@Ğ¢2F–ÖV÷WB6ògWGW&W2æWfW"V"'F–ÖVB÷WB"f÷"6Æ÷rÖ'WB×fÆ–@Ğ¢2…EE2&÷VæB×G&—…54Â†æG6†¶R²Æ&vR¥4ôâ–ÆöB’àĞ¢FöæRÂVæF–ærÒö6bçv—B†gWGW&W2ÂF–ÖV÷WCÖ–çFW'fÂ¢bĞ Ğ¢åöö²Ò7VÒ€Ğ¢f÷"b–âFöæPĞ¢–bæ÷Bbæ6æ6VÆÆVB‚’æBbæW†6WF–öâ‚’—2æöæRæBbç&W7VÇB‚Ğ¢Ğ¢–båöö³ ¢öÖGöÆÆW%öW'&÷"ÒæöæP¢öÖGöÆÆW%öÆ7Eöö²ÒF–ÖRçF–ÖR‚¢6öç6V7WF—fUöÖ—72Ò ¢VÇ6S Ğ¢6öç6V7WF—fUöÖ—72³ÒĞ¢2öæÇ’ÆörWfW'’Ö—76W2†öæ6RW"æ&6¶öfbv–æF÷r’Fòfö–B7ĞĞ¢–b6öç6V7WF—fUöÖ—72ÓÒ÷"6öç6V7WF—fUöÖ—72RÓÒ Ğ¢ÆövvW"çv&æ–ær€Ğ¢b%´ÔEöÆÆW%Ò7–6ÆR¶7–6ÆWÓ¢ÆÂ¶ÆVâ†7–6ÆUö&F6†W2—Ò&F6†W2V×G’ ¢b"‡¶6öç6V7WF—fUöÖ—77Ò6öç6V7WF—fR(	B&FRÖÆ–Ö—FVB’ Ğ¢Ğ¢öÖGöÆÆW%öW'&÷"Òb'&FRÖÆ–Ö—FVB‡¶6öç6V7WF—fUöÖ—77Ò6öç6V7WF—fRV×G’7–6ÆW2’ Ğ Ğ¢–bVæF–æs Ğ¢ÆövvW"çv&æ–ær†b%´ÔEöÆÆW%Ò7–6ÆR¶7–6ÆWÓ¢¶ÆVâ‡VæF–ær—Ò&F6‚†W2’F–ÖVB÷WB"Ğ Ğ¢2W&–öF–2†VÇF‚Æör(	BöæR”ädòW"Ö–çWFR6ò÷26â6öæf—&Ò—Bw2Æ—fPĞ¢–b7–6ÆRRcÓÒ Ğ¢VÆ6VEö×2Ò–çB‚‡F–ÖRçF–ÖR‚’Òö7–6ÆU÷7F'B’¢Ğ¢ÆövvW"æ–æfò€Ğ¢b%´ÔEöÆÆW%Ò)É27–6ÆR¶7–6ÆWÒÂ¶åöö·Ò÷¶ÆVâ†7–6ÆUö&F6†W2—Ò&F6†W2ô² ¢b'Â¶7–6ÆUöçÒF–6¶W'2Â¶VÆ6VEö×7Ö×2 ¢Ğ Ğ¢W†6WBW†6WF–öâ2öS Ğ¢ÆövvW"çv&æ–ær†b%´ÔEöÆÆW%ÒöÆÂW'&÷"†7–6ÆR¶7–6ÆWÒ“¢µöWÒ"Ğ¢öÖGöÆÆW%öW'&÷"Ò7G"…öRĞ¢6öç6V7WF—fUöÖ—72³ÒĞ Ğ¢öÖGöÆÆW%ö7–6ÆRÒ7–6ÆPĞ¢7–6ÆR³ÒĞ Ğ¢24Dâ÷&FRÖÆ–Ö—B&6²Ööfc¢¶Ö’&Æö6·2Æ7B3Óc2âöæRfÆB30Ğ¢2v—B÷WFÆ7G2F†R&Æö6³²F†RöÆB72ó‡2óW2ÆFFW"&WG&–VBrF–ÖW0Ğ¢2–ç6–FRF†R&Æö6²v–æF÷rÂW‡FVæF–ær—BæB6W6–ærCg2²FFv2àĞ¢&6µööfbÒ–çFW'fÂ–b6öç6V7WF—fUöÖ—72ÓÒVÇ6R3ã Ğ Ğ¢VÆ6VBÒF–ÖRçF–ÖR‚’Òö7–6ÆU÷7F'@Ğ¢&VÖ–æ–ærÒ&6µööfbÒVÆ6V@Ğ¢–b&VÖ–æ–ærâ Ğ¢F–ÖRç6ÆVW‡&VÖ–æ–ærĞ Ğ¢öÖGöÆÆW%÷F‡&VBÒF‡&VF–æråF‡&VB€Ğ¢F&vWCÕ÷öÆÅöÆö÷ÂFVÖöãÕG'VRÂæÖSÒ%66‡v$ÔEöÆÆW" Ğ¢Ğ¢öÖGöÆÆW%÷F‡&VBç7F'B‚Ğ¢ÆövvW"æ–æfò€Ğ¢b%´ÔEöÆÆW%ÒF‡&VB7F'FVB(	B¶çÒF–6¶W'2Â Ğ¢b'¶ÆVâ†&F6†W2—ÒæöâÖ&Æö6¶–ær&ÆÆVÂ&F6†W2â Ğ¢Ğ Ğ Ğ¦FVb7F'E÷7G&VÖW"‡F–6¶W'3¢Æ—7E·7G%Ò’ÓâæöæS ¢"" Ğ¢ÆVæ6‚F†R66‡v"vV%6ö6¶WB7G&VÖW"–â&6¶w&÷VæBFVÖöâF‡&VBàĞ¢6fRFò6ÆÂ×VÇF—ÆRF–ÖW2(	BöæÇ’7F'G2öæ6RàĞ¢6â'VâÆöæw6–FRF†RÔEöÆÆW"‡F†W’W6R6W&FRF‡&VG2’àĞ¢"" Ğ¢vÆö&Â÷7G&VÖW%÷F‡&VBÂöWfVçEöÆö÷Â÷w5öFW6—&VE÷F–6¶W'0 ¢v—F‚÷7G&VÖW%÷7F'EöÆö6³ ¢–b÷7G&VÖW%÷F‡&VBæB÷7G&VÖW%÷F‡&VBæ—5öÆ—fR‚“ ¢WFFU÷7G&VÖW%÷F–6¶W'2‡F–6¶W'2¢ÆövvW"æFV'Vr‚%µ7G&VÖW%ÒÇ&VG’'Vææ–ærâ"¢&WGW&à ¢G2ÒvWE÷Fö¶Vå÷7FGW2‚¢–bæ÷BG2ævWB‚&6öææV7FVB"“ ¢GFÂÒG2ævWB‚'&Vg&W6…÷Fö¶Vå÷GFÅ÷2"Â¢ÆövvW"çv&æ–ær€¢b%µ7G&VÖW%Ò66‡v"µBæ÷B6öææV7FVB‡&Vg&W6…÷Fö¶Vå÷GFÃ×·GFÇ×2’(	B ¢b'f—6—B÷66‡v"öWF‚öBFò&RÖWF†VçF–6FRâ ¢¢vÆö&Â÷w5öW'&÷ ¢÷w5öW'&÷"Ò%66‡v"µBæ÷BWF†VçF–6FVB(	Bf—6—B÷66‡v"öWF‚öB ¢&WGW&à ¢÷w5öFW6—&VE÷F–6¶W'2ÒÆ—7B†F–7Bæg&öÖ¶W—2‡7G"‡B’çWW"‚’f÷"B–âF–6¶W'2–bB’¢öVç7W&Uö&%÷W'6—7E÷v÷&¶W"‚ ¢FVb÷'Vâ‚“ ¢vÆö&ÂöWfVçEöÆö÷ ¢Æö÷Ò7–æ6–òææWuöWfVçEöÆö÷‚¢öWfVçEöÆö÷ÒÆö÷ ¢7–æ6–òç6WEöWfVçEöÆö÷†Æö÷¢Æö÷ç'Vå÷VçF–Åö6ö×ÆWFR…÷7G&VÖW%öÖ–â‚’ ¢÷7G&VÖW%÷F‡&VBÒF‡&VF–æråF‡&VB‡F&vWCÕ÷'VâÂFVÖöãÕG'VRÂæÖSÒ%66‡v%7G&VÖW""¢÷7G&VÖW%÷F‡&VBç7F'B‚¢ÆövvW"æ–æfò†b%µ7G&VÖW%Òu27G&VÖW"7F'FVBf÷"¶ÆVâ‡F–6¶W'2—ÒF–6¶W'2â" Ğ Ğ¦FVb7F÷÷7G&VÖW"‚’ÓâæöæS Ğ¢vÆö&ÂöWfVçEöÆö÷ Ğ¢–böWfVçEöÆö÷æBæ÷BöWfVçEöÆö÷æ—5ö6Æ÷6VB‚“ Ğ¢öWfVçEöÆö÷æ6ÆÅ÷6ööå÷F‡&VG6fR…öWfVçEöÆö÷ç7F÷Ğ Ğ Ğ¦FVbvWEöÆ—fU÷V÷FR‡F–6¶W#¢7G"’ÓâF–7C Ğ¢""$ÆFW7BÆWfVÂV÷FRf÷"F–6¶W"âV×G’F–7B–bæ÷B7G&VÖ–ærâ"" Ğ¢v—F‚öÆö6³ Ğ¢&WGW&âF–7B…öÆ—fU÷V÷FW2ævWB‡F–6¶W"Â·Ò’Ğ Ğ Ğ¦FVbvWEöÆ—fU÷V÷FW5÷6æ6†÷B†Ö…övU÷3¢fÆöBÂæöæRÒæöæR’ÓâF–7E·7G"ÂF–7EÓ Ğ¢"" Ğ¢&WGW&âF‡&VB×6fR6æ6†÷Böb7W'&VçBÆWfVÂV÷FW2àĞ Ğ¢Ö…övU÷2f–ÇFW'2÷WB7FÆRV÷FW2'’WFFVEöBâ76–æræöæR&WGW&ç2WfW'Ğ¢V÷FR7W'&VçFÇ’†VÆB–âÖVÖ÷'’Âv†–6‚—2W6VgVÂf÷"6Æ÷6VB×6W76–öâF6†&ö&@Ğ¢ö'6W'fF–öâ&÷w2v†W&RÆ7B¶æ÷vâ&–6R—27F–ÆÂ–æf÷&ÖF—fRàĞ¢"" Ğ¢æ÷rÒF–ÖRçF–ÖR‚Ğ¢v—F‚öÆö6³ Ğ¢&WGW&â°Ğ¢7–Ó¢F–7B‡V÷FRĞ¢f÷"7–ÒÂV÷FR–âöÆ—fU÷V÷FW2æ—FV×2‚Ğ¢–bÖ…övU÷2—2æöæR÷"æ÷rÒfÆöB‡V÷FRævWB‚'WFFVEöB"’÷"ã’ÃÒÖ…övU÷0Ğ¢ĞĞ Ğ Ğ¦FVbvWEö&–Eö6µö–Ö&Ææ6R‡F–6¶W#¢7G"’ÓâfÆöC Ğ¢"" Ğ¢&–Bö6²6—¦R–Ö&Ææ6S¢†&–E÷6—¦R(‰"6µ÷6—¦R’ò†&–E÷6—¦R²6µ÷6—¦R’àĞ¢&ævS¢(‰#ã†ÆÂ6VÆÆW'2’(i"³ã†ÆÂ'W–W'2’àĞ¢&WGW&ç2ã–bæòÆ—fRFFàĞ¢"" Ğ¢v—F‚öÆö6³ Ğ¢&WGW&âfÆöB…öÆ—fU÷V÷FW2ævWB‡F–6¶W"Â·Ò’ævWB‚&&–Eö6µö–Ö&Ææ6R"Âã’Ğ Ğ Ğ¦FVbvWEöÆ—fUö6æFÆW2‡F–6¶W#¢7G"Âã¢–çBÒ3’ÓâÆ—7E¶F–7EÓ Ğ¢""$Æ7Bâ6ö×ÆWFVBÖÖ–â6æFÆW2f÷"F–6¶W"g&öÒF†R7G&VÖW"â"" Ğ¢v—F‚öÆö6³ Ğ¢GÒöÆ—fUö6æFÆW2ævWB‡F–6¶W"Ğ¢–bæ÷BG Ğ¢&WGW&âµĞĞ¢—FV×2ÒÆ—7B†GĞ¢&WGW&â—FV×5²Öã¥Ò–bÆVâ†—FV×2’ââVÇ6R—FV×0Ğ Ğ Ğ¦FVbvWE÷67&VVæW%÷&–÷&—G’‡F–6¶W'3¢6WE·7G%ÒÂæöæRÒæöæR’ÓâÆ—7E·7G%Ó Ğ¢"" Ğ¢&WGW&â7–Ö&öÇ2g&öÒ45$TTäU"6÷'FVB'’7F—f—G’†v–æW'2²Æ÷6W'2²föÇVÖR’àĞ¢–bF–6¶W'6—2&÷f–FVBÂöæÇ’&WGW&â7–Ö&öÇ2F†B&R–âF†B6WBàĞ¢6ÆÂF†—2Fò&RÖ÷&FW"F†R66âVWVR6ò†÷BF–6¶W'2&R66ææVBf—'7BàĞ¢"" Ğ¢v—F‚öÆö6³ Ğ¢6öÖ&–æVBÒ÷67&VVæW%÷W³¥Ò²÷67&VVæW%öF÷vå³¥Ò²÷67&VVæW%÷föÅ³¥ĞĞ¢6VVâÂ÷&FW&VBÒ6WB‚’ÂµĞĞ¢f÷"—FVÒ–â6öÖ&–æVC Ğ¢7–ÒÒ—FVÒævWB‚'7–Ö&öÂ"Â""Ğ¢–b7–ÒæB7–Òæ÷B–â6VVã Ğ¢–bF–6¶W'2—2æöæR÷"7–Ò–âF–6¶W'3 Ğ¢6VVâæFB‡7–ÒĞ¢÷&FW&VBæVæB‡7–ÒĞ¢&WGW&â÷&FW&V@Ğ Ğ Ğ¦FVbvWEöçögWGW&W5ö&–2‚’ÓâfÆöC Ğ¢"" Ğ¢RÔÖ–æ’ä4DgWGW&W2&–3¢7Eö6†ævRæ÷&ÖÆ—6VBFò(‰#(
+b³àĞ¢+ãRRÖ2Fò&÷Vv†Ç’+ã²&W–öæB+ãRR—26Æ—VBàĞ¢&WGW&ç2ã–bgWGW&W2FFæ÷Bf–Æ&ÆR–WBàĞ¢"" Ğ¢7–ÒÒög&öçEöÖöçF‚‚$å"Ğ¢v—F‚öÆö6³ Ğ¢gÒögWGW&W2ævWB‡7–ÒÂ·ÒĞ¢7BÒfÆöB†gævWB‚'7Eö6†ævR"Â’÷"Ğ¢&WGW&âÖ‚‚ÓãÂÖ–âƒãÂ7BòãR’’2ãRR(i"&–2öbã Ğ Ğ Ğ¦FVbvWEöW5ögWGW&W5ö&–2‚’ÓâfÆöC Ğ¢""%2eSRÔÖ–æ’gWGW&W2&–2‡6ÖR66ÆR2å’â"" Ğ¢7–ÒÒög&öçEöÖöçF‚‚$U2"Ğ¢v—F‚öÆö6³ Ğ¢gÒögWGW&W2ævWB‡7–ÒÂ·ÒĞ¢7BÒfÆöB†gævWB‚'7Eö6†ævR"Â’÷"Ğ¢&WGW&âÖ‚‚ÓãÂÖ–âƒãÂ7BòãR’Ğ Ğ Ğ¦FVb—5÷F–6¶W%ö†ÇFVB‡F–6¶W#¢7G"’Óâ&ööÃ Ğ¢""%G'VR–bF†RF–6¶W"w26V7W&—G’7FGW2—27W'&VçFÇ’†ÇFVBâ"" Ğ¢v—F‚öÆö6³ Ğ¢&WGW&âF–6¶W"–âö†ÇFV@Ğ Ğ Ğ¦FVb&Vv—7FW%ö&%ö6Æ÷6Uö6ÆÆ&6²†fâ’ÓâæöæS Ğ¢""%&Vv—7FW"fâ‡F–6¶W#¢7G"Â6æFÆS¢F–7B’(	B6ÆÆVBv†VâV6‚ÖÖ–â&"6Æ÷6W2â"" Ğ¢ö&%ö6Æ÷6Uö6ÆÆ&6·2æVæB†fâĞ Ğ Ğ¦FVbvWEö&%ö6Æ÷6U÷VWVR‚’Óâ%÷åVWVR# ¢""%VWVRöb‡F–6¶W"Â6æFÆR’GWÆW2V&Æ—6†VBöâWfW'’öæRÖÖ–çWFR6Æ÷6Râ"" ¢&WGW&âö&%ö6Æ÷6U÷VWVPĞ Ğ Ğ¦FVbvWE÷7G&VÖ–æuö&%ö6÷VçB‡F–6¶W#¢7G"’Óâ–çC Ğ¢""$çVÖ&W"öbÖÖ–â&'27W'&VçFÇ’'VffW&VBf÷"F–6¶W"ƒ–bæ÷B7G&VÖ–ær’â"" Ğ¢v—F‚öÆö6³ Ğ¢GÒöÆ—fUö6æFÆW2ævWB‡F–6¶W"Ğ¢&WGW&âÆVâ†G’–bGVÇ6R Ğ Ğ Ğ¦FVbvWEö†ÇFVE÷F–6¶W'2‚’Óâ6WE·7G%Ó Ğ¢v—F‚öÆö6³ Ğ¢&WGW&â6WB…ö†ÇFVBĞ Ğ Ğ¦FVbvWEöÆ—fUóÕöFb‡F–6¶W#¢7G"’Óâ$÷F–öæÅ¶ö&¦V7EÒ# Ğ¢"" Ğ¢6öçfW'BF†RÆ—fR4„%EôUT•E’6æFÆRFWVR–çFòæF2FFg&ÖRF†@Ğ¢ÖF6†W2F†RGvVÇfRFFf÷&ÖBW6VB'’F†R66ææW"æBfVGW&RVæv–æRàĞ Ğ¢6öÇVÖç3¢÷VâÂ†–v‚ÂÆ÷rÂ6Æ÷6RÂföÇVÖR†fÆöCcBĞ¢–æFWƒ¢FFWF–ÖT–æFW‚–âÖW&–6ôæWuõ–÷&²G¢ÂöÆFW7Bf—'7BàĞ Ğ¢&WGW&ç2æöæR–bfWvW"F†âR6æFÆW2&Rf–Æ&ÆR†æ÷BVæ÷Vv‚f÷"–æF–6F÷'2’àĞ¢"" Ğ¢–×÷'BæF22@Ğ¢6æFÆW2ÒvWEöÆ—fUö6æFÆW2‡F–6¶W"ÂÔ…ô4äDÄUô„•5Dõ%’Ğ¢–bÆVâ†6æFÆW2’ÂS Ğ¢&WGW&âæöæPĞ¢FbÒBäFFg&ÖR‡°Ğ¢$÷Vâ#¢¶fÆöB†2ævWB‚&÷Vâ"Â’’f÷"2–â6æFÆW5ÒÀĞ¢$†–v‚#¢¶fÆöB†2ævWB‚&†–v‚"Â’’f÷"2–â6æFÆW5ÒÀĞ¢$Æ÷r#¢¶fÆöB†2ævWB‚&Æ÷r"Â’’f÷"2–â6æFÆW5ÒÀĞ¢$6Æ÷6R#¢¶fÆöB†2ævWB‚&6Æ÷6R"Â’’f÷"2–â6æFÆW5ÒÀĞ¢%föÇVÖR#¢¶fÆöB†2ævWB‚'föÇVÖR"Â’’f÷"2–â6æFÆW5ÒÀĞ¢ÒĞ¢2'V–ÆBFFWF–ÖT–æFW‚g&öÒ66‡v"Wö6‚Ö×2F–ÖW7F×2–bf–Æ&ÆPĞ¢–b6æFÆW5³ÒævWB‚'F–ÖUö×2"“ Ğ¢G2ÒBçFõöFFWF–ÖR…¶2ævWB‚'F–ÖUö×2"Â’f÷"2–â6æFÆW5ÒÀĞ¢Væ—CÒ&×2"ÂWF3ÕG'VRĞ¢Fbæ–æFW‚ÒG2çG¥ö6öçfW'B‚$ÖW&–6ôæWuõ–÷&²"Ğ¢2G&÷&'2v—F‚¦W&ò6Æ÷6R†–æ6ö×ÆWFRò&BFFĞ¢FbÒFe¶Fe²$6Æ÷6R%ÒâÒæ6÷’‚Ğ¢&WGW&âFb–bÆVâ†Fb’ãÒRVÇ6RæöæPĞ Ğ Ğ¦FVb—5÷7G&VÖW%÷&VG’‚’Óâ&ööÃ Ğ¢""%G'VRv†VâF†Ru27G&VÖW"—26öææV7FVBæB†2Æ—fRV÷FRFFâ"" Ğ¢&WGW&â&ööÂ€Ğ¢÷7G&VÖW%÷F‡&VBæB÷7G&VÖW%÷F‡&VBæ—5öÆ—fR‚Ğ¢æB÷w5ö6öææV7FVBæBöÆ—fU÷V÷FW0Ğ¢Ğ Ğ Ğ¦FVb—5÷w5öFFöÆ—fR†Ö…övU÷3¢fÆöBÒ"ã’Óâ&ööÃ Ğ¢""%G'VRv†VâF†Ru27G&VÖW"†2&V6V—fVBÄUdTÄôäUôUT•D”U2FFv—F†–àĞ¢Ö…övU÷26V6öæG2âÖ÷&R&VÆ–&ÆRF†â—5÷7G&VÖW%÷&VG’‚’&V6W6R—@Ğ¢6öæf—&×2FF—27GVÆÇ’fÆ÷v–ærÂæ÷B§W7BF†BF†R6ö6¶WB—2÷Vââ"" Ğ¢&WGW&â&ööÂ€Ğ¢÷7G&VÖW%÷F‡&VBæB÷7G&VÖW%÷F‡&VBæ—5öÆ—fR‚Ğ¢æBöÆ7E÷w5öFFöBâ Ğ¢æBF–ÖRçF–ÖR‚’ÒöÆ7E÷w5öFFöBÂÖ…övU÷0Ğ¢Ğ Ğ Ğ¦FVbw5ög&W6…ö6÷fW&vR†Ö…övU÷3¢fÆöBÒ"ã’ÓâfÆöC ¢""%&WGW&âg&7F–öâöbFW6—&VBF–6¶W'2v—F‚&V6VçB66‡v"u2WfVçBâ"" ¢v—F‚öÆö6³ ¢F–6¶W'2ÒÆ—7B…÷w5öFW6—&VE÷F–6¶W'2¢6VVåöBÒF–7B…÷w5÷6VVåöB¢–bæ÷BF–6¶W'3 ¢&WGW&âã ¢æ÷rÒF–ÖRçF–ÖR‚¢g&W6‚Ò7VÒ†æ÷rÒfÆöB‡6VVåöBævWB‡F–6¶W"’÷"ã’ÃÒÖ…övU÷2f÷"F–6¶W"–âF–6¶W'2¢&WGW&âg&W6‚òÆVâ‡F–6¶W'2 Ğ Ğ¦FVbvWE÷7G&VÖW%÷7FGW2‚’ÓâF–7C Ğ¢"" Ğ¢&WGW&â†VÇF‚6æ6†÷Bf÷"&÷F‚F†Ru27G&VÖW"æBF†R$U5BÔEöÆÆW"àĞ¢6ÆÆW'26â&VBw5÷7G&VÖW"â¢æBÖE÷öÆÆW"â¢–æFWVæFVçFÇ’àĞ¢"" Ğ¢7–ÕöçÒög&öçEöÖöçF‚‚$å"Ğ¢7–ÕöW2Òög&öçEöÖöçF‚‚$U2"Ğ¢v—F‚öÆö6³ ¢çÒF–7B…ögWGW&W2ævWB‡7–ÕöçÂ·Ò’¢W2ÒF–7B…ögWGW&W2ævWB‡7–ÕöW2Â·Ò’¢FW6—&VBÒ6WB…÷w5öFW6—&VE÷F–6¶W'2¢FW6—&VEö6÷VçBÒÆVâ†FW6—&VB¢7F—fUö6÷VçBÒÆVâ…÷w5ö7F—fU÷F–6¶W'2bFW6—&VB¢6¶æ÷vÆVFvVEö6÷VçBÒÆVâ…÷w5ö6¶æ÷vÆVFvVE÷F–6¶W'2bFW6—&VB¢VæF–æuö6÷VçBÒÆVâ…÷w5÷7V'67&—F–öå÷&WVW7G2¢6VVåö6÷VçBÒ7VÒ‡F–6¶W"–â÷w5÷6VVåöBf÷"F–6¶W"–â÷w5öFW6—&VE÷F–6¶W'2¢æ÷rÒF–ÖRçF–ÖR‚¢g&W6…ö6÷VçBÒ7VÒ€¢æ÷rÒfÆöB…÷w5÷6VVåöBævWB‡F–6¶W"’÷"ã’ÃÒ"ã ¢f÷"F–6¶W"–â÷w5öFW6—&VE÷F–6¶W'0¢¢7F—fUóc5ö6÷VçBÒ7VÒ€¢æ÷rÒfÆöB…÷w5÷6VVåöBævWB‡F–6¶W"’÷"ã’ÃÒcã ¢f÷"F–6¶W"–â÷w5öFW6—&VE÷F–6¶W'0¢¢&W7Eö6÷VçBÒ7VÒ€¢7G"‚…öÆ—fU÷V÷FW2ævWB‡F–6¶W"’÷"·Ò’ævWB‚'6÷W&6U÷7FGW2"’÷"""’çWW"‚¢ÓÒ%$U5EôdÄÄ$4² ¢f÷"F–6¶W"–âöÖGöÆÆW%÷F–6¶W'0¢¢6æFÆUö6÷VçBÒÆVâ…öÆ—fUö6æFÆW2¢†ÇFVEö6÷VçBÒÆVâ…ö†ÇFVB¢Æ7E÷w5övU÷2Ò€¢&÷VæB†æ÷rÒöÆ7E÷w5öFFöBÂ2’–böÆ7E÷w5öFFöBâVÇ6RæöæP¢ Ğ¢ÖGöÆÆW%övòÒ&÷VæB‡F–ÖRçF–ÖR‚’ÒöÖGöÆÆW%öÆ7Eöö²Â’–böÖGöÆÆW%öÆ7Eöö²VÇ6RæöæPĞ Ğ¢&WGW&â°Ğ¢2ÆVv7’fÆB¶W—2(	B¶WBf÷"&6·v&B6ö×@Ğ¢&6öææV7FVB#¢÷w5ö6öææV7FVBÀĞ¢&W'&÷"#¢÷w5öW'&÷"ÀĞ¢&Æ—fU÷V÷FW2#¢g&W6…ö6÷VçBÀ¢&Æ—fUö6æFÆW2#¢6æFÆUö6÷VçBÀĞ¢&†ÇFVE÷F–6¶W'2#¢†ÇFVEö6÷VçBÀĞ¢&gWGW&W2#¢·7–Õöç¢çÂ7–ÕöW3¢W7ÒÀĞ¢&çö&–2#¢vWEöçögWGW&W5ö&–2‚’ÀĞ¢&W5ö&–2#¢vWEöW5ögWGW&W5ö&–2‚’ÀĞ¢2æWr7G'V7GW&VB¶W—2(	BW6VB'’ö’÷6W'f–6W0Ğ¢'w5÷7G&VÖW"#¢°Ğ¢''Vææ–ær#¢&ööÂ…÷7G&VÖW%÷F‡&VBæB÷7G&VÖW%÷F‡&VBæ—5öÆ—fR‚’’À¢&6öææV7FVB#¢÷w5ö6öææV7FVBæB&ööÂ…÷7G&VÖW%÷F‡&VBæB÷7G&VÖW%÷F‡&VBæ—5öÆ—fR‚’’À¢&FW6—&VE÷7V'67&—F–öç2#¢FW6—&VEö6÷VçBÀ¢'6VçE÷7V'67&—F–öç2#¢7F—fUö6÷VçBÀ¢&6¶æ÷vÆVFvVE÷7V'67&—F–öç2#¢6¶æ÷vÆVFvVEö6÷VçBÀ¢'VæF–æu÷7V'67&—F–öå÷&WVW7G2#¢VæF–æuö6÷VçBÀ¢'7V'67&—F–öåö6÷fW&vU÷7B#¢&÷VæB€¢6¶æ÷vÆVFvVEö6÷VçBòFW6—&VEö6÷VçB¢ãÂ¢’–bFW6—&VEö6÷VçBVÇ6RãÀ¢'6VVå÷V÷FW2#¢6VVåö6÷VçBÀ¢&7F—fU÷V÷FW5óc2#¢7F—fUóc5ö6÷VçBÀ¢&Æ—fU÷V÷FW2#¢g&W6…ö6÷VçB–b…÷7G&VÖW%÷F‡&VBæB÷7G&VÖW%÷F‡&VBæ—5öÆ—fR‚’’VÇ6RÀ¢&g&W6…ö6÷fW&vU÷7B#¢&÷VæB‡w5ög&W6…ö6÷fW&vR†Ö…övU÷3Ó"ã’¢Â’À¢&Æ7EöFFövU÷2#¢Æ7E÷w5övU÷2À¢&Æ—fUö6æFÆW2#¢6æFÆUö6÷VçBÀ¢&†ÇFVE÷F–6¶W'2#¢†ÇFVEö6÷VçBÀĞ¢&çö&–2#¢vWEöçögWGW&W5ö&–2‚’ÀĞ¢&W'&÷"#¢÷w5öW'&÷"–b…÷7G&VÖW%÷F‡&VBæB÷7G&VÖW%÷F‡&VBæ—5öÆ—fR‚’’VÇ6RæöæRÀĞ¢ÒÀĞ¢&ÖE÷öÆÆW"#¢°Ğ¢''Vææ–ær#¢öÖGöÆÆW%÷'Vææ–æræB&ööÂ…öÖGöÆÆW%÷F‡&VBæBöÖGöÆÆW%÷F‡&VBæ—5öÆ—fR‚’’ÀĞ¢&7–6ÆR#¢öÖGöÆÆW%ö7–6ÆRÀĞ¢&Æ7Eööµövõ÷2#¢ÖGöÆÆW%övòÀĞ¢'Væ—fW'6U÷6—¦R#¢ÆVâ…öÖGöÆÆW%÷F–6¶W'2’À¢&fÆÆ&6µ÷V÷FW2#¢&W7Eö6÷VçBÀ¢&Æ—fU÷V÷FW2#¢&W7Eö6÷VçBÀ¢&W'&÷"#¢öÖGöÆÆW%öW'&÷"ÀĞ¢ÒÀĞ¢ĞĞ

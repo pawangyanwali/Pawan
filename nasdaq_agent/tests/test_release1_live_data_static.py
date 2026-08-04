@@ -72,6 +72,62 @@ def test_price_bus_preserves_open_when_ws_tick_omits_it():
     assert merged["source_status"] == "LIVE"
 
 
+def test_price_bus_rest_cannot_overwrite_fresh_ws_source():
+    from agent.valkey_client import _merge_price_sources
+
+    merged = _merge_price_sources(
+        {
+            "last": 99.0,
+            "bid": 98.99,
+            "ask": 99.01,
+            "open": 97.0,
+            "updated_at": 104.0,
+            "source": "SCHWAB_REST",
+            "source_status": "REST_FALLBACK",
+            "is_live": False,
+        },
+        {
+            "last": 101.0,
+            "bid": 100.99,
+            "ask": 101.01,
+            "updated_at": 100.0,
+            "ws_updated_at": 100.0,
+            "source": "SCHWAB_WS",
+            "source_status": "LIVE",
+            "is_live": True,
+        },
+        now=104.0,
+    )
+
+    assert merged["last"] == 101.0
+    assert merged["open"] == 97.0
+    assert merged["updated_at"] == 100.0
+    assert merged["rest_updated_at"] == 104.0
+    assert merged["source_status"] == "LIVE"
+
+
+def test_price_bus_rest_takes_over_after_ws_priority_window():
+    from agent.valkey_client import _merge_price_sources
+
+    merged = _merge_price_sources(
+        {
+            "last": 99.0,
+            "updated_at": 110.0,
+            "source_status": "REST_FALLBACK",
+        },
+        {
+            "last": 101.0,
+            "updated_at": 100.0,
+            "ws_updated_at": 100.0,
+            "source_status": "LIVE",
+        },
+        now=110.0,
+    )
+
+    assert merged["last"] == 99.0
+    assert merged["source_status"] == "REST_FALLBACK"
+
+
 def test_streamer_seeds_open_from_rest_without_downgrading_live_ws():
     src = _src("agent/broker/schwab_streamer.py")
     valkey = _src("agent/valkey_client.py")

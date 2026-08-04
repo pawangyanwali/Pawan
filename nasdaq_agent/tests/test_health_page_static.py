@@ -47,4 +47,33 @@ def test_health_page_keeps_schwab_polling_conservative_and_exposes_reauth():
     assert "if(state.brokerLoading)return" in page
     assert "/schwab/auth/at" in page
     assert "/schwab/auth/md" in page
+    assert "acknowledged_subscriptions" in page
+    assert "desired_subscriptions" in page
+    assert "subscription_coverage_pct" in page
+    assert "active_quotes_60s" in page
     assert 'id="settings-modal"' not in page
+
+
+def test_broker_streamer_status_uses_market_data_owner_state(monkeypatch):
+    import agent.broker.schwab_streamer as streamer
+    import routers.broker as broker
+
+    monkeypatch.setattr(
+        streamer,
+        "get_streamer_status",
+        lambda: {"ws_streamer": {"running": False, "connected": False}},
+    )
+    remote = {
+        "ws_streamer": {
+            "running": True,
+            "connected": True,
+            "desired_subscriptions": 477,
+            "acknowledged_subscriptions": 477,
+        }
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_cross_container_token_status",
+        lambda key: remote if key == "market-data:status" else None,
+    )
+    assert broker._get_streamer_status() == remote

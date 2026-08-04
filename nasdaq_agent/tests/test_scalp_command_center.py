@@ -30,6 +30,12 @@ def test_command_center_is_a_dedicated_authenticated_live_page():
     assert "samples_until_training" in html
     assert "Open Positions" in html
     assert "Recent Learned Outcomes" in html
+    assert "Counterfactual Gate Evidence" in html
+    assert "never enters positions, consumes risk budget, or trains production models" in html
+    assert "renderCandidates(d.candidate_trials||{})" in html
+    assert '@router.get("/api/scalp/candidates")' in (
+        ROOT / "routers" / "scalp.py"
+    ).read_text(encoding="utf-8")
     assert "Shadow Validation" in html
     assert "Candidate evidence and policy-approved hypothetical execution" in html
     assert "Rule score" in html
@@ -140,6 +146,8 @@ def test_dashboard_snapshot_joins_plans_prices_risk_and_learning(monkeypatch):
     assert result["risk"]["shadow_enabled"] is True
     assert "shadow" in result
     assert "shadow_reports" in result
+    assert result["risk"]["candidate_tracking_enabled"] is True
+    assert result["candidate_trials"]["learning_isolation"] is True
 
 
 def test_hard_learning_block_is_not_presented_as_watch():

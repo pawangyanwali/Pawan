@@ -91,6 +91,19 @@ def _record_shadow_decision(
         reason=reason,
         detail=payload,
     )
+    try:
+        from .candidate_tracker import update_candidate_admission
+
+        update_candidate_admission(
+            ticker=plan.ticker,
+            entry_bar_id=entry_bar_id,
+            admission_state=decision,
+            admission_reason=reason,
+        )
+    except Exception:
+        logger.exception(
+            "[Shadow] candidate admission update failed for %s", plan.ticker
+        )
 
 
 def open_shadow_trade(

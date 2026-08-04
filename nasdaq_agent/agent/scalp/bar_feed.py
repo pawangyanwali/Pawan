@@ -15,6 +15,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+_frame_cache: dict[str, tuple[bytes | str | None, int, int, pd.DataFrame]] = {}
+
 
 def load_one_minute_frames(
     tickers: Iterable[str], *, limit: int = 120
@@ -29,24 +31,70 @@ def load_one_minute_frames(
         client = _get_client()
         if client is None:
             return {}, {ticker: "VALKEY_UNAVAILABLE" for ticker in symbols}
-        pipe = client.pipeline(transaction=False)
+        probe = client.pipeline(transaction=False)
         for ticker in symbols:
-            pipe.lrange(f"md:1m:{ticker}", -max(35, int(limit)), -1)
-        payloads = pipe.execute()
+            key = f"md:1m:{ticker}"
+            probe.lindex(key, -1)
+            probe.llen(key)
+        probe_values = probe.execute()
     except Exception as exc:
         logger.warning("[ScalpBars] batched Valkey read failed: %s", exc)
         return {}, {ticker: "BAR_FEED_READ_FAILED" for ticker in symbols}
 
-    for ticker, payload in zip(symbols, payloads):
+    requested_limit = max(35, int(limit))
+    changed: list[str] = []
+    metadata: dict[str, tuple[bytes | str | None, int]] = {}
+    for index, ticker in enumerate(symbols):
+        last_raw = probe_values[index * 2]
+        row_count = int(probe_values[index * 2 + 1] or 0)
+        metadata[ticker] = (last_raw, row_count)
+        cached = _frame_cache.get(ticker)
+        if (
+            cached
+            and cached[0] == last_raw
+            and cached[1] == row_count
+            and cached[2] == requested_limit
+        ):
+            frames[ticker] = cached[3]
+        else:
+            changed.append(ticker)
+
+    payload_by_ticker: dict[str, list[Any]] = {}
+    if changed:
+        try:
+            pipe = client.pipeline(transaction=False)
+            for ticker in changed:
+                pipe.lrange(f"md:1m:{ticker}", -requested_limit, -1)
+            payload_by_ticker = dict(zip(changed, pipe.execute()))
+        except Exception as exc:
+            logger.warning("[ScalpBars] changed-frame read failed: %s", exc)
+            errors.update({ticker: "BAR_FEED_READ_FAILED" for ticker in changed})
+
+    for ticker in changed:
+        payload = payload_by_ticker.get(ticker)
+        if payload is None:
+            continue
         try:
             frame = _frame_from_payload(payload)
             if frame.empty:
                 errors[ticker] = "ONE_MINUTE_BARS_MISSING"
             else:
                 frames[ticker] = frame
+                last_raw, row_count = metadata[ticker]
+                _frame_cache[ticker] = (
+                    last_raw,
+                    row_count,
+                    requested_limit,
+                    frame,
+                )
         except Exception as exc:
             logger.debug("[ScalpBars] %s parse failed: %s", ticker, exc)
             errors[ticker] = "ONE_MINUTE_BARS_INVALID"
+
+    keep = set(symbols)
+    for ticker in tuple(_frame_cache):
+        if ticker not in keep:
+            _frame_cache.pop(ticker, None)
     return frames, errors
 
 

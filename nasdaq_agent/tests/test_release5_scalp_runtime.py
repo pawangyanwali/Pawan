@@ -66,6 +66,28 @@ def test_indicator_contract_is_computed_from_closed_one_minute_bars():
     assert snapshot.bar_age_ms == 60_000
 
 
+def test_rvol_prefers_same_session_and_minute_across_prior_days():
+    index = pd.DatetimeIndex([
+        "2026-06-22T13:30:00Z",
+        "2026-06-23T13:30:00Z",
+        "2026-06-24T13:30:00Z",
+    ])
+    frame = pd.DataFrame(
+        {
+            "Open": [100.0, 101.0, 102.0],
+            "High": [100.2, 101.2, 102.2],
+            "Low": [99.8, 100.8, 101.8],
+            "Close": [100.1, 101.1, 102.1],
+            "Volume": [100.0, 200.0, 600.0],
+        },
+        index=index,
+    )
+
+    enriched = calculate_one_minute_indicators(frame)
+
+    assert enriched["vol_ratio"].iloc[-1] == pytest.approx(4.0)
+
+
 def test_provisional_indicators_match_appending_one_live_price_observation():
     frame = _frame_from_payload(_bars())
     enriched = calculate_one_minute_indicators(frame)
@@ -149,6 +171,8 @@ def test_root_ui_and_deployment_are_scalp_only():
     assert "_svc_health scalp-engine" in workflow
     assert "_svc_health scalp-learner" in workflow
     assert "python -m scripts.activate_scalp_only" in workflow
+    assert "python -m scripts.validate_production_release" in workflow
+    assert 'EXPECTED_SHA="${{ github.sha }}"' in workflow
 
 
 def test_activation_enables_shadow_and_keeps_paper_execution_off():
@@ -194,7 +218,7 @@ def test_runtime_controls_are_ui_catalogued():
         assert key in fields
         assert fields[key]["description"]
     assert fields["scalp_runtime.cycle_interval_s"]["advanced"] is False
-    assert fields["scalp_runtime.bar_lookback"]["default"] == 500
+    assert fields["scalp_runtime.bar_lookback"]["default"] == 2500
 
 
 def test_runtime_publishes_every_ticker_even_when_one_has_no_bars(monkeypatch):

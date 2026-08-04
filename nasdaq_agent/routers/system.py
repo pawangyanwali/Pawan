@@ -290,11 +290,26 @@ async def services_status(_user: AuthenticatedUser = Depends(require_viewer)):
             "ws_clients": len(manager.active),
         },
         "ws_streamer": {
-            "running":     ws_st.get("running", False),
-            "connected":   ws_st.get("connected", False),
-            "live_quotes": ws_st.get("live_quotes", 0),
-            "nq_bias":     ws_st.get("nq_bias", 0.0),
-            "error":       ws_st.get("error"),
+            "running":                  ws_st.get("running", False),
+            "connected":                ws_st.get("connected", False),
+            "desired_subscriptions":    ws_st.get("desired_subscriptions", 0),
+            "sent_subscriptions":       ws_st.get("sent_subscriptions", 0),
+            "acknowledged_subscriptions": ws_st.get(
+                "acknowledged_subscriptions", 0
+            ),
+            "pending_subscription_requests": ws_st.get(
+                "pending_subscription_requests", 0
+            ),
+            "subscription_coverage_pct": ws_st.get(
+                "subscription_coverage_pct", 0.0
+            ),
+            "seen_quotes":              ws_st.get("seen_quotes", 0),
+            "active_quotes_60s":        ws_st.get("active_quotes_60s", 0),
+            "live_quotes":              ws_st.get("live_quotes", 0),
+            "fresh_coverage_pct":        ws_st.get("fresh_coverage_pct", 0.0),
+            "last_data_age_s":          ws_st.get("last_data_age_s"),
+            "nq_bias":                  ws_st.get("nq_bias", 0.0),
+            "error":                    ws_st.get("error"),
         },
         "md_poller": {
             "running":       md_st.get("running", False),

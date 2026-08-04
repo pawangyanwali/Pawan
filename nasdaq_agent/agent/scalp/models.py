@@ -319,6 +319,8 @@ class ScalpSignalPlan:
     data_age_ms: int = 0
     bar_age_ms: int = 0
     source: QuoteSource = QuoteSource.UNKNOWN
+    execution_eligible: bool = False
+    execution_blockers: list[str] = field(default_factory=list)
     rsi_14: float = 0.0
     rsi_7: float = 0.0
     rsi_2: float = 0.0

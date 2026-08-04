@@ -63,7 +63,13 @@ def _schwab_callback_url(request: Request) -> str:
 def _get_streamer_status():
     try:
         from agent.broker.schwab_streamer import get_streamer_status
-        return get_streamer_status()
+
+        status = get_streamer_status()
+        if not (status.get("ws_streamer") or {}).get("running"):
+            remote = _get_cross_container_token_status("market-data:status")
+            if remote:
+                status = remote
+        return status
     except Exception:
         return {"connected": False, "disabled": True}
 
@@ -265,11 +271,26 @@ async def broker_status(_user: AuthenticatedUser = Depends(require_viewer)):
             "market_data_app":    ts_md,
             "trader_app":         ts,
             "ws_streamer": {
-                "running":     ws_st.get("running", False),
-                "connected":   ws_st.get("connected", False),
-                "live_quotes": ws_st.get("live_quotes", 0),
-                "auth_url":    "/schwab/auth/at",
-                "error":       ws_st.get("error"),
+                "running":                  ws_st.get("running", False),
+                "connected":                ws_st.get("connected", False),
+                "desired_subscriptions":    ws_st.get("desired_subscriptions", 0),
+                "sent_subscriptions":       ws_st.get("sent_subscriptions", 0),
+                "acknowledged_subscriptions": ws_st.get(
+                    "acknowledged_subscriptions", 0
+                ),
+                "pending_subscription_requests": ws_st.get(
+                    "pending_subscription_requests", 0
+                ),
+                "subscription_coverage_pct": ws_st.get(
+                    "subscription_coverage_pct", 0.0
+                ),
+                "seen_quotes":              ws_st.get("seen_quotes", 0),
+                "active_quotes_60s":        ws_st.get("active_quotes_60s", 0),
+                "live_quotes":              ws_st.get("live_quotes", 0),
+                "fresh_coverage_pct":        ws_st.get("fresh_coverage_pct", 0.0),
+                "last_data_age_s":          ws_st.get("last_data_age_s"),
+                "auth_url":                 "/schwab/auth/at",
+                "error":                    ws_st.get("error"),
             },
             "md_poller": {
                 "running":     md_st.get("running", False),

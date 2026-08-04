@@ -75,6 +75,29 @@ def test_level_one_builder_does_not_emit_weekend_quote_snapshots_as_bars():
     assert completed is None
 
 
+def test_level_one_builder_ignores_transient_zero_cumulative_volume():
+    import agent.broker.schwab_streamer as streamer
+
+    streamer._forming_bars.clear()
+    streamer._last_cumulative_volume.clear()
+    with streamer._lock:
+        streamer._accumulate_one_minute_bar_locked(
+            "AAPL", {"last": 100.0, "volume": 1000}, now=60.1
+        )
+        streamer._accumulate_one_minute_bar_locked(
+            "AAPL", {"last": 100.1, "volume": 0}, now=80.0
+        )
+        streamer._accumulate_one_minute_bar_locked(
+            "AAPL", {"last": 100.15, "volume": 1010}, now=90.0
+        )
+        completed = streamer._accumulate_one_minute_bar_locked(
+            "AAPL", {"last": 100.2, "volume": 1015}, now=120.1
+        )
+
+    assert completed is not None
+    assert completed["volume"] == pytest.approx(10.0)
+
+
 def test_history_requires_real_volume_and_enough_bars():
     assert frame_is_usable(_frame()) is True
     no_volume = _frame()
@@ -117,6 +140,32 @@ class _Client:
     def __init__(self): self.pipes = []
     def pipeline(self, transaction=False):
         pipe = _Pipe(); self.pipes.append((transaction, pipe)); return pipe
+
+
+def test_missing_history_detects_frozen_bars_during_active_session(monkeypatch):
+    import agent.valkey_client as valkey
+    from agent.scalp.bar_hydration import missing_valkey_history
+
+    now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+
+    class _ReadPipe:
+        def llen(self, _key): return self
+        def lindex(self, _key, _index): return self
+        def execute(self):
+            return [
+                50, json.dumps({"time_ms": now_ms - 60_000}),
+                50, json.dumps({"time_ms": now_ms - 600_000}),
+            ]
+
+    class _ReadClient:
+        @staticmethod
+        def pipeline(transaction=False):
+            return _ReadPipe()
+
+    monkeypatch.setattr(valkey, "_get_client", lambda: _ReadClient())
+    assert missing_valkey_history(
+        ["FRESH", "FROZEN"], require_fresh=True, max_age_s=180
+    ) == ["FROZEN"]
 
 
 def test_hydration_replaces_valkey_history_with_authoritative_ohlcv(monkeypatch):

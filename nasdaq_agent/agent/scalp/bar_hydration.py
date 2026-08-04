@@ -11,7 +11,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-BAR_LIMIT = 500
+BAR_LIMIT = 2500
 BAR_TTL_S = 7 * 24 * 60 * 60
 MIN_INDICATOR_BARS = 35
 MIN_VOLUME_BARS = 10
@@ -131,9 +131,13 @@ def hydrate_one_minute_history(
 
 
 def missing_valkey_history(
-    tickers: Iterable[str], *, min_bars: int = MIN_INDICATOR_BARS
+    tickers: Iterable[str],
+    *,
+    min_bars: int = MIN_INDICATOR_BARS,
+    require_fresh: bool = False,
+    max_age_s: float = 180.0,
 ) -> list[str]:
-    """Return symbols whose shared rolling bar list is absent or too short."""
+    """Return symbols whose shared rolling bar list is absent, short, or stale."""
     from agent.valkey_client import _get_client
 
     symbols = [str(ticker).upper() for ticker in dict.fromkeys(tickers) if ticker]
@@ -143,9 +147,35 @@ def missing_valkey_history(
     pipe = client.pipeline(transaction=False)
     for ticker in symbols:
         pipe.llen(f"md:1m:{ticker}")
-    counts = pipe.execute()
+        if require_fresh:
+            pipe.lindex(f"md:1m:{ticker}", -1)
+    values = pipe.execute()
     floor = max(1, int(min_bars))
-    return [ticker for ticker, count in zip(symbols, counts) if int(count or 0) < floor]
+    missing: list[str] = []
+    stride = 2 if require_fresh else 1
+    now_ms = int(time.time() * 1000)
+    for index, ticker in enumerate(symbols):
+        count = int(values[index * stride] or 0)
+        if count < floor:
+            missing.append(ticker)
+            continue
+        if not require_fresh:
+            continue
+        raw = values[index * stride + 1]
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            item = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+            timestamp = int(
+                item.get("time_ms")
+                or float(item.get("timestamp") or item.get("datetime") or 0) * 1000
+            )
+            age_s = (now_ms - timestamp) / 1000.0
+        except (TypeError, ValueError, json.JSONDecodeError):
+            age_s = float("inf")
+        if age_s < 0 or age_s > max(60.0, float(max_age_s)):
+            missing.append(ticker)
+    return missing
 
 
 def _normalise_frame(frame: pd.DataFrame) -> pd.DataFrame:

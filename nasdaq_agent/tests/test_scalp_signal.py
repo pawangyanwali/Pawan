@@ -181,7 +181,7 @@ def test_stale_quote_blocks_even_when_technicals_are_valid():
     assert "QUOTE_STALE" in plan.blockers
 
 
-def test_rest_fallback_is_visible_and_blocked_by_default():
+def test_rest_fallback_is_visible_for_analysis_but_execution_blocked_by_default():
     plan = create_scalp_signal_plan(
         quote=_quote(source="REST"),
         indicators=_long_indicators(),
@@ -190,7 +190,24 @@ def test_rest_fallback_is_visible_and_blocked_by_default():
     )
 
     assert plan.source is QuoteSource.REST
-    assert "REST_FALLBACK_NOT_TRADABLE" in plan.blockers
+    assert plan.valid is True
+    assert plan.execution_eligible is False
+    assert "REST_FALLBACK_NOT_TRADABLE" in plan.execution_blockers
+    assert "REST_FALLBACK_NOT_TRADABLE" not in plan.blockers
+
+
+def test_rest_fallback_can_only_become_execution_eligible_when_configured():
+    plan = create_scalp_signal_plan(
+        quote=_quote(source="REST"),
+        indicators=_long_indicators(),
+        side="LONG",
+        session="REGULAR",
+        config=ScalpSignalConfig(allow_rest_fallback_trading=True),
+    )
+
+    assert plan.valid is True
+    assert plan.execution_eligible is True
+    assert plan.execution_blockers == []
 
 
 def test_spread_to_risk_gate_blocks_expensive_execution():

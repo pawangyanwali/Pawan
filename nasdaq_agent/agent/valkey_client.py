@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 _CHANNEL = "md:prices"
 _HASH    = "md:prices"
 _STICKY_PRICE_FIELDS = ("open",)
+_WS_PRIORITY_TTL_S = max(
+    1.0, float(os.getenv("NASDAQ_WS_QUOTE_PRIORITY_TTL_S", "5.0"))
+)
+_PRICE_FIELDS = (
+    "last", "mark", "bid", "ask", "volume", "high", "low", "pct_change",
+)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -125,6 +131,62 @@ def _merge_sticky_price_fields(incoming: dict, existing: Optional[dict]) -> dict
     return merged
 
 
+def _merge_price_sources(
+    incoming: dict,
+    existing: Optional[dict],
+    *,
+    now: float | None = None,
+) -> dict:
+    """Merge quote publishers without letting REST relabel a fresh WS quote.
+
+    WS and REST are complementary: WS owns executable price fields while it is
+    fresh; REST may still backfill session metadata such as the opening price.
+    Per-source timestamps make the effective source deterministic even when the
+    two publisher threads interleave.
+    """
+    current_time = time.time() if now is None else float(now)
+    previous = dict(existing or {})
+    merged = _merge_sticky_price_fields(dict(incoming), previous)
+    incoming_status = str(merged.get("source_status") or "").upper()
+    incoming_ts = float(merged.get("updated_at") or current_time)
+
+    if incoming_status == "LIVE":
+        merged["ws_updated_at"] = float(
+            merged.get("ws_updated_at") or incoming_ts
+        )
+        if previous.get("rest_updated_at") is not None:
+            merged["rest_updated_at"] = previous["rest_updated_at"]
+        return merged
+
+    if incoming_status in {"REST_FALLBACK", "FALLBACK"}:
+        merged["rest_updated_at"] = float(
+            merged.get("rest_updated_at") or incoming_ts
+        )
+        ws_updated_at = float(
+            previous.get("ws_updated_at")
+            or (
+                previous.get("updated_at")
+                if str(previous.get("source_status") or "").upper() == "LIVE"
+                else 0.0
+            )
+            or 0.0
+        )
+        if ws_updated_at > 0 and current_time - ws_updated_at <= _WS_PRIORITY_TTL_S:
+            # Preserve every executable field from WS. REST remains useful for
+            # sticky session metadata and records its own freshness timestamp.
+            for field in _PRICE_FIELDS:
+                if field in previous:
+                    merged[field] = previous[field]
+            merged.update(
+                updated_at=ws_updated_at,
+                ws_updated_at=ws_updated_at,
+                source=previous.get("source") or "SCHWAB_WS",
+                source_status="LIVE",
+                is_live=True,
+            )
+    return merged
+
+
 def publish_prices(bulk: dict[str, dict]) -> bool:
     """
     Write a batch of quotes from the MD Poller into Valkey.
@@ -158,8 +220,13 @@ def publish_prices(bulk: dict[str, dict]) -> bool:
             logger.debug("[Valkey] sticky price merge skipped: %s", exc)
             existing_by_ticker = {}
 
+        now = time.time()
         merged_bulk = {
-            ticker: _merge_sticky_price_fields(quote, existing_by_ticker.get(ticker))
+            ticker: _merge_price_sources(
+                quote,
+                existing_by_ticker.get(ticker),
+                now=now,
+            )
             for ticker, quote in bulk.items()
         }
 

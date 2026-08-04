@@ -63,19 +63,47 @@ def calculate_one_minute_indicators(frame: Any) -> Any:
     )
     cumulative_volume = volume.groupby(session_keys).cumsum()
     result["vwap"] = (typical * volume).groupby(session_keys).cumsum() / cumulative_volume.replace(0.0, float("nan"))
-    # RVOL compares with prior bars from the same market session across days.
-    # Grouping by date made the first ten bars of every PM/AH session unusable.
-    baseline = volume.groupby(session_names).transform(
-        lambda values: values.shift(1).rolling(20, min_periods=10).mean()
+    # The signal contract consumes only the latest RVOL value. Calculate that
+    # decision point directly instead of materialising hundreds of tiny
+    # groupby/rolling windows for every historical row and every ticker.
+    # Prefer the same minute-of-session across prior trading days. This keeps
+    # the regular-session U-shaped volume curve from making the open look
+    # artificially hot and midday look artificially weak.
+    minute_of_day = pd.Series(
+        [stamp.hour * 60 + stamp.minute for stamp in local_index],
+        index=result.index,
     )
-    # Sparse PM/AH symbols may not have ten prints in the current session
-    # within the hot history window. Fall back to prior real traded bars;
-    # this is deliberately conservative because regular-session volume usually
-    # makes the resulting extended-hours RVOL small rather than overstated.
-    fallback_baseline = volume.shift(1).rolling(20, min_periods=10).mean()
-    extended_hours = session_names.isin({"PRE_MARKET", "AFTER_HOURS"})
-    baseline = baseline.where(~(baseline.isna() & extended_hours), fallback_baseline)
-    result["vol_ratio"] = volume / baseline.replace(0.0, float("nan"))
+    latest_session = str(session_names.iloc[-1])
+    latest_minute = int(minute_of_day.iloc[-1])
+    prior = volume.iloc[:-1]
+    profile_values = prior[
+        (session_names.iloc[:-1] == latest_session)
+        & (minute_of_day.iloc[:-1] == latest_minute)
+    ].tail(10)
+    baseline_value = (
+        float(profile_values.median()) if len(profile_values) >= 2 else float("nan")
+    )
+    if not finite(baseline_value) or baseline_value <= 0:
+        session_values = prior[session_names.iloc[:-1] == latest_session].tail(20)
+        baseline_value = (
+            float(session_values.median()) if len(session_values) >= 10 else float("nan")
+        )
+    # Sparse PM/AH symbols may not have ten prints in the current session.
+    # Prior real traded bars are conservative because regular-session volume
+    # normally makes the resulting extended-hours RVOL smaller, not overstated.
+    if (
+        (not finite(baseline_value) or baseline_value <= 0)
+        and latest_session in {"PRE_MARKET", "AFTER_HOURS"}
+    ):
+        fallback_values = prior.tail(20)
+        baseline_value = (
+            float(fallback_values.median()) if len(fallback_values) >= 10 else float("nan")
+        )
+    result["vol_ratio"] = float("nan")
+    if finite(baseline_value) and baseline_value > 0:
+        result.loc[result.index[-1], "vol_ratio"] = (
+            float(volume.iloc[-1]) / baseline_value
+        )
     return result
 
 

@@ -48,6 +48,41 @@ def _plan(side: SignalSide = SignalSide.LONG, ticker: str = "AAPL") -> ScalpSign
     )
 
 
+def test_zero_trade_report_distinguishes_pipeline_degradation():
+    from agent.scalp.shadow_report import _pipeline_summary, _status
+
+    metrics = [{
+        "session": "REGULAR",
+        "universe_total": 477,
+        "valid_plan_count": 0,
+        "data_gap_count": 320,
+        "live_count": 100,
+        "cycle_ms": 12000,
+    }]
+
+    assert _status({"closed": 0}, metrics) == "DATA_DEGRADED"
+    pipeline = _pipeline_summary(metrics)
+    assert pipeline["status"] == "DEGRADED"
+    assert pipeline["avg_data_gap_pct"] > 60
+    assert pipeline["avg_live_pct"] < 25
+
+
+def test_zero_trade_report_is_not_degraded_when_pipeline_is_healthy():
+    from agent.scalp.shadow_report import _pipeline_summary, _status
+
+    metrics = [{
+        "session": "REGULAR",
+        "universe_total": 477,
+        "valid_plan_count": 1,
+        "data_gap_count": 10,
+        "live_count": 450,
+        "cycle_ms": 4000,
+    }]
+
+    assert _status({"closed": 0}, metrics) == "NO_TRADES"
+    assert _pipeline_summary(metrics)["status"] == "HEALTHY"
+
+
 def test_shadow_trade_is_isolated_and_resolves_at_tp2():
     from agent.scalp.shadow import (
         mark_shadow_trades,

@@ -34,6 +34,7 @@ def create_scalp_signal_plan(
     source = quote.normalized_source
     blockers: list[str] = []
     reasons: list[str] = []
+    execution_blockers: list[str] = []
 
     if normalized_side is SignalSide.NONE:
         blockers.append("NO_DIRECTIONAL_SETUP")
@@ -50,7 +51,7 @@ def create_scalp_signal_plan(
     if source in {QuoteSource.STALE, QuoteSource.UNKNOWN}:
         blockers.append("QUOTE_SOURCE_NOT_LIVE")
     if source is QuoteSource.REST and not cfg.allow_rest_fallback_trading:
-        blockers.append("REST_FALLBACK_NOT_TRADABLE")
+        execution_blockers.append("REST_FALLBACK_NOT_TRADABLE")
 
     blockers.extend(
         f"{name}_MISSING" for name in _missing_indicator_names(indicators)
@@ -159,6 +160,11 @@ def create_scalp_signal_plan(
         data_age_ms=quote.data_age_ms,
         bar_age_ms=indicators.bar_age_ms if indicators.bar_age_ms is not None else -1,
         source=source,
+        execution_eligible=(
+            not execution_blockers
+            and source in {QuoteSource.WS, QuoteSource.REST}
+        ),
+        execution_blockers=execution_blockers,
         rsi_14=number(indicators.rsi_14),
         rsi_7=number(indicators.rsi_7),
         rsi_2=number(indicators.rsi_2),

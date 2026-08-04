@@ -49,8 +49,18 @@ def _sqlite_to_test_sql(sql: str) -> str:
     """Translate SQL from PostgreSQL dialect to SQLite for tests."""
     sql = sql.replace("%s", "?")
     sql = re.sub(r'ON CONFLICT\s*\([^)]+\)\s*DO UPDATE SET[^;]*', '', sql, flags=re.IGNORECASE)
-    sql = re.sub(r'ON CONFLICT\s*\([^)]+\)\s*DO NOTHING', 'OR IGNORE', sql, flags=re.IGNORECASE)
-    sql = re.sub(r'\bON CONFLICT DO NOTHING\b', 'OR IGNORE', sql, flags=re.IGNORECASE)
+    if re.search(
+        r'\bON CONFLICT(?:\s*\([^)]+\))?\s*DO NOTHING\b',
+        sql,
+        flags=re.IGNORECASE,
+    ):
+        sql = re.sub(
+            r'\bON CONFLICT(?:\s*\([^)]+\))?\s*DO NOTHING\b',
+            '',
+            sql,
+            flags=re.IGNORECASE,
+        )
+        sql = re.sub(r'\bINSERT\s+INTO\b', 'INSERT OR IGNORE INTO', sql, count=1, flags=re.IGNORECASE)
     sql = re.sub(r'\s+RETURNING\s+\w+', '', sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bSERIAL PRIMARY KEY\b', 'INTEGER PRIMARY KEY AUTOINCREMENT', sql, flags=re.IGNORECASE)
     sql = re.sub(r'\bDOUBLE PRECISION\b', 'REAL', sql, flags=re.IGNORECASE)
@@ -81,6 +91,7 @@ class _TestCursor:
     def __init__(self, cur: sqlite3.Cursor):
         self._cur = cur
         self.lastrowid = cur.lastrowid
+        self.rowcount = cur.rowcount
 
     def _wrap(self, row):
         if row is None:
@@ -254,6 +265,7 @@ def tmp_db_paths(tmp_path, monkeypatch):
         "agent.backtester",
         "agent.scalp.store",
         "agent.scalp.shadow",
+        "agent.scalp.candidate_tracker",
         "agent.scalp.execution_policy",
         "agent.scalp.learning",
         "agent.scalp.ml_trainer",
