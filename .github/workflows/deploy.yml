@@ -305,8 +305,22 @@ jobs:
                 exit 1
               fi
 
-              echo "=== Activating health-gated scalp-only shadow validation ==="
-              _dc exec -T scalp-engine python -m scripts.activate_scalp_only
+              echo "=== Activating health-gated scalp-only shadow validation (max 2 min) ==="
+              SCALP_ACTIVATED=0
+              for i in $(seq 1 12); do
+                if _dc exec -T scalp-engine python -m scripts.activate_scalp_only; then
+                  SCALP_ACTIVATED=1
+                  echo "  Scalp-only activation passed after $((i*10))s"
+                  break
+                fi
+                echo "  Attempt $i/12 deferred; waiting for the first fresh scalp snapshot"
+                sleep 10
+              done
+              if [ "$SCALP_ACTIVATED" = "0" ]; then
+                echo "ERROR: scalp-only activation gate failed"
+                _dc logs --tail 80 market-data scalp-engine 2>/dev/null || true
+                exit 1
+              fi
 
               echo "=== Functional production readiness gate (max 2 min) ==="
               PRODUCTION_READY=0
