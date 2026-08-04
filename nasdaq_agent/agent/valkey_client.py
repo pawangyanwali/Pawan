@@ -12,7 +12,7 @@ Key layout:
   PUBSUB md:prices       payload=JSON({ticker: quote, ...})
 
 TLS is required for ElastiCache Valkey.  All config via env vars:
-  VALKEY_HOST   (default: master.nasdaq-cache.zn4aar.use1.cache.amazonaws.com)
+  VALKEY_HOST   (required)
   VALKEY_PORT   (default: 6379)
   VALKEY_SSL    (default: true)
 """
@@ -40,10 +40,9 @@ _PRICE_FIELDS = (
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 def _cfg() -> tuple[str, int, bool]:
-    host = os.getenv(
-        "VALKEY_HOST",
-        "master.nasdaq-cache.zn4aar.use1.cache.amazonaws.com",
-    )
+    host = os.getenv("VALKEY_HOST", "").strip()
+    if not host:
+        raise RuntimeError("VALKEY_HOST is required")
     port = int(os.getenv("VALKEY_PORT", "6379"))
     ssl  = os.getenv("VALKEY_SSL", "true").lower() not in ("false", "0", "no")
     return host, port, ssl

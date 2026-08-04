@@ -356,7 +356,54 @@ class ScalpRuntime:
         return self.last_cycle
 
     def run_position_tick(self) -> None:
-        """Check live stop, TP1, and TP2 conditions from tÎ≠≠¢Gß≤⁄Óù∆≠y–not bar_id:
+        """Check live stop, TP1, and TP2 conditions from the current price bus."""
+        from agent.paper_trading import get_open_trades, rt_check_positions
+        from agent.valkey_client import get_all_prices
+
+        quotes = get_all_prices()
+        try:
+            from agent.config_manager import config
+            from agent.market_hours import get_session
+            from agent.scalp.shadow import mark_shadow_trades
+            from agent.scalp.candidate_tracker import mark_candidate_trials
+
+            if bool(config.get("scalp.shadow_enabled", True)):
+                mark_shadow_trades(quotes, session=get_session())
+            if bool(config.get("scalp.candidate_tracking_enabled", True)):
+                mark_candidate_trials(quotes, session=get_session())
+        except Exception:
+            logger.exception("[ScalpRuntime] shadow position tick failed")
+        for ticker in {
+            str(row.get("ticker") or "").upper() for row in get_open_trades()
+        }:
+            if not ticker:
+                continue
+            quote = quotes.get(ticker) or {}
+            try:
+                current = float(quote.get("last") or quote.get("mark") or 0.0)
+            except (TypeError, ValueError):
+                current = 0.0
+            if current <= 0:
+                continue
+            try:
+                rt_check_positions(ticker, current)
+            except Exception:
+                logger.exception("[ScalpRuntime] live position tick failed for %s", ticker)
+
+    def _shadow_execute(
+        self,
+        plans: dict[str, ScalpSignalPlan],
+        bars: dict[str, int],
+        market_health: dict[str, Any],
+    ) -> None:
+        """Open isolated hypothetical trades once per ticker/bar."""
+        from agent.config_manager import config
+        from agent.scalp.candidate_tracker import update_candidate_admission
+        from agent.scalp.shadow import open_shadow_trade
+
+        for ticker, plan in plans.items():
+            bar_id = bars.get(ticker, 0)
+            if not plan.valid or not bar_id:
                 pending_state = self._shadow_pending.get(ticker) or {}
                 if pending_state:
                     update_candidate_admission(

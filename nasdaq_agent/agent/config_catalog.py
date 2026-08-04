@@ -241,4 +241,325 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "65 was selected from a 30-day shadow audit and must be forward-validated before canonical execution.",
     ),
     "scalp.entry_quality_min_score_extended": (
-        "Extended-session reachability scoã¿{¶‰Ëkºwµçq…Ñ¥½¸¸	É½­•È…±±Ì¹•Ù•ÈÉÕ¸¥¹Í¥‘”Ñ¡•Í”İ½É­•ÉÌ¸ˆ°(€€€€€€€€ˆà±•…Ù•Ì…Á…¥Ñä™½Èµ…É­•Ğ‘…Ñ„…¹Ñ¡”A$½¸Ñ¡”™½ÕÈµÙAT¡½ÍĞ¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹‰…É}±½½­‰…¬ˆè€ (€€€€€€€€‰=¹”µµ¥¹ÕÑ”‰…È±½½­‰…¬ˆ°(€€€€€€€€‰±½Í•½¹”µµ¥¹ÕÑ”=!1X‰…ÉÌÉ•Ñ…¥¹•™½ÈIM$°5°QH°Í•ÍÍ¥½¸µÉ•Í•ĞY]@°IY=0°…¹±½…°ÍÑÉÕÑÕÉ”¸Y…±Õ•Ì‰•±½Ü€ÌäÀ…É”É•©•Ñ•‰•…ÕÍ”Ñ¡•ä…¹¹½ĞÉ•ÁÉ•Í•¹Ğ„½µÁ±•Ñ”É•Õ±…ÈÍ•ÍÍ¥½¸¸ˆ°(€€€€€€€€ˆÈÔÀÀÁÉ•Í•ÉÙ•ÌÍ•Ù•É…°Í•ÍÍ¥½¹ÌÍ¼IY=0…¸½µÁ…É”Ñ¡”Í…µ”µ¥¹ÕÑ”½˜‘…ä¥¹ÍÑ•…½˜Õ¹É•±…Ñ•‰…ÉÌ¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹‰±½­•‘}Í•ÍÍ¥½¹Ìˆè€ (€€€€€€€€‰	±½­••¹ÑÉäÍ•ÍÍ¥½¹Ìˆ°(€€€€€€€€‰M•ÍÍ¥½¹Ì¥¸İ¡¥ Á±…¹ÌÉ•µ…¥¸Ù¥Í¥‰±”‰ÕĞ…¹¹½Ğ‰•½µ”…Ñ¥½¹…‰±”½È½Á•¸„Á…Á•ÈÁ½Í¥Ñ¥½¸¸ˆ°(€€€€€€€€‰1=M°IMQI%Q°1=M%9}UQ%=8°…¹!I}1=M‰±½­ÌÕ¹Í…™”•¹ÑÉäİ¥¹‘½İÌ¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹•á•ÕÑ¥½¹}Á½±¥å}•¹…‰±•ˆè€ (€€€€€€€€‰M¡…É••á•ÕÑ¥½¸ÁÉ•™±¥¡Ğˆ°(€€€€€€€€‰ÁÁ±¥•ÌÑ¡”Í…µ”Í•ÍÍ¥½¸°µ…É­•Ğµ‘…Ñ„°‘…¥±äµ±½ÍÌ°ÑÉ…‘”µ½Õ¹Ğ°…¹½¹ÕÉÉ•¹ä¡•­Ì‰•™½É”„Ù…±¥Á±…¸µ…ä•¹Ñ•ÈÍ¡…‘½Ü½È…¹½¹¥…°Á…Á•È•á•ÕÑ¥½¸¸ˆ°(€€€€€€€€‰-••À•¹…‰±•Í¼Í¡…‘½ÜÉ•ÍÕ±ÑÌÉ•ÁÉ•Í•¹ĞÑÉ…‘•ÌÑ¡”ÁÉ½‘ÕÑ¥½¸É¥Í¬½¹ÑÉ…Ğİ½Õ±…ÑÕ…±±ä…±±½Ü¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹•á•ÕÑ¥½¹}‰±½­•‘}Í•ÍÍ¥½¹Ìˆè€ (€€€€€€€€‰á•ÕÑ¥½¸µ½¹±ä‰±½­•Í•ÍÍ¥½¹Ìˆ°(€€€€€€€€‰-••ÁÌÑ•¡¹¥…±±äÙ…±¥Á±…¹ÌÙ¥Í¥‰±”…Ì…¹‘¥‘…Ñ•Ìİ¡¥±”ÁÉ•Ù•¹Ñ¥¹œÑ¡•´™É½´½¹ÍÕµ¥¹œÍ¥µÕ±…Ñ•…Á¥Ñ…°¥¸Õ¹Í…™”Í•ÍÍ¥½¹Ì¸ˆ°(€€€€€€€€‰1U9!}	1=,É•µ…¥¹Ì½‰Í•ÉÙ…‰±”‰ÕĞ‘½•Ì¹½Ğ•¹Ñ•È•á•ÕÑ…‰±”Í¡…‘½ÜÕ¹Ñ¥°¥ĞÁÉ½Ù•ÌÁ½Í¥Ñ¥Ù”•áÁ•Ñ…¹ä¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹É•ÅÕ¥É•}±¥Ù•}•á•ÕÑ¥½¹}‘…Ñ„ˆè€ (€€€€€€€€‰I•ÅÕ¥É”ÑÉÕÍÑ••á•ÕÑ¥½¸‘…Ñ„ˆ°(€€€€€€€€‰	±½­Ì¹•ÜÁ½Í¥Ñ¥½¹Ìİ¡•¸M¡İ…ˆÉ•ÅÕ¥É•Ì…ÕÑ¡½É¥é…Ñ¥½¸°Ñ¡”ÁÉ¥”‰ÕÌ¥ÌÍÑ…±”°Ñ¡”ÅÕ½Ñ”Í½ÕÉ”¥Ì¹½ĞÑÉ…‘…‰±”°½ÈÑ¡”Ñ¥­•ÈÅÕ½Ñ”•á••‘ÌÑ¡”½¹™¥ÕÉ•…”¸ˆ°(€€€€€€€€‰á¥ÍÑ¥¹œÁ½Í¥Ñ¥½¹Ì½¹Ñ¥¹Õ”Ñ¼‰”µ½¹¥Ñ½É•°‰ÕĞ¹¼¹•ÜÉ¥Í¬¥Ì…‘‘•‘ÕÉ¥¹œ‘•É…‘•‘…Ñ„¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹ÁÉ•}µ…É­•Ñ}Í¥é•}µÕ±Ğˆè€ ‰AÉ”µµ…É­•Ğ•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•È…ÁÁ±¥•…™Ñ•ÈÉ¥Í¬µ‰…Í•Í¥é¥¹œ™½ÈÁÉ”µµ…É­•Ğ•¹ÑÉ¥•Ì¸ˆ°€ˆÀ¸ÌÔÕÍ•Ì€ÌÔ”½˜Ñ¡”¹½Éµ…°É¥Í¬µÍ¥é•Á½Í¥Ñ¥½¸¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹É•ÍÑÉ¥Ñ•‘}Í¥é•}µÕ±Ğˆè€ ‰=Á•¹¥¹œµÁÉ¥”µ‘¥Í½Ù•ÉäÍ¥é”ˆ°€‰á•ÕÑ¥½¸µÕ±Ñ¥Á±¥•È™½ÈÑ¡”É•ÍÑÉ¥Ñ•½Á•¹¥¹œİ¥¹‘½Ü¸i•É¼‘¥Í…‰±•Ì•¹ÑÉ¥•Ìİ¡¥±”Á±…¹ÌÉ•µ…¥¸Ù¥Í¥‰±”¸ˆ°€ˆÀ‰±½­Ì€äèÌÀ´äèĞĞP•á•ÕÑ¥½¸¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹ÁÉ¥µ•}Í¥é•}µÕ±Ğˆè€ ‰AÉ¥µ”µÍ•ÍÍ¥½¸•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•È™½ÈÑ¡”¡¥¡•ÍĞµÅÕ…±¥ÑäÉ•Õ±…ÈµÍ•ÍÍ¥½¸İ¥¹‘½Ü¸ˆ°€ˆÄ¸ÀÕÍ•ÌÑ¡”™Õ±°É¥Í¬µÍ¥é•Á½Í¥Ñ¥½¸¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹±Õ¹¡}Í¥é•}µÕ±Ğˆè€ ‰5¥‘‘…ä•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•È™½ÈÑ¡”±½ÜµÙ½±Õµ”µ¥‘‘…äİ¥¹‘½Ü¸‰±½­•Í•ÍÍ¥½¸É•µ…¥¹Ì‰±½­••Ù•¸İ¡•¸Ñ¡¥ÌÙ…±Õ”¥Ì¹½¹é•É¼¸ˆ°€ˆÀ­••ÁÌ±Õ¹ …¹‘¥‘…Ñ•Ì½‰Í•ÉÙ…Ñ¥½¹…°½¹±ä¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹ÍÑ…¹‘…É‘}Í¥é•}µÕ±Ğˆè€ ‰MÑ…¹‘…ÉµÍ•ÍÍ¥½¸•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•È™½ÈÁ½ÍĞµ±Õ¹ É•Õ±…ÈµÍ•ÍÍ¥½¸•¹ÑÉ¥•Ì¸ˆ°€ˆÀ¸àÀÕÍ•Ì€àÀ”½˜¹½Éµ…°Í¥é”¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹±½Í¥¹}Í¥é•}µÕ±Ğˆè€ ‰±½Í¥¹œµ…ÕÑ¥½¸•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•È‘ÕÉ¥¹œÑ¡”±½Í¥¹œµ…ÕÑ¥½¸İ¥¹‘½Ü¸ˆ°€ˆÀÁÉ•Ù•¹ÑÌ¹•ÜÍ…±ÁÌ¹•…È™½É•±¥ÅÕ¥‘…Ñ¥½¸¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹…™Ñ•É}¡½ÕÉÍ}Í¥é•}µÕ±Ğˆè€ ‰™Ñ•Èµ¡½ÕÉÌ•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•È™½È•±¥¥‰±”…™Ñ•Èµ¡½ÕÉÌÁ±…¹ÌÑ¡…ĞÁ…ÍÌÍÁÉ•……¹±¥Ù”µ‘…Ñ„¡•­Ì¸ˆ°€ˆÀ¸ÌÀÕÍ•Ì€ÌÀ”½˜¹½Éµ…°Í¥é”¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹¡…É‘}±½Í•}Í¥é•}µÕ±Ğˆè€ ‰!…Éµ±½Í”•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•È¥¹Í¥‘”Ñ¡”µ…¹‘…Ñ½Éä±¥ÅÕ¥‘…Ñ¥½¸İ¥¹‘½Ü¸ˆ°€ˆÀÁÉ•Ù•¹ÑÌ…±°¹•Ü•¹ÑÉ¥•Ì¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹±½Í•‘}Í¥é•}µÕ±Ğˆè€ ‰±½Í•µµ…É­•Ğ•á•ÕÑ¥½¸Í¥é”ˆ°€‰5Õ±Ñ¥Á±¥•Èİ¡¥±”Ñ¡”µ…É­•Ğ¥Ì±½Í•¸ˆ°€ˆÀÁÉ•Ù•¹ÑÌ…±°¹•Ü•¹ÑÉ¥•Ì¸ˆ¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹Á½Í¥Ñ¥½¹}µ…á}ÅÕ½Ñ•}…•}µÌˆè€ (€€€€€€€€‰5…á¥µÕ´Á½Í¥Ñ¥½¸µµ…É¬ÅÕ½Ñ”…”ˆ°(€€€€€€€€‰AÉ•Ù•¹ÑÌÍÑ…±”½ÈÍ¹…ÁÍ¡½ĞÅÕ½Ñ•Ì™É½´ÑÉ¥•É¥¹œQ@Ä°Q@È°ÑÉ…¥±¥¹œÍÑ½ÁÌ°½ÈÍÑ½À±½ÍÍ•Ì½¸…¸½Á•¸Í¥µÕ±…Ñ•Á½Í¥Ñ¥½¸¸ˆ°(€€€€€€€€ˆÔÀÀÀÉ•ÅÕ¥É•Ì„ÑÉÕÍÑ•Á½Í¥Ñ¥½¸µ…É¬¹¼½±‘•ÈÑ¡…¸™¥Ù”Í•½¹‘Ì¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹É•ÅÕ¥É•}½¹Ñ•áÑ}‘…Ñ„ˆè€ (€€€€€€€€‰I•ÅÕ¥É”™É•Í µ…É­•Ğ½¹Ñ•áĞˆ°(€€€€€€€€‰	±½­Ì¹•Ü•¹ÑÉ¥•Ìİ¡•¸•…É¹¥¹Ì…¹¹•İÌ½¹Ñ•áĞ¥Ìµ¥ÍÍ¥¹œ½ÈÍÑ…±”İ¡¥±”­••Á¥¹œÑ¡”Á±…¸Ù¥Í¥‰±”¸ˆ°(€€€€€€€€‰¹…‰±•ÁÉ•Ù•¹ÑÌ„Ñ•¡¹¥…°Í…±À™É½´ÑÉ…‘¥¹œİ¥Ñ¡½ÕĞ„ÕÉÉ•¹Ğ½¹Ñ•áĞµ¥¹Ñ•°Í¹…ÁÍ¡½Ğ¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹µ…á}½¹Ñ•áÑ}…•}Ìˆè€ (€€€€€€€€‰5…á¥µÕ´½¹Ñ•áĞ…”ˆ°(€€€€€€€€‰5…á¥µÕ´…”¥¸Í•½¹‘Ì™½ÈÑ¡”Ñ¥­•È•…É¹¥¹Ì…¹¹•İÌÍ¹…ÁÍ¡½Ğ¸ˆ°(€€€€€€€€ˆÄàÀ…±±½İÌÑ¡É•”µ¥¹ÕÑ•Ì‰•™½É”½¹Ñ•áĞ¥ÌÑÉ•…Ñ•…ÌÍÑ…±”¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹µ…á}½¹Ñ•áÑ}É¥Í­}Í½É”ˆè€ (€€€€€€€€‰5…á¥µÕ´½¹Ñ•áĞÉ¥Í¬ˆ°(€€€€€€€€‰	±½­Ì„Á±…¸İ¡•¸Ñ¡”¹½Éµ…±¥é••…É¹¥¹Ì°µ…É¼°¡…±Ğ°½È¹•İÌÉ¥Í¬Í½É”É•…¡•ÌÑ¡¥ÌÙ…±Õ”¸ˆ°(€€€€€€€€ˆÀ¸à‰±½­Ì¡¥ µÉ¥Í¬•Ù•¹Ğ½¹Ñ•áÑÌ½¸„é•É¼µÑ¼µ½¹”Í…±”¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹…‘Ù•ÉÍ•}¹•İÍ}Í•¹Ñ¥µ•¹Ğˆè€ (€€€€€€€€‰‘Ù•ÉÍ”¹•İÌµÍ¡½¬Ñ¡É•Í¡½±ˆ°(€€€€€€€€‰	±½­Ì1=9‘ÕÉ¥¹œ„¹•…Ñ¥Ù”¹•İÌÍ¡½¬…¹M!=IP‘ÕÉ¥¹œ„Á½Í¥Ñ¥Ù”¹•İÌÍ¡½¬¸ˆ°(€€€€€€€€ˆÀ¸ÈÔÉ•ÅÕ¥É•Ì…‰Í½±ÕÑ”€ÌÀµµ¥¹ÕÑ”Í•¹Ñ¥µ•¹Ğ½˜…Ğ±•…ÍĞ€À¸ÈÔÑ½•Ñ¡•Èİ¥Ñ ¹•İÍ}Í¡½¬õÑÉÕ”¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹½¹Ñ•áÑ}±ÕÍÑ•É}Ñ¡É½ÑÑ±•}•¹…‰±•ˆè€ (€€€€€€€€‰½¹Ñ•áĞ±ÕÍÑ•ÈÑ¡É½ÑÑ±”ˆ°(€€€€€€€€‰AÉ•Ù•¹ÑÌÑ¡”Í…µ”Í•ÑÕÀ½Í¥‘”½Í•ÍÍ¥½¸½½¹Ñ•áĞ™É½´½Á•¹¥¹œÑ½¼µ…¹äÍ¡…‘½Ü½ÈÁ…Á•È•¹ÑÉ¥•Ì¥¹Í¥‘”„Í¡½ÉĞİ¥¹‘½Ü¸ˆ°(€€€€€€€€‰¹…‰±•ÍÑ½ÁÌ„™½ÕÉÑ ¥‘•¹Ñ¥…°½¹Ñ•áĞ•¹ÑÉä…™Ñ•ÈÑ¡É•”…±É•…‘ä½Á•¹•¥¸Ñ•¸µ¥¹ÕÑ•Ì¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹½¹Ñ•áÑ}±ÕÍÑ•É}İ¥¹‘½İ}µ¥¸ˆè€ (€€€€€€€€‰½¹Ñ•áĞ±ÕÍÑ•Èİ¥¹‘½Üˆ°(€€€€€€€€‰5¥¹ÕÑ•ÌÕÍ•‰äÑ¡”•á•ÕÑ¥½¸Á½±¥äÑ¼½Õ¹ĞÉ••¹ĞÍ…µ”µ½¹Ñ•áĞ•¹ÑÉ¥•Ì¸ˆ°(€€€€€€€€ˆÄÀµ•…¹ÌÑ¡”Ñ¡É½ÑÑ±”½¹±ä½¹Í¥‘•ÉÌ•¹ÑÉ¥•Ì½Á•¹•¥¸Ñ¡”±…ÍĞÑ•¸µ¥¹ÕÑ•Ì¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹½¹Ñ•áÑ}±ÕÍÑ•É}µ…á}•¹ÑÉ¥•Ìˆè€ (€€€€€€€€‰5…àÍ…µ”µ½¹Ñ•áĞ•¹ÑÉ¥•Ìˆ°(€€€€€€€€‰5…á¥µÕ´•¹ÑÉ¥•Ì…±±½İ•™½ÈÑ¡”Í…µ”±•…É¹•½¹Ñ•áĞ¥¹Í¥‘”Ñ¡”±ÕÍÑ•Èİ¥¹‘½Ü‰•™½É”¹•Ü•¹ÑÉ¥•Ì…É”‰±½­•¸ˆ°(€€€€€€€€ˆÌ±•ÑÌÑ¡”ÍåÍÑ•´Ñ•ÍĞ„Í•ÑÕÀ±ÕÍÑ•È‰ÕĞÁÉ•Ù•¹ÑÌ„™Õ±°µÕ¹¥Ù•ÉÍ”ÍÑ…µÁ•‘”¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹½¹Ñ•áÑ}±ÕÍÑ•É}ÕÍ•}Í•ÑÕÁ}Í•ÍÍ¥½¸ˆè€ (€€€€€€€€‰Q¡É½ÑÑ±”Í•ÑÕÀµÍ•ÍÍ¥½¸±ÕÍÑ•ÉÌˆ°(€€€€€€€€‰½Õ¹ÑÌÍ•ÑÕÀ€¬Í¥‘”€¬Í•ÍÍ¥½¸•¹ÑÉ¥•ÌÑ½•Ñ¡•È¥¹ÍÑ•…½˜½¹±ä•á…ĞIM$½Y]@½¹Ñ•áĞµ…Ñ¡•Ì°…Ñ¡¥¹œ½ÉÉ•±…Ñ•Ñ¥­•È±ÕÍÑ•ÉÌ•…É±¥•È¸ˆ°(€€€€€€€€‰¹…‰±•ÑÉ•…ÑÌEED°QEED°M=a0°9Y°…¹5TÁÉ”µµ…É­•ĞÍ¡½ÉÑÌ…ÌÑ¡”Í…µ”•á•ÕÑ¥½¸¥‘•„¸ˆ°(€€€€¤°(€€€€‰Í…±Á}ÉÕ¹Ñ¥µ”¹Í•ÑÕÁ}Í•ÍÍ¥½¹}±ÕÍÑ•É}µ…á}•¹ÑÉ¥•Ìˆè€ (€€€€€€€€‰5…àÍ•ÑÕÀµÍ•ÍÍ¥½¸•¹ÑÉ¥•Ìˆ°(€€€€€€€€‰5…á¥µÕ´•¹ÑÉ¥•Ì…±±½İ•™½ÈÑ¡”Í…µ”Í•ÑÕÀ€¬Í¥‘”€¬Í•ÍÍ¥½¸¥¹Í¥‘”Ñ¡”±ÕÍÑ•Èİ¥¹‘½Ü‰•™½É”¹•Ü•¹ÑÉ¥•Ì…É”‰±½­•¸ˆ°(€€€€€€€€ˆÈ±•ÑÌÑ¡”•¹¥¹”Ñ•ÍĞ½¹”½ÈÑİ¼ÁÉ”µµ…É­•ĞÍ¡½ÉÑÌ°Ñ¡•¸İ…¥ÑÌ™½È½ÕÑ½µ•Ì‰•™½É”…‘‘¥¹œµ½É”¸ˆ°(€€€€¤°)ô()}M1A}51}Q%1Lè‘¥ÑmÍÑÈ°ÑÕÁ±•mÍÑÈ°ÍÑÈ°ÍÑÉut€ôì(€€€€‰Í…±Á}µ°¹ÑÉ…¥¹¥¹}•¹…‰±•ˆè€ ‰¹…‰±”50ÑÉ…¥¹¥¹œˆ°€‰±±½İÌÑ¡”¥Í½±…Ñ•±•…É¹•ÈÍ•ÉÙ¥”Ñ¼ÑÉ…¥¸Q@Äµ‰•™½É”µÍÑ½À…¹Q@Èµ‰•™½É”µÍÑ½À¡…±±•¹•ÉÌ™É½´±½Í•M1A}A19}XÄ½ÕÑ½µ•Ì¸%Ğ¹•Ù•ÈÑÉ…¥¹Ì¥¸Í…¹¹•È½Èİ•ˆµ…Á¤¸ˆ°€‰-••À‘¥Í…‰±•Õ¹Ñ¥°•¹½Õ …¹½¹¥…°½ÕÑ½µ•Ì•á¥ÍĞì•¹…‰±¥¹œ‘½•Ì¹½Ğ…Ñ¥Ù…Ñ”•á•ÕÑ¥½¸¸ˆ¤°(€€€€‰Í…±Á}µ°¹…ÕÑ½}ÑÉ…¥¹}İ¡•¹}É•…‘äˆè€ ‰ÕÑ¼µÍÑ…ÉĞ50…ĞÍ…µÁ±”…Ñ”ˆ°€‰ÉµÌÑ¡”¥Í½±…Ñ•±•…É¹•È¹½Ü…¹…ÕÑ½µ…Ñ¥…±±äÍÑ…ÉÑÌ¡…±±•¹•ÈÑÉ…¥¹¥¹œ½¹”Ñ¡”µ¥¹¥µÕ´…¹½¹¥…°½ÕÑ½µ”½Õ¹Ğ¥ÌÉ•…¡•¸	•™½É”Ñ¡”…Ñ”°¥Ğ½‰Í•ÉÙ•Ìİ¥Ñ¡½ÕĞÉ•…Ñ¥¹œ•µÁÑä¡…±±•¹•È•Ù…±Õ…Ñ¥½¹Ì¸ˆ°€‰¹…‰±•İ¥Ñ „€ÈÀÀµ½ÕÑ½µ”™±½½Èµ•…¹ÌÑÉ…¥¹¥¹œÍÑ…ÉÑÌ…ÕÑ½µ…Ñ¥…±±ä…Ğ½ÕÑ½µ”€ÈÀÀ¸ˆ¤°(€€€€‰Í…±Á}µ°¹Í¡…‘½İ}•¹…‰±•ˆè€ ‰¹…‰±”Í¡…‘½ÜÁÉ•‘¥Ñ¥½¹Ìˆ°€‰1½…‘ÌÑ¡”ÁÉ½µ½Ñ•¡…µÁ¥½¸…¹É•½É‘ÌÁÉ½‰…‰¥±¥Ñ¥•Ì½¸Ù…±¥Í…±ÀÁ±…¹Ìİ¥Ñ¡½ÕĞ¡…¹¥¹œ½¹™¥‘•¹”½È•á•ÕÑ¥½¸¸ˆ°€‰UÍ”Í¡…‘½Üµ½‘”™¥ÉÍĞÑ¼½µÁ…É”ÁÉ•‘¥Ñ¥½¹Ìİ¥Ñ É•…±¥é•½ÕÑ½µ•Ì¸ˆ¤°(€€€€‰Í…±Á}µ°¹½Ù•É±…å}•¹…‰±•ˆè€ ‰ÁÁ±ä½¹™¥‘•¹”½Ù•É±…äˆ°€‰ÁÁ±¥•ÌÑ¡”ÁÉ½µ½Ñ•µ½‘•°Ì‰½Õ¹‘•½¹™¥‘•¹”…‘©ÕÍÑµ•¹Ğ¸%Ğ…¹¹½ĞÉ•…Ñ”„Í•ÑÕÀ°¡…¹”‰É…­•Ğ±•Ù•±Ì°…±Ñ•ÈÍ¥é”°½È‰åÁ…ÍÌ‰±½­•ÉÌ¸ˆ°€‰¹…‰±”½¹±ä…™Ñ•ÈÍ¡…‘½Ü…±¥‰É…Ñ¥½¸¥Ì•½¹½µ¥…±±äÙ…±¥‘…Ñ•¸ˆ¤°(€€€€‰Í…±Á}µ°¹ÑÉ…¥¹¥¹}¥¹Ñ•ÉÙ…±}µ¥¸ˆè€ ‰QÉ…¥¹¥¹œ¥¹Ñ•ÉÙ…°ˆ°€‰5¥¹ÕÑ•Ì‰•Ñİ••¸¡…±±•¹•ÈÑÉ…¥¹¥¹œ…ÑÑ•µÁÑÌ¥¹Í¥‘”Ñ¡”±•…É¹•È½¹Ñ…¥¹•È¸ˆ°€ˆØÀ•Ù…±Õ…Ñ•Ì„™É•Í ¡…±±•¹•È…Ğµ½ÍĞ½¹”Á•È¡½ÕÈ¸ˆ¤°(€€€€‰Í…±Á}µ°¹ÑÉ…¥¹¥¹}±½½­‰…­}‘…åÌˆè€ ‰QÉ…¥¹¥¹œ±½½­‰…¬ˆ°€‰5…á¥µÕ´…”½˜…¹½¹¥…°½ÕÑ½µ•Ì¥¹±Õ‘•¥¸„¡…±±•¹•È‘…Ñ…Í•ĞÍ¼½‰Í½±•Ñ”É•¥µ•Ì…¹¹½Ğ‘½µ¥¹…Ñ”ÕÉÉ•¹ĞÍ…±Á¥¹œ‰•¡…Ù¥½È¸ˆ°€ˆØÀÑÉ…¥¹Ì½¹±ä™É½´Ñ¡”µ½ÍĞÉ••¹ĞÍ¥áÑä…±•¹‘…È‘…åÌ¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ…á¥µÕµ}µ½‘•±}…•}¡½ÕÉÌˆè€ ‰5…á¥µÕ´¡…µÁ¥½¸…”ˆ°€‰I•©•ÑÌ¥¹™•É•¹”™É½´„¡…µÁ¥½¸½±‘•ÈÑ¡…¸Ñ¡¥Ìµ…¹ä¡½ÕÉÌ¸5¥ÍÍ¥¹œ½ÈÍÑ…±”50…±İ…åÌ™…¥±Ì½Á•¸Ñ¼‘•Ñ•Éµ¥¹¥ÍÑ¥Œ½¹™¥‘•¹”¸ˆ°€ˆÄØà•áÁ¥É•Ì„¡…µÁ¥½¸…™Ñ•ÈÍ•Ù•¸‘…åÌİ¥Ñ¡½ÕĞÍÕ•ÍÍ™Õ°É•Ù…±¥‘…Ñ¥½¸¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}Í…µÁ±•Ìˆè€ ‰5¥¹¥µÕ´ÑÉ…¥¹¥¹œ½ÕÑ½µ•Ìˆ°€‰5¥¹¥µÕ´±½Í•…¹½¹¥…°½ÕÑ½µ•ÌÉ•ÅÕ¥É•‰•™½É”„¡…±±•¹•Èµ…ä‰”™¥ÑÑ•¸ˆ°€ˆÈÀÀÁÉ•Ù•¹ÑÌÁÉ½µ½Ñ¥½¸™É½´„Ñ¥¹äÍ…µÁ±”¸ˆ¤°(€€€€‰Í…±Á}µ°¹‰½½ÑÍÑÉ…Á}µ¥¹¥µÕµ}Í…µÁ±•Ìˆè€ ‰	½½ÑÍÑÉ…À•Ù…±Õ…Ñ¥½¸½ÕÑ½µ•Ìˆ°€‰Mµ…±±•ÈÍ…µÁ±”™±½½ÈÑ¡…Ğ±•ÑÌÑ¡”±•…É¹•È™¥Ğ…¹É•©•Ğ•…É±ä¡…±±•¹•ÉÌ™½ÈÙ¥Í¥‰¥±¥Ñä‰•™½É”ÁÉ½µ½Ñ¥½¸¥Ì…±±½İ•¸ˆ°€ˆÜÔÍÑ…ÉÑÌÕÍ•™Õ°‘¥…¹½ÍÑ¥Ì•…É±¥•ÈìÁÉ½µ½Ñ¥½¸ÍÑ¥±°É•ÅÕ¥É•ÌÑ¡”µ…¥¸µ¥¹¥µÕ´ÑÉ…¥¹¥¹œ½ÕÑ½µ•Ì…Ñ”¸ˆ¤°(€€€€‰Í…±Á}µ°¹‰½½ÑÍÑÉ…Á}ÑÉ…¥¹¥¹}•¹…‰±•ˆè€ ‰¹…‰±”‰½½ÑÍÑÉ…À•Ù…±Õ…Ñ¥½¸ˆ°€‰±±½İÌ•…É±ä¡…±±•¹•È™¥ÑÑ¥¹œ™É½´Ñ¡”‰½½ÑÍÑÉ…ÀÍ…µÁ±”™±½½Èİ¡¥±”É•Ñ…¥¹¥¹œ™Õ±°ÁÉ½µ½Ñ¥½¸…Ñ•Ì¸ˆ°€‰¹…‰±•µ•…¹ÌÑ¡”±•…É¹•È…¸•áÁ±…¥¸İ¡ä„µ½‘•°¥Ì¹½ĞÉ•…‘ä¥¹ÍÑ•…½˜½¹±äÍ…å¥¹œİ…¥Ñ¥¹œ™½ÈÍ…µÁ±•Ì¸ˆ¤°(€€€€‰Í…±Á}µ°¹¡½±‘½ÕÑ}ÁĞˆè€ ‰¡É½¹½±½¥…°¡½±‘½ÕĞ™É…Ñ¥½¸ˆ°€‰9•İ•ÍĞ™É…Ñ¥½¸½˜½ÕÑ½µ•ÌÉ•Í•ÉÙ•ÍÑÉ¥Ñ±ä™½È½ÕĞµ½˜µÍ…µÁ±”ÁÉ½µ½Ñ¥½¸Ñ•ÍÑ¥¹œ¸9¼É…¹‘½´Í¡Õ™™±”½ÈÍ…±•È™¥ĞÑ½Õ¡•Ì¥Ğ¸ˆ°€ˆÀ¸ÈÔÉ•Í•ÉÙ•ÌÑ¡”¹•İ•ÍĞ€ÈÔ”™½ÈÙ…±¥‘…Ñ¥½¸¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}Í•±•Ñ•‘}¡½±‘½ÕĞˆè€ ‰5¥¹¥µÕ´•Ù…±Õ…Ñ•¡½±‘½ÕĞÑÉ…‘•Ìˆ°€‰5¥¹¥µÕ´¡½±‘½ÕĞÉ½İÌİ¡½Í”µ½‘•°•áÁ•Ñ•µH±•…ÉÌÑ¡”Í•±•Ñ¥½¸Ñ¡É•Í¡½±‰•™½É”•½¹½µ¥Œµ•ÑÉ¥Ì…É”ÑÉÕÍÑ•¸ˆ°€ˆÌÀÉ•ÅÕ¥É•Ì…Ğ±•…ÍĞÑ¡¥ÉÑä¥¹‘•Á•¹‘•¹Ñ±ä•Ù…±Õ…Ñ•½ÁÁ½ÉÑÕ¹¥Ñ¥•Ì¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}¡½±‘½ÕÑ}Í•ÍÍ¥½¹Ìˆè€ ‰5¥¹¥µÕ´Ù…±¥‘…Ñ¥½¸Í•ÍÍ¥½¹Ìˆ°€‰9Õµ‰•È½˜É••¹Ğµ…É­•Ğ‘…Ñ•ÌÑ¡…ĞµÕÍĞ¥¹‘•Á•¹‘•¹Ñ±äÍ…Ñ¥Í™äÍ•ÍÍ¥½¸ÍÑ…‰¥±¥Ñä¡•­Ì¸ˆ°€ˆÈÁÉ•Ù•¹ÑÌ½¹”Õ¹ÕÍÕ…±±äÍÑÉ½¹œ‘…ä™É½´ÁÉ½µ½Ñ¥¹œ„µ½‘•°¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}Í•ÍÍ¥½¹}Í…µÁ±•Ìˆè€ ‰5¥¹¥µÕ´ÑÉ…‘•ÌÁ•ÈÍ•ÍÍ¥½¸ˆ°€‰5¥¹¥µÕ´Í•±•Ñ•¡½±‘½ÕĞÑÉ…‘•ÌÉ•ÅÕ¥É•½¸•… É••¹ĞÙ…±¥‘…Ñ¥½¸Í•ÍÍ¥½¸¸ˆ°€ˆÔÉ•ÅÕ¥É•Ìµ•…¹¥¹™Õ°½Ù•É…”½¸‰½Ñ É••¹Ğ‘…åÌ¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}•áÁ•Ñ…¹å}Èˆè€ ‰AÉ½µ½Ñ¥½¸•áÁ•Ñ…¹ä™±½½Èˆ°€‰5¥¹¥µÕ´É•…±¥é•µ•…¸H½¸Í•±•Ñ•¡É½¹½±½¥…°¡½±‘½ÕĞÉ½İÌ¸ˆ°€ˆÀ¸ÀÔÉ•ÅÕ¥É•Ì…Ğ±•…ÍĞ€¬À¸ÀÕHÁ•ÈÍ•±•Ñ•ÑÉ…‘”¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}ÁÉ½™¥Ñ}™…Ñ½Èˆè€ ‰AÉ½µ½Ñ¥½¸ÁÉ½™¥Ğµ™…Ñ½È™±½½Èˆ°€‰5¥¹¥µÕ´É½ÍÌ¡½±‘½ÕĞİ¥¹Ì‘¥Ù¥‘•‰ä…‰Í½±ÕÑ”É½ÍÌ¡½±‘½ÕĞ±½ÍÍ•Ì¸ˆ°€ˆÄ¸ÄÀÉ•ÅÕ¥É•ÌÑ•¸Á•É•¹Ğµ½É”É½ÍÌÁÉ½™¥ĞÑ¡…¸É½ÍÌ±½ÍÌ¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}Í•ÍÍ¥½¹}•áÁ•Ñ…¹å}Èˆè€ ‰A•ÈµÍ•ÍÍ¥½¸•áÁ•Ñ…¹ä™±½½Èˆ°€‰5¥¹¥µÕ´É•…±¥é••áÁ•Ñ…¹äÉ•ÅÕ¥É•¥¹‘•Á•¹‘•¹Ñ±ä½¸•… É••¹ĞÙ…±¥‘…Ñ¥½¸Í•ÍÍ¥½¸¸ˆ°€ˆÀ¸ÀÁÉ•Ù•¹ÑÌÁÉ½µ½Ñ¥½¸İ¡•¸•¥Ñ¡•ÈÉ••¹ĞÍ•ÍÍ¥½¸¥Ì¹•…Ñ¥Ù”¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}…ÕŒˆè€ ‰5¥¹¥µÕ´¡½±‘½ÕĞUˆ°€‰5¥¹¥µÕ´½ÕĞµ½˜µÍ…µÁ±”‘¥ÍÉ¥µ¥¹…Ñ¥½¸É•ÅÕ¥É•¥¹‘•Á•¹‘•¹Ñ±ä™½È‰½Ñ Q@Ä…¹Q@È±…ÍÍ¥™¥•ÉÌ¸ˆ°€ˆÀ¸ÔÈÉ•ÅÕ¥É•Ì•… µ½‘•°Ñ¼É…¹¬½ÕÑ½µ•Ì‰•ÑÑ•ÈÑ¡…¸¡…¹”¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ¥¹¥µÕµ}‰É¥•É}¥µÁÉ½Ù•µ•¹Ğˆè€ ‰5¥¹¥µÕ´	É¥•È¥µÁÉ½Ù•µ•¹Ğˆ°€‰I•ÅÕ¥É•ÁÉ½‰…‰¥±¥Ñäµ…±¥‰É…Ñ¥½¸¥µÁÉ½Ù•µ•¹Ğ½Ù•È„½¹ÍÑ…¹ĞÑÉ…¥¹¥¹œµÁÉ•Ù…±•¹”‰…Í•±¥¹”½¸¡É½¹½±½¥…°¡½±‘½ÕĞ‘…Ñ„¸ˆ°€ˆÀ¸ÀÉ•©•ÑÌ„µ½‘•°İ¡½Í”ÁÉ½‰…‰¥±¥Ñ¥•Ì…É”İ½ÉÍ”Ñ¡…¸Ñ¡”¹…¥Ù”‰…Í•±¥¹”¸ˆ¤°(€€€€‰Í…±Á}µ°¹Í•±•Ñ¥½¹}•áÁ•Ñ•‘}Èˆè€ ‰AÉ•‘¥Ñ¥½¸Í•±•Ñ¥½¸Ñ¡É•Í¡½±ˆ°€‰5¥¹¥µÕ´µ½‘•°µ¥µÁ±¥••áÁ•Ñ•HÕÍ•Ñ¼¥¹±Õ‘”„¡½±‘½ÕĞÉ½Ü¥¸•½¹½µ¥ŒÁÉ½µ½Ñ¥½¸•Ù…±Õ…Ñ¥½¸¸ˆ°€ˆÀ¸À•Ù…±Õ…Ñ•Ì½¹±äµ½‘•°µÁ½Í¥Ñ¥Ù”½ÁÁ½ÉÑÕ¹¥Ñ¥•Ì¸ˆ¤°(€€€€‰Í…±Á}µ°¹½¹™¥‘•¹•}Á½¥¹ÑÍ}Á•É}Èˆè€ ‰½¹™¥‘•¹”Í•¹Í¥Ñ¥Ù¥Ñäˆ°€‰A•É•¹Ñ…”µÁ½¥¹Ğ…‘©ÕÍÑµ•¹ĞÁÉ½‘Õ•Á•È½¹”Õ¹¥Ğ½˜µ½‘•°µ¥µÁ±¥••áÁ•Ñ•H‰•™½É”…ÁÌ¸ˆ°€ˆÔ…‘‘Ì€È¸ÔÁ½¥¹ÑÌ™½È€¬À¸ÔÀ•áÁ•Ñ•H¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ…á}½¹™¥‘•¹•}É…¥Í”ˆè€ ‰5…á¥µÕ´½¹™¥‘•¹”¥¹É•…Í”ˆ°€‰!…É…À½¸Á½Í¥Ñ¥Ù”µ½‘•°¥¹™±Õ•¹”¸Q¡”Á±…¸µÕÍĞ…±É•…‘ä‰”Ù…±¥‰•™½É”Ñ¡¥Ì…¸µ…ÑÑ•È¸ˆ°€ˆÔÁÉ•Ù•¹ÑÌ50™É½´…‘‘¥¹œµ½É”Ñ¡…¸™¥Ù”½¹™¥‘•¹”Á½¥¹ÑÌ¸ˆ¤°(€€€€‰Í…±Á}µ°¹µ…á}½¹™¥‘•¹•}É•‘ÕÑ¥½¸ˆè€ ‰5…á¥µÕ´½¹™¥‘•¹”É•‘ÕÑ¥½¸ˆ°€‰!…É…À½¸¹•…Ñ¥Ù”µ½‘•°¥¹™±Õ•¹”¸9•…Ñ¥Ù”•Ù¥‘•¹”µ…äÑ¥¡Ñ•¸µ½É”ÍÑÉ½¹±äÑ¡…¸Á½Í¥Ñ¥Ù”•Ù¥‘•¹”…¸É•±…à¸ˆ°€ˆÄÔÁ•Éµ¥ÑÌÕÀÑ¼„™¥™Ñ••¸µÁ½¥¹ĞÉ•‘ÕÑ¥½¸¸ˆ¤°)ô(()‘•˜‰Õ¥±‘}…Ñ…±½œ¡Ù…±Õ•Ìè‘¥ÑmÍÑÈ°¹åt°‘•™…Õ±ÑÌè‘¥ÑmÍÑÈ°¹åt¤€´ø‘¥ÑmÍÑÈ°¹åtè(€€€É½ÕÁÌ€ôl(€€€€€€€ì‰¥ˆèÁÉ•™¥à°€‰±…‰•°ˆè±…‰•°°€‰‘•ÍÉ¥ÁÑ¥½¸ˆè‘•ÍÉ¥ÁÑ¥½¹ô(€€€€€€€™½ÈÁÉ•™¥à°±…‰•°°‘•ÍÉ¥ÁÑ¥½¸¥¸I=UAL(€€€t(€€€™¥•±‘Ì€ômt(€€€™½È­•ä¥¸Í½ÉÑ•¡Í•Ğ¡‘•™…Õ±ÑÌ¤ğÍ•Ğ¡Ù…±Õ•Ì¤¤è(€€€€€€€Ù…±Õ”€ôÙ…±Õ•Ì¹•Ğ¡­•ä°‘•™…Õ±ÑÌ¹•Ğ¡­•ä¤¤(€€€€€€€‘•™…Õ±Ğ€ô‘•™…Õ±ÑÌ¹•Ğ¡­•ä¤(€€€€€€€ÁÉ•™¥à€ô­•ä¹ÍÁ±¥Ğ ˆ¸ˆ°€Ä¥lÁt(€€€€€€€É½ÕÀ€ôÁÉ•™¥à¥˜ÁÉ•™¥à¥¸}I=UA}	e}AI%`•±Í”€‰ÍåÍÑ•´ˆ(€€€€€€€±…‰•°°‘•ÍÉ¥ÁÑ¥½¸°•á…µÁ±”€ô}‘•Ñ…¥°¡­•ä°Ù…±Õ”°É½ÕÀ¤(€€€€€€€™¥•±‘Ì¹…ÁÁ•¹ (€€€€€€€€€€€ì(€€€€€€€€€€€€€€€€‰­•äˆè­•ä°(€€€€€€€€€€€€€€€€‰É½ÕÀˆèÉ½ÕÀ°(€€€€€€€€€€€€€€€€‰±…‰•°ˆè±…‰•°°(€€€€€€€€€€€€€€€€‰‘•ÍÉ¥ÁÑ¥½¸ˆè‘•ÍÉ¥ÁÑ¥½¸°(€€€€€€€€€€€€€€€€‰•á…µÁ±”ˆè•á…µÁ±”°(€€€€€€€€€€€€€€€€‰Ù…±Õ”ˆèÙ…±Õ”°(€€€€€€€€€€€€€€€€‰‘•™…Õ±Ğˆè‘•™…Õ±Ğ°(€€€€€€€€€€€€€€€€‰ÑåÁ”ˆè}Ù…±Õ•}ÑåÁ”¡Ù…±Õ”¤°(€€€€€€€€€€€€€€€€‰…‘Ù…¹•ˆè­•ä¹½Ğ¥¸}M1A}Q%1L…¹­•ä¹½Ğ¥¸}M1A}IU9Q%5}Q%1L…¹­•ä¹½Ğ¥¸}M1A}1I9}Q%1L…¹­•ä¹½Ğ¥¸}M1A}51}Q%1L°(€€€€€€€€€€€ô(€€€€€€€€¤(€€€É•ÑÕÉ¸ì‰Í¡•µ…}Ù•ÉÍ¥½¸ˆè€Ä°€‰É½ÕÁÌˆèÉ½ÕÁÌ°€‰™¥•±‘Ìˆè™¥•±‘Íô(()‘•˜}‘•Ñ…¥°¡­•äèÍÑÈ°Ù…±Õ”è¹ä°É½ÕÀèÍÑÈ¤€´øÑÕÁ±•mÍÑÈ°ÍÑÈ°ÍÑÉtè(€€€¥˜­•ä¥¸}M1A}Q%1Lè(€€€€€€€É•ÑÕÉ¸}M1A}Q%1Mm­•åt(€€€¥˜­•ä¥¸}M1A}IU9Q%5}Q%1Lè(€€€€€€€É•ÑÕÉ¸}M1A}IU9Q%5}Q%1Mm­•åt(€€€¥˜­•ä¥¸}M1A}1I9}Q%1Lè(€€€€€€€É•ÑÕÉ¸}M1A}1I9}Q%1Mm­•åt(€€€¥˜­•ä¥¸}M1A}51}Q%1Lè(€€€€€€€É•ÑÕÉ¸}M1A}51}Q%1Mm­•åt(€€€ÍÕ™™¥à€ô­•ä¹ÍÁ±¥Ğ ˆ¸ˆ°€Ä¥l´Åt(€€€±…‰•°€ôÉ”¹ÍÕˆ¡È‰qÌ¬ˆ°€ˆ€ˆ°ÍÕ™™¥à¹É•Á±…” ‰|ˆ°€ˆ€ˆ¤¤¹ÍÑÉ¥À ¤¹Ñ¥Ñ±” ¤(€€€É½ÕÁ}±…‰•°€ô}I=UA}	e}AI%`¹•Ğ¡É½ÕÀ°€ ‰MåÍÑ•´ˆ°€ˆˆ¤¥lÁt(€€€‘•ÍÉ¥ÁÑ¥½¸€ô€ (€€€€€€€˜‰IÕ¹Ñ¥µ”íÉ½ÕÁ}±…‰•°¹±½İ•È ¥ôÍ•ÑÑ¥¹œí­•åõ€¸%Ğ¥ÌÁ•ÉÍ¥ÍÑ•¥¸A½ÍÑÉ•ME0€ˆ(€€€€€€€€‰…¹¡½ĞµÉ•±½…‘•‰äÑ¡”½İ¹¥¹œÍ•ÉÙ¥”İ¥Ñ¡½ÕĞ„½¹Ñ…¥¹•ÈÉ•ÍÑ…ÉĞ¸ˆ(€€€€¤(€€€¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°‰½½°¤è(€€€€€€€•á…µÁ±”€ô€‰¹…‰±•…ÁÁ±¥•ÌÑ¡”‰•¡…Ù¥½È¥µµ•‘¥…Ñ•±äì‘¥Í…‰±•±•…Ù•ÌÑ¡”½İ¹¥¹œ™•…ÑÕÉ”¥¹…Ñ¥Ù”¸ˆ(€€€•±¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°€¡¥¹Ğ°™±½…Ğ¤¤è(€€€€€€€•á…µÁ±”€ô˜‰ÕÉÉ•¹Ğ½‘•™…Õ±ĞÉ•™•É•¹”Ù…±Õ”èíÙ…±Õ•ô¸¡…¹”É…‘Õ…±±ä…¹Ù•É¥™äÑ¡”½İ¹¥¹œÍ•ÉÙ¥”µ•ÑÉ¥Ì¸ˆ(€€€•±¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°±¥ÍĞ¤è(€€€€€€€•á…µÁ±”€ô€‰¹Ñ•È„)M=8±¥ÍĞ¸… ¥Ñ•´¥ÌÁÉ•Í•ÉÙ•¥¸½É‘•È¸ˆ(€€€•±Í”è(€€€€€€€•á…µÁ±”€ô˜‰ÕÉÉ•¹Ğ½‘•™…Õ±ĞÉ•™•É•¹”Ù…±Õ”èíÙ…±Õ”…Íô¸ˆ(€€€É•ÑÕÉ¸±…‰•°°‘•ÍÉ¥ÁÑ¥½¸°•á…µÁ±”(()‘•˜}Ù…±Õ•}ÑåÁ”¡Ù…±Õ”è¹ä¤€´øÍÑÈè(€€€¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°‰½½°¤è(€€€€€€€É•ÑÕÉ¸€‰‰½½±•…¸ˆ(€€€¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°¥¹Ğ¤…¹¹½Ğ¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°‰½½°¤è(€€€€€€€É•ÑÕÉ¸€‰¥¹Ñ••Èˆ(€€€¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°™±½…Ğ¤è(€€€€€€€É•ÑÕÉ¸€‰¹Õµ‰•Èˆ(€€€¥˜¥Í¥¹ÍÑ…¹”¡Ù…±Õ”°±¥ÍĞ¤è(€€€€€€€É•ÑÕÉ¸€‰…ÉÉ…äˆ(€€€É•ÑÕÉ¸€‰ÍÑÉ¥¹œˆ
+        "Extended-session reachability score",
+        "Minimum reachability score for PRE_MARKET and AFTER_HOURS entries, where spreads and quote depth are less reliable.",
+        "70 is deliberately stricter than regular hours because extended-session execution has greater liquidity risk.",
+    ),
+    "scalp.entry_quality_require_positive_ml_ev": (
+        "Require positive champion EV",
+        "When a validated ML champion exists, requires its pre-entry expected-R estimate to clear the configured floor. No unpromoted or missing model can block a trade through this rule.",
+        "Enabled makes ML a downside gate only after chronological economic promotion succeeds.",
+    ),
+    "scalp.entry_quality_min_ml_expected_r": (
+        "Minimum champion expected R",
+        "Minimum model-implied expected return after the champion estimates TP1-before-stop and TP2-before-stop probabilities.",
+        "0.05 requires at least +0.05R modeled expectancy after the configured two-stage payoff.",
+    ),
+    "scalp.entry_quality_empirical_gate_enabled": (
+        "Empirical context EV guard",
+        "Uses closed outcomes from the matching context or broader setup + side + session to prevent repeatedly funding a context with negative observed expectancy.",
+        "In shadow mode a negative mature context receives a small probe allocation; canonical paper execution is blocked.",
+    ),
+    "scalp.entry_quality_empirical_min_samples": (
+        "Empirical EV sample floor",
+        "Minimum matching closed outcomes required before observed mean expectancy may control execution.",
+        "10 avoids treating one or two random outcomes as a durable economic conclusion.",
+    ),
+    "scalp.entry_quality_min_empirical_expectancy_r": (
+        "Minimum empirical expected R",
+        "Lowest accepted mean R expectancy for a mature learned context.",
+        "0.0 requires the context to be non-negative; shadow probes continue collecting recovery evidence below the floor.",
+    ),
+    "scalp.entry_quality_shadow_probe_size_mult": (
+        "Negative-context probe size",
+        "Shadow-only size multiplier used when a mature context is empirically negative, preserving forward evidence while sharply reducing simulated dollar exposure.",
+        "0.10 observes the context at ten percent of normal shadow risk; canonical paper remains blocked.",
+    ),
+    "scalp.entry_confirmation_enabled": (
+        "Stable-entry confirmation",
+        "Requires an eligible plan to remain valid across several scalp-engine cycles before execution. It filters transient provisional RSI, MACD, and VWAP flips.",
+        "Enabled confirms inside the current scalp minute instead of waiting a full bar and entering late.",
+    ),
+    "scalp.entry_confirmation_seconds": (
+        "Confirmation dwell seconds",
+        "Minimum continuous time the same ticker, side, and setup must remain eligible before entry.",
+        "15 seconds spans roughly three five-second runtime observations.",
+    ),
+    "scalp.entry_confirmation_min_observations": (
+        "Confirmation observations",
+        "Minimum number of independent runtime observations required during the dwell window.",
+        "3 prevents a delayed second cycle from counting as stable evidence by itself.",
+    ),
+    "scalp.entry_confirmation_max_chase_r": (
+        "Maximum confirmation chase",
+        "Maximum favorable price movement, measured in initial R, allowed between first detection and confirmed entry. Larger moves reset confirmation rather than chasing.",
+        "0.25 prevents entering after price has already consumed more than one-quarter of the route to TP1.",
+    ),
+    "scalp.mtf_enabled": (
+        "Five-minute scalp context",
+        "Calculates context from fully closed five-minute bars while live quotes and one-minute bars remain the only execution clock.",
+        "Enabled adds five-minute trend, RSI, MACD, ATR, and VWAP evidence without changing entries in SHADOW mode.",
+    ),
+    "scalp.mtf_mode": (
+        "Multi-timeframe rollout mode",
+        "OFF disables the assessment. SHADOW records and displays reversal versus momentum-pullback evidence but cannot change validity, confidence, size, stops, or targets.",
+        "Keep SHADOW until chronological net-of-cost validation proves positive expectancy.",
+    ),
+    "scalp.mtf_max_bar_age_ms": (
+        "Maximum closed 5m bar age",
+        "Marks five-minute context unavailable when its last fully closed bar is older than this limit. The current incomplete five-minute bucket is never used.",
+        "420000 allows seven minutes from the close of the last completed five-minute bar.",
+    ),
+    "scalp.momentum_shadow_enabled": (
+        "Evaluate momentum pullbacks",
+        "Builds shadow continuation candidates from aligned closed-five-minute trend plus one-minute RSI pullback, MACD reacceleration, VWAP direction, and RVOL.",
+        "Enabled measures continuation opportunities that the original reversal-only engine cannot detect.",
+    ),
+    "scalp.reversal_shadow_enabled": (
+        "Evaluate scalp reversals",
+        "Builds shadow reversal candidates from one-minute RSI extremes, MACD turn, VWAP reaction, and five-minute conflict detection.",
+        "Enabled keeps the original reversal thesis measurable beside momentum pullbacks.",
+    ),
+    "scalp.momentum_long_rsi_min": (
+        "Momentum LONG RSI floor",
+        "Lowest closed one-minute RSI-14 accepted as a pullback inside a bullish five-minute scalp context.",
+        "45 avoids treating a deeply oversold breakdown as an ordinary continuation pullback.",
+    ),
+    "scalp.momentum_long_rsi_max": (
+        "Momentum LONG RSI ceiling",
+        "Highest closed one-minute RSI-14 accepted before a bullish continuation entry is considered too extended.",
+        "70 rejects chasing an already overbought one-minute move.",
+    ),
+    "scalp.momentum_short_rsi_min": (
+        "Momentum SHORT RSI floor",
+        "Lowest closed one-minute RSI-14 accepted before a bearish continuation entry is considered too extended.",
+        "30 rejects chasing an already oversold one-minute move lower.",
+    ),
+    "scalp.momentum_short_rsi_max": (
+        "Momentum SHORT RSI ceiling",
+        "Highest closed one-minute RSI-14 accepted as a bounce inside a bearish five-minute scalp context.",
+        "55 limits short continuation candidates to modest countertrend bounces.",
+    ),
+}
+
+_SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
+    "scalp_learn.enabled": ("Immediate outcome learning", "Updates context statistics whenever a SCALP_PLAN_V1 paper or enabled shadow trade closes. Disabling it preserves outcomes but stops automatic gate changes.", "Keep enabled in paper/shadow mode to measure same-session adaptation."),
+    "scalp_learn.shadow_outcomes_enabled": ("Learn from shadow mistakes", "Turns closed shadow trades into negative-ID learning outcomes. This never changes paper P&L, but it lets the next matching setup reduce size, raise confidence, or block automatically.", "Enabled means a bad simulated LONG RECLAIM setup can tighten the next similar setup without human intervention."),
+    "scalp_learn.rolling_window_min": ("Rolling context window", "Limits decisions to outcomes closed within this many minutes for the exact setup context.", "120 evaluates the most recent two hours."),
+    "scalp_learn.min_samples_to_adjust": ("Samples before adjustment", "Minimum matching outcomes required before confidence or size may be tightened by the normal rolling-expectancy path.", "3 reacts within the same failure cluster while still ignoring one isolated bad print."),
+    "scalp_learn.min_samples_to_block": ("Samples before blocking", "Minimum matching outcomes required before a context may be temporarily blocked.", "12 requires a broader failure cluster than a size reduction."),
+    "scalp_learn.ewma_alpha": ("Expectancy EWMA alpha", "Weight assigned to the newest outcome when calculating rolling R expectancy.", "0.25 gives the newest trade 25% weight."),
+    "scalp_learn.negative_reduce_r": ("Size-reduction expectancy", "Triggers reduced size when EWMA expectancy falls to this R value after the adjustment sample floor.", "-0.05R reduces exposure before a hard block."),
+    "scalp_learn.negative_block_r": ("Context-block expectancy", "Allows a temporary block when EWMA expectancy and posterior win rate are both weak.", "-0.20R requires materially negative recent expectancy."),
+    "scalp_learn.block_win_rate": ("Block posterior win rate", "Bayesian posterior win-rate ceiling required together with negative expectancy for a hard block.", "0.40 requires the smoothed win rate to be below 40%."),
+    "scalp_learn.confidence_win_rate": ("Confidence-raise win rate", "Raises the confidence floor when posterior win rate is weak but hard-block conditions are not met.", "0.48 tightens contexts below a 48% smoothed win rate."),
+    "scalp_learn.base_confidence_floor": ("Base learned confidence floor", "Starting confidence requirement used for a CONFIDENCE_RAISE action.", "60 plus a 10-point step creates a 70% floor."),
+    "scalp_learn.confidence_raise_step": ("Confidence raise step", "Percentage points added to the learned confidence floor for a weak context.", "10 raises a 60% floor to 70%."),
+    "scalp_learn.size_reduce_mult": ("Learned size multiplier", "Multiplier applied while SIZE_REDUCE is active. Learning may reduce, but never increase, size.", "0.50 halves the planned position."),
+    "scalp_learn.dollar_guard_enabled": ("Dollar-aware learning guard", "Lets the context gate react when recent trades are profitable in R but losing real dollars because of size, fills, spread, or slippage.", "Enabled catches a +0.15R day that is still -$50 and reduces the next matching setup."),
+    "scalp_learn.negative_reduce_dollar": ("Dollar size-reduction threshold", "Recent same-context dollar P&L at or below this value triggers a temporary size reduction after the adjustment sample floor.", "-25 reduces size when the rolling context has lost at least twenty-five dollars."),
+    "scalp_learn.negative_block_dollar": ("Dollar block threshold", "Recent same-context dollar P&L at or below this value can temporarily block the setup once the block sample floor is met and win-rate evidence is weak.", "-100 blocks a context that repeatedly loses real dollars even if a few partial exits look positive in R."),
+    "scalp_learn.fast_stop_circuit_enabled": ("Fast stop circuit", "Immediately tightens a setup context when clustered stop exits occur inside the fast-stop window, even before the normal rolling sample floor would react.", "Enabled catches three near-back-to-back STOP exits in the same context during a noisy tape."),
+    "scalp_learn.fast_stop_window_min": ("Fast stop window", "Minutes used to count clustered stop exits for the fast circuit.", "10 means only stops from the last ten minutes count toward the circuit."),
+    "scalp_learn.fast_stop_count": ("Fast stop count", "Number of losing stop exits in the fast-stop window required to trigger immediate size reduction.", "3 turns three same-context stop exits into an automatic risk tightening action."),
+    "scalp_learn.fast_stop_size_mult": ("Fast stop size multiplier", "Temporary position-size multiplier applied by the fast stop circuit. It can only reduce exposure.", "0.25 means the next matching setup trades at one-quarter size until the action expires or context recovers."),
+    "scalp_learn.setup_session_fast_stop_block_enabled": ("Setup-session fast stop block", "Escalates the broad setup + side + session gate to a temporary block when repeated stop exits cluster inside the fast-stop window.", "Enabled blocks the next PRE_MARKET short cluster after two rapid stop exits instead of only reducing size after three."),
+    "scalp_learn.setup_session_fast_stop_block_count": ("Setup-session stop block count", "Number of rapid stop exits in the same setup + side + session required to trigger a temporary cooldown block.", "2 blocks the third matching setup/session attempt inside the fast-stop window."),
+    "scalp_learn.pre_tp1_failure_circuit_enabled": ("Pre-TP1 failure circuit", "Counts every losing trade that failed to reach TP1, including TIME_STOP as well as STOP. This catches weak follow-through that the stop-only circuit misses.", "Enabled lets two non-follow-through outcomes tighten the next matching setup immediately."),
+    "scalp_learn.pre_tp1_failure_window_min": ("Pre-TP1 failure window", "Rolling minutes used to count losing outcomes that never reached TP1.", "120 captures recurring non-follow-through across the current two-hour market context."),
+    "scalp_learn.pre_tp1_failure_count": ("Pre-TP1 failure count", "Number of losing no-TP1 outcomes required to trigger the immediate circuit.", "2 reacts to a repeated failure while still ignoring one isolated loss."),
+    "scalp_learn.pre_tp1_failure_size_mult": ("Pre-TP1 probe size", "Temporary multiplier for the exact learned context after the pre-TP1 failure count is reached.", "0.25 keeps exact-context observation at one-quarter size."),
+    "scalp_learn.setup_session_pre_tp1_block_enabled": ("Block repeated setup-session failures", "Escalates repeated pre-TP1 failures across the broader setup + side + session into a temporary block.", "Enabled prevents a third same-session reversal after two different tickers both fail before TP1."),
+    "scalp_learn.setup_session_gate_enabled": ("Broad setup-session learning", "Maintains an additional setup + side + session gate so clustered failures tighten even when RSI/VWAP buckets differ slightly.", "Enabled lets losing OVERSOLD_MACD_TURN_LONG + LONG + STANDARD trades reduce the next similar long in the same session."),
+    "scalp_learn.action_ttl_min": ("Learning action lifetime", "Minutes before an automatic action expires unless refreshed by another outcome.", "60 makes every automatic action reversible within one hour."),
+}
+
+_SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
+    "scalp_runtime.cycle_interval_s": (
+        "Canonical plan interval",
+        "Seconds between full-universe plan refreshes. The browser still marks prices and positions every second from the live price bus.",
+        "5 refreshes all 477 canonical plans every five seconds.",
+    ),
+    "scalp_runtime.workers": (
+        "Analysis workers",
+        "Maximum worker threads used for deterministic per-ticker calculation. Broker calls never run inside these workers.",
+        "8 leaves capacity for market data and the API on the four-vCPU host.",
+    ),
+    "scalp_runtime.bar_lookback": (
+        "One-minute bar lookback",
+        "Closed one-minute OHLCV bars retained for RSI, MACD, ATR, session-reset VWAP, RVOL, and local structure. Values below 390 are rejected because they cannot represent a complete regular session.",
+        "2500 preserves several sessions so RVOL can compare the same minute of day instead of unrelated bars.",
+    ),
+    "scalp_runtime.blocked_sessions": (
+        "Blocked entry sessions",
+        "Sessions in which plans remain visible but cannot become actionable or open a paper position.",
+        "CLOSED, RESTRICTED, CLOSING_CAUTION, and HARD_CLOSE blocks unsafe entry windows.",
+    ),
+    "scalp_runtime.execution_policy_enabled": (
+        "Shared execution preflight",
+        "Applies the same session, market-data, daily-loss, trade-count, and concurrency checks before a valid plan may enter shadow or canonical paper execution.",
+        "Keep enabled so shadow results represent trades the production risk contract would actually allow.",
+    ),
+    "scalp_runtime.execution_blocked_sessions": (
+        "Execution-only blocked sessions",
+        "Keeps technically valid plans visible as candidates while preventing them from consuming simulated capital in unsafe sessions.",
+        "LUNCH_BLOCK remains observable but does not enter executable shadow until it proves positive expectancy.",
+    ),
+    "scalp_runtime.require_live_execution_data": (
+        "Require trusted execution data",
+        "Blocks new positions when Schwab requires authorization, the price bus is stale, the quote source is not tradable, or the ticker quote exceeds the configured age.",
+        "Existing positions continue to be monitored, but no new risk is added during degraded data.",
+    ),
+    "scalp_runtime.pre_market_size_mult": ("Pre-market execution size", "Multiplier applied after risk-based sizing for pre-market entries.", "0.35 uses 35% of the normal risk-sized position."),
+    "scalp_runtime.restricted_size_mult": ("Opening-price-discovery size", "Execution multiplier for the restricted opening window. Zero disables entries while plans remain visible.", "0 blocks 9:30-9:44 ET execution."),
+    "scalp_runtime.prime_size_mult": ("Prime-session execution size", "Multiplier for the highest-quality regular-session window.", "1.0 uses the full risk-sized position."),
+    "scalp_runtime.lunch_size_mult": ("Midday execution size", "Multiplier for the low-volume midday window. A blocked session remains blocked even when this value is nonzero.", "0 keeps lunch candidates observational only."),
+    "scalp_runtime.standard_size_mult": ("Standard-session execution size", "Multiplier for post-lunch regular-session entries.", "0.80 uses 80% of normal size."),
+    "scalp_runtime.closing_size_mult": ("Closing-caution execution size", "Multiplier during the closing-caution window.", "0 prevents new scalps near forced liquidation."),
+    "scalp_runtime.after_hours_size_mult": ("After-hours execution size", "Multiplier for eligible after-hours plans that pass spread and live-data checks.", "0.30 uses 30% of normal size."),
+    "scalp_runtime.hard_close_size_mult": ("Hard-close execution size", "Multiplier inside the mandatory liquidation window.", "0 prevents all new entries."),
+    "scalp_runtime.closed_size_mult": ("Closed-market execution size", "Multiplier while the market is closed.", "0 prevents all new entries."),
+    "scalp_runtime.position_max_quote_age_ms": (
+        "Maximum position-mark quote age",
+        "Prevents stale or snapshot quotes from triggering TP1, TP2, trailing stops, or stop losses on an open simulated position.",
+        "5000 requires a trusted position mark no older than five seconds.",
+    ),
+    "scalp_runtime.require_context_data": (
+        "Require fresh market context",
+        "Blocks new entries when earnings and news context is missing or stale while keeping the plan visible.",
+        "Enabled prevents a technical scalp from trading without a current context-intel snapshot.",
+    ),
+    "scalp_runtime.max_context_age_s": (
+        "Maximum context age",
+        "Maximum age in seconds for the ticker earnings and news snapshot.",
+        "180 allows three minutes before context is treated as stale.",
+    ),
+    "scalp_runtime.max_context_risk_score": (
+        "Maximum context risk",
+        "Blocks a plan when the normalized earnings, macro, halt, or news risk score reaches this value.",
+        "0.8 blocks high-risk event contexts on a zero-to-one scale.",
+    ),
+    "scalp_runtime.adverse_news_sentiment": (
+        "Adverse news-shock threshold",
+        "Blocks LONG during a negative news shock and SHORT during a positive news shock.",
+        "0.25 requires absolute 30-minute sentiment of at least 0.25 together with news_shock=true.",
+    ),
+    "scalp_runtime.context_cluster_throttle_enabled": (
+        "Context cluster throttle",
+        "Prevents the same setup/side/session/context from opening too many shadow or paper entries inside a short window.",
+        "Enabled stops a fourth identical context entry after three already opened in ten minutes.",
+    ),
+    "scalp_runtime.context_cluster_window_min": (
+        "Context cluster window",
+        "Minutes used by the execution policy to count recent same-context entries.",
+        "10 means the throttle only considers entries opened in the last ten minutes.",
+    ),
+    "scalp_runtime.context_cluster_max_entries": (
+        "Max same-context entries",
+        "Maximum entries allowed for the same learned context inside the cluster window before new entries are blocked.",
+        "3 lets the system test a setup cluster but prevents a full-universe stampede.",
+    ),
+    "scalp_runtime.context_cluster_use_setup_session": (
+        "Throttle setup-session clusters",
+        "Counts setup + side + session entries together instead of only exact RSI/VWAP context matches, catching correlated ticker clusters earlier.",
+        "Enabled treats QQQ, TQQQ, SOXL, NVDA, and MU pre-market shorts as the same execution idea.",
+    ),
+    "scalp_runtime.setup_session_cluster_max_entries": (
+        "Max setup-session entries",
+        "Maximum entries allowed for the same setup + side + session inside the cluster window before new entries are blocked.",
+        "2 lets the engine test one or two pre-market shorts, then waits for outcomes before adding more.",
+    ),
+}
+
+_SCALP_ML_DETAILS: dict[str, tuple[str, str, str]] = {
+    "scalp_ml.training_enabled": ("Enable ML training", "Allows the isolated learner service to train TP1-before-stop and TP2-before-stop challengers from closed SCALP_PLAN_V1 outcomes. It never trains in scanner or web-api.", "Keep disabled until enough canonical outcomes exist; enabling does not activate execution."),
+    "scalp_ml.auto_train_when_ready": ("Auto-start ML at sample gate", "Arms the isolated learner now and automatically starts challenger training once the minimum canonical outcome count is reached. Before the gate, it observes without creating empty challenger evaluations.", "Enabled with a 200-outcome floor means training starts automatically at outcome 200."),
+    "scalp_ml.shadow_enabled": ("Enable shadow predictions", "Loads the promoted champion and records probabilities on valid scalp plans without changing confidence or execution.", "Use shadow mode first to compare predictions with realized outcomes."),
+    "scalp_ml.overlay_enabled": ("Apply confidence overlay", "Applies the promoted model's bounded confidence adjustment. It cannot create a setup, change bracket levels, alter size, or bypass blockers.", "Enable only after shadow calibration is economically validated."),
+    "scalp_ml.training_interval_min": ("Training interval", "Minutes between challenger training attempts inside the learner container.", "60 evaluates a fresh challenger at most once per hour."),
+    "scalp_ml.training_lookback_days": ("Training lookback", "Maximum age of canonical outcomes included in a challenger dataset so obsolete regimes cannot dominate current scalping behavior.", "60 trains only from the most recent sixty calendar days."),
+    "scalp_ml.maximum_model_age_hours": ("Maximum champion age", "Rejects inference from a champion older than this many hours. Missing or stale ML always fails open to deterministic confidence.", "168 expires a champion after seven days without successful revalidation."),
+    "scalp_ml.minimum_samples": ("Minimum training outcomes", "Minimum closed canonical outcomes required before a challenger may be fitted.", "200 prevents promotion from a tiny sample."),
+    "scalp_ml.bootstrap_minimum_samples": ("Bootstrap evaluation outcomes", "Smaller sample floor that lets the learner fit and reject early challengers for visibility before promotion is allowed.", "75 starts useful diagnostics earlier; promotion still requires the main minimum training outcomes gate."),
+    "scalp_ml.bootstrap_training_enabled": ("Enable bootstrap evaluation", "Allows early challenger fitting from the bootstrap sample floor while retaining full promotion gates.", "Enabled means the learner can explain why a model is not ready instead of only saying waiting for samples."),
+    "scalp_ml.holdout_pct": ("Chronological holdout fraction", "Newest fraction of outcomes reserved strictly for out-of-sample promotion testing. No random shuffle or scaler fit touches it.", "0.25 reserves the newest 25% for validation."),
+    "scalp_ml.minimum_selected_holdout": ("Minimum evaluated holdout trades", "Minimum holdout rows whose model expected-R clears the selection threshold before economic metrics are trusted.", "30 requires at least thirty independently evaluated opportunities."),
+    "scalp_ml.minimum_holdout_sessions": ("Minimum validation sessions", "Number of recent market dates that must independently satisfy session stability checks.", "2 prevents one unusually strong day from promoting a model."),
+    "scalp_ml.minimum_session_samples": ("Minimum trades per session", "Minimum selected holdout trades required on each recent validation session.", "5 requires meaningful coverage on both recent days."),
+    "scalp_ml.minimum_expectancy_r": ("Promotion expectancy floor", "Minimum realized mean R on selected chronological holdout rows.", "0.05 requires at least +0.05R per selected trade."),
+    "scalp_ml.minimum_profit_factor": ("Promotion profit-factor floor", "Minimum gross holdout wins divided by absolute gross holdout losses.", "1.10 requires ten percent more gross profit than gross loss."),
+    "scalp_ml.minimum_session_expectancy_r": ("Per-session expectancy floor", "Minimum realized expectancy required independently on each recent validation session.", "0.0 prevents promotion when either recent session is negative."),
+    "scalp_ml.minimum_auc": ("Minimum holdout AUC", "Minimum out-of-sample discrimination required independently for both TP1 and TP2 classifiers.", "0.52 requires each model to rank outcomes better than chance."),
+    "scalp_ml.minimum_brier_improvement": ("Minimum Brier improvement", "Required probability-calibration improvement over a constant training-prevalence baseline on chronological holdout data.", "0.0 rejects a model whose probabilities are worse than the naive baseline."),
+    "scalp_ml.selection_expected_r": ("Prediction selection threshold", "Minimum model-implied expected R used to include a holdout row in economic promotion evaluation.", "0.0 evaluates only model-positive opportunities."),
+    "scalp_ml.confidence_points_per_r": ("Confidence sensitivity", "Percentage-point adjustment produced per one unit of model-implied expected R before caps.", "5 adds 2.5 points for +0.50 expected R."),
+    "scalp_ml.max_confidence_raise": ("Maximum confidence increase", "Hard cap on positive model influence. The plan must already be valid before this can matter.", "5 prevents ML from adding more than five confidence points."),
+    "scalp_ml.max_confidence_reduction": ("Maximum confidence reduction", "Hard cap on negative model influence. Negative evidence may tighten more strongly than positive evidence can relax.", "15 permits up to a fifteen-point reduction."),
+}
+
+
+def build_catalog(values: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    groups = [
+        {"id": prefix, "label": label, "description": description}
+        for prefix, label, description in GROUPS
+    ]
+    fields = []
+    for key in sorted(set(defaults) | set(values)):
+        value = values.get(key, defaults.get(key))
+        default = defaults.get(key)
+        prefix = key.split(".", 1)[0]
+        group = prefix if prefix in _GROUP_BY_PREFIX else "system"
+        label, description, example = _detail(key, value, group)
+        fields.append(
+            {
+                "key": key,
+                "group": group,
+                "label": label,
+                "description": description,
+                "example": example,
+                "value": value,
+                "default": default,
+                "type": _value_type(value),
+                "advanced": key not in _SCALP_DETAILS and key not in _SCALP_RUNTIME_DETAILS and key not in _SCALP_LEARN_DETAILS and key not in _SCALP_ML_DETAILS,
+            }
+        )
+    return {"schema_version": 1, "groups": groups, "fields": fields}
+
+
+def _detail(key: str, value: Any, group: str) -> tuple[str, str, str]:
+    if key in _SCALP_DETAILS:
+        return _SCALP_DETAILS[key]
+    if key in _SCALP_RUNTIME_DETAILS:
+        return _SCALP_RUNTIME_DETAILS[key]
+    if key in _SCALP_LEARN_DETAILS:
+        return _SCALP_LEARN_DETAILS[key]
+    if key in _SCALP_ML_DETAILS:
+        return _SCALP_ML_DETAILS[key]
+    suffix = key.split(".", 1)[-1]
+    label = re.sub(r"\s+", " ", suffix.replace("_", " ")).strip().title()
+    group_label = _GROUP_BY_PREFIX.get(group, ("System", ""))[0]
+    description = (
+        f"Runtime {group_label.lower()} setting `{key}`. It is persisted in PostgreSQL "
+        "and hot-reloaded by the owning service without a container restart."
+    )
+    if isinstance(value, bool):
+        example = "Enabled applies the behavior immediately; disabled leaves the owning feature inactive."
+    elif isinstance(value, (int, float)):
+        example = f"Current/default reference value: {value}. Change gradually and verify the owning service metrics."
+    elif isinstance(value, list):
+        example = "Enter a JSON list. Each item is preserved in order."
+    else:
+        example = f"Current/default reference value: {value!s}."
+    return label, description, example
+
+
+def _value_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    return "string"

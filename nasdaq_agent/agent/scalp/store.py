@@ -280,7 +280,32 @@ def init_scalp_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scalp_ml_predictions_model ON scalp_ml_predictions(model_version, predicted_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_status ON scalp_shadow_trades(status, opened_at)",
             "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_closed ON scalp_shadow_trades(closed_at)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uÔØm¢Gß≤⁄Óù∆≠y’xecute(statement)
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_scalp_shadow_open_ticker ON scalp_shadow_trades(ticker) WHERE status='OPEN'",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_shadow_reports_generated ON scalp_shadow_daily_reports(generated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_trials_status ON scalp_candidate_trials(status, observed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_trials_type ON scalp_candidate_trials(candidate_type, resolved_at)",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_trials_ticker ON scalp_candidate_trials(ticker, observed_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_scalp_trial_open_episode ON scalp_candidate_trials(ticker, side, candidate_type, strategy_family) WHERE status='OPEN'",
+            "CREATE INDEX IF NOT EXISTS idx_scalp_cycle_metrics_session ON scalp_cycle_metrics(session, bucket_ts)",
+        ]
+        migrations = [
+            "ALTER TABLE scalp_trade_outcomes ADD COLUMN IF NOT EXISTS plan_json TEXT DEFAULT ''",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_size_mult DOUBLE PRECISION NOT NULL DEFAULT 1",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS policy_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_price DOUBLE PRECISION",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_source TEXT DEFAULT ''",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS trigger_quote_age_ms INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_bid DOUBLE PRECISION",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_ask DOUBLE PRECISION",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_spread_bps DOUBLE PRECISION DEFAULT 0",
+            "ALTER TABLE scalp_shadow_trades ADD COLUMN IF NOT EXISTS exit_slippage_bps DOUBLE PRECISION DEFAULT 0",
+            "ALTER TABLE scalp_context_stats ADD COLUMN IF NOT EXISTS sum_pnl_dollar DOUBLE PRECISION DEFAULT 0",
+            "ALTER TABLE scalp_context_stats ADD COLUMN IF NOT EXISTS mean_pnl_dollar DOUBLE PRECISION DEFAULT 0",
+        ]
+        try:
+            with get_conn() as conn:
+                for statement in statements:
+                    conn.execute(statement)
                 if using_postgres():
                     for statement in migrations:
                         conn.execute(statement)

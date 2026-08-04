@@ -448,7 +448,56 @@ def _exit_calibration(closed: list[dict[str, Any]]) -> dict[str, Any]:
         "trail_exits": trail_exits,
         "breakeven_like_after_tp1": breakeven_like,
         "avg_mfe_r": _round(
-  ë½­¢G§²ÚîÆ­yÐ   pipeline = report.get("pipeline") or {}
+            sum(_float(row.get("mfe_r")) for row in closed) / total, 4
+        )
+        if total
+        else 0.0,
+        "avg_mae_r": _round(
+            sum(_float(row.get("mae_r")) for row in closed) / total, 4
+        )
+        if total
+        else 0.0,
+    }
+
+
+def _worst_trades(closed: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    result = []
+    for trade in sorted(closed, key=lambda row: _float(row.get("pnl_r")))[:limit]:
+        plan = trade.get("_plan") or {}
+        result.append(
+            {
+                "ticker": trade.get("ticker"),
+                "side": trade.get("side"),
+                "setup_type": trade.get("setup_type"),
+                "session": trade.get("session"),
+                "opened_at": _clean(trade.get("opened_at")),
+                "closed_at": _clean(trade.get("closed_at")),
+                "exit_reason": trade.get("exit_reason"),
+                "pnl_r": _round(_float(trade.get("pnl_r")), 4),
+                "pnl_dollar": _round(_float(trade.get("pnl_dollar")), 2),
+                "mfe_r": _round(_float(trade.get("mfe_r")), 4),
+                "mae_r": _round(_float(trade.get("mae_r")), 4),
+                "t1_hit": _int(trade.get("t1_hit")),
+                "t2_hit": _int(trade.get("t2_hit")),
+                "confidence": _round(_float(plan.get("confidence")), 2),
+                "rsi_14": _round(_float(plan.get("rsi_14")), 2),
+                "rsi_7": _round(_float(plan.get("rsi_7")), 2),
+                "rsi_2": _round(_float(plan.get("rsi_2")), 2),
+                "vwap_event": plan.get("vwap_event") or "UNKNOWN",
+                "rvol": _round(_float(plan.get("rvol")), 3),
+                "reasons": list(plan.get("reasons") or [])[:8],
+            }
+        )
+    return result
+
+
+def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
+    summary = report["summary"]
+    findings: list[str] = []
+    recommendations: list[str] = []
+    closed = int(summary.get("closed") or 0)
+    if closed == 0:
+        pipeline = report.get("pipeline") or {}
         if pipeline.get("status") == "DEGRADED":
             findings.append(
                 "No closed shadow trades were recorded while the market-data pipeline was degraded "
