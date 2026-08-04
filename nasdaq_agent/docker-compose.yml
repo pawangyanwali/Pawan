@@ -216,13 +216,16 @@ services:
       <<: [*db-env, *valkey-env, *schwab-env, *log-env, *alert-env]
       NASDAQ_MD_STARTUP_DELAY_S: ${NASDAQ_MD_STARTUP_DELAY_S:-10}
       UNIVERSE_TARGET_ELIGIBLE: ${UNIVERSE_TARGET_ELIGIBLE:-450}
+      SCALP_BAR_HYDRATION_BATCH_SIZE: ${SCALP_BAR_HYDRATION_BATCH_SIZE:-25}
     deploy:
       resources:
         limits:
           cpus: "0.5"
-          memory: 1G
+          # Full-universe history is hydrated in bounded batches, but pandas,
+          # REST polling, WebSocket bars, and JSON serialization can overlap.
+          memory: 3G
         reservations:
-          memory: 384M
+          memory: 1G
     healthcheck:
       test: ["CMD", "python", "-m", "services.md_healthcheck"]
       interval: 30s

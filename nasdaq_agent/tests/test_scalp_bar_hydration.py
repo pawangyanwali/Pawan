@@ -10,6 +10,7 @@ from agent.scalp.bar_feed import _frame_from_payload
 from agent.scalp.bar_hydration import (
     _normalise_frame,
     frame_is_usable,
+    hydrate_one_minute_history,
     publish_frames_to_valkey,
 )
 from agent.scalp.indicators import calculate_one_minute_indicators
@@ -182,6 +183,35 @@ def test_hydration_replaces_valkey_history_with_authoritative_ohlcv(monkeypatch)
     assert payload["volume"] > 0
     assert payload["time_ms"] > 0
     assert next(args[-1] for name, args in pipe.calls if name == "expire") >= 604800
+
+
+def test_full_universe_hydration_reads_postgres_in_bounded_batches(monkeypatch):
+    import agent.historical_cache as historical_cache
+    import agent.scalp.bar_hydration as hydration
+
+    calls = []
+
+    def _bulk(symbols, interval, limit):
+        calls.append(list(symbols))
+        return {ticker: _frame() for ticker in symbols}
+
+    monkeypatch.setattr(historical_cache, "get_recent_bars_bulk", _bulk)
+    monkeypatch.setattr(hydration, "publish_frames_to_valkey", lambda frames: len(frames))
+    monkeypatch.setattr(hydration, "HYDRATION_BATCH_SIZE", 2)
+
+    metrics = hydrate_one_minute_history(
+        ["AAPL", "MSFT", "NVDA", "AMZN", "META"], fetch_missing=False
+    )
+
+    assert calls == [["AAPL", "MSFT"], ["NVDA", "AMZN"], ["META"]]
+    assert metrics == {
+        "requested": 5,
+        "postgres_usable": 5,
+        "rest_requested": 0,
+        "rest_usable": 0,
+        "published": 5,
+        "unresolved": 0,
+    }
 
 
 def test_vwap_and_rvol_reset_at_regular_session_open():

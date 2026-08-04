@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections.abc import Iterable
 from typing import Any
@@ -15,6 +16,9 @@ BAR_LIMIT = 2500
 BAR_TTL_S = 7 * 24 * 60 * 60
 MIN_INDICATOR_BARS = 35
 MIN_VOLUME_BARS = 10
+HYDRATION_BATCH_SIZE = max(
+    1, int(os.getenv("SCALP_BAR_HYDRATION_BATCH_SIZE", "25"))
+)
 
 
 def frame_is_usable(
@@ -74,58 +78,73 @@ def hydrate_one_minute_history(
     force_refresh: bool = False,
     require_fresh: bool = False,
 ) -> dict[str, int]:
-    """Restore Valkey from PostgreSQL, then fill incomplete symbols from Schwab."""
+    """Restore Valkey from PostgreSQL, then fill incomplete symbols from Schwab.
+
+    Work in bounded batches so full-universe hydration does not hold every
+    DataFrame and its serialized Valkey payload in memory at the same time.
+    """
     from agent.historical_cache import _upsert_bars, get_recent_bars_bulk
 
     symbols = [str(ticker).upper() for ticker in dict.fromkeys(tickers) if ticker]
-    stored = get_recent_bars_bulk(symbols, "1min", BAR_LIMIT)
-    usable = {
-        ticker: frame
-        for ticker, frame in stored.items()
-        if frame_is_usable(frame)
-    }
-    published = publish_frames_to_valkey(usable)
-    current = (
-        {
-            ticker: frame
-            for ticker, frame in usable.items()
-            if frame_is_usable(frame, require_fresh=True)
-        }
-        if require_fresh
-        else usable
-    )
-    missing = symbols if force_refresh else [ticker for ticker in symbols if ticker not in current]
-    fetched: dict[str, pd.DataFrame] = {}
-
-    if fetch_missing and missing:
-        from agent.broker.schwab_market_data import fetch_price_history_batch_async
-
-        logger.info("[ScalpBars] Fetching authoritative OHLCV for %d tickers", len(missing))
-        fetched = fetch_price_history_batch_async(
-            missing,
-            interval="1min",
-            outputsize=BAR_LIMIT,
-            extended_hours=True,
-            background=True,
-        )
-        valid_fetched: dict[str, pd.DataFrame] = {}
-        for ticker, frame in fetched.items():
-            normalised = _normalise_frame(frame)
-            if not frame_is_usable(normalised):
-                continue
-            _upsert_bars(ticker, "1min", normalised)
-            valid_fetched[ticker] = normalised
-        published += publish_frames_to_valkey(valid_fetched)
-        fetched = valid_fetched
-
     metrics = {
         "requested": len(symbols),
-        "postgres_usable": len(usable),
-        "rest_requested": len(missing) if fetch_missing else 0,
-        "rest_usable": len(fetched),
-        "published": published,
-        "unresolved": max(0, len(symbols) - len(set(usable) | set(fetched))),
+        "postgres_usable": 0,
+        "rest_requested": 0,
+        "rest_usable": 0,
+        "published": 0,
+        "unresolved": 0,
     }
+    batch_size = HYDRATION_BATCH_SIZE
+    for start in range(0, len(symbols), batch_size):
+        batch = symbols[start:start + batch_size]
+        stored = get_recent_bars_bulk(batch, "1min", BAR_LIMIT)
+        usable = {
+            ticker: frame
+            for ticker, frame in stored.items()
+            if frame_is_usable(frame)
+        }
+        metrics["postgres_usable"] += len(usable)
+        metrics["published"] += publish_frames_to_valkey(usable)
+        current = (
+            {
+                ticker: frame
+                for ticker, frame in usable.items()
+                if frame_is_usable(frame, require_fresh=True)
+            }
+            if require_fresh
+            else usable
+        )
+        missing = batch if force_refresh else [ticker for ticker in batch if ticker not in current]
+        valid_fetched: dict[str, pd.DataFrame] = {}
+
+        if fetch_missing and missing:
+            from agent.broker.schwab_market_data import fetch_price_history_batch_async
+
+            metrics["rest_requested"] += len(missing)
+            logger.info(
+                "[ScalpBars] Fetching authoritative OHLCV for %d tickers",
+                len(missing),
+            )
+            fetched = fetch_price_history_batch_async(
+                missing,
+                interval="1min",
+                outputsize=BAR_LIMIT,
+                extended_hours=True,
+                background=True,
+            )
+            for ticker, frame in fetched.items():
+                normalised = _normalise_frame(frame)
+                if not frame_is_usable(normalised):
+                    continue
+                _upsert_bars(ticker, "1min", normalised)
+                valid_fetched[ticker] = normalised
+            metrics["rest_usable"] += len(valid_fetched)
+            metrics["published"] += publish_frames_to_valkey(valid_fetched)
+
+        metrics["unresolved"] += max(
+            0, len(batch) - len(set(usable) | set(valid_fetched))
+        )
+
     logger.info("[ScalpBars] Hydration complete: %s", metrics)
     return metrics
 

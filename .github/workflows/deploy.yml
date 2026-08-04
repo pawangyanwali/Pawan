@@ -155,6 +155,10 @@ jobs:
               # Rolling update: bring up new containers; remove old ones when healthy
               _dc up -d --remove-orphans
 
+              # Every recreated critical container must remain at restart count zero.
+              # A short-lived healthy window must not hide an OOM/restart loop.
+              CRITICAL_CONTAINERS="nasdaq-web-api nasdaq-token-service nasdaq-scalp-engine nasdaq-market-data nasdaq-scalp-learner nasdaq-scheduler nasdaq-context-intel nasdaq-watchdog"
+
               if sudo docker ps -a --format '{{.Names}}' | grep -Eq '^nasdaq-(scanner|learner)$'; then
                 echo "ERROR: orphaned legacy runtime container still exists"
                 sudo docker ps -a --filter name=nasdaq-scanner --filter name=nasdaq-learner
@@ -318,6 +322,29 @@ jobs:
               if [ "$PRODUCTION_READY" = "0" ]; then
                 echo "ERROR: functional production readiness gate failed"
                 _dc logs --tail 80 market-data scalp-engine 2>/dev/null || true
+                exit 1
+              fi
+
+              echo "=== Stability soak and restart/OOM gate (75s) ==="
+              sleep 75
+              if ! _dc exec -T scalp-engine python -m scripts.validate_production_release; then
+                echo "ERROR: functional readiness failed after stability soak"
+                exit 1
+              fi
+              STABILITY_FAILED=0
+              for container in $CRITICAL_CONTAINERS; do
+                restart_count=$(sudo docker inspect "$container" --format '{{.RestartCount}}' 2>/dev/null || echo missing)
+                oom_killed=$(sudo docker inspect "$container" --format '{{.State.OOMKilled}}' 2>/dev/null || echo unknown)
+                running=$(sudo docker inspect "$container" --format '{{.State.Running}}' 2>/dev/null || echo false)
+                echo "  $container: running=$running restarts=$restart_count oom=$oom_killed"
+                if [ "$running" != "true" ] || [ "$restart_count" != "0" ] || [ "$oom_killed" != "false" ]; then
+                  STABILITY_FAILED=1
+                fi
+              done
+              if [ "$STABILITY_FAILED" = "1" ]; then
+                echo "ERROR: one or more critical containers restarted, OOMed, or stopped"
+                _dc ps
+                _dc logs --tail 80 market-data scalp-engine token-service 2>/dev/null || true
                 exit 1
               fi
 
