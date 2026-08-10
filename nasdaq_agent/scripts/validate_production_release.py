@@ -46,8 +46,11 @@ def main() -> int:
     active_session = session_name not in {
         "CLOSED", "WEEKEND", "HOLIDAY", "UNKNOWN",
     }
+    from agent.scalp.quality import continuous_bar_session
+    data_gap_sla_session = continuous_bar_session(session_name)
     details["session"] = session_name
     details["active_session_sla_enforced"] = active_session
+    details["data_gap_sla_enforced"] = data_gap_sla_session
     cycle_ms = float(snapshot.get("cycle_ms") or 0.0)
     gap_pct = (
         int(snapshot.get("data_gap_count") or 0) / universe_total * 100.0
@@ -56,7 +59,7 @@ def main() -> int:
     details["data_gap_pct"] = round(gap_pct, 2)
     if active_session and (cycle_ms <= 0 or cycle_ms > 12_000):
         failures.append(f"full-universe cycle exceeds 12s SLA: {cycle_ms:.1f}ms")
-    if active_session and gap_pct > 5.0:
+    if data_gap_sla_session and gap_pct > 5.0:
         failures.append(f"canonical plan data-gap rate exceeds 5%: {gap_pct:.1f}%")
 
     prices = price_bus_health(max_age_s=5.0)

@@ -69,3 +69,44 @@ def test_five_day_activation_gate_rejects_one_slow_market_day(monkeypatch):
     assert report["operational_ready"] is False
     assert report["statistical_ready"] is True
     assert "FIVE_CONSECUTIVE_MARKET_DAYS_NOT_SLA_COMPLIANT" in report["reasons"]
+
+
+def test_five_day_activation_gate_excludes_sparse_extended_hours(monkeypatch):
+    import agent.scalp.activation as activation
+
+    cycles, trials = _evidence()
+    for row in list(cycles):
+        if row["bucket_ts"].minute == 0:
+            cycles.append({
+                **row,
+                "session": "AFTER_HOURS",
+                "data_gap_count": row["universe_total"],
+                "cycle_ms": 90_000,
+                "live_count": 0,
+                "rest_count": 0,
+                "stale_count": row["universe_total"],
+            })
+
+    class Conn:
+        def execute(self, sql, _params=()):
+            return SimpleNamespace(
+                fetchall=lambda: trials if "candidate_trials" in sql else cycles
+            )
+
+    @contextmanager
+    def get_conn(read_only=False):
+        yield Conn()
+
+    import agent.config_manager as manager
+    import agent.db as db
+    import agent.scalp.store as store
+
+    monkeypatch.setattr(db, "get_conn", get_conn)
+    monkeypatch.setattr(store, "init_scalp_tables", lambda: None)
+    monkeypatch.setattr(manager, "config", SimpleNamespace(get=lambda _key, default=None: default))
+    latest = max(row["bucket_ts"] for row in cycles).date()
+    monkeypatch.setattr(activation, "_latest_completed_market_date", lambda: latest)
+
+    report = activation._build_report()
+
+    assert report["operational_ready"] is True

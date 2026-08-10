@@ -16,6 +16,7 @@ from agent.scalp.indicators import (
     provisional_live_indicators,
     update_one_minute_indicators,
 )
+from agent.scalp.quality import has_market_data_gap
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,6 +92,14 @@ def test_indicator_snapshot_accepts_compact_warmed_recursive_state():
     assert snapshot.atr_14 and snapshot.atr_14 > 0
     assert snapshot.vwap and snapshot.vwap > 0
     assert snapshot.rvol and snapshot.rvol > 0
+
+
+def test_extended_hours_inactivity_is_not_misclassified_as_feed_failure():
+    blockers = ["INDICATOR_BAR_STALE", "QUOTE_STALE"]
+
+    assert has_market_data_gap(blockers, "AFTER_HOURS") is False
+    assert has_market_data_gap(blockers, "REGULAR") is True
+    assert has_market_data_gap(["ATR_14_MISSING"], "AFTER_HOURS") is True
 
 
 def test_rvol_prefers_same_session_and_minute_across_prior_days():

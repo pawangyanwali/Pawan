@@ -8,10 +8,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-_ACTIVE_SESSIONS = {
-    "PRE_MARKET", "RESTRICTED", "REGULAR", "PRIME", "LUNCH_BLOCK",
-    "STANDARD", "CLOSING_CAUTION", "HARD_CLOSE", "AFTER_HOURS",
-}
+from agent.scalp.quality import CONTINUOUS_BAR_SESSIONS
+
+_EVIDENCE_SESSIONS = CONTINUOUS_BAR_SESSIONS
 _cache_lock = threading.Lock()
 _cache: tuple[float, dict[str, Any]] | None = None
 
@@ -60,7 +59,7 @@ def _build_report() -> dict[str, Any]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for raw in cycles:
         row = dict(raw)
-        if str(row.get("session") or "").upper() not in _ACTIVE_SESSIONS:
+        if str(row.get("session") or "").upper() not in _EVIDENCE_SESSIONS:
             continue
         stamp = _as_datetime(row.get("bucket_ts"))
         if stamp is None:
