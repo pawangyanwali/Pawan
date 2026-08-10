@@ -43,6 +43,7 @@ def load_one_minute_frames(
 
     requested_limit = max(35, int(limit))
     changed: list[str] = []
+    fetch_counts: dict[str, int] = {}
     metadata: dict[str, tuple[bytes | str | None, int]] = {}
     for index, ticker in enumerate(symbols):
         last_raw = probe_values[index * 2]
@@ -58,13 +59,18 @@ def load_one_minute_frames(
             frames[ticker] = cached[3]
         else:
             changed.append(ticker)
+            fetch_counts[ticker] = _delta_fetch_count(
+                cached, last_raw, requested_limit
+            )
 
     payload_by_ticker: dict[str, list[Any]] = {}
     if changed:
         try:
             pipe = client.pipeline(transaction=False)
             for ticker in changed:
-                pipe.lrange(f"md:1m:{ticker}", -requested_limit, -1)
+                pipe.lrange(
+                    f"md:1m:{ticker}", -fetch_counts[ticker], -1
+                )
             payload_by_ticker = dict(zip(changed, pipe.execute()))
         except Exception as exc:
             logger.warning("[ScalpBars] changed-frame read failed: %s", exc)
@@ -75,7 +81,13 @@ def load_one_minute_frames(
         if payload is None:
             continue
         try:
-            frame = _frame_from_payload(payload)
+            delta = _frame_from_payload(payload)
+            cached = _frame_cache.get(ticker)
+            frame = (
+                _merge_frame(cached[3], delta, requested_limit)
+                if cached and fetch_counts[ticker] < requested_limit
+                else delta.tail(requested_limit)
+            )
             if frame.empty:
                 errors[ticker] = "ONE_MINUTE_BARS_MISSING"
             else:
@@ -96,6 +108,53 @@ def load_one_minute_frames(
         if ticker not in keep:
             _frame_cache.pop(ticker, None)
     return frames, errors
+
+
+def _delta_fetch_count(
+    cached: tuple[bytes | str | None, int, int, pd.DataFrame] | None,
+    last_raw: bytes | str | None,
+    requested_limit: int,
+) -> int:
+    if not cached or cached[2] != requested_limit or cached[3].empty:
+        return requested_limit
+    latest = _payload_timestamp(last_raw)
+    cached_latest = cached[3].index[-1]
+    if latest is None or cached_latest.tzinfo is None or latest < cached_latest:
+        return requested_limit
+    gap = max(0, int((latest - cached_latest).total_seconds() // 60))
+    return min(requested_limit, max(2, gap + 2))
+
+
+def _payload_timestamp(raw: bytes | str | None) -> pd.Timestamp | None:
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        item = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        value = item.get("time_ms") or item.get("datetime") or item.get("timestamp")
+        if value is None:
+            return None
+        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.notna(numeric):
+            unit = "ms" if abs(float(numeric)) > 10_000_000_000 else "s"
+            stamp = pd.to_datetime(numeric, unit=unit, utc=True)
+        else:
+            stamp = pd.to_datetime(value, utc=True, errors="coerce")
+        return None if pd.isna(stamp) else stamp
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _merge_frame(
+    cached: pd.DataFrame, delta: pd.DataFrame, requested_limit: int
+) -> pd.DataFrame:
+    if delta.empty:
+        return cached.tail(requested_limit)
+    merged = pd.concat([cached, delta])
+    return (
+        merged[~merged.index.duplicated(keep="last")]
+        .sort_index()
+        .tail(requested_limit)
+    )
 
 
 def _frame_from_payload(payload: list[Any] | None) -> pd.DataFrame:

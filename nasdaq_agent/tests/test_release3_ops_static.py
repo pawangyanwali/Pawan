@@ -65,7 +65,9 @@ def test_command_center_exposes_runtime_health_and_one_second_refresh():
     assert 'id="md-chip"' in src
     assert 'id="scan-chip"' in src
     assert 'id="execution-chip"' in src
-    assert "state.timer=setTimeout(load,1000)" in src
+    assert "state.liveTimer=setTimeout(loadLive,1000)" in src
+    assert "state.fullTimer=setTimeout(loadFull,5000)" in src
+    assert "authFetch('/api/scalp/live')" in src
 
 
 def test_compose_resource_budget_matches_scalp_only_runtime():

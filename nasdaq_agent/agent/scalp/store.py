@@ -537,6 +537,16 @@ def scalp_outcome_count() -> int:
     return int((row or {}).get("count") or 0)
 
 
+def latest_ml_sample_count() -> int:
+    """Return the largest canonical outcome watermark already evaluated."""
+    init_scalp_tables()
+    with get_conn(read_only=True) as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sample_count), 0) AS count FROM scalp_ml_models"
+        ).fetchone()
+    return int((row or {}).get("count") or 0)
+
+
 def record_cycle_metrics(metrics: dict[str, Any], *, observed_at: float | None = None) -> str:
     """Persist one idempotent minute bucket of runtime health telemetry."""
     init_scalp_tables()

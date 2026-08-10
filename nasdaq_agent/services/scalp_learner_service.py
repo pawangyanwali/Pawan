@@ -23,10 +23,34 @@ def _publish_status(**updates: Any) -> None:
         _log.debug("Status publish failed", exc_info=True)
 
 
+def _load_training_watermark(fallback: int = 0) -> int:
+    try:
+        from agent.service_state import get_state
+
+        state = get_state("scalp-learner:ml-watermark", ignore_expiry=True) or {}
+        return max(int(fallback), int(state.get("outcome_count") or 0))
+    except Exception:
+        return int(fallback)
+
+
+def _save_training_watermark(outcome_count: int) -> None:
+    from agent.service_state import set_state
+
+    set_state(
+        "scalp-learner:ml-watermark",
+        {"outcome_count": int(outcome_count), "evaluated_at": time.time()},
+        ttl_s=None,
+    )
+
+
 def main() -> int:
     from agent.config_manager import config
     from agent.scalp.ml_trainer import train_and_maybe_promote
-    from agent.scalp.store import init_scalp_tables, scalp_outcome_count
+    from agent.scalp.store import (
+        init_scalp_tables,
+        latest_ml_sample_count,
+        scalp_outcome_count,
+    )
     from agent.service_heartbeat import start_service_heartbeat
 
     _log.info("=== scalp_learner_service starting ===")
@@ -42,6 +66,13 @@ def main() -> int:
     )
     _runner.register_signals()
     last_attempt = 0.0
+    try:
+        trained_outcome_watermark = _load_training_watermark(
+            latest_ml_sample_count()
+        )
+    except Exception:
+        _log.exception("ML outcome watermark load failed")
+        trained_outcome_watermark = 0
     _publish_status(mode="OBSERVING", detail="Immediate context learning runs on every canonical trade close")
     while not _runner.stopped:
         manually_enabled = bool(config.get("scalp_ml.training_enabled", False))
@@ -76,11 +107,14 @@ def main() -> int:
             300.0,
             float(config.get("scalp_ml.training_interval_min", 60)) * 60.0,
         )
-        if enabled and time.time() - last_attempt >= interval_s:
+        has_new_outcomes = outcome_count > trained_outcome_watermark
+        if enabled and has_new_outcomes and time.time() - last_attempt >= interval_s:
             last_attempt = time.time()
             _publish_status(mode="TRAINING", training_enabled=True)
             try:
                 result = train_and_maybe_promote()
+                trained_outcome_watermark = outcome_count
+                _save_training_watermark(trained_outcome_watermark)
                 _publish_status(
                     mode="OBSERVING",
                     training_enabled=True,
@@ -92,6 +126,7 @@ def main() -> int:
                     bootstrap_minimum_samples=bootstrap_minimum_samples,
                     bootstrap_enabled=bootstrap_enabled,
                     samples_until_training=samples_until_training,
+                    trained_outcome_watermark=trained_outcome_watermark,
                     last_training_result=result,
                 )
             except Exception as exc:
@@ -100,7 +135,8 @@ def main() -> int:
         else:
             _publish_status(
                 mode=(
-                    "OBSERVING" if enabled
+                    "WAITING_FOR_NEW_OUTCOMES" if enabled and not has_new_outcomes
+                    else "OBSERVING" if enabled
                     else "WAITING_FOR_SAMPLES" if auto_armed
                     else "DISABLED"
                 ),
@@ -113,6 +149,8 @@ def main() -> int:
                 bootstrap_minimum_samples=bootstrap_minimum_samples,
                 bootstrap_enabled=bootstrap_enabled,
                 samples_until_training=samples_until_training,
+                trained_outcome_watermark=trained_outcome_watermark,
+                new_outcomes=max(0, outcome_count - trained_outcome_watermark),
             )
         _runner._stop.wait(30)
     _log.info("=== scalp_learner_service stopped ===")

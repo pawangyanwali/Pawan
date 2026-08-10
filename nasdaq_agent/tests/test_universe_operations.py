@@ -99,7 +99,7 @@ def test_readiness_reports_enabled_services_and_waiting_learning(monkeypatch):
         lambda: {
             "plans": [{"ticker": f"T{i}"} for i in range(400)],
             "counts": {"data_gap": 0},
-            "session": {"session": "CLOSED"},
+            "session": "CLOSED",
             "risk": {
                 "budget": 150_000,
                 "max_open_positions": 10,

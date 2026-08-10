@@ -62,6 +62,8 @@ _SCHWAB_TOKENS_DDL = """
         refresh_token TEXT,
         expires_in    INTEGER NOT NULL DEFAULT 1800,
         stored_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        refresh_issued_at TIMESTAMPTZ,
+        refresh_expires_at TIMESTAMPTZ,
         refreshed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
         generation    BIGINT NOT NULL DEFAULT 0,
         status        TEXT NOT NULL DEFAULT 'OK',
@@ -76,6 +78,8 @@ def _ensure_schwab_token_table(conn) -> None:
     conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0")
     conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'OK'")
     conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
+    conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS refresh_issued_at TIMESTAMPTZ")
+    conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS refresh_expires_at TIMESTAMPTZ")
 
 
 def _row_value(row, key: str, index: int, default=None):
@@ -198,13 +202,13 @@ class _TokenManager:
         # readers in the other container never see a partial JSON blob.
         _tmp = self._token_path.with_suffix(".json.tmp")
         _tmp.write_text(payload)
-        _tmp.rename(self._token_path)
+        _tmp.replace(self._token_path)
         # Mirror to persistent backup so tokens survive git-pull redeploys / container restarts.
         try:
             _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
             _btmp = _BACKUP_DIR / (_tmp.name)
             _btmp.write_text(payload)
-            _btmp.rename(_BACKUP_DIR / self._token_path.name)
+            _btmp.replace(_BACKUP_DIR / self._token_path.name)
         except Exception as _e:
             logger.debug(f"[Schwab/{self.name}] Token backup write skipped: {_e}")
 
@@ -297,16 +301,34 @@ class _TokenManager:
 
     # ── Token storage ─────────────────────────────────────────────────────────
 
-    def _store(self, data: dict) -> None:
+    def _store(self, data: dict, *, force_refresh_issue: bool = False) -> None:
         with self._lock:
             # Preserve the refresh_token if Schwab's response omits it (e.g. rotating
             # token implementations that only return a new access_token on refresh).
             existing_rt = self._tokens.get("refresh_token")
+            existing_issued = float(self._tokens.get("refresh_issued_at") or 0.0)
+            existing_expires = float(self._tokens.get("refresh_expires_at") or 0.0)
+            previous_stored_at = float(self._tokens.get("stored_at") or 0.0)
+            incoming_rt = data.get("refresh_token")
             self._tokens.clear()
             self._tokens.update(data)
             if "refresh_token" not in self._tokens and existing_rt:
                 self._tokens["refresh_token"] = existing_rt
-            self._tokens["stored_at"] = time.time()
+            now = time.time()
+            refresh_rotated = bool(incoming_rt and incoming_rt != existing_rt)
+            if force_refresh_issue or refresh_rotated:
+                refresh_issued_at = now
+                refresh_expires_at = now + float(
+                    data.get("refresh_token_expires_in") or 7 * 86400
+                )
+            else:
+                refresh_issued_at = existing_issued or previous_stored_at or now
+                refresh_expires_at = (
+                    existing_expires or refresh_issued_at + 7 * 86400
+                )
+            self._tokens["refresh_issued_at"] = refresh_issued_at
+            self._tokens["refresh_expires_at"] = refresh_expires_at
+            self._tokens["stored_at"] = now
             self._tokens["generation"] = int(self._tokens["stored_at"] * 1000)
             self._tokens["status"] = "OK"
             snapshot = dict(self._tokens)
@@ -434,13 +456,17 @@ class _TokenManager:
                 conn.execute("""
                     INSERT INTO schwab_tokens
                         (app, access_token, refresh_token, expires_in, stored_at,
-                         refreshed_at, generation, status, last_error)
-                    VALUES (%s, %s, %s, %s, to_timestamp(%s), now(), %s, 'OK', NULL)
+                         refresh_issued_at, refresh_expires_at, refreshed_at,
+                         generation, status, last_error)
+                    VALUES (%s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s),
+                            to_timestamp(%s), now(), %s, 'OK', NULL)
                     ON CONFLICT (app) DO UPDATE SET
                         access_token  = EXCLUDED.access_token,
                         refresh_token = EXCLUDED.refresh_token,
                         expires_in    = EXCLUDED.expires_in,
                         stored_at     = EXCLUDED.stored_at,
+                        refresh_issued_at = EXCLUDED.refresh_issued_at,
+                        refresh_expires_at = EXCLUDED.refresh_expires_at,
                         refreshed_at  = now(),
                         generation    = EXCLUDED.generation,
                         status        = 'OK',
@@ -451,6 +477,8 @@ class _TokenManager:
                     tokens.get("refresh_token"),
                     tokens.get("expires_in", 1800),
                     tokens.get("stored_at", time.time()),
+                    tokens.get("refresh_issued_at", tokens.get("stored_at", time.time())),
+                    tokens.get("refresh_expires_at", time.time() + 7 * 86400),
                     int(tokens.get("generation") or int(tokens.get("stored_at", time.time()) * 1000)),
                 ))
         except Exception as exc:
@@ -472,20 +500,24 @@ class _TokenManager:
                 row = conn.execute(
                     """SELECT access_token, refresh_token, expires_in,
                               EXTRACT(EPOCH FROM stored_at)::double precision AS stored_at,
+                              EXTRACT(EPOCH FROM refresh_issued_at)::double precision AS refresh_issued_at,
+                              EXTRACT(EPOCH FROM refresh_expires_at)::double precision AS refresh_expires_at,
                               COALESCE(generation, 0) AS generation,
                               COALESCE(status, 'OK') AS status
                        FROM schwab_tokens WHERE app = %s""",
                     (self.name.lower(),)
                 ).fetchone()
                 access_token = _row_value(row, "access_token", 0)
-                status = _row_value(row, "status", 5, "OK")
+                status = _row_value(row, "status", 7, "OK")
                 if row and access_token and str(status).upper() == "OK":
                     return {
                         "access_token":  access_token,
                         "refresh_token": _row_value(row, "refresh_token", 1),
                         "expires_in":    _row_value(row, "expires_in", 2, 1800),
                         "stored_at":     float(_row_value(row, "stored_at", 3, 0.0)),
-                        "generation":    int(_row_value(row, "generation", 4, 0) or 0),
+                        "refresh_issued_at": float(_row_value(row, "refresh_issued_at", 4, 0.0) or 0.0),
+                        "refresh_expires_at": float(_row_value(row, "refresh_expires_at", 5, 0.0) or 0.0),
+                        "generation":    int(_row_value(row, "generation", 6, 0) or 0),
                         "status":        status,
                     }
         except Exception as exc:
@@ -857,7 +889,7 @@ class _TokenManager:
                 payload["code_verifier"] = code_verifier
             data = self._post_token(payload)
             data["_redirect_uri"] = redirect_uri
-            self._store(data)
+            self._store(data, force_refresh_issue=True)
             # Resolve outstanding re-auth alert immediately — tokens are fresh.
             try:
                 from agent.system_alerts import resolve_alert
@@ -913,17 +945,25 @@ class _TokenManager:
         with self._lock:
             tok = dict(self._tokens)
         stored_at    = tok.get("stored_at", 0)
+        refresh_issued_at = tok.get("refresh_issued_at", stored_at)
+        refresh_expires_at = tok.get(
+            "refresh_expires_at",
+            refresh_issued_at + 7 * 86400 if refresh_issued_at else 0,
+        )
         expires_in   = tok.get("expires_in", 1800)
         remaining    = max(0, expires_in - (time.time() - stored_at)) if stored_at else 0
-        rt_remaining = max(0, 7 * 86400 - (time.time() - stored_at)) if stored_at else 0
+        rt_remaining = max(0, refresh_expires_at - time.time()) if refresh_expires_at else 0
         return {
             "connected":           bool(tok.get("access_token")),
             "app":                 self.name,
             "access_token_ttl_s":  int(remaining),
             "refresh_token_ttl_s": int(rt_remaining),
             "refresh_token_expires": datetime.fromtimestamp(
-                stored_at + 7 * 86400, tz=timezone.utc
-            ).isoformat() if stored_at else None,
+                refresh_expires_at, tz=timezone.utc
+            ).isoformat() if refresh_expires_at else None,
+            "refresh_token_issued": datetime.fromtimestamp(
+                refresh_issued_at, tz=timezone.utc
+            ).isoformat() if refresh_issued_at else None,
         }
 
 

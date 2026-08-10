@@ -20,9 +20,6 @@ def main() -> int:
     config.load()
     init_scalp_tables()
 
-    if bool(config.get("scalp.execution_enabled", False)):
-        failures.append("canonical paper execution must remain disabled")
-
     tickers = get_runtime_universe()
     details["universe_total"] = len(tickers)
     if len(tickers) < 400:
@@ -33,12 +30,34 @@ def main() -> int:
     details["snapshot_age_s"] = round(snapshot_age, 1)
     details["snapshot_runtime"] = snapshot.get("runtime")
     details["snapshot_universe"] = int(snapshot.get("universe_total") or 0)
+    details["cycle_ms"] = float(snapshot.get("cycle_ms") or 0.0)
+    details["data_gap_count"] = int(snapshot.get("data_gap_count") or 0)
     if snapshot.get("runtime") != "SCALP_ONLY_V1":
         failures.append("latest snapshot is not SCALP_ONLY_V1")
     if snapshot_age < 0 or snapshot_age > 60:
         failures.append(f"scalp snapshot stale: {snapshot_age:.1f}s")
     if int(snapshot.get("universe_total") or 0) < 400:
         failures.append("scalp snapshot does not cover the production universe")
+    universe_total = int(snapshot.get("universe_total") or 0)
+    session_value = snapshot.get("session")
+    if isinstance(session_value, dict):
+        session_value = session_value.get("session") or session_value.get("name")
+    session_name = str(session_value or "UNKNOWN").upper()
+    active_session = session_name not in {
+        "CLOSED", "WEEKEND", "HOLIDAY", "UNKNOWN",
+    }
+    details["session"] = session_name
+    details["active_session_sla_enforced"] = active_session
+    cycle_ms = float(snapshot.get("cycle_ms") or 0.0)
+    gap_pct = (
+        int(snapshot.get("data_gap_count") or 0) / universe_total * 100.0
+        if universe_total else 100.0
+    )
+    details["data_gap_pct"] = round(gap_pct, 2)
+    if active_session and (cycle_ms <= 0 or cycle_ms > 12_000):
+        failures.append(f"full-universe cycle exceeds 12s SLA: {cycle_ms:.1f}ms")
+    if active_session and gap_pct > 5.0:
+        failures.append(f"canonical plan data-gap rate exceeds 5%: {gap_pct:.1f}%")
 
     prices = price_bus_health(max_age_s=5.0)
     details["price_bus"] = {
@@ -50,8 +69,8 @@ def main() -> int:
     }
     if int(prices.get("total") or 0) < 400:
         failures.append("price bus covers fewer than 400 eligible tickers")
-    if float(prices.get("trusted_fresh_pct") or 0.0) < 80.0:
-        failures.append("trusted five-second quote coverage is below 80%")
+    if active_session and float(prices.get("trusted_fresh_pct") or 0.0) < 95.0:
+        failures.append("trusted five-second quote coverage is below 95%")
 
     market_data = get_state("market-data:status") or {}
     ws = market_data.get("ws_streamer") or {}
@@ -84,6 +103,12 @@ def main() -> int:
         details["bar_depth_median"] = sorted(counts)[len(counts) // 2] if counts else 0
         if bar_coverage < 95.0:
             failures.append("usable one-minute bar coverage is below 95%")
+
+    from agent.scalp.activation import execution_activation_report
+    activation = execution_activation_report(force=True)
+    details["execution_activation"] = activation
+    if bool(config.get("scalp.execution_enabled", False)) and not activation.get("ready"):
+        failures.append("canonical execution enabled before five-day evidence gate passed")
 
     details["ok"] = not failures
     details["failures"] = failures

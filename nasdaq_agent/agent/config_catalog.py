@@ -10,6 +10,7 @@ GROUPS = [
     ("scalp_runtime", "Scalp Runtime", "Universe coverage, canonical plan cadence, concurrency, and session ownership."),
     ("scalp_learn", "Scalp Learning", "Bounded outcome learning, context gates, and expiring automatic actions."),
     ("scalp_ml", "Scalp ML Overlay", "Advisory TP1/TP2 probability models, economic promotion gates, and bounded confidence adjustment."),
+    ("scalp_activation", "Production Activation", "Evidence required before canonical paper execution can be enabled."),
     ("paper", "Paper Trading", "Simulated account, position limits, exits, and live-like execution behavior."),
     ("risk", "Risk Controls", "Account protection, exposure, cooldowns, and adaptive execution brakes."),
     ("execution", "Execution Model", "Spread, slippage, liquidity, and stop-fill simulation."),
@@ -375,6 +376,46 @@ _SCALP_LEARN_DETAILS: dict[str, tuple[str, str, str]] = {
 }
 
 _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
+    "scalp_activation.required_market_days": (
+        "Consecutive compliant market days",
+        "Number of recent active market days that must all pass scanner latency, quote coverage, and data-completeness gates before canonical paper execution is allowed.",
+        "5 requires one complete trading week of operational evidence; weekends are naturally excluded.",
+    ),
+    "scalp_activation.min_cycles_per_day": (
+        "Minimum measured cycles per day",
+        "Prevents a short healthy window from representing an entire market day in the activation decision.",
+        "300 requires at least five hours of one-per-minute persisted active-session observations per day.",
+    ),
+    "scalp_activation.max_cycle_p95_ms": (
+        "Maximum scanner p95 latency",
+        "The 95th percentile full-universe cycle duration allowed on every qualifying market day.",
+        "8000 means at least 95% of measured cycles complete within eight seconds.",
+    ),
+    "scalp_activation.max_data_gap_pct": (
+        "Maximum plan data-gap rate",
+        "Largest average share of canonical plans with missing or stale required market inputs on a qualifying day.",
+        "5 allows no more than five data-gap plans per hundred plans evaluated.",
+    ),
+    "scalp_activation.min_quote_coverage_pct": (
+        "Minimum trusted quote coverage",
+        "Minimum average share of the eligible universe with fresh WebSocket or explicitly identified REST-fallback quotes.",
+        "95 requires trusted quotes for at least 95 percent of ticker observations.",
+    ),
+    "scalp_activation.min_canonical_trials": (
+        "Minimum resolved canonical trials",
+        "Resolved CANONICAL_VALID counterfactual trials required before execution can rely on statistical evidence.",
+        "100 avoids activating from a handful of unusually favorable setups.",
+    ),
+    "scalp_activation.min_expectancy_r": (
+        "Minimum canonical expectancy",
+        "Average realized R per resolved canonical trial must be strictly above this value.",
+        "0 requires positive out-of-sample expectancy after losses and partial exits.",
+    ),
+    "scalp_activation.min_profit_factor": (
+        "Minimum canonical profit factor",
+        "Gross winning R divided by gross losing R required across resolved canonical trials.",
+        "1.10 requires ten percent more gross winning R than gross losing R.",
+    ),
     "scalp_runtime.cycle_interval_s": (
         "Canonical plan interval",
         "Seconds between full-universe plan refreshes. The browser still marks prices and positions every second from the live price bus.",
@@ -389,6 +430,11 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
         "One-minute bar lookback",
         "Closed one-minute OHLCV bars retained for RSI, MACD, ATR, session-reset VWAP, RVOL, and local structure. Values below 390 are rejected because they cannot represent a complete regular session.",
         "2500 preserves several sessions so RVOL can compare the same minute of day instead of unrelated bars.",
+    ),
+    "scalp_runtime.mtf_bar_lookback": (
+        "Five-minute context source bars",
+        "One-minute bars used to build completed five-minute context. This is intentionally bounded because multi-session RVOL profiling is owned by the one-minute tier.",
+        "500 covers a complete regular session plus warm-up without reprocessing all 2500 profile bars.",
     ),
     "scalp_runtime.blocked_sessions": (
         "Blocked entry sessions",

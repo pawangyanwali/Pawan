@@ -16,13 +16,20 @@ router = APIRouter(tags=["scalp"])
 _cache_lock = threading.Lock()
 _cache_ts = 0.0
 _cache_value: dict[str, Any] | None = None
-_CACHE_TTL_S = 0.75
+_CACHE_TTL_S = 5.0
 
 
 @router.get("/api/scalp/dashboard")
 async def scalp_dashboard(_user: AuthenticatedUser = Depends(require_viewer)):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _dashboard_snapshot)
+
+
+@router.get("/api/scalp/live")
+async def scalp_live(_user: AuthenticatedUser = Depends(require_viewer)):
+    """Compact one-second quote/indicator delta; plans remain versioned separately."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _live_snapshot)
 
 
 @router.get("/api/scalp/learning")
@@ -123,6 +130,11 @@ def _dashboard_snapshot() -> dict[str, Any]:
     )
     learning = _learning_snapshot()
     try:
+        from agent.scalp.activation import execution_activation_report
+        activation = execution_activation_report()
+    except Exception as exc:
+        activation = {"ready": False, "reasons": [f"ACTIVATION_CHECK_FAILED:{exc}"]}
+    try:
         from agent.scalp.shadow import shadow_dashboard_data
         shadow = shadow_dashboard_data(recent_limit=30)
     except Exception:
@@ -163,8 +175,8 @@ def _dashboard_snapshot() -> dict[str, Any]:
     result = {
         "schema_version": 1,
         "asof_ts": datetime.now(timezone.utc).isoformat(),
-        "scan_ts": snapshot.get("ts"),
-        "session": snapshot.get("session") or {},
+        "scan_ts": snapshot.get("scan_version") or snapshot.get("ts"),
+        "session": _session_payload(snapshot.get("session")),
         "regime": snapshot.get("regime") or {},
         "market_data_health": health,
         "counts": counts,
@@ -195,7 +207,19 @@ def _dashboard_snapshot() -> dict[str, Any]:
             "candidate_tracking_enabled": bool(
                 config.get("scalp.candidate_tracking_enabled", True)
             ),
+            "activation_ready": bool(activation.get("ready")),
+            "activation_days_passed": sum(
+                bool(day.get("passed")) for day in activation.get("days") or []
+            ),
+            "activation_required_days": int(
+                activation.get("required_market_days") or 5
+            ),
+            "activation_canonical_trials": int(
+                activation.get("canonical_trials") or 0
+            ),
+            "activation_reasons": list(activation.get("reasons") or []),
         },
+        "execution_activation": activation,
         "learning": learning,
         "shadow": shadow,
         "shadow_reports": shadow_reports,
@@ -205,6 +229,56 @@ def _dashboard_snapshot() -> dict[str, Any]:
         _cache_ts = now
         _cache_value = result
     return result
+
+
+def _live_snapshot() -> dict[str, Any]:
+    from agent.paper_trading import get_open_trades
+    from agent.scalp.live_feed import read_live_indicator_states
+    from agent.signal_snapshot import read_latest
+    from agent.valkey_client import get_all_prices, price_bus_health
+
+    live_state = read_live_indicator_states()
+    snapshot = live_state or read_latest() or {}
+    prices = get_all_prices()
+    fields = (
+        "ticker", "live_price", "live_bid", "live_ask", "live_price_source",
+        "live_price_age_ms", "live_rsi_14", "live_rsi_7", "live_rsi_2",
+        "live_macd_hist", "live_macd_slope", "indicator_mode",
+    )
+    deltas = []
+    raw_plans = snapshot.get("plans") if live_state else [
+        signal.get("scalp_plan") for signal in snapshot.get("signals") or []
+    ]
+    for raw_plan in raw_plans or []:
+        plan = dict(raw_plan or {})
+        if not plan:
+            continue
+        enriched = _enrich_plan(plan, prices)
+        deltas.append({key: enriched.get(key) for key in fields})
+    positions = [_enrich_position(row, prices) for row in get_open_trades()]
+    return {
+        "schema_version": 1,
+        "asof_ts": datetime.now(timezone.utc).isoformat(),
+        "scan_ts": (
+            snapshot.get("scan_ts")
+            or snapshot.get("scan_version")
+            or snapshot.get("ts")
+        ),
+        "session": _session_payload(snapshot.get("session")),
+        "market_data_health": price_bus_health(max_age_s=2.0),
+        "plans": deltas,
+        "positions": positions,
+        "open_unrealized_pnl": round(
+            sum(float(row.get("unrealized_pnl") or 0.0) for row in positions), 2
+        ),
+    }
+
+
+def _session_payload(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        name = value.get("session") or value.get("name") or "UNKNOWN"
+        return {**value, "session": str(name).upper()}
+    return {"session": str(value or "UNKNOWN").upper()}
 
 
 def _candidate_snapshot(recent_limit: int = 40) -> dict[str, Any]:
@@ -337,8 +411,9 @@ def _readiness_snapshot() -> dict[str, Any]:
     counts = dashboard.get("counts") or {}
     risk = dashboard.get("risk") or {}
     learning = dashboard.get("learning") or {}
-    session = dashboard.get("session") or {}
-    session_name = str(session.get("session") or session.get("name") or "UNKNOWN").upper()
+    activation = dashboard.get("execution_activation") or {}
+    session = _session_payload(dashboard.get("session"))
+    session_name = session["session"]
     active_session = session_name not in {"CLOSED", "WEEKEND", "HOLIDAY", "UNKNOWN"}
     catalog = int(registry.get("catalog_total") or 0)
     eligible = int(registry.get("eligible_total") or 0)
@@ -418,6 +493,14 @@ def _readiness_snapshot() -> dict[str, Any]:
         f"slots {risk.get('max_open_positions', 0)}",
         "positive budget, slots, and ordered targets",
         f"Execution {'enabled' if risk.get('execution_enabled') else 'shadow only'}.",
+    ))
+    checks.append(check(
+        "Canonical execution activation",
+        "PASS" if activation.get("ready") else "WAITING",
+        f"{len(activation.get('days') or [])}/{activation.get('required_market_days', 5)} SLA days; "
+        f"{activation.get('canonical_trials', 0)} trials",
+        "five compliant market days plus positive canonical expectancy and profit factor",
+        "; ".join(activation.get("reasons") or ["Activation evidence satisfied"]),
     ))
     outcomes = int(learning.get("outcome_count") or 0)
     minimum_ml_samples = max(50, int(config.get("scalp_ml.minimum_samples", 200)))

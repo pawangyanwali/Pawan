@@ -43,4 +43,5 @@ def test_command_center_surfaces_market_and_plan_freshness():
     assert 'id="scan-chip"' in src
     assert "Market data" in src
     assert "d.scan_ts" in src
-    assert "setTimeout(load,1000)" in src
+    assert "setTimeout(loadLive,1000)" in src
+    assert "setTimeout(loadFull,5000)" in src

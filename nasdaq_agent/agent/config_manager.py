@@ -127,6 +127,7 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_runtime.cycle_interval_s":       lambda: 5.0,
     "scalp_runtime.workers":                lambda: 8,
     "scalp_runtime.bar_lookback":           lambda: 2500,
+    "scalp_runtime.mtf_bar_lookback":       lambda: 500,
     "scalp_runtime.blocked_sessions":       lambda: [
         "CLOSED", "RESTRICTED", "CLOSING_CAUTION", "HARD_CLOSE"
     ],
@@ -196,6 +197,14 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_ml.training_lookback_days":       lambda: 60,
     "scalp_ml.maximum_model_age_hours":      lambda: 168,
     "scalp_ml.minimum_samples":              lambda: 200,
+    "scalp_activation.required_market_days": lambda: 5,
+    "scalp_activation.min_cycles_per_day":   lambda: 300,
+    "scalp_activation.max_cycle_p95_ms":     lambda: 8000.0,
+    "scalp_activation.max_data_gap_pct":     lambda: 5.0,
+    "scalp_activation.min_quote_coverage_pct": lambda: 95.0,
+    "scalp_activation.min_canonical_trials": lambda: 100,
+    "scalp_activation.min_expectancy_r":     lambda: 0.0,
+    "scalp_activation.min_profit_factor":    lambda: 1.10,
     "scalp_ml.bootstrap_minimum_samples":    lambda: 75,
     "scalp_ml.bootstrap_training_enabled":   lambda: True,
     "scalp_ml.holdout_pct":                  lambda: 0.25,

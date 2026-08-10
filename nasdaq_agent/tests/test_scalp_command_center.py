@@ -23,7 +23,9 @@ def test_command_center_is_a_dedicated_authenticated_live_page():
     assert "scalp.html" in system
     assert "app.include_router(scalp_router)" in main
     assert "authFetch('/api/scalp/dashboard')" in html
-    assert "setTimeout(load,1000)" in html
+    assert "authFetch('/api/scalp/live')" in html
+    assert "setTimeout(loadLive,1000)" in html
+    assert "setTimeout(loadFull,5000)" in html
     assert "canonical scalp plans" in html.lower()
     assert "Learning Guard" in html
     assert "ML trainer" in html
@@ -148,6 +150,84 @@ def test_dashboard_snapshot_joins_plans_prices_risk_and_learning(monkeypatch):
     assert "shadow_reports" in result
     assert result["risk"]["candidate_tracking_enabled"] is True
     assert result["candidate_trials"]["learning_isolation"] is True
+    assert result["session"]["session"] == "REGULAR"
+
+
+def test_session_contract_normalizes_legacy_string_and_object():
+    assert scalp_router._session_payload("STANDARD") == {"session": "STANDARD"}
+    assert scalp_router._session_payload({"name": "prime", "tradeable": True}) == {
+        "name": "prime", "tradeable": True, "session": "PRIME"
+    }
+
+
+def test_live_snapshot_is_compact_and_versioned(monkeypatch):
+    now = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(
+        signal_snapshot,
+        "read_latest",
+        lambda: {
+            "ts": now,
+            "session": "REGULAR",
+            "signals": [{"scalp_plan": {
+                "plan_id": "plan-1", "ticker": "AAPL", "entry": 100,
+                "stop_loss": 99, "tp1": 101, "tp2": 102,
+            }}],
+        },
+    )
+    monkeypatch.setattr(paper, "get_open_trades", lambda: [])
+    monkeypatch.setattr(
+        valkey,
+        "get_all_prices",
+        lambda: {"AAPL": {"last": 100.5, "updated_at": now, "source_status": "WS_LIVE"}},
+    )
+    monkeypatch.setattr(
+        valkey, "price_bus_health",
+        lambda max_age_s: {"status": "LIVE", "live": 1, "fallback": 0, "stale": 0},
+    )
+    result = scalp_router._live_snapshot()
+    assert result["scan_ts"] == now
+    assert result["session"] == {"session": "REGULAR"}
+    assert result["plans"][0]["ticker"] == "AAPL"
+    assert result["plans"][0]["live_price"] == pytest.approx(100.5)
+    assert "blockers" not in result["plans"][0]
+    assert "candidate_trials" not in result
+
+
+def test_live_snapshot_uses_compact_valkey_state_without_full_snapshot(monkeypatch):
+    import agent.scalp.live_feed as live_feed
+
+    now = datetime.now(timezone.utc).timestamp()
+    state = {
+        "schema_version": 1,
+        "scan_ts": now,
+        "session": "REGULAR",
+        "plans": [{
+            "ticker": "AAPL", "indicator_close": 100.0, "macd_hist": 0.01,
+            "rsi_avg_gain_14": 0.2, "rsi_avg_loss_14": 0.1,
+            "rsi_avg_gain_7": 0.2, "rsi_avg_loss_7": 0.1,
+            "rsi_avg_gain_2": 0.2, "rsi_avg_loss_2": 0.1,
+            "macd_fast_ema": 100.1, "macd_slow_ema": 99.9,
+            "macd_signal_ema": 0.15,
+        }],
+    }
+    monkeypatch.setattr(live_feed, "read_live_indicator_states", lambda: state)
+    monkeypatch.setattr(
+        signal_snapshot, "read_latest",
+        lambda: (_ for _ in ()).throw(AssertionError("full snapshot must not load")),
+    )
+    monkeypatch.setattr(paper, "get_open_trades", lambda: [])
+    monkeypatch.setattr(
+        valkey, "get_all_prices",
+        lambda: {"AAPL": {"last": 100.25, "updated_at": now, "source_status": "WS_LIVE"}},
+    )
+    monkeypatch.setattr(
+        valkey, "price_bus_health",
+        lambda max_age_s: {"status": "LIVE", "live": 1, "fallback": 0, "stale": 0},
+    )
+    result = scalp_router._live_snapshot()
+    assert result["scan_ts"] == now
+    assert result["plans"][0]["live_price"] == pytest.approx(100.25)
+    assert result["plans"][0]["live_rsi_14"] is not None
 
 
 def test_hard_learning_block_is_not_presented_as_watch():

@@ -45,6 +45,34 @@ def test_token_service_initializes_postgres_token_table():
     assert "from agent.db import get_pool" not in auth
     assert "pool.connection()" not in auth
     assert "init_schwab_token_store()" in token_service
+    assert "refresh_issued_at" in auth
+    assert "refresh_expires_at" in auth
+
+
+def test_access_refresh_preserves_original_refresh_token_clock(monkeypatch, tmp_path):
+    import agent.broker.schwab_auth as auth
+
+    manager = auth._TokenManager("Test", "TEST_ID", "TEST_SECRET", "token.json")
+    manager._token_dir = tmp_path
+    manager._token_path = tmp_path / "token.json"
+    monkeypatch.setattr(manager, "_pg_save", lambda _snapshot: None)
+    monkeypatch.setattr(auth, "_BACKUP_DIR", tmp_path / "backup")
+    now = [1_000.0]
+    monkeypatch.setattr(auth.time, "time", lambda: now[0])
+
+    manager._store(
+        {"access_token": "a1", "refresh_token": "r1", "expires_in": 1800},
+        force_refresh_issue=True,
+    )
+    issued = manager._tokens["refresh_issued_at"]
+    expires = manager._tokens["refresh_expires_at"]
+    now[0] = 2_000.0
+    manager._store({"access_token": "a2", "expires_in": 1800})
+
+    assert manager._tokens["refresh_token"] == "r1"
+    assert manager._tokens["refresh_issued_at"] == issued
+    assert manager._tokens["refresh_expires_at"] == expires
+    assert manager._tokens["stored_at"] == 2_000.0
 
 
 def test_market_data_reacts_to_app_specific_token_events():

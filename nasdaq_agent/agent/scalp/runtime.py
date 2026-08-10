@@ -18,6 +18,7 @@ from .indicators import (
     indicator_snapshot_from_frame,
     provisional_live_indicators,
     refresh_indicator_bar_age,
+    update_one_minute_indicators,
 )
 from .learning import apply_context_gate
 from .ml_overlay import apply_ml_overlay
@@ -39,7 +40,7 @@ class ScalpRuntime:
 
     def __init__(self, tickers: list[str]) -> None:
         self.tickers = list(dict.fromkeys(str(t).upper() for t in tickers))
-        self._indicator_cache: dict[str, tuple[int, Any, IndicatorSnapshot, list[float], list[float]]] = {}
+        self._indicator_cache: dict[str, tuple[tuple[Any, ...], Any, IndicatorSnapshot, list[float], list[float]]] = {}
         self._mtf_cache: dict[str, tuple[int, Any]] = {}
         self._last_execution_bar: dict[str, int] = {}
         self._last_shadow_bar: dict[str, int] = {}
@@ -117,16 +118,21 @@ class ScalpRuntime:
                 )
 
             bar_id = int(frame.index[-1].timestamp() * 1000)
+            frame_version = _frame_version(frame)
             cached = self._indicator_cache.get(ticker)
-            if cached and cached[0] == bar_id:
-                enriched, cached_indicators, supports, resistances = cached[1:]
-                indicators = refresh_indicator_bar_age(cached_indicators, enriched)
+            if cached and cached[0] == frame_version:
+                indicator_state, cached_indicators, supports, resistances = cached[1:]
+                indicators = refresh_indicator_bar_age(cached_indicators, frame)
             else:
-                enriched = calculate_one_minute_indicators(frame)
-                indicators = indicator_snapshot_from_frame(enriched)
-                supports, resistances = _structure_levels(enriched)
+                indicator_state = update_one_minute_indicators(
+                    cached[1] if cached else None,
+                    frame,
+                )
+                indicator_state = indicator_state.tail(2).copy()
+                indicators = indicator_snapshot_from_frame(indicator_state)
+                supports, resistances = _structure_levels(frame)
                 self._indicator_cache[ticker] = (
-                    bar_id, enriched, indicators, supports, resistances
+                    frame_version, indicator_state, indicators, supports, resistances
                 )
 
             mtf_bar_id = completed_five_minute_bar_id(frame)
@@ -138,12 +144,15 @@ class ScalpRuntime:
                 )
             else:
                 mtf_context = five_minute_snapshot(
-                    frame,
+                    frame.tail(max(
+                        390,
+                        int(config.get("scalp_runtime.mtf_bar_lookback", 500)),
+                    )),
                     max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
                 )
                 self._mtf_cache[ticker] = (mtf_bar_id, mtf_context)
 
-            return ticker, enriched, bar_id, indicators, supports, resistances, mtf_context, ""
+            return ticker, frame, bar_id, indicators, supports, resistances, mtf_context, ""
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-bars") as pool:
             prepared = list(pool.map(prepare, self.tickers))
@@ -293,13 +302,23 @@ class ScalpRuntime:
         self._manage_positions(frames_by_ticker, bars_by_ticker, quotes)
         if bool(config.get("scalp.shadow_enabled", True)):
             self._shadow_execute(plans_by_ticker, bars_by_ticker, market_health)
+        activation_report: dict[str, Any] = {"ready": False, "reasons": ["EXECUTION_DISABLED"]}
         if bool(config.get("scalp.execution_enabled", False)):
-            self._execute(
-                plans_by_ticker,
-                frames_by_ticker,
-                bars_by_ticker,
-                market_health,
-            )
+            from agent.scalp.activation import execution_activation_report
+
+            activation_report = execution_activation_report()
+            if activation_report.get("ready"):
+                self._execute(
+                    plans_by_ticker,
+                    frames_by_ticker,
+                    bars_by_ticker,
+                    market_health,
+                )
+            else:
+                logger.warning(
+                    "[ScalpRuntime] canonical execution held by activation gate: %s",
+                    activation_report.get("reasons"),
+                )
         rows = [
             {"ticker": ticker, "scalp_plan": plan.to_dict()}
             for ticker, plan in plans_by_ticker.items()
@@ -318,6 +337,7 @@ class ScalpRuntime:
             if plan.valid and not plan.execution_eligible
         )
         elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+        scan_version = time.time()
         meta = {
             "runtime": "SCALP_ONLY_V1",
             "universe_total": len(self.tickers),
@@ -337,8 +357,20 @@ class ScalpRuntime:
                 )[:10]
             ],
             "cycle_ms": elapsed_ms,
+            "scan_version": scan_version,
+            "execution_activation_ready": bool(activation_report.get("ready")),
         }
         write_latest(rows, {}, session_info, len(rows), scan_meta=meta)
+        try:
+            from agent.scalp.live_feed import publish_live_indicator_states
+
+            publish_live_indicator_states(
+                plans_by_ticker,
+                scan_ts=scan_version,
+                session=session,
+            )
+        except Exception:
+            logger.exception("[ScalpRuntime] compact live-state publish failed")
         metrics_bucket = int(time.time() // 60)
         if metrics_bucket != self._last_metrics_bucket:
             try:
@@ -772,3 +804,14 @@ def _structure_levels(frame: Any, *, lookback: int = 60, window: int = 3) -> tup
         {round(float(v), 4) for v in swing_lows if float(v) < current}, reverse=True
     )
     return supports[:5], resistances[:5]
+
+
+def _frame_version(frame: Any) -> tuple[Any, ...]:
+    """Identify both a new minute and an in-place update of the latest bar."""
+    row = frame.iloc[-1]
+    return (
+        int(frame.index[-1].timestamp() * 1000),
+        *(round(float(row.get(column) or 0.0), 8) for column in (
+            "Open", "High", "Low", "Close", "Volume"
+        )),
+    )

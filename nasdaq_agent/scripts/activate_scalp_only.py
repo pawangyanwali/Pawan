@@ -35,13 +35,19 @@ def main() -> int:
             "scalp.shadow_enabled": True,
             "scalp.execution_enabled": False,
             "scalp_runtime.bar_lookback": 2500,
+            "scalp_runtime.mtf_bar_lookback": 500,
         },
         updated_by="release5_health_gated_cutover",
     )
+    from agent.scalp.activation import execution_activation_report
+    activation = execution_activation_report(force=True)
     print(
         "SCALP_ONLY_V1 shadow validation activated: canonical paper entries remain disabled; "
         "valid plans are evaluated in the isolated shadow ledger "
-        f"({snapshot.get('universe_total')} tickers, snapshot age {snapshot_age:.1f}s)."
+        f"({snapshot.get('universe_total')} tickers, snapshot age {snapshot_age:.1f}s). "
+        f"Execution evidence ready={activation.get('ready')} "
+        f"({len(activation.get('days') or [])}/{activation.get('required_market_days', 5)} days, "
+        f"{activation.get('canonical_trials', 0)} canonical trials)."
     )
     return 0
 

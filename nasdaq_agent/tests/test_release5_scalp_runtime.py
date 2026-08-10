@@ -9,11 +9,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from agent.scalp.bar_feed import _frame_from_payload
+from agent.scalp.bar_feed import _delta_fetch_count, _frame_from_payload, _merge_frame
 from agent.scalp.indicators import (
     calculate_one_minute_indicators,
     indicator_snapshot_from_frame,
     provisional_live_indicators,
+    update_one_minute_indicators,
 )
 
 
@@ -47,6 +48,17 @@ def test_batched_bar_payload_becomes_ordered_utc_frame():
     assert str(frame.index.tz) == "UTC"
     assert frame.index.is_monotonic_increasing
     assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+
+
+def test_warmed_bar_cache_reads_and_merges_only_delta_tail():
+    frame = _frame_from_payload(_bars(80))
+    latest = _bars(81)[-1]
+    cached = (_bars(80)[-1], 80, 2500, frame)
+    assert _delta_fetch_count(cached, latest, 2500) == 3
+    delta = _frame_from_payload(_bars(81)[-3:])
+    merged = _merge_frame(frame, delta, 2500)
+    assert len(merged) == 81
+    assert merged.index[-1] == delta.index[-1]
 
 
 def test_indicator_contract_is_computed_from_closed_one_minute_bars():
@@ -114,6 +126,29 @@ def test_provisional_indicators_match_appending_one_live_price_observation():
     assert provisional["macd_slope"] == pytest.approx(
         expected["macd_hist"] - enriched["macd_hist"].iloc[-1], abs=1e-8
     )
+
+
+@pytest.mark.parametrize("replace_latest", [False, True])
+def test_incremental_indicators_match_full_recalculation(replace_latest):
+    frame = _frame_from_payload(_bars(240))
+    prior_frame = frame.iloc[:-1] if not replace_latest else frame.copy()
+    prior = calculate_one_minute_indicators(prior_frame)
+    current = frame.copy()
+    if replace_latest:
+        current.loc[current.index[-1], "Close"] -= 0.21
+        current.loc[current.index[-1], "Low"] -= 0.21
+        current.loc[current.index[-1], "Volume"] += 275
+
+    incremental = update_one_minute_indicators(prior, current)
+    expected = calculate_one_minute_indicators(current)
+    for column in (
+        "rsi_14", "rsi_7", "rsi_2", "macd_hist", "atr_14", "vwap",
+        "vol_ratio", "rsi_avg_gain_14", "rsi_avg_loss_14",
+        "macd_fast_ema", "macd_slow_ema", "macd_signal_ema",
+    ):
+        assert incremental[column].iloc[-1] == pytest.approx(
+            expected[column].iloc[-1], rel=1e-10, abs=1e-10
+        )
 
 
 def test_runtime_uses_provisional_live_indicator_snapshot_for_recent_stale_bar():
@@ -200,6 +235,7 @@ def test_runtime_controls_are_ui_catalogued():
         "scalp_runtime.cycle_interval_s",
         "scalp_runtime.workers",
         "scalp_runtime.bar_lookback",
+        "scalp_runtime.mtf_bar_lookback",
         "scalp_runtime.blocked_sessions",
         "scalp.long_require_mtf_not_bearish",
         "scalp.long_block_bearish_market",
@@ -460,3 +496,14 @@ def _valid_plan_for_pipeline_test():
         valid=True,
         invalid_reason="",
     )
+
+
+def test_learner_retrains_only_after_new_canonical_outcomes():
+    service = (APP / "services" / "scalp_learner_service.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"scalp-learner:ml-watermark"' in service
+    assert "outcome_count > trained_outcome_watermark" in service
+    assert '"WAITING_FOR_NEW_OUTCOMES"' in service
+    assert "_save_training_watermark(trained_outcome_watermark)" in service

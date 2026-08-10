@@ -58,10 +58,13 @@ jobs:
                  tests/test_scalp_entry_quality.py \
                  tests/test_scalp_execution_policy.py \
                  tests/test_scalp_learning.py \
+                 tests/test_scalp_activation.py \
                  tests/test_release5_scalp_runtime.py \
                  tests/test_scalp_candidate_tracker.py \
                  tests/test_schwab_streamer_subscriptions.py \
                  tests/test_scalp_command_center.py \
+                 tests/test_universe_operations.py \
+                 tests/test_schwab_token_ownership.py \
                  tests/test_health_page_static.py \
                  --timeout=8 -x -q 2>&1 | tail -30
 
@@ -339,8 +342,8 @@ jobs:
                 exit 1
               fi
 
-              echo "=== Stability soak and restart/OOM gate (75s) ==="
-              sleep 75
+              echo "=== Stability soak and restart/OOM gate (180s) ==="
+              sleep 180
               if ! _dc exec -T scalp-engine python -m scripts.validate_production_release; then
                 echo "ERROR: functional readiness failed after stability soak"
                 exit 1
