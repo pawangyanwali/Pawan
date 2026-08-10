@@ -81,10 +81,10 @@ def test_services_returns_dict(client):
     assert isinstance(body, dict)
 
 
-def test_services_has_scanner_key(client):
+def test_services_has_scalp_engine_key(client):
     r = client.get("/api/services")
     body = r.json()
-    assert "scanner" in body
+    assert "scalp_engine" in body
 
 
 def test_services_has_valkey_key(client):

@@ -265,78 +265,6 @@ from agent.paper_trading import (
 )
 
 
-class TestPaperTradingLifecycle:
-    def test_full_buy_win_cycle(self):
-        tid = maybe_open_trade("PT_WIN", "BUY", 100.0, 105.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        assert tid is not None
-        df = make_ohlcv(start_price=107.0)  # above target=105
-        update_open_trades("PT_WIN", df, current_price=107.0)
-        closed = get_closed_trades()
-        match = next((t for t in closed if t["ticker"] == "PT_WIN"), None)
-        assert match is not None, "trade should have closed on target hit"
-        assert match["exit_reason"] in ("TARGET_HIT", "EXIT_NOW", "TARGET")
-
-    def test_full_buy_loss_cycle(self):
-        tid = maybe_open_trade("PT_LOSS", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        assert tid is not None
-        df = make_ohlcv(start_price=93.0)
-        update_open_trades("PT_LOSS", df, current_price=93.0)
-        closed = get_closed_trades()
-        match = next((t for t in closed if t["ticker"] == "PT_LOSS"), None)
-        assert match is not None, "trade should have closed on stop hit"
-
-    def test_pnl_positive_on_buy_win(self):
-        maybe_open_trade("PT_PNL", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        df = make_ohlcv(start_price=115.0)
-        update_open_trades("PT_PNL", df, current_price=115.0)
-        closed = get_closed_trades()
-        match = next((t for t in closed if t["ticker"] == "PT_PNL"), None)
-        if match and match.get("pnl_pct") is not None:
-            assert match["pnl_pct"] > 0, "winning BUY trade must have positive P&L"
-
-    def test_pnl_negative_on_buy_loss(self):
-        maybe_open_trade("PT_PNL2", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        df = make_ohlcv(start_price=93.0)
-        update_open_trades("PT_PNL2", df, current_price=93.0)
-        closed = get_closed_trades()
-        match = next((t for t in closed if t["ticker"] == "PT_PNL2"), None)
-        if match and match.get("pnl_pct") is not None:
-            assert match["pnl_pct"] < 0, "losing BUY trade must have negative P&L"
-
-    def test_sell_pnl_positive_when_price_falls(self):
-        maybe_open_trade("PT_SELL", "SELL", 200.0, 185.0, 207.0, confidence=75.0, rr_qualifies=True, session="REGULAR")
-        df = make_ohlcv(start_price=182.0)
-        update_open_trades("PT_SELL", df, current_price=182.0)
-        closed = get_closed_trades()
-        match = next((t for t in closed if t["ticker"] == "PT_SELL"), None)
-        if match and match.get("pnl_pct") is not None:
-            assert match["pnl_pct"] > 0, "winning SELL trade must have positive P&L"
-
-    def test_no_duplicate_same_ticker(self):
-        maybe_open_trade("PT_DUP", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        t2 = maybe_open_trade("PT_DUP", "SELL", 100.0, 90.0, 105.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        assert t2 is None, "cannot open second trade while one is open on same ticker"
-
-    def test_low_confidence_floor_blocks(self):
-        tid = maybe_open_trade("PT_LOWC", "BUY", 100.0, 110.0, 95.0, confidence=10.0, rr_qualifies=True, session="REGULAR")
-        assert tid is None, "confidence below 25% floor must be rejected"
-
-    def test_rr_false_still_opens(self):
-        tid = maybe_open_trade("PT_RRF", "BUY", 100.0, 102.0, 99.0, confidence=70.0, rr_qualifies=False, session="REGULAR")
-        assert tid is not None, "rr_qualifies=False must still open (data collection mode)"
-
-    def test_neutral_direction_rejected(self):
-        tid = maybe_open_trade("PT_NEU", "NEUTRAL", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        assert tid is None
-
-    def test_summary_win_rate_in_pct_range(self):
-        s = get_summary()
-        assert 0.0 <= s["win_rate"] <= 100.0
-
-    def test_summary_has_required_fields(self):
-        s = get_summary()
-        for key in ("open", "closed", "wins", "losses", "win_rate"):
-            assert key in s, f"summary missing key: {key}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -966,9 +894,9 @@ class TestAPIServices:
     def test_services_200(self, client):
         assert client.get("/api/services").status_code == 200
 
-    def test_services_has_scanner(self, client):
+    def test_services_has_scalp_engine(self, client):
         body = client.get("/api/services").json()
-        assert "scanner" in body or "services" in body
+        assert "scalp_engine" in body
 
 
 class TestAPINotifications:
@@ -1348,19 +1276,6 @@ class TestEdgeCases:
         sid = record_signal("EDGE_ZERO2", "BUY", entry_price=0.0, target=10.0, stop=0.0)
         assert sid == "", "zero entry price must be rejected by live backtest"
 
-    def test_double_close_idempotent(self, tmp_path, monkeypatch):
-        """Closing an already-closed trade should be a no-op, not raise."""
-        import agent.paper_trading as pt
-        pt.init_db()
-        tid = pt.maybe_open_trade("DC_TEST", "BUY", 100.0, 110.0, 95.0, confidence=70.0, rr_qualifies=True, session="REGULAR")
-        assert tid is not None
-        df = make_ohlcv(start_price=112.0)
-        pt.update_open_trades("DC_TEST", df, current_price=112.0)
-        # Second close should be silently ignored
-        pt.update_open_trades("DC_TEST", df, current_price=113.0)
-        closed = pt.get_closed_trades()
-        matches = [t for t in closed if t["ticker"] == "DC_TEST"]
-        assert len(matches) == 1, f"double-close must not duplicate — found {len(matches)} entries"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

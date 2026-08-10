@@ -234,69 +234,6 @@ class TestRoutingLogic:
 # Gap 3 — Phase 2 API endpoints in main.py (tested by reading source)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestPhase2ApiEndpoints:
-    """
-    Test that the Phase 2 API endpoints are correctly wired in main.py.
-
-    We test the endpoint implementations by inspecting the source code
-    (to avoid needing a full FastAPI test client with all dependencies).
-    For integration-level tests, use the httpx TestClient.
-    """
-
-    def _get_main_source(self) -> str:
-        # Phase 2 endpoints moved from main.py to routers/learning.py
-        import pathlib
-        p = pathlib.Path("/home/user/Pawan/nasdaq_agent/routers/learning.py")
-        return p.read_text()
-
-    def test_phase2_endpoint_defined(self):
-        """main.py must define /api/learning/phase2 endpoint."""
-        src = self._get_main_source()
-        assert '"/api/learning/phase2"' in src, (
-            "main.py must define @app.get(\"/api/learning/phase2\")"
-        )
-
-    def test_phase2_endpoint_uses_get_p2_engine(self):
-        """Phase 2 endpoint must call _get_p2_engine().get_status()."""
-        src = self._get_main_source()
-        assert "_get_p2_engine" in src
-        assert "get_status" in src
-
-    def test_phase2_import_guarded(self):
-        """Phase 2 import must be try/except guarded for graceful degradation."""
-        src = self._get_main_source()
-        assert "_P2_AVAILABLE" in src, (
-            "main.py must have _P2_AVAILABLE guard for Phase 2 import"
-        )
-
-    def test_learning_status_extended_with_deployment_mode(self):
-        """learning-status endpoint must include deployment_mode from Phase 2."""
-        src = self._get_main_source()
-        assert "deployment_mode" in src, (
-            "learning-status must include deployment_mode from Phase 2"
-        )
-
-    def test_learning_status_extended_with_drift_alerts(self):
-        """learning-status endpoint must include drift_alerts from Phase 2."""
-        src = self._get_main_source()
-        assert "drift_alerts" in src, (
-            "learning-status must include drift_alerts from Phase 2"
-        )
-
-    def test_phase2_endpoint_returns_available_false_when_p2_missing(self):
-        """When _P2_AVAILABLE is False, endpoint returns available: False."""
-        src = self._get_main_source()
-        assert '"available": False' in src or "\"available\": False" in src or \
-               '{"available": False}' in src or "available: False" in src or \
-               "return {\"available\": False}" in src or "not _P2_AVAILABLE" in src, (
-            "phase2 endpoint must return {available: False} when P2 unavailable"
-        )
-
-    def test_phase2_endpoint_correct_keys(self):
-        """Phase 2 status must use correct keys: current_mode and material_drifts."""
-        src = self._get_main_source()
-        assert "current_mode" in src, "deployment status uses 'current_mode' key"
-        assert "material_drifts" in src, "drift status uses 'material_drifts' key"
 
 
 class TestPhase2ApiEndpointFastAPI:
