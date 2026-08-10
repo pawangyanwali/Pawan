@@ -302,7 +302,11 @@ def indicator_snapshot_from_frame(
     bar_close_offset_ms: int = 0,
 ) -> IndicatorSnapshot:
     """Extract final-bar values without substituting neutral defaults."""
-    if frame is None or len(frame) < 35:
+    # A cold calculation needs enough source rows to warm the recursive
+    # indicators, but the live runtime intentionally retains only the last two
+    # already-warmed state rows.  Validate the values below instead of
+    # rejecting that compact state solely because of its row count.
+    if frame is None or len(frame) < 2:
         return IndicatorSnapshot(None, None, None, None, None, None, None, None)
 
     row = frame.iloc[-1]

@@ -78,6 +78,21 @@ def test_indicator_contract_is_computed_from_closed_one_minute_bars():
     assert snapshot.bar_age_ms == 60_000
 
 
+def test_indicator_snapshot_accepts_compact_warmed_recursive_state():
+    enriched = calculate_one_minute_indicators(_frame_from_payload(_bars()))
+
+    snapshot = indicator_snapshot_from_frame(enriched.tail(2))
+
+    assert snapshot.rsi_14 is not None
+    assert snapshot.rsi_7 is not None
+    assert snapshot.rsi_2 is not None
+    assert snapshot.macd_hist is not None
+    assert snapshot.macd_hist_prev is not None
+    assert snapshot.atr_14 and snapshot.atr_14 > 0
+    assert snapshot.vwap and snapshot.vwap > 0
+    assert snapshot.rvol and snapshot.rvol > 0
+
+
 def test_rvol_prefers_same_session_and_minute_across_prior_days():
     index = pd.DatetimeIndex([
         "2026-06-22T13:30:00Z",
