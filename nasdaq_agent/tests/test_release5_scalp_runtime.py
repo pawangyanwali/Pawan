@@ -531,3 +531,9 @@ def test_learner_retrains_only_after_new_canonical_outcomes():
     assert "outcome_count > trained_outcome_watermark" in service
     assert '"WAITING_FOR_NEW_OUTCOMES"' in service
     assert "_save_training_watermark(trained_outcome_watermark)" in service
+    load_call = service.index("trained_outcome_watermark = _load_training_watermark")
+    first_save = service.index(
+        "_save_training_watermark(trained_outcome_watermark)", load_call
+    )
+    loop_start = service.index("while not _runner.stopped")
+    assert load_call < first_save < loop_start

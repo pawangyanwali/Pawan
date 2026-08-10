@@ -47,6 +47,8 @@ def test_token_service_initializes_postgres_token_table():
     assert "init_schwab_token_store()" in token_service
     assert "refresh_issued_at" in auth
     assert "refresh_expires_at" in auth
+    assert "UPDATE schwab_tokens" in auth
+    assert "COALESCE(refresh_issued_at, stored_at)" in auth
 
 
 def test_access_refresh_preserves_original_refresh_token_clock(monkeypatch, tmp_path):

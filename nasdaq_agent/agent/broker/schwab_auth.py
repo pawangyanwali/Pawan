@@ -80,6 +80,21 @@ def _ensure_schwab_token_table(conn) -> None:
     conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS last_error TEXT")
     conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS refresh_issued_at TIMESTAMPTZ")
     conn.execute("ALTER TABLE schwab_tokens ADD COLUMN IF NOT EXISTS refresh_expires_at TIMESTAMPTZ")
+    # Legacy rows predate refresh-token clock persistence.  Seed those rows
+    # once from their last known durable token timestamp so every store has an
+    # explicit clock immediately; subsequent access-token refreshes preserve
+    # it, and the next OAuth issuance/actual rotation replaces it with the
+    # authoritative Schwab issuance time.
+    conn.execute("""
+        UPDATE schwab_tokens
+           SET refresh_issued_at = COALESCE(refresh_issued_at, stored_at),
+               refresh_expires_at = COALESCE(
+                   refresh_expires_at,
+                   COALESCE(refresh_issued_at, stored_at) + INTERVAL '7 days'
+               )
+         WHERE refresh_token IS NOT NULL
+           AND (refresh_issued_at IS NULL OR refresh_expires_at IS NULL)
+    """)
 
 
 def _row_value(row, key: str, index: int, default=None):

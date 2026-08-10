@@ -73,6 +73,12 @@ def main() -> int:
     except Exception:
         _log.exception("ML outcome watermark load failed")
         trained_outcome_watermark = 0
+    try:
+        # Materialize the fallback immediately so restarts have one explicit,
+        # durable source of truth even before the next training cycle.
+        _save_training_watermark(trained_outcome_watermark)
+    except Exception:
+        _log.exception("ML outcome watermark persistence failed")
     _publish_status(mode="OBSERVING", detail="Immediate context learning runs on every canonical trade close")
     while not _runner.stopped:
         manually_enabled = bool(config.get("scalp_ml.training_enabled", False))
