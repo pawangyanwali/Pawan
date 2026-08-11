@@ -136,6 +136,8 @@ _DEFAULTS: dict[str, Any] = {
     "scalp_runtime.workers":                lambda: 8,
     "scalp_runtime.bar_lookback":           lambda: 2500,
     "scalp_runtime.mtf_bar_lookback":       lambda: 500,
+    "scalp_runtime.mtf_boundary_batch_size": lambda: 16,
+    "scalp_runtime.mtf_refresh_batch_size": lambda: 128,
     "scalp_runtime.blocked_sessions":       lambda: [
         "CLOSED", "RESTRICTED", "CLOSING_CAUTION", "HARD_CLOSE"
     ],

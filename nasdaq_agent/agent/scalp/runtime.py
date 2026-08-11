@@ -29,7 +29,15 @@ from .multi_timeframe import (
     refresh_five_minute_age,
     update_five_minute_state,
 )
-from .models import IndicatorSnapshot, QuoteSnapshot, QuoteSource, ScalpSignalConfig, ScalpSignalPlan, SignalSide
+from .models import (
+    IndicatorSnapshot,
+    MultiTimeframeSnapshot,
+    QuoteSnapshot,
+    QuoteSource,
+    ScalpSignalConfig,
+    ScalpSignalPlan,
+    SignalSide,
+)
 from .quality import has_market_data_gap
 from .quotes import quote_snapshot_from_payload
 
@@ -113,14 +121,49 @@ class ScalpRuntime:
         stage_started = time.monotonic()
         signal_config = ScalpSignalConfig.from_runtime(config)
         workers = max(1, min(16, int(config.get("scalp_runtime.workers", 8))))
+        changed_one_minute = sum(
+            1
+            for ticker, frame in frames.items()
+            if frame is not None
+            and not frame.empty
+            and (
+                ticker not in self._indicator_cache
+                or self._indicator_cache[ticker][0] != _frame_version(frame)
+            )
+        )
+        pending_mtf = [
+            ticker
+            for ticker, frame in frames.items()
+            if frame is not None
+            and not frame.empty
+            and (
+                ticker not in self._mtf_cache
+                or self._mtf_cache[ticker][0] != completed_five_minute_bar_id(frame)
+            )
+        ]
+        pending_mtf.sort(key=lambda ticker: (ticker not in {"QQQ", "SPY"}, ticker))
+        boundary_threshold = max(25, len(self.tickers) // 4)
+        mtf_batch_size = max(
+            8,
+            int(config.get(
+                "scalp_runtime.mtf_boundary_batch_size"
+                if changed_one_minute >= boundary_threshold
+                else "scalp_runtime.mtf_refresh_batch_size",
+                16 if changed_one_minute >= boundary_threshold else 128,
+            )),
+        )
+        mtf_refresh = set(pending_mtf[:mtf_batch_size])
+        mtf_deferred = set(pending_mtf) - mtf_refresh
 
-        def prepare(ticker: str) -> tuple[str, Any | None, int, Any, list[float], list[float], Any | None, str]:
+        def prepare(ticker: str) -> tuple[
+            str, Any | None, int, Any, list[float], list[float], Any | None, bool, str
+        ]:
             frame = frames.get(ticker)
             if frame is None or frame.empty:
                 return (
                     ticker, None, 0,
                     IndicatorSnapshot(None, None, None, None, None, None, None, None),
-                    [], [], None,
+                    [], [], None, False,
                     bar_errors.get(ticker, "ONE_MINUTE_BARS_MISSING"),
                 )
 
@@ -149,6 +192,17 @@ class ScalpRuntime:
                     cached_mtf[1].snapshot,
                     max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
                 )
+                mtf_pending = False
+            elif ticker in mtf_deferred:
+                mtf_context = (
+                    refresh_five_minute_age(
+                        cached_mtf[1].snapshot,
+                        max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
+                    )
+                    if cached_mtf
+                    else MultiTimeframeSnapshot()
+                )
+                mtf_pending = True
             else:
                 mtf_source = frame.tail(max(
                     390,
@@ -168,8 +222,12 @@ class ScalpRuntime:
                 )
                 mtf_context = mtf_state.snapshot
                 self._mtf_cache[ticker] = (mtf_bar_id, mtf_state)
+                mtf_pending = False
 
-            return ticker, frame, bar_id, indicators, supports, resistances, mtf_context, ""
+            return (
+                ticker, frame, bar_id, indicators, supports, resistances,
+                mtf_context, mtf_pending, "",
+            )
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-bars") as pool:
             prepared = list(pool.map(prepare, self.tickers))
@@ -186,7 +244,8 @@ class ScalpRuntime:
 
         def analyze(
             item: tuple[
-                str, Any | None, int, Any, list[float], list[float], Any | None, str
+                str, Any | None, int, Any, list[float], list[float], Any | None,
+                bool, str
             ]
         ) -> tuple[
             str,
@@ -195,7 +254,10 @@ class ScalpRuntime:
             int,
             list[tuple[str, ScalpSignalPlan, dict[str, Any]]],
         ]:
-            ticker, enriched, bar_id, indicators, supports, resistances, mtf_context, bar_error = item
+            (
+                ticker, enriched, bar_id, indicators, supports, resistances,
+                mtf_context, mtf_pending, bar_error,
+            ) = item
             quote = quote_snapshot_from_payload(ticker, quotes.get(ticker) or {})
             if enriched is None:
                 plan = create_scalp_signal_plan(
@@ -236,7 +298,11 @@ class ScalpRuntime:
             trial_specs: list[
                 tuple[str, ScalpSignalPlan, dict[str, Any]]
             ] = []
-            if plan.shadow_setup_ready and plan.shadow_side in {"LONG", "SHORT"}:
+            if (
+                not mtf_pending
+                and plan.shadow_setup_ready
+                and plan.shadow_side in {"LONG", "SHORT"}
+            ):
                 shadow_side = SignalSide(plan.shadow_side)
                 shadow_plan = deepcopy(next(
                     candidate for candidate in candidates
@@ -263,6 +329,8 @@ class ScalpRuntime:
                         "observation_only": True,
                     },
                 ))
+            if mtf_pending and plan.side is not SignalSide.NONE:
+                _add_blocker(plan, "MTF_REFRESH_PENDING")
             _apply_directional_quality_filters(plan, market_context, signal_config)
             blocked_sessions = {
                 str(value).upper()
@@ -389,6 +457,9 @@ class ScalpRuntime:
             ],
             "cycle_ms": elapsed_ms,
             "stage_ms": stage_ms,
+            "one_minute_refresh_total": changed_one_minute,
+            "mtf_refresh_total": len(mtf_refresh),
+            "mtf_refresh_pending": len(mtf_deferred),
             "scan_version": scan_version,
             "execution_activation_ready": bool(activation_report.get("ready")),
         }
@@ -414,9 +485,10 @@ class ScalpRuntime:
                 logger.exception("[ScalpRuntime] cycle telemetry persistence failed")
         self.last_cycle = {"ts": time.time(), **meta}
         logger.info(
-            "Scalp cycle: %d/%d valid, %d execution-liquid, %d data gaps, %.1fms | stages=%s",
+            "Scalp cycle: %d/%d valid, %d execution-liquid, %d data gaps, "
+            "%d MTF pending, %.1fms | stages=%s",
             valid_count, len(rows), execution_universe_total, data_gap_count,
-            elapsed_ms, stage_ms,
+            len(mtf_deferred), elapsed_ms, stage_ms,
         )
         return self.last_cycle
 
@@ -754,13 +826,19 @@ def _blocker_counts(plans: Any) -> dict[str, int]:
 
 def _market_direction_context(
     prepared: list[
-        tuple[str, Any | None, int, Any, list[float], list[float], Any | None, str]
+        tuple[
+            str, Any | None, int, Any, list[float], list[float], Any | None,
+            bool, str,
+        ]
     ],
 ) -> dict[str, Any]:
     """Summarize QQQ/SPY context from the same closed bars used by ticker scans."""
     votes: list[str] = []
     evidence: list[dict[str, Any]] = []
-    for ticker, _frame, _bar_id, indicators, _supports, _resistances, mtf, error in prepared:
+    for (
+        ticker, _frame, _bar_id, indicators, _supports, _resistances,
+        mtf, _mtf_pending, error,
+    ) in prepared:
         if str(ticker).upper() not in {"QQQ", "SPY"}:
             continue
         mtf_state = str(getattr(mtf, "state", "NO_DATA") or "NO_DATA").upper()

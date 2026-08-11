@@ -260,6 +260,8 @@ def test_runtime_controls_are_ui_catalogued():
         "scalp_runtime.workers",
         "scalp_runtime.bar_lookback",
         "scalp_runtime.mtf_bar_lookback",
+        "scalp_runtime.mtf_boundary_batch_size",
+        "scalp_runtime.mtf_refresh_batch_size",
         "scalp_runtime.blocked_sessions",
         "scalp.long_require_mtf_not_bearish",
         "scalp.long_block_bearish_market",
@@ -279,6 +281,21 @@ def test_runtime_controls_are_ui_catalogued():
         assert fields[key]["description"]
     assert fields["scalp_runtime.cycle_interval_s"]["advanced"] is False
     assert fields["scalp_runtime.bar_lookback"]["default"] == 2500
+    assert fields["scalp_runtime.mtf_boundary_batch_size"]["default"] == 16
+    assert fields["scalp_runtime.mtf_refresh_batch_size"]["default"] == 128
+
+
+def test_deferred_mtf_refresh_is_bounded_and_fail_closed():
+    import inspect
+    import agent.scalp.runtime as runtime_module
+
+    source = inspect.getsource(runtime_module.ScalpRuntime.run_cycle)
+    assert "scalp_runtime.mtf_boundary_batch_size" in source
+    assert "scalp_runtime.mtf_refresh_batch_size" in source
+    assert source.index('_add_blocker(plan, "MTF_REFRESH_PENDING")') < source.index(
+        "apply_ml_overlay(plan)"
+    )
+    assert "not mtf_pending" in source
 
 
 def test_runtime_publishes_every_ticker_even_when_one_has_no_bars(monkeypatch):

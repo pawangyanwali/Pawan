@@ -451,6 +451,16 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
         "One-minute bars used to build completed five-minute context. This is intentionally bounded because multi-session RVOL profiling is owned by the one-minute tier.",
         "500 covers a complete regular session plus warm-up without reprocessing all 2500 profile bars.",
     ),
+    "scalp_runtime.mtf_boundary_batch_size": (
+        "Five-minute boundary refresh batch",
+        "Maximum five-minute contexts refreshed in the same cycle that receives a new one-minute bar for most symbols. Remaining symbols are marked MTF_REFRESH_PENDING and cannot execute until refreshed.",
+        "16 keeps the synchronized closed-bar cycle below its latency SLA while prioritizing SPY and QQQ.",
+    ),
+    "scalp_runtime.mtf_refresh_batch_size": (
+        "Five-minute catch-up batch",
+        "Maximum deferred five-minute contexts refreshed on each following fast cycle. Entry gates remain fail-closed while a ticker is pending.",
+        "128 refreshes the full execution universe in a few fast cycles without a 428-symbol latency spike.",
+    ),
     "scalp_runtime.blocked_sessions": (
         "Blocked entry sessions",
         "Sessions in which plans remain visible but cannot become actionable or open a paper position.",
