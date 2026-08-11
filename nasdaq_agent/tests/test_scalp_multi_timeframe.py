@@ -11,9 +11,12 @@ from agent.scalp import (
 )
 from agent.scalp.multi_timeframe import (
     apply_multi_timeframe_shadow,
+    build_five_minute_state,
     completed_five_minute_bar_id,
     completed_five_minute_bars,
+    five_minute_snapshot,
     refresh_five_minute_age,
+    update_five_minute_state,
 )
 
 
@@ -110,6 +113,32 @@ def test_five_minute_cache_id_changes_only_when_a_bucket_closes():
 
     assert before_close == still_open
     assert after_close > still_open
+
+
+def test_incremental_five_minute_state_matches_full_recalculation():
+    prior = _frame(190)
+    current = _frame(195)
+    state = build_five_minute_state(prior, now_ms=1_800_000_000_000)
+
+    updated = update_five_minute_state(
+        state,
+        current,
+        now_ms=1_800_000_000_000,
+    ).snapshot
+    expected = five_minute_snapshot(
+        current,
+        now_ms=1_800_000_000_000,
+    )
+
+    for field in (
+        "close", "rsi_14", "macd_hist", "macd_hist_prev", "macd_slope",
+        "atr_14", "vwap", "ema_fast", "ema_slow",
+    ):
+        assert getattr(updated, field) == pytest.approx(
+            getattr(expected, field), rel=1e-10, abs=1e-10
+        )
+    assert updated.vwap_event == expected.vwap_event
+    assert updated.state == expected.state
 
 
 def test_shadow_momentum_detects_pullback_without_mutating_canonical_plan():

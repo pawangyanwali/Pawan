@@ -24,9 +24,10 @@ from .learning import apply_context_gate
 from .ml_overlay import apply_ml_overlay
 from .multi_timeframe import (
     apply_multi_timeframe_shadow,
+    build_five_minute_state,
     completed_five_minute_bar_id,
-    five_minute_snapshot,
     refresh_five_minute_age,
+    update_five_minute_state,
 )
 from .models import IndicatorSnapshot, QuoteSnapshot, QuoteSource, ScalpSignalConfig, ScalpSignalPlan, SignalSide
 from .quality import has_market_data_gap
@@ -145,18 +146,28 @@ class ScalpRuntime:
             cached_mtf = self._mtf_cache.get(ticker)
             if cached_mtf and cached_mtf[0] == mtf_bar_id:
                 mtf_context = refresh_five_minute_age(
-                    cached_mtf[1],
+                    cached_mtf[1].snapshot,
                     max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
                 )
             else:
-                mtf_context = five_minute_snapshot(
-                    frame.tail(max(
-                        390,
-                        int(config.get("scalp_runtime.mtf_bar_lookback", 500)),
-                    )),
-                    max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
+                mtf_source = frame.tail(max(
+                    390,
+                    int(config.get("scalp_runtime.mtf_bar_lookback", 500)),
+                ))
+                mtf_state = (
+                    update_five_minute_state(
+                        cached_mtf[1],
+                        mtf_source,
+                        max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
+                    )
+                    if cached_mtf
+                    else build_five_minute_state(
+                        mtf_source,
+                        max_bar_age_ms=signal_config.mtf_max_bar_age_ms,
+                    )
                 )
-                self._mtf_cache[ticker] = (mtf_bar_id, mtf_context)
+                mtf_context = mtf_state.snapshot
+                self._mtf_cache[ticker] = (mtf_bar_id, mtf_state)
 
             return ticker, frame, bar_id, indicators, supports, resistances, mtf_context, ""
 

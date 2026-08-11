@@ -4,6 +4,7 @@ import time
 from dataclasses import replace
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from ._utils import finite
@@ -149,9 +150,13 @@ def update_one_minute_indicators(previous: Any, frame: Any) -> Any:
 
     if stable.empty or pending.empty:
         return calculate_one_minute_indicators(source)
-    result = stable.copy()
+    # Building rows as plain dictionaries avoids repeated ``DataFrame.loc``
+    # expansion.  Across the production universe that pandas bookkeeping was
+    # the dominant cost at every closed-minute boundary.
+    result_rows = [row.to_dict() for _, row in stable.iterrows()]
+    result_index = list(stable.index)
     for stamp, raw in pending.iterrows():
-        prior = result.iloc[-1]
+        prior = result_rows[-1]
         row = {column: raw.get(column) for column in source.columns}
         close = float(raw["Close"])
         prior_close = float(prior["Close"])
@@ -190,14 +195,90 @@ def update_one_minute_indicators(previous: Any, frame: Any) -> Any:
         row["atr_14"] = (
             true_range / 14.0 + (13.0 / 14.0) * float(prior["atr_14"])
         )
-        result.loc[stamp] = row
+        row["vwap"] = _latest_session_vwap(source, stamp)
+        row["vol_ratio"] = _latest_rvol(source, stamp)
+        result_rows.append(row)
+        result_index.append(stamp)
 
+    result = pd.DataFrame(result_rows, index=result_index)
     result = result[~result.index.duplicated(keep="last")].sort_index()
-    _refresh_session_vwap(result, source, pending.index)
-    _refresh_latest_rvol(result, source)
     # RSI/MACD/ATR are recursive. Two rows are sufficient to advance the next
     # closed bar and to recalculate an in-place correction of the latest bar.
     return result.tail(2)
+
+
+def _latest_session_vwap(source: pd.DataFrame, stamp: pd.Timestamp) -> float:
+    """Calculate one decision-point VWAP without materialising pandas groups."""
+    local_stamp = stamp
+    if local_stamp.tzinfo is None:
+        local_stamp = local_stamp.tz_localize("UTC")
+    local_stamp = local_stamp.tz_convert("America/New_York")
+    minute = local_stamp.hour * 60 + local_stamp.minute
+    start_minute = {
+        "PRE_MARKET": 4 * 60,
+        "REGULAR": 9 * 60 + 30,
+        "AFTER_HOURS": 16 * 60,
+    }.get(_volume_session(minute), 0)
+    start_local = local_stamp.normalize() + pd.Timedelta(minutes=start_minute)
+    start = start_local.tz_convert(source.index.tz or "UTC")
+    left = int(source.index.searchsorted(start, side="left"))
+    right = int(source.index.searchsorted(stamp, side="right"))
+    window = source.iloc[left:right]
+    if window.empty:
+        return float("nan")
+    high = pd.to_numeric(window["High"], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(window["Low"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(window["Close"], errors="coerce").to_numpy(dtype=float)
+    volume = pd.to_numeric(window["Volume"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    total_volume = float(np.sum(volume))
+    if total_volume <= 0:
+        return float("nan")
+    typical = (high + low + close) / 3.0
+    return float(np.sum(typical * volume) / total_volume)
+
+
+def _latest_rvol(source: pd.DataFrame, stamp: pd.Timestamp) -> float:
+    """Calculate one decision-point RVOL using numpy masks over cached bars."""
+    through = source.loc[source.index <= stamp]
+    if through.empty:
+        return float("nan")
+    index = through.index
+    if getattr(index, "tz", None) is None:
+        index = index.tz_localize("UTC")
+    local = index.tz_convert("America/New_York")
+    minutes = np.asarray(local.hour * 60 + local.minute, dtype=int)
+    latest_minute = int(minutes[-1])
+    latest_session = _volume_session(latest_minute)
+    if latest_session == "PRE_MARKET":
+        session_mask = (minutes >= 4 * 60) & (minutes < 9 * 60 + 30)
+    elif latest_session == "REGULAR":
+        session_mask = (minutes >= 9 * 60 + 30) & (minutes < 16 * 60)
+    elif latest_session == "AFTER_HOURS":
+        session_mask = (minutes >= 16 * 60) & (minutes <= 20 * 60)
+    else:
+        session_mask = (minutes < 4 * 60) | (minutes > 20 * 60)
+    volume = (
+        pd.to_numeric(through["Volume"], errors="coerce")
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+    prior_volume = volume[:-1]
+    prior_session = session_mask[:-1]
+    same_minute = minutes[:-1] == latest_minute
+    profile = prior_volume[prior_session & same_minute][-10:]
+    baseline = float(np.median(profile)) if profile.size >= 2 else float("nan")
+    if not finite(baseline) or baseline <= 0:
+        values = prior_volume[prior_session][-20:]
+        baseline = float(np.median(values)) if values.size >= 10 else float("nan")
+    if (
+        (not finite(baseline) or baseline <= 0)
+        and latest_session in {"PRE_MARKET", "AFTER_HOURS"}
+    ):
+        values = prior_volume[-20:]
+        baseline = float(np.median(values)) if values.size >= 10 else float("nan")
+    if not finite(baseline) or baseline <= 0:
+        return float("nan")
+    return float(volume[-1] / baseline)
 
 
 def _same_number(left: object, right: object) -> bool:

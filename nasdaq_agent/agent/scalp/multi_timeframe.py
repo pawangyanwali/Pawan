@@ -13,7 +13,11 @@ from typing import Any
 import pandas as pd
 
 from ._utils import finite
-from .indicators import calculate_one_minute_indicators, indicator_snapshot_from_frame
+from .indicators import (
+    calculate_one_minute_indicators,
+    indicator_snapshot_from_frame,
+    update_one_minute_indicators,
+)
 from .models import (
     IndicatorSnapshot,
     MultiTimeframeSnapshot,
@@ -31,6 +35,15 @@ class ShadowAssessment:
     score: float
     reasons: tuple[str, ...]
     blockers: tuple[str, ...]
+
+
+@dataclass
+class FiveMinuteIndicatorState:
+    """Incremental closed-5m state retained by the live scalp runtime."""
+
+    completed: pd.DataFrame
+    enriched: pd.DataFrame
+    snapshot: MultiTimeframeSnapshot
 
 
 def completed_five_minute_bars(frame: Any) -> pd.DataFrame:
@@ -82,14 +95,165 @@ def five_minute_snapshot(
     now_ms: int | None = None,
     max_bar_age_ms: int = 420_000,
 ) -> MultiTimeframeSnapshot:
+    return build_five_minute_state(
+        frame,
+        now_ms=now_ms,
+        max_bar_age_ms=max_bar_age_ms,
+    ).snapshot
+
+
+def build_five_minute_state(
+    frame: Any,
+    *,
+    now_ms: int | None = None,
+    max_bar_age_ms: int = 420_000,
+) -> FiveMinuteIndicatorState:
+    """Warm the 5m state once; subsequent closed buckets advance incrementally."""
     completed = completed_five_minute_bars(frame)
     if len(completed) < 35:
-        return MultiTimeframeSnapshot(completed_bars=len(completed))
+        return FiveMinuteIndicatorState(
+            completed=completed,
+            enriched=pd.DataFrame(),
+            snapshot=MultiTimeframeSnapshot(completed_bars=len(completed)),
+        )
 
     enriched = calculate_one_minute_indicators(completed)
     close = pd.to_numeric(enriched["Close"], errors="coerce")
     enriched["mtf_ema_fast"] = close.ewm(span=5, adjust=False, min_periods=5).mean()
     enriched["mtf_ema_slow"] = close.ewm(span=13, adjust=False, min_periods=13).mean()
+    snapshot = _snapshot_from_enriched(
+        enriched,
+        completed_bars=len(completed),
+        now_ms=now_ms,
+        max_bar_age_ms=max_bar_age_ms,
+    )
+    return FiveMinuteIndicatorState(
+        completed=completed.tail(120).copy(),
+        enriched=enriched.tail(2).copy(),
+        snapshot=snapshot,
+    )
+
+
+def update_five_minute_state(
+    state: FiveMinuteIndicatorState | None,
+    frame: Any,
+    *,
+    now_ms: int | None = None,
+    max_bar_age_ms: int = 420_000,
+) -> FiveMinuteIndicatorState:
+    """Advance only newly closed 5m buckets instead of resampling all symbols."""
+    if state is None or state.completed.empty or state.enriched.empty:
+        return build_five_minute_state(
+            frame,
+            now_ms=now_ms,
+            max_bar_age_ms=max_bar_age_ms,
+        )
+    target_id = completed_five_minute_bar_id(frame)
+    cached_id = int(state.completed.index[-1].timestamp() * 1000)
+    if target_id <= cached_id:
+        return replace(
+            state,
+            snapshot=refresh_five_minute_age(
+                state.snapshot,
+                max_bar_age_ms=max_bar_age_ms,
+                now_ms=now_ms,
+            ),
+        )
+
+    missing_buckets = max(1, (target_id - cached_id) // (5 * 60_000))
+    if missing_buckets > 12:
+        return build_five_minute_state(
+            frame,
+            now_ms=now_ms,
+            max_bar_age_ms=max_bar_age_ms,
+        )
+    recent = (
+        _latest_completed_five_minute_bar(frame, target_id)
+        if missing_buckets == 1
+        else completed_five_minute_bars(
+            frame.tail(max(15, int(missing_buckets) * 5 + 5))
+        )
+    )
+    pending = recent.loc[recent.index > state.completed.index[-1]]
+    if pending.empty:
+        return replace(
+            state,
+            snapshot=refresh_five_minute_age(
+                state.snapshot,
+                max_bar_age_ms=max_bar_age_ms,
+                now_ms=now_ms,
+            ),
+        )
+
+    completed = pd.concat([state.completed, pending])
+    completed = (
+        completed[~completed.index.duplicated(keep="last")]
+        .sort_index()
+        .tail(120)
+    )
+    enriched = state.enriched.copy()
+    for stamp in pending.index:
+        prior = enriched.iloc[-1]
+        source = completed.loc[completed.index <= stamp]
+        enriched = update_one_minute_indicators(enriched, source)
+        close = float(enriched.iloc[-1]["Close"])
+        enriched.at[enriched.index[-1], "mtf_ema_fast"] = (
+            (2.0 / 6.0) * close
+            + (4.0 / 6.0) * float(prior["mtf_ema_fast"])
+        )
+        enriched.at[enriched.index[-1], "mtf_ema_slow"] = (
+            (2.0 / 14.0) * close
+            + (12.0 / 14.0) * float(prior["mtf_ema_slow"])
+        )
+
+    snapshot = _snapshot_from_enriched(
+        enriched,
+        completed_bars=len(completed),
+        now_ms=now_ms,
+        max_bar_age_ms=max_bar_age_ms,
+    )
+    return FiveMinuteIndicatorState(completed, enriched.tail(2).copy(), snapshot)
+
+
+def _latest_completed_five_minute_bar(
+    frame: pd.DataFrame,
+    target_id: int,
+) -> pd.DataFrame:
+    """Aggregate the single newly closed bucket without a pandas resample."""
+    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    index = frame.index
+    start = pd.to_datetime(target_id, unit="ms", utc=True)
+    if index.tz is None:
+        start = start.tz_localize(None)
+    else:
+        start = start.tz_convert(index.tz)
+    end = start + pd.Timedelta(minutes=5)
+    bucket = frame.loc[(index >= start) & (index < end)]
+    if bucket.empty:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    volume = float(pd.to_numeric(bucket["Volume"], errors="coerce").fillna(0.0).sum())
+    if volume <= 0:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    return pd.DataFrame(
+        [{
+            "Open": float(bucket.iloc[0]["Open"]),
+            "High": float(pd.to_numeric(bucket["High"], errors="coerce").max()),
+            "Low": float(pd.to_numeric(bucket["Low"], errors="coerce").min()),
+            "Close": float(bucket.iloc[-1]["Close"]),
+            "Volume": volume,
+        }],
+        index=pd.DatetimeIndex([start]),
+    )
+
+
+def _snapshot_from_enriched(
+    enriched: pd.DataFrame,
+    *,
+    completed_bars: int,
+    now_ms: int | None,
+    max_bar_age_ms: int,
+) -> MultiTimeframeSnapshot:
     base = indicator_snapshot_from_frame(
         enriched,
         now_ms=now_ms,
@@ -126,9 +290,9 @@ def five_minute_snapshot(
         ema_slow=ema_slow,
         bar_age_ms=base.bar_age_ms,
         bar_closed_at_ms=int(
-            (completed.index[-1] + pd.Timedelta(minutes=5)).timestamp() * 1000
+            (enriched.index[-1] + pd.Timedelta(minutes=5)).timestamp() * 1000
         ),
-        completed_bars=len(completed),
+        completed_bars=completed_bars,
     )
 
 
