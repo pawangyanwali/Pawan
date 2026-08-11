@@ -45,6 +45,7 @@ def _build_report() -> dict[str, Any]:
     with get_conn(read_only=True) as conn:
         cycles = conn.execute(
             """SELECT bucket_ts, session, universe_total, data_gap_count,
+                      execution_universe_total, execution_data_gap_count,
                       cycle_ms, live_count, rest_count, stale_count
                FROM scalp_cycle_metrics WHERE bucket_ts >= ?
                ORDER BY bucket_ts""",
@@ -73,15 +74,22 @@ def _build_report() -> dict[str, Any]:
         rows = grouped.get(market_date, [])
         latencies = sorted(float(row.get("cycle_ms") or 0.0) for row in rows)
         p95 = latencies[max(0, math.ceil(len(latencies) * 0.95) - 1)] if latencies else 0.0
-        universe = sum(max(0, int(row.get("universe_total") or 0)) for row in rows)
-        gaps = sum(max(0, int(row.get("data_gap_count") or 0)) for row in rows)
+        monitored_universe = sum(
+            max(0, int(row.get("universe_total") or 0)) for row in rows
+        )
+        execution_universe = sum(
+            max(0, int(row.get("execution_universe_total") or 0)) for row in rows
+        )
+        gaps = sum(
+            max(0, int(row.get("execution_data_gap_count") or 0)) for row in rows
+        )
         fresh = sum(
             max(0, int(row.get("live_count") or 0))
             + max(0, int(row.get("rest_count") or 0))
             for row in rows
         )
-        gap_pct = gaps / universe * 100.0 if universe else 100.0
-        fresh_pct = fresh / universe * 100.0 if universe else 0.0
+        gap_pct = gaps / execution_universe * 100.0 if execution_universe else 100.0
+        fresh_pct = fresh / monitored_universe * 100.0 if monitored_universe else 0.0
         passed = (
             len(rows) >= min_cycles
             and p95 <= max_p95_ms
@@ -92,6 +100,7 @@ def _build_report() -> dict[str, Any]:
             "market_date": market_date,
             "cycles": len(rows),
             "cycle_p95_ms": round(p95, 1),
+            "execution_universe_observations": execution_universe,
             "data_gap_pct": round(gap_pct, 2),
             "quote_coverage_pct": round(fresh_pct, 2),
             "passed": passed,

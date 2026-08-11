@@ -32,6 +32,12 @@ def main() -> int:
     details["snapshot_universe"] = int(snapshot.get("universe_total") or 0)
     details["cycle_ms"] = float(snapshot.get("cycle_ms") or 0.0)
     details["data_gap_count"] = int(snapshot.get("data_gap_count") or 0)
+    details["execution_universe_total"] = int(
+        snapshot.get("execution_universe_total") or 0
+    )
+    details["execution_data_gap_count"] = int(
+        snapshot.get("execution_data_gap_count") or 0
+    )
     if snapshot.get("runtime") != "SCALP_ONLY_V1":
         failures.append("latest snapshot is not SCALP_ONLY_V1")
     if snapshot_age < 0 or snapshot_age > 60:
@@ -39,6 +45,11 @@ def main() -> int:
     if int(snapshot.get("universe_total") or 0) < 400:
         failures.append("scalp snapshot does not cover the production universe")
     universe_total = int(snapshot.get("universe_total") or 0)
+    monitored_gap_pct = (
+        int(snapshot.get("data_gap_count") or 0) / universe_total * 100.0
+        if universe_total else 100.0
+    )
+    details["monitored_data_gap_pct"] = round(monitored_gap_pct, 2)
     session_value = snapshot.get("session")
     if isinstance(session_value, dict):
         session_value = session_value.get("session") or session_value.get("name")
@@ -52,15 +63,19 @@ def main() -> int:
     details["active_session_sla_enforced"] = active_session
     details["data_gap_sla_enforced"] = data_gap_sla_session
     cycle_ms = float(snapshot.get("cycle_ms") or 0.0)
+    execution_universe = int(snapshot.get("execution_universe_total") or 0)
     gap_pct = (
-        int(snapshot.get("data_gap_count") or 0) / universe_total * 100.0
-        if universe_total else 100.0
+        int(snapshot.get("execution_data_gap_count") or 0)
+        / execution_universe * 100.0
+        if execution_universe else 100.0
     )
-    details["data_gap_pct"] = round(gap_pct, 2)
+    details["execution_data_gap_pct"] = round(gap_pct, 2)
     if active_session and (cycle_ms <= 0 or cycle_ms > 12_000):
         failures.append(f"full-universe cycle exceeds 12s SLA: {cycle_ms:.1f}ms")
     if data_gap_sla_session and gap_pct > 5.0:
-        failures.append(f"canonical plan data-gap rate exceeds 5%: {gap_pct:.1f}%")
+        failures.append(
+            f"execution-universe data-gap rate exceeds 5%: {gap_pct:.1f}%"
+        )
 
     prices = price_bus_health(max_age_s=5.0)
     details["price_bus"] = {

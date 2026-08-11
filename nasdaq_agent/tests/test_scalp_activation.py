@@ -18,6 +18,8 @@ def _evidence(*, slow_last_day: bool = False):
                     "session": "REGULAR",
                     "universe_total": 424,
                     "data_gap_count": 4,
+                    "execution_universe_total": 200,
+                    "execution_data_gap_count": 2,
                     "cycle_ms": 20_000 if slow_last_day and market_days == 4 else 4_000,
                     "live_count": 410,
                     "rest_count": 10,
@@ -61,6 +63,8 @@ def test_five_day_activation_gate_accepts_operational_and_positive_evidence(monk
     assert len(report["days"]) == 5
     assert report["expectancy_r"] > 0
     assert report["profit_factor"] >= 1.1
+    assert report["days"][0]["data_gap_pct"] == 1.0
+    assert report["days"][0]["quote_coverage_pct"] == 99.06
 
 
 def test_five_day_activation_gate_rejects_one_slow_market_day(monkeypatch):
@@ -114,6 +118,7 @@ def test_five_day_activation_gate_excludes_sparse_extended_hours(monkeypatch):
                 **row,
                 "session": "AFTER_HOURS",
                 "data_gap_count": row["universe_total"],
+                "execution_data_gap_count": row["execution_universe_total"],
                 "cycle_ms": 90_000,
                 "live_count": 0,
                 "rest_count": 0,

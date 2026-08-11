@@ -434,6 +434,12 @@ class ScalpRuntime:
         execution_universe_total = sum(
             1 for plan in plans_by_ticker.values() if plan.execution_eligible
         )
+        execution_data_gap_count = sum(
+            1
+            for plan in plans_by_ticker.values()
+            if plan.execution_eligible
+            and _has_actionable_data_gap(plan.blockers, session)
+        )
         elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
         scan_version = time.time()
         meta = {
@@ -443,6 +449,7 @@ class ScalpRuntime:
             "data_gap_count": data_gap_count,
             "execution_ineligible_count": execution_ineligible_count,
             "execution_universe_total": execution_universe_total,
+            "execution_data_gap_count": execution_data_gap_count,
             "source_counts": dict(source_counts),
             "session": str(session or "UNKNOWN").upper(),
             "market_context": market_context,

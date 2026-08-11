@@ -264,6 +264,7 @@ def init_scalp_tables() -> None:
                 data_gap_count          INTEGER NOT NULL DEFAULT 0,
                 execution_ineligible_count INTEGER NOT NULL DEFAULT 0,
                 execution_universe_total INTEGER NOT NULL DEFAULT 0,
+                execution_data_gap_count INTEGER NOT NULL DEFAULT 0,
                 cycle_ms                DOUBLE PRECISION NOT NULL DEFAULT 0,
                 live_count              INTEGER NOT NULL DEFAULT 0,
                 rest_count              INTEGER NOT NULL DEFAULT 0,
@@ -305,6 +306,7 @@ def init_scalp_tables() -> None:
             "ALTER TABLE scalp_context_stats ADD COLUMN IF NOT EXISTS mean_pnl_dollar DOUBLE PRECISION DEFAULT 0",
             "ALTER TABLE scalp_candidate_trials ADD COLUMN IF NOT EXISTS episode_version INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE scalp_cycle_metrics ADD COLUMN IF NOT EXISTS execution_universe_total INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scalp_cycle_metrics ADD COLUMN IF NOT EXISTS execution_data_gap_count INTEGER NOT NULL DEFAULT 0",
             "CREATE INDEX IF NOT EXISTS idx_scalp_trials_episode_cooldown ON scalp_candidate_trials(episode_version, resolved_at)",
         ]
         try:
@@ -568,6 +570,7 @@ def record_cycle_metrics(metrics: dict[str, Any], *, observed_at: float | None =
         int(metrics.get("data_gap_count") or 0),
         int(metrics.get("execution_ineligible_count") or 0),
         int(metrics.get("execution_universe_total") or 0),
+        int(metrics.get("execution_data_gap_count") or 0),
         float(metrics.get("cycle_ms") or 0.0),
         int(source_counts.get("WS") or 0),
         int(source_counts.get("REST") or 0),
@@ -581,10 +584,10 @@ def record_cycle_metrics(metrics: dict[str, Any], *, observed_at: float | None =
             INSERT INTO scalp_cycle_metrics
               (bucket_ts, session, universe_total, valid_plan_count,
                data_gap_count, execution_ineligible_count,
-               execution_universe_total, cycle_ms,
+               execution_universe_total, execution_data_gap_count, cycle_ms,
                live_count, rest_count, stale_count, blocker_counts_json,
                market_context_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT (bucket_ts) DO UPDATE SET
               session=excluded.session,
               universe_total=excluded.universe_total,
@@ -592,6 +595,7 @@ def record_cycle_metrics(metrics: dict[str, Any], *, observed_at: float | None =
               data_gap_count=excluded.data_gap_count,
               execution_ineligible_count=excluded.execution_ineligible_count,
               execution_universe_total=excluded.execution_universe_total,
+              execution_data_gap_count=excluded.execution_data_gap_count,
               cycle_ms=excluded.cycle_ms,
               live_count=excluded.live_count,
               rest_count=excluded.rest_count,
