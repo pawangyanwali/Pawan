@@ -42,7 +42,7 @@ class ScalpSignalConfig:
     max_stop_pct: float = 0.020
     spread_buffer_mult: float = 2.0
     tick_size: float = 0.01
-    max_quote_age_ms: int = 2_000
+    max_quote_age_ms: int = 5_000
     max_bar_age_ms: int = 120_000
     use_provisional_live_indicators: bool = True
     provisional_max_bar_age_ms: int = 300_000
@@ -132,7 +132,7 @@ class ScalpSignalConfig:
             max_stop_pct=float(read("scalp.max_stop_pct", 0.020)),
             spread_buffer_mult=float(read("scalp.spread_buffer_mult", 2.0)),
             tick_size=float(read("scalp.tick_size", 0.01)),
-            max_quote_age_ms=int(read("scalp.max_quote_age_ms", 2_000)),
+            max_quote_age_ms=int(read("scalp.max_quote_age_ms", 5_000)),
             max_bar_age_ms=int(read("scalp.max_bar_age_ms", 120_000)),
             use_provisional_live_indicators=bool(
                 read("scalp.use_provisional_live_indicators", True)
@@ -321,6 +321,8 @@ class ScalpSignalPlan:
     source: QuoteSource = QuoteSource.UNKNOWN
     execution_eligible: bool = False
     execution_blockers: list[str] = field(default_factory=list)
+    execution_liquidity_qualified: bool = False
+    execution_median_minute_dollar_volume: float = 0.0
     rsi_14: float = 0.0
     rsi_7: float = 0.0
     rsi_2: float = 0.0

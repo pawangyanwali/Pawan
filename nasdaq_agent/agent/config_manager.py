@@ -71,11 +71,19 @@ _DEFAULTS: dict[str, Any] = {
     "scalp.max_stop_pct":                  lambda: 0.020,
     "scalp.spread_buffer_mult":            lambda: 2.0,
     "scalp.tick_size":                     lambda: 0.01,
-    "scalp.max_quote_age_ms":              lambda: 2000,
+    # The price bus SLA is five seconds.  Signal planning, provisional
+    # indicators, execution policy, and position marking must use the same
+    # boundary or a healthy WS quote is incorrectly labelled a data gap.
+    "scalp.max_quote_age_ms":              lambda: 5000,
     "scalp.max_bar_age_ms":                lambda: 120000,
     "scalp.use_provisional_live_indicators": lambda: True,
     "scalp.provisional_max_bar_age_ms":    lambda: 300000,
     "scalp.max_spread_to_risk":            lambda: 0.25,
+    # Dynamic execution universe.  Every registry symbol remains monitored;
+    # only sufficiently liquid plans may enter shadow/canonical execution.
+    "scalp.execution_max_spread_bps":      lambda: 30.0,
+    "scalp.execution_min_median_minute_dollar_volume": lambda: 25_000.0,
+    "scalp.candidate_episode_cooldown_min": lambda: 15,
     "scalp.min_rvol_regular":              lambda: 0.8,
     "scalp.min_rvol_extended":             lambda: 0.4,
     "scalp.rsi_oversold":                  lambda: 30.0,
@@ -749,6 +757,33 @@ class ConfigManager:
                     logger.info(
                         "[ConfigManager] Migrated paper.t1_r_multiple from legacy 1.5R to 1.0R"
                     )
+
+                # Prior releases persisted a two-second quote gate while the
+                # trusted price-bus and position SLA were five seconds.  The
+                # mismatch created false QUOTE_STALE gaps during healthy WS
+                # operation.  Migrate only the exact legacy value.
+                row = c.execute(
+                    "SELECT value FROM config_store WHERE key = ?",
+                    ("scalp.max_quote_age_ms",),
+                ).fetchone()
+                if row:
+                    try:
+                        current_quote_age = int(float(json.loads(row["value"])))
+                    except Exception:
+                        current_quote_age = 0
+                    if current_quote_age == 2_000:
+                        c.execute(
+                            _UPSERT,
+                            (
+                                "scalp.max_quote_age_ms",
+                                json.dumps(5_000),
+                                now,
+                                "migration_quote_sla_5s",
+                            ),
+                        )
+                        logger.info(
+                            "[ConfigManager] Aligned scalp quote freshness with the 5s price-bus SLA"
+                        )
 
                 row = c.execute(
                     "SELECT value FROM config_store WHERE key = ?",

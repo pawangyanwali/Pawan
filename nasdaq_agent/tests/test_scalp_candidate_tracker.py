@@ -153,6 +153,49 @@ def test_candidate_batch_registers_multiple_tickers_in_one_scan():
     ]
 
 
+def test_resolved_candidate_requires_independent_episode_cooldown():
+    from datetime import datetime, timedelta, timezone
+
+    from agent.db import get_conn
+    from agent.scalp.candidate_tracker import (
+        CANONICAL_CANDIDATE,
+        mark_candidate_trials,
+        register_candidate,
+    )
+
+    assert register_candidate(
+        _plan(),
+        candidate_type=CANONICAL_CANDIDATE,
+        entry_bar_id=2201,
+    )
+    assert mark_candidate_trials(
+        {"AAPL": _quote(last=98.9, bid=98.8, ask=99.0)},
+        session="REGULAR",
+    ) == 1
+    assert not register_candidate(
+        _plan(),
+        candidate_type=CANONICAL_CANDIDATE,
+        entry_bar_id=2202,
+    )
+
+    old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scalp_candidate_trials SET resolved_at=? WHERE ticker='AAPL'",
+            (old,),
+        )
+    assert register_candidate(
+        _plan(),
+        candidate_type=CANONICAL_CANDIDATE,
+        entry_bar_id=2203,
+    )
+    with get_conn(read_only=True) as conn:
+        versions = conn.execute(
+            "SELECT episode_version FROM scalp_candidate_trials ORDER BY id"
+        ).fetchall()
+    assert [row["episode_version"] for row in versions] == [2, 2]
+
+
 def test_short_candidate_uses_ask_for_stop_resolution():
     from agent.scalp.candidate_tracker import (
         MTF_CANDIDATE,

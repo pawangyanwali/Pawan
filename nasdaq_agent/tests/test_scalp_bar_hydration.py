@@ -76,6 +76,29 @@ def test_level_one_builder_does_not_emit_weekend_quote_snapshots_as_bars():
     assert completed is None
 
 
+def test_completed_level_one_bar_is_published_to_valkey_immediately(monkeypatch):
+    import agent.broker.schwab_streamer as streamer
+
+    observed = []
+    bar = {
+        "time_ms": 60_000,
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.5,
+        "close": 100.5,
+        "volume": 1_000.0,
+    }
+    monkeypatch.setattr(
+        streamer,
+        "_publish_candles_to_valkey",
+        lambda bars: observed.extend(bars),
+    )
+
+    streamer._dispatch_completed_bars([("AAPL", bar)])
+
+    assert observed == [("AAPL", bar)]
+
+
 def test_level_one_builder_ignores_transient_zero_cumulative_volume():
     import agent.broker.schwab_streamer as streamer
 

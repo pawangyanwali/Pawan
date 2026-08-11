@@ -506,6 +506,67 @@ def test_bullish_five_minute_context_blocks_short_reversal():
     assert "SHORT_5M_BULLISH_CONTEXT" in plan.blockers
 
 
+def test_execution_liquidity_classification_does_not_hide_monitored_plan():
+    import pandas as pd
+
+    from agent.scalp.models import QuoteSource, ScalpSignalPlan, SignalSide
+    from agent.scalp.runtime import _apply_execution_liquidity
+
+    frame = pd.DataFrame(
+        {"Close": [100.0] * 40, "Volume": [1_000.0] * 40}
+    )
+    plan = ScalpSignalPlan(
+        ticker="AAPL",
+        side=SignalSide.LONG,
+        valid=True,
+        invalid_reason="",
+        source=QuoteSource.WS,
+        execution_eligible=True,
+        spread_bps=45.0,
+    )
+    _apply_execution_liquidity(plan, frame, _ConfigStub())
+
+    assert plan.valid is True
+    assert plan.blockers == []
+    assert plan.execution_eligible is False
+    assert plan.execution_liquidity_qualified is False
+    assert "EXECUTION_LIQUIDITY_SPREAD" in plan.execution_blockers
+    assert plan.execution_median_minute_dollar_volume == 100_000.0
+
+
+def test_canonical_safety_gates_remain_enabled_by_default():
+    from agent.scalp.models import ScalpSignalConfig
+
+    config = ScalpSignalConfig()
+    assert config.require_rsi_zone is True
+    assert config.require_macd_confirm is True
+    assert config.require_vwap_event is True
+    assert config.block_when_path_obstructed is True
+    assert config.block_when_risk_capped is True
+
+
+def test_runtime_uses_shared_quote_sla_and_stage_telemetry():
+    import inspect
+
+    from agent.scalp.runtime import ScalpRuntime
+
+    source = inspect.getsource(ScalpRuntime.run_cycle)
+    assert "execution_market_health()" in source
+    assert "execution_market_health(max_age_s=2.0)" not in source
+    assert '"stage_ms": stage_ms' in source
+
+
+def test_live_bar_repair_is_absence_based_and_bounded():
+    import inspect
+
+    from services.market_data_service import _bar_hydration_loop
+
+    source = inspect.getsource(_bar_hydration_loop)
+    assert "require_fresh=False" in source
+    assert "missing[:repair_batch_size]" in source
+    assert "require_fresh=active" not in source
+
+
 class _ConfigStub:
     def get(self, _key, default=None):
         return default

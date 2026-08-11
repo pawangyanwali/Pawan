@@ -89,7 +89,7 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
     "scalp.max_quote_age_ms": (
         "Maximum quote age",
         "Blocks plans when the Level 1 quote is older than this threshold, even if the service connection still reports healthy.",
-        "2000 blocks quotes older than two seconds.",
+        "5000 matches the trusted price-bus SLA and blocks quotes older than five seconds.",
     ),
     "scalp.max_bar_age_ms": (
         "Maximum indicator-bar age",
@@ -380,6 +380,21 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
         "Consecutive compliant market days",
         "Number of recent active market days that must all pass scanner latency, quote coverage, and data-completeness gates before canonical paper execution is allowed.",
         "5 requires one complete trading week of operational evidence; weekends are naturally excluded.",
+    ),
+    "scalp.execution_max_spread_bps": (
+        "Execution-universe maximum spread",
+        "Keeps every ticker visible and analyzed, but prevents shadow or canonical execution when the live bid/ask spread indicates insufficient liquidity.",
+        "30 permits a spread up to 0.30% of price; the stricter spread-to-risk rule still applies to each bracket.",
+    ),
+    "scalp.execution_min_median_minute_dollar_volume": (
+        "Execution-universe minimum minute liquidity",
+        "Minimum median traded dollar value per positive-volume one-minute bar across the recent session history. This separates the monitored universe from the executable universe without hiding symbols.",
+        "25000 requires a typical traded minute to represent at least $25,000 of notional volume.",
+    ),
+    "scalp.candidate_episode_cooldown_min": (
+        "Independent candidate cooldown",
+        "Minutes after a candidate episode resolves before the same ticker, side, candidate type, and strategy family can start another statistical trial.",
+        "15 prevents consecutive one-minute observations of one setup from being counted as independent evidence.",
     ),
     "scalp_activation.min_cycles_per_day": (
         "Minimum measured cycles per day",

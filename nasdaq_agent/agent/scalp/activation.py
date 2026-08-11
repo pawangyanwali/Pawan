@@ -52,7 +52,8 @@ def _build_report() -> dict[str, Any]:
         ).fetchall()
         trials = conn.execute(
             """SELECT pnl_r FROM scalp_candidate_trials
-               WHERE candidate_type='CANONICAL_VALID' AND status='CLOSED'"""
+               WHERE candidate_type='CANONICAL_VALID' AND status='CLOSED'
+                 AND episode_version>=2"""
         ).fetchall()
 
     eastern = ZoneInfo("America/New_York")
@@ -119,6 +120,7 @@ def _build_report() -> dict[str, Any]:
         "operational_ready": operational_ready,
         "statistical_ready": statistical_ready,
         "canonical_trials": len(pnl),
+        "canonical_evidence_contract": "INDEPENDENT_EPISODE_V2",
         "expectancy_r": round(expectancy, 4),
         "profit_factor": round(profit_factor, 4) if math.isfinite(profit_factor) else None,
         "thresholds": {

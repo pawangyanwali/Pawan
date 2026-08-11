@@ -426,7 +426,13 @@ def _universe_recheck_loop() -> None:
 
 
 def _bar_hydration_loop(tickers: list[str]) -> None:
-    """Keep the shared scalp bar contract warm from PG and Schwab history."""
+    """Repair absent/short histories without rewriting the active bar stream.
+
+    LEVELONE owns live finalized-bar publication.  A quiet ticker is not a
+    missing history, so active-session repair is based on list completeness,
+    not wall-clock freshness.  This prevents repeated full-list rewrites from
+    competing with the five-second scalp cycle.
+    """
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -468,8 +474,10 @@ def _bar_hydration_loop(tickers: list[str]) -> None:
             _log.debug("[ScalpBars] universe history audit failed: %s", exc)
         return metrics
 
-    last_session = ""
     last_nightly_refresh = None
+    repair_batch_size = max(
+        1, int(os.getenv("SCALP_BAR_REPAIR_BATCH_SIZE", "10"))
+    )
     _runner._stop.wait(5.0)
 
     while not _runner.stopped:
@@ -479,7 +487,6 @@ def _bar_hydration_loop(tickers: list[str]) -> None:
             tickers = get_runtime_universe()
             session = str(get_session() or "CLOSED").upper()
             active = session != "CLOSED"
-            session_opened = active and last_session == "CLOSED"
             now_et = datetime.now(ZoneInfo("America/New_York"))
             nightly_due = (
                 not active
@@ -488,24 +495,26 @@ def _bar_hydration_loop(tickers: list[str]) -> None:
             )
             missing = missing_valkey_history(
                 tickers,
-                require_fresh=active,
-                max_age_s=180.0,
+                require_fresh=False,
             )
-            if not last_session or session_opened:
-                targets = tickers
-                hydrate(
+            if missing:
+                targets = missing[:repair_batch_size]
+                _log.warning(
+                    "[ScalpBars] Repairing %d/%d absent or short Valkey histories",
+                    len(targets),
+                    len(missing),
+                )
+                metrics = hydrate(
                     targets,
                     fetch_missing=True,
-                    force_refresh=nightly_due,
-                    require_fresh=active,
+                    require_fresh=False,
                 )
-            elif missing:
-                _log.warning("[ScalpBars] Repairing %d missing Valkey histories", len(missing))
-                hydrate(missing, fetch_missing=active, require_fresh=active)
+                _bar_hydration_status["repair_backlog"] = max(
+                    0, len(missing) - len(targets)
+                )
 
             if nightly_due:
-                if last_session:
-                    hydrate(tickers, fetch_missing=True, force_refresh=True)
+                hydrate(tickers, fetch_missing=True, force_refresh=True)
                 from agent.historical_cache import fill_history_gaps
                 for interval, outputsize, minimum in (
                     ("15min", 5000, 200),
@@ -518,10 +527,9 @@ def _bar_hydration_loop(tickers: list[str]) -> None:
                         outputsize=outputsize,
                     )
                 last_nightly_refresh = now_et.date()
-            last_session = session
         except Exception as exc:
             _log.warning("[ScalpBars] hydration cycle failed: %s", exc)
-        _runner._stop.wait(60.0)
+        _runner._stop.wait(30.0)
 
 
 # ── Token status publisher ────────────────────────────────────────────────────

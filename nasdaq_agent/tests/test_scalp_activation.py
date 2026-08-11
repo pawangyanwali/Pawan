@@ -71,6 +71,39 @@ def test_five_day_activation_gate_rejects_one_slow_market_day(monkeypatch):
     assert "FIVE_CONSECUTIVE_MARKET_DAYS_NOT_SLA_COMPLIANT" in report["reasons"]
 
 
+def test_activation_uses_only_independent_episode_v2_evidence(monkeypatch):
+    import agent.scalp.activation as activation
+
+    captured = []
+    cycles, trials = _evidence()
+
+    class Conn:
+        def execute(self, sql, _params=()):
+            captured.append(sql)
+            return SimpleNamespace(
+                fetchall=lambda: trials if "candidate_trials" in sql else cycles
+            )
+
+    @contextmanager
+    def get_conn(read_only=False):
+        yield Conn()
+
+    monkeypatch.setattr("agent.db.get_conn", get_conn)
+    monkeypatch.setattr("agent.scalp.store.init_scalp_tables", lambda: None)
+    monkeypatch.setattr(
+        "agent.config_manager.config",
+        SimpleNamespace(get=lambda _key, default=None: default),
+    )
+    latest = max(row["bucket_ts"] for row in cycles).date()
+    monkeypatch.setattr(activation, "_latest_completed_market_date", lambda: latest)
+
+    report = activation._build_report()
+
+    trial_sql = next(sql for sql in captured if "candidate_trials" in sql)
+    assert "episode_version>=2" in trial_sql
+    assert report["canonical_evidence_contract"] == "INDEPENDENT_EPISODE_V2"
+
+
 def test_five_day_activation_gate_excludes_sparse_extended_hours(monkeypatch):
     import agent.scalp.activation as activation
 

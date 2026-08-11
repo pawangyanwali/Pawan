@@ -72,8 +72,15 @@ class ExecutionPolicyDecision:
         return asdict(self)
 
 
-def execution_market_health(*, max_age_s: float = 2.0) -> dict[str, Any]:
+def execution_market_health(*, max_age_s: float | None = None) -> dict[str, Any]:
     """Combine price-bus freshness with durable Schwab token state."""
+    if max_age_s is None:
+        from agent.config_manager import config
+
+        max_age_s = max(
+            1.0,
+            float(config.get("scalp.max_quote_age_ms", 5_000)) / 1_000.0,
+        )
     try:
         from agent.valkey_client import price_bus_health
 
@@ -285,6 +292,16 @@ def evaluate_execution_policy(
         **limits,
     }
 
+    blockers = list(plan.execution_blockers or [])
+    if blockers:
+        checks["plan_execution_blockers"] = blockers
+        return ExecutionPolicyDecision(
+            False,
+            blockers[0],
+            0.0,
+            checks,
+        )
+
     if not bool(config.get("scalp_runtime.execution_policy_enabled", True)):
         return ExecutionPolicyDecision(True, "POLICY_DISABLED", size_mult, checks)
 
@@ -308,7 +325,7 @@ def evaluate_execution_policy(
             allowed_sources.add("REST")
         if checks["source"] not in allowed_sources:
             return ExecutionPolicyDecision(False, "QUOTE_SOURCE_NOT_TRADABLE", 0.0, checks)
-        maximum_age = max(1, int(config.get("scalp.max_quote_age_ms", 2_000)))
+        maximum_age = max(1, int(config.get("scalp.max_quote_age_ms", 5_000)))
         if checks["quote_age_ms"] > maximum_age:
             return ExecutionPolicyDecision(False, "QUOTE_TOO_OLD", 0.0, checks)
 

@@ -28,11 +28,12 @@ _INSERT_SQL = """
     INSERT INTO scalp_candidate_trials
       (candidate_key, plan_id, observed_at, ticker, side,
        candidate_type, strategy_family, session, entry_bar_id,
+       episode_version,
        admission_state, admission_reason, entry_price, current_price,
        stop_loss, original_stop, tp1, tp2, risk_per_share,
        high_watermark, low_watermark, trigger_source,
        trigger_quote_age_ms, quality_score, metadata_json, plan_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT DO NOTHING
 """
 
@@ -78,7 +79,7 @@ def candidate_key(
             str(plan.ticker or "").upper(),
             plan.side.value,
             family,
-            str(int(entry_bar_id)),
+            f"EP2-{int(entry_bar_id)}",
         )
     )
 
@@ -108,6 +109,8 @@ def register_candidate(
     init_scalp_tables()
     _purge_if_due()
     with get_conn() as conn:
+        if _episode_exists(conn, values):
+            return False
         cursor = conn.execute(_INSERT_SQL, values)
     return bool(getattr(cursor, "rowcount", 0))
 
@@ -139,8 +142,17 @@ def register_candidate_batch(
     init_scalp_tables()
     _purge_if_due()
     with get_conn() as conn:
-        conn.executemany(_INSERT_SQL, values)
-    return len(values)
+        blocked = _blocked_episode_identities(conn)
+        eligible = []
+        for row in values:
+            identity = _episode_identity(row)
+            if identity in blocked:
+                continue
+            blocked.add(identity)
+            eligible.append(row)
+        if eligible:
+            conn.executemany(_INSERT_SQL, eligible)
+    return len(eligible)
 
 
 def _candidate_values(
@@ -184,6 +196,7 @@ def _candidate_values(
         family,
         plan.session,
         int(entry_bar_id),
+        2,
         str(admission_state or "OBSERVED").upper(),
         str(admission_reason or ""),
         plan.entry,
@@ -201,6 +214,43 @@ def _candidate_values(
         meta,
         payload,
     )
+
+
+def _episode_identity(values: tuple[Any, ...]) -> tuple[str, str, str, str]:
+    return tuple(str(values[index] or "").upper() for index in (3, 4, 5, 6))  # type: ignore[return-value]
+
+
+def _episode_cutoff() -> str:
+    from agent.config_manager import config
+
+    cooldown = max(
+        1, int(config.get("scalp.candidate_episode_cooldown_min", 15))
+    )
+    return (_now() - timedelta(minutes=cooldown)).isoformat()
+
+
+def _blocked_episode_identities(conn: Any) -> set[tuple[str, str, str, str]]:
+    rows = conn.execute(
+        """
+        SELECT ticker, side, candidate_type, strategy_family
+        FROM scalp_candidate_trials
+        WHERE status='OPEN'
+           OR (episode_version>=2 AND resolved_at>=?)
+        """,
+        (_episode_cutoff(),),
+    ).fetchall()
+    return {
+        tuple(
+            str(row[column] or "").upper()
+            for column in ("ticker", "side", "candidate_type", "strategy_family")
+        )
+        for row in rows
+    }
+
+
+def _episode_exists(conn: Any, values: tuple[Any, ...]) -> bool:
+    identity = _episode_identity(values)
+    return identity in _blocked_episode_identities(conn)
 
 
 def update_candidate_admission(

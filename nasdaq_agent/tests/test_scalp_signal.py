@@ -171,7 +171,7 @@ def test_required_indicator_gaps_block_instead_of_becoming_neutral(overrides, bl
 
 def test_stale_quote_blocks_even_when_technicals_are_valid():
     plan = create_scalp_signal_plan(
-        quote=_quote(data_age_ms=2_001),
+        quote=_quote(data_age_ms=5_001),
         indicators=_long_indicators(),
         side="LONG",
         session="REGULAR",
@@ -179,6 +179,18 @@ def test_stale_quote_blocks_even_when_technicals_are_valid():
 
     assert plan.valid is False
     assert "QUOTE_STALE" in plan.blockers
+
+
+def test_quote_inside_shared_five_second_sla_remains_usable():
+    plan = create_scalp_signal_plan(
+        quote=_quote(data_age_ms=4_999),
+        indicators=_long_indicators(),
+        side="LONG",
+        session="REGULAR",
+    )
+
+    assert plan.valid is True
+    assert "QUOTE_STALE" not in plan.blockers
 
 
 def test_rest_fallback_is_visible_for_analysis_but_execution_blocked_by_default():

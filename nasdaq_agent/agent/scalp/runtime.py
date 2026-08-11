@@ -97,13 +97,19 @@ class ScalpRuntime:
         from agent.scalp.execution_policy import execution_market_health
 
         started = time.monotonic()
+        stage_started = started
+        stage_ms: dict[str, float] = {}
         session = get_session()
         session_info = get_session_info()
         contexts = get_context_snapshots(self.tickers)
+        stage_ms["context"] = _elapsed_ms(stage_started)
+        stage_started = time.monotonic()
         frames, bar_errors = load_one_minute_frames(
             self.tickers,
             limit=max(390, int(config.get("scalp_runtime.bar_lookback", 2500))),
         )
+        stage_ms["bar_read"] = _elapsed_ms(stage_started)
+        stage_started = time.monotonic()
         signal_config = ScalpSignalConfig.from_runtime(config)
         workers = max(1, min(16, int(config.get("scalp_runtime.workers", 8))))
 
@@ -156,12 +162,16 @@ class ScalpRuntime:
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-bars") as pool:
             prepared = list(pool.map(prepare, self.tickers))
+        stage_ms["indicator_prepare"] = _elapsed_ms(stage_started)
+        stage_started = time.monotonic()
         market_context = _market_direction_context(prepared)
 
         # Quotes are deliberately captured after the expensive bar/indicator pass.
         # Plan age therefore measures market-data freshness, not cycle compute time.
         quotes = get_all_prices()
-        market_health = execution_market_health(max_age_s=2.0)
+        market_health = execution_market_health()
+        stage_ms["quote_capture"] = _elapsed_ms(stage_started)
+        stage_started = time.monotonic()
 
         def analyze(
             item: tuple[
@@ -253,11 +263,12 @@ class ScalpRuntime:
             if session in blocked_sessions:
                 _add_blocker(plan, f"SESSION_{session}_BLOCKED")
             _apply_market_context(plan, contexts.get(ticker) or {}, config)
+            _apply_execution_liquidity(plan, enriched, config)
             if plan.valid:
                 plan = assess_entry_quality(plan, config)
                 plan = apply_ml_overlay(plan)
                 plan = apply_context_gate(plan)
-            if plan.valid:
+            if plan.valid and plan.execution_eligible:
                 trial_specs.append((
                     "CANONICAL_VALID",
                     deepcopy(plan),
@@ -272,6 +283,8 @@ class ScalpRuntime:
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scalp-plan") as pool:
             analyzed = list(pool.map(analyze, prepared))
+        stage_ms["plan_analysis"] = _elapsed_ms(stage_started)
+        stage_started = time.monotonic()
 
         plans_by_ticker: dict[str, ScalpSignalPlan] = {}
         frames_by_ticker: dict[str, Any] = {}
@@ -298,6 +311,8 @@ class ScalpRuntime:
                 logger.exception(
                     "[ScalpRuntime] candidate batch registration failed"
                 )
+        stage_ms["candidate_persistence"] = _elapsed_ms(stage_started)
+        stage_started = time.monotonic()
 
         self._manage_positions(frames_by_ticker, bars_by_ticker, quotes)
         if bool(config.get("scalp.shadow_enabled", True)):
@@ -319,6 +334,7 @@ class ScalpRuntime:
                     "[ScalpRuntime] canonical execution held by activation gate: %s",
                     activation_report.get("reasons"),
                 )
+        stage_ms["execution_management"] = _elapsed_ms(stage_started)
         rows = [
             {"ticker": ticker, "scalp_plan": plan.to_dict()}
             for ticker, plan in plans_by_ticker.items()
@@ -336,6 +352,9 @@ class ScalpRuntime:
             for plan in plans_by_ticker.values()
             if plan.valid and not plan.execution_eligible
         )
+        execution_universe_total = sum(
+            1 for plan in plans_by_ticker.values() if plan.execution_eligible
+        )
         elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
         scan_version = time.time()
         meta = {
@@ -344,6 +363,7 @@ class ScalpRuntime:
             "valid_plan_count": valid_count,
             "data_gap_count": data_gap_count,
             "execution_ineligible_count": execution_ineligible_count,
+            "execution_universe_total": execution_universe_total,
             "source_counts": dict(source_counts),
             "session": str(session or "UNKNOWN").upper(),
             "market_context": market_context,
@@ -357,6 +377,7 @@ class ScalpRuntime:
                 )[:10]
             ],
             "cycle_ms": elapsed_ms,
+            "stage_ms": stage_ms,
             "scan_version": scan_version,
             "execution_activation_ready": bool(activation_report.get("ready")),
         }
@@ -382,8 +403,9 @@ class ScalpRuntime:
                 logger.exception("[ScalpRuntime] cycle telemetry persistence failed")
         self.last_cycle = {"ts": time.time(), **meta}
         logger.info(
-            "Scalp cycle: %d/%d valid, %d data gaps, %.1fms",
-            valid_count, len(rows), data_gap_count, elapsed_ms,
+            "Scalp cycle: %d/%d valid, %d execution-liquid, %d data gaps, %.1fms | stages=%s",
+            valid_count, len(rows), execution_universe_total, data_gap_count,
+            elapsed_ms, stage_ms,
         )
         return self.last_cycle
 
@@ -599,6 +621,54 @@ def _add_blocker(plan: ScalpSignalPlan, blocker: str) -> None:
         plan.blockers.append(blocker)
     plan.valid = False
     plan.invalid_reason = plan.blockers[0]
+
+
+def _apply_execution_liquidity(
+    plan: ScalpSignalPlan, frame: Any, config: Any
+) -> None:
+    """Classify execution liquidity without removing monitored plans."""
+    maximum_spread_bps = max(
+        0.0, float(config.get("scalp.execution_max_spread_bps", 30.0))
+    )
+    minimum_dollar_volume = max(
+        0.0,
+        float(
+            config.get(
+                "scalp.execution_min_median_minute_dollar_volume",
+                25_000.0,
+            )
+        ),
+    )
+    median_dollar_volume = 0.0
+    try:
+        recent = frame.tail(390)
+        dollar_volume = recent["Close"].astype(float) * recent["Volume"].astype(float)
+        positive = dollar_volume[dollar_volume > 0]
+        if not positive.empty:
+            median_dollar_volume = float(positive.median())
+    except Exception:
+        median_dollar_volume = 0.0
+    if not math.isfinite(median_dollar_volume):
+        median_dollar_volume = 0.0
+
+    plan.execution_median_minute_dollar_volume = round(median_dollar_volume, 2)
+    blockers: list[str] = []
+    if plan.spread_bps <= 0 or plan.spread_bps > maximum_spread_bps:
+        blockers.append("EXECUTION_LIQUIDITY_SPREAD")
+    if median_dollar_volume < minimum_dollar_volume:
+        blockers.append("EXECUTION_LIQUIDITY_DOLLAR_VOLUME")
+    plan.execution_liquidity_qualified = not blockers
+    for blocker in blockers:
+        if blocker not in plan.execution_blockers:
+            plan.execution_blockers.append(blocker)
+    if blockers:
+        plan.execution_eligible = False
+    elif plan.execution_eligible:
+        plan.reasons.append("EXECUTION_LIQUIDITY_QUALIFIED")
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.monotonic() - started) * 1000.0, 1)
 
 
 def _has_actionable_data_gap(blockers: list[str], session: str) -> bool:

@@ -35,6 +35,26 @@ def _health() -> dict:
     }
 
 
+def test_market_health_uses_configured_five_second_quote_sla(monkeypatch):
+    from agent.config_manager import config
+    from agent.scalp.execution_policy import execution_market_health
+    import agent.valkey_client as valkey_client
+
+    observed = {}
+
+    def health(*, max_age_s):
+        observed["max_age_s"] = max_age_s
+        return {"status": "LIVE"}
+
+    monkeypatch.setitem(config._cache, "scalp.max_quote_age_ms", 5_000)
+    monkeypatch.setattr(valkey_client, "price_bus_health", health)
+
+    result = execution_market_health()
+
+    assert observed["max_age_s"] == 5.0
+    assert result["status"] == "LIVE"
+
+
 def test_market_day_boundary_is_new_york_not_utc():
     from agent.scalp.execution_policy import market_day_start_utc
 
