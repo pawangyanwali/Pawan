@@ -55,7 +55,7 @@ def test_warmed_bar_cache_reads_and_merges_only_delta_tail():
     frame = _frame_from_payload(_bars(80))
     latest = _bars(81)[-1]
     cached = (_bars(80)[-1], 80, 2500, frame)
-    assert _delta_fetch_count(cached, latest, 2500) == 3
+    assert _delta_fetch_count(cached, latest, 2500) == 2
     delta = _frame_from_payload(_bars(81)[-3:])
     merged = _merge_frame(frame, delta, 2500)
     assert len(merged) == 81

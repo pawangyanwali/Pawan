@@ -16,7 +16,6 @@ from ._utils import finite
 from .indicators import (
     calculate_one_minute_indicators,
     indicator_snapshot_from_frame,
-    update_one_minute_indicators,
 )
 from .models import (
     IndicatorSnapshot,
@@ -193,17 +192,10 @@ def update_five_minute_state(
     )
     enriched = state.enriched.copy()
     for stamp in pending.index:
-        prior = enriched.iloc[-1]
-        source = completed.loc[completed.index <= stamp]
-        enriched = update_one_minute_indicators(enriched, source)
-        close = float(enriched.iloc[-1]["Close"])
-        enriched.at[enriched.index[-1], "mtf_ema_fast"] = (
-            (2.0 / 6.0) * close
-            + (4.0 / 6.0) * float(prior["mtf_ema_fast"])
-        )
-        enriched.at[enriched.index[-1], "mtf_ema_slow"] = (
-            (2.0 / 14.0) * close
-            + (12.0 / 14.0) * float(prior["mtf_ema_slow"])
+        enriched = _advance_five_minute_indicators(
+            enriched,
+            completed.loc[completed.index <= stamp],
+            stamp,
         )
 
     snapshot = _snapshot_from_enriched(
@@ -213,6 +205,103 @@ def update_five_minute_state(
         max_bar_age_ms=max_bar_age_ms,
     )
     return FiveMinuteIndicatorState(completed, enriched.tail(2).copy(), snapshot)
+
+
+def _advance_five_minute_indicators(
+    enriched: pd.DataFrame,
+    completed: pd.DataFrame,
+    stamp: pd.Timestamp,
+) -> pd.DataFrame:
+    """Advance the exact 5m indicator contract with scalar recursive math."""
+    prior = enriched.iloc[-1]
+    raw = completed.loc[stamp]
+    row = {column: raw.get(column) for column in completed.columns}
+    close = float(raw["Close"])
+    prior_close = float(prior["Close"])
+    delta = close - prior_close
+    for period in (14, 7, 2):
+        prior_gain = float(prior[f"rsi_avg_gain_{period}"])
+        prior_loss = float(prior[f"rsi_avg_loss_{period}"])
+        if not finite(prior_gain) or not finite(prior_loss):
+            return _warm_five_minute_indicators(completed)
+        alpha = 1.0 / period
+        gain = alpha * max(delta, 0.0) + (1.0 - alpha) * prior_gain
+        loss = alpha * max(-delta, 0.0) + (1.0 - alpha) * prior_loss
+        row[f"rsi_avg_gain_{period}"] = gain
+        row[f"rsi_avg_loss_{period}"] = loss
+        row[f"rsi_{period}"] = (
+            100.0 if loss == 0.0 and gain > 0.0
+            else 50.0 if loss == 0.0
+            else 100.0 - (100.0 / (1.0 + gain / loss))
+        )
+
+    fast = (2.0 / 13.0) * close + (11.0 / 13.0) * float(prior["macd_fast_ema"])
+    slow = (2.0 / 27.0) * close + (25.0 / 27.0) * float(prior["macd_slow_ema"])
+    macd = fast - slow
+    signal = (2.0 / 10.0) * macd + (8.0 / 10.0) * float(prior["macd_signal_ema"])
+    row.update(
+        macd_fast_ema=fast,
+        macd_slow_ema=slow,
+        macd_signal_ema=signal,
+        macd_hist=macd - signal,
+    )
+    true_range = max(
+        abs(float(raw["High"]) - float(raw["Low"])),
+        abs(float(raw["High"]) - prior_close),
+        abs(float(raw["Low"]) - prior_close),
+    )
+    row["atr_14"] = true_range / 14.0 + (13.0 / 14.0) * float(prior["atr_14"])
+    row["vwap"] = _completed_five_minute_vwap(completed, stamp)
+    row["vol_ratio"] = float("nan")
+    row["mtf_ema_fast"] = (
+        (2.0 / 6.0) * close + (4.0 / 6.0) * float(prior["mtf_ema_fast"])
+    )
+    row["mtf_ema_slow"] = (
+        (2.0 / 14.0) * close + (12.0 / 14.0) * float(prior["mtf_ema_slow"])
+    )
+    return pd.DataFrame(
+        [prior.to_dict(), row],
+        index=pd.DatetimeIndex([enriched.index[-1], stamp]),
+    )
+
+
+def _warm_five_minute_indicators(completed: pd.DataFrame) -> pd.DataFrame:
+    enriched = calculate_one_minute_indicators(completed)
+    close = pd.to_numeric(enriched["Close"], errors="coerce")
+    enriched["mtf_ema_fast"] = close.ewm(span=5, adjust=False, min_periods=5).mean()
+    enriched["mtf_ema_slow"] = close.ewm(span=13, adjust=False, min_periods=13).mean()
+    return enriched.tail(2).copy()
+
+
+def _completed_five_minute_vwap(
+    completed: pd.DataFrame,
+    stamp: pd.Timestamp,
+) -> float:
+    local = stamp
+    if local.tzinfo is None:
+        local = local.tz_localize("UTC")
+    local = local.tz_convert("America/New_York")
+    minute = local.hour * 60 + local.minute
+    start_minute = (
+        4 * 60 if 4 * 60 <= minute < 9 * 60 + 30
+        else 9 * 60 + 30 if 9 * 60 + 30 <= minute < 16 * 60
+        else 16 * 60 if 16 * 60 <= minute <= 20 * 60
+        else 0
+    )
+    start = (local.normalize() + pd.Timedelta(minutes=start_minute)).tz_convert(
+        completed.index.tz or "UTC"
+    )
+    window = completed.loc[(completed.index >= start) & (completed.index <= stamp)]
+    volume = pd.to_numeric(window["Volume"], errors="coerce").fillna(0.0)
+    total_volume = float(volume.sum())
+    if total_volume <= 0:
+        return float("nan")
+    typical = (
+        pd.to_numeric(window["High"], errors="coerce")
+        + pd.to_numeric(window["Low"], errors="coerce")
+        + pd.to_numeric(window["Close"], errors="coerce")
+    ) / 3.0
+    return float((typical * volume).sum() / total_volume)
 
 
 def _latest_completed_five_minute_bar(

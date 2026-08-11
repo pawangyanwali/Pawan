@@ -122,7 +122,10 @@ def _delta_fetch_count(
     if latest is None or cached_latest.tzinfo is None or latest < cached_latest:
         return requested_limit
     gap = max(0, int((latest - cached_latest).total_seconds() // 60))
-    return min(requested_limit, max(2, gap + 2))
+    # The cached frame already owns the previous close. Fetch the latest row
+    # plus one overlap row to capture in-place corrections without reading a
+    # third payload for every symbol at each minute boundary.
+    return min(requested_limit, max(2, gap + 1))
 
 
 def _payload_timestamp(raw: bytes | str | None) -> pd.Timestamp | None:
