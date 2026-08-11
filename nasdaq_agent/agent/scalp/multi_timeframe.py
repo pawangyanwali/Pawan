@@ -173,6 +173,19 @@ def update_five_minute_state(
             frame.tail(max(15, int(missing_buckets) * 5 + 5))
         )
     )
+    # Sparse symbols can print at the new boundary without trading at all in
+    # the preceding bucket. Preserve the prior context (whose age still
+    # advances and eventually fails closed) instead of comparing a RangeIndex
+    # from an empty frame with the cached DatetimeIndex.
+    if recent.empty:
+        return replace(
+            state,
+            snapshot=refresh_five_minute_age(
+                state.snapshot,
+                max_bar_age_ms=max_bar_age_ms,
+                now_ms=now_ms,
+            ),
+        )
     pending = recent.loc[recent.index > state.completed.index[-1]]
     if pending.empty:
         return replace(

@@ -141,6 +141,29 @@ def test_incremental_five_minute_state_matches_full_recalculation():
     assert updated.state == expected.state
 
 
+def test_incremental_five_minute_state_preserves_context_for_empty_bucket():
+    prior = _frame(190)
+    state = build_five_minute_state(prior, now_ms=1_800_000_000_000)
+    # Advance the latest timestamp across a boundary while leaving the prior
+    # five-minute bucket empty, matching a sparse production ticker.
+    sparse = pd.concat([
+        prior,
+        _frame(1).set_axis(
+            pd.DatetimeIndex([prior.index[-1] + pd.Timedelta(minutes=6)])
+        ),
+    ])
+
+    updated = update_five_minute_state(
+        state,
+        sparse,
+        now_ms=1_800_000_010_000,
+    )
+
+    assert updated.completed.index[-1] == state.completed.index[-1]
+    assert updated.snapshot.close == state.snapshot.close
+    assert updated.snapshot.bar_age_ms > state.snapshot.bar_age_ms
+
+
 def test_shadow_momentum_detects_pullback_without_mutating_canonical_plan():
     one = _one_minute()
     plan = create_scalp_signal_plan(
