@@ -234,6 +234,13 @@ class ScalpRuntime:
         stage_ms["indicator_prepare"] = _elapsed_ms(stage_started)
         stage_started = time.monotonic()
         market_context = _market_direction_context(prepared)
+        mtf_observation_blocked_sessions = {
+            str(value).upper()
+            for value in config.get(
+                "scalp.mtf_observation_blocked_sessions",
+                ["LUNCH_BLOCK"],
+            )
+        }
 
         # Quotes are deliberately captured after the expensive bar/indicator pass.
         # Plan age therefore measures market-data freshness, not cycle compute time.
@@ -300,6 +307,7 @@ class ScalpRuntime:
             ] = []
             if (
                 not mtf_pending
+                and session not in mtf_observation_blocked_sessions
                 and plan.shadow_setup_ready
                 and plan.shadow_side in {"LONG", "SHORT"}
             ):

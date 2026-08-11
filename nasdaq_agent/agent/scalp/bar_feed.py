@@ -15,7 +15,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-_frame_cache: dict[str, tuple[bytes | str | None, int, int, pd.DataFrame]] = {}
+_frame_cache: dict[str, tuple[bytes | str | None, int, pd.DataFrame]] = {}
 
 
 def load_one_minute_frames(
@@ -34,8 +34,9 @@ def load_one_minute_frames(
         probe = client.pipeline(transaction=False)
         for ticker in symbols:
             key = f"md:1m:{ticker}"
-            probe.lindex(key, -1)
-            probe.llen(key)
+            # One tail read replaces LINDEX + LLEN and is also the normal
+            # incremental payload when a new minute closes.
+            probe.lrange(key, -2, -1)
         probe_values = probe.execute()
     except Exception as exc:
         logger.warning("[ScalpBars] batched Valkey read failed: %s", exc)
@@ -44,19 +45,18 @@ def load_one_minute_frames(
     requested_limit = max(35, int(limit))
     changed: list[str] = []
     fetch_counts: dict[str, int] = {}
-    metadata: dict[str, tuple[bytes | str | None, int]] = {}
+    tail_by_ticker: dict[str, list[Any]] = {}
     for index, ticker in enumerate(symbols):
-        last_raw = probe_values[index * 2]
-        row_count = int(probe_values[index * 2 + 1] or 0)
-        metadata[ticker] = (last_raw, row_count)
+        tail = list(probe_values[index] or [])
+        last_raw = tail[-1] if tail else None
+        tail_by_ticker[ticker] = tail
         cached = _frame_cache.get(ticker)
         if (
             cached
             and cached[0] == last_raw
-            and cached[1] == row_count
-            and cached[2] == requested_limit
+            and cached[1] == requested_limit
         ):
-            frames[ticker] = cached[3]
+            frames[ticker] = cached[2]
         else:
             changed.append(ticker)
             fetch_counts[ticker] = _delta_fetch_count(
@@ -65,16 +65,27 @@ def load_one_minute_frames(
 
     payload_by_ticker: dict[str, list[Any]] = {}
     if changed:
+        needs_history = [
+            ticker for ticker in changed if fetch_counts[ticker] > 2
+        ]
+        for ticker in changed:
+            if fetch_counts[ticker] <= 2:
+                payload_by_ticker[ticker] = tail_by_ticker[ticker]
         try:
-            pipe = client.pipeline(transaction=False)
-            for ticker in changed:
-                pipe.lrange(
-                    f"md:1m:{ticker}", -fetch_counts[ticker], -1
+            if needs_history:
+                pipe = client.pipeline(transaction=False)
+                for ticker in needs_history:
+                    pipe.lrange(
+                        f"md:1m:{ticker}", -fetch_counts[ticker], -1
+                    )
+                payload_by_ticker.update(
+                    dict(zip(needs_history, pipe.execute()))
                 )
-            payload_by_ticker = dict(zip(changed, pipe.execute()))
         except Exception as exc:
             logger.warning("[ScalpBars] changed-frame read failed: %s", exc)
-            errors.update({ticker: "BAR_FEED_READ_FAILED" for ticker in changed})
+            errors.update({
+                ticker: "BAR_FEED_READ_FAILED" for ticker in needs_history
+            })
 
     for ticker in changed:
         payload = payload_by_ticker.get(ticker)
@@ -84,7 +95,7 @@ def load_one_minute_frames(
             delta = _frame_from_payload(payload)
             cached = _frame_cache.get(ticker)
             frame = (
-                _merge_frame(cached[3], delta, requested_limit)
+                _merge_frame(cached[2], delta, requested_limit)
                 if cached and fetch_counts[ticker] < requested_limit
                 else delta.tail(requested_limit)
             )
@@ -92,10 +103,8 @@ def load_one_minute_frames(
                 errors[ticker] = "ONE_MINUTE_BARS_MISSING"
             else:
                 frames[ticker] = frame
-                last_raw, row_count = metadata[ticker]
                 _frame_cache[ticker] = (
-                    last_raw,
-                    row_count,
+                    tail_by_ticker[ticker][-1] if tail_by_ticker[ticker] else None,
                     requested_limit,
                     frame,
                 )
@@ -111,14 +120,14 @@ def load_one_minute_frames(
 
 
 def _delta_fetch_count(
-    cached: tuple[bytes | str | None, int, int, pd.DataFrame] | None,
+    cached: tuple[bytes | str | None, int, pd.DataFrame] | None,
     last_raw: bytes | str | None,
     requested_limit: int,
 ) -> int:
-    if not cached or cached[2] != requested_limit or cached[3].empty:
+    if not cached or cached[1] != requested_limit or cached[2].empty:
         return requested_limit
     latest = _payload_timestamp(last_raw)
-    cached_latest = cached[3].index[-1]
+    cached_latest = cached[2].index[-1]
     if latest is None or cached_latest.tzinfo is None or latest < cached_latest:
         return requested_limit
     gap = max(0, int((latest - cached_latest).total_seconds() // 60))

@@ -9,7 +9,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from agent.scalp.bar_feed import _delta_fetch_count, _frame_from_payload, _merge_frame
+from agent.scalp.bar_feed import (
+    _delta_fetch_count,
+    _frame_cache,
+    _frame_from_payload,
+    _merge_frame,
+    load_one_minute_frames,
+)
 from agent.scalp.indicators import (
     calculate_one_minute_indicators,
     indicator_snapshot_from_frame,
@@ -54,12 +60,51 @@ def test_batched_bar_payload_becomes_ordered_utc_frame():
 def test_warmed_bar_cache_reads_and_merges_only_delta_tail():
     frame = _frame_from_payload(_bars(80))
     latest = _bars(81)[-1]
-    cached = (_bars(80)[-1], 80, 2500, frame)
+    cached = (_bars(80)[-1], 2500, frame)
     assert _delta_fetch_count(cached, latest, 2500) == 2
     delta = _frame_from_payload(_bars(81)[-3:])
     merged = _merge_frame(frame, delta, 2500)
     assert len(merged) == 81
     assert merged.index[-1] == delta.index[-1]
+
+
+def test_warmed_bar_reader_reuses_single_tail_probe(monkeypatch):
+    import agent.valkey_client as valkey_client
+
+    class Pipe:
+        def __init__(self, owner):
+            self.owner = owner
+            self.ops = []
+
+        def lrange(self, key, start, end):
+            self.ops.append((key, start, end))
+            return self
+
+        def execute(self):
+            self.owner.batches.append(list(self.ops))
+            return [self.owner.payload[start:] for _, start, _ in self.ops]
+
+    class Client:
+        def __init__(self):
+            self.payload = _bars(50)
+            self.batches = []
+
+        def pipeline(self, transaction=False):
+            assert transaction is False
+            return Pipe(self)
+
+    client = Client()
+    _frame_cache.clear()
+    monkeypatch.setattr(valkey_client, "_get_client", lambda: client)
+
+    first, errors = load_one_minute_frames(["AAPL"], limit=35)
+    assert not errors and len(first["AAPL"]) == 35
+    client.payload = _bars(51)
+    second, errors = load_one_minute_frames(["AAPL"], limit=35)
+
+    assert not errors and len(second["AAPL"]) == 35
+    assert [len(batch) for batch in client.batches] == [1, 1, 1]
+    assert client.batches[-1] == [("md:1m:AAPL", -2, -1)]
 
 
 def test_indicator_contract_is_computed_from_closed_one_minute_bars():

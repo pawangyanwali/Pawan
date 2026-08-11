@@ -381,6 +381,16 @@ def _summarize(trades: list[dict[str, Any]]) -> dict[str, Any]:
         )
         if closed
         else 0.0,
+        "avg_fill_slippage_r": _round(
+            sum(_float(row.get("fill_slippage_r")) for row in closed) / len(closed), 4
+        )
+        if closed
+        else 0.0,
+        "avg_stop_overshoot_r": _round(
+            sum(_float(row.get("stop_overshoot_r")) for row in closed if str(row.get("exit_reason") or "") in {"STOP", "TRAIL_STOP"})
+            / max(1, sum(str(row.get("exit_reason") or "") in {"STOP", "TRAIL_STOP"} for row in closed)),
+            4,
+        ),
     }
 
 
@@ -598,6 +608,14 @@ def _diagnose(report: dict[str, Any]) -> tuple[list[str], list[str]]:
         )
         recommendations.append(
             "Audit executable bid/ask fills and avoid activation during degraded liquidity."
+        )
+    if _float(summary.get("avg_stop_overshoot_r")) > 0.10:
+        findings.append(
+            "Stop fills exceeded the planned stop by an average of "
+            f"{summary['avg_stop_overshoot_r']:.3f}R."
+        )
+        recommendations.append(
+            "Tighten entry liquidity limits or reduce size where stop-fill overshoot exceeds 0.10R."
         )
     if int((report.get("learning") or {}).get("actions_count") or 0) == 0:
         findings.append("No durable learning actions were created for this date.")

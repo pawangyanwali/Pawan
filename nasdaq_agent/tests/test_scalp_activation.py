@@ -41,7 +41,7 @@ def _run(monkeypatch, *, slow_last_day: bool = False):
 
     class Conn:
         def execute(self, sql, _params=()):
-            return SimpleNamespace(fetchall=lambda: trials if "candidate_trials" in sql else cycles)
+            return SimpleNamespace(fetchall=lambda: trials if "shadow_trades" in sql else cycles)
 
     @contextmanager
     def get_conn(read_only=False):
@@ -75,7 +75,7 @@ def test_five_day_activation_gate_rejects_one_slow_market_day(monkeypatch):
     assert "FIVE_CONSECUTIVE_MARKET_DAYS_NOT_SLA_COMPLIANT" in report["reasons"]
 
 
-def test_activation_uses_only_independent_episode_v2_evidence(monkeypatch):
+def test_activation_uses_only_policy_approved_shadow_episode_v3_evidence(monkeypatch):
     import agent.scalp.activation as activation
 
     captured = []
@@ -85,7 +85,7 @@ def test_activation_uses_only_independent_episode_v2_evidence(monkeypatch):
         def execute(self, sql, _params=()):
             captured.append(sql)
             return SimpleNamespace(
-                fetchall=lambda: trials if "candidate_trials" in sql else cycles
+                fetchall=lambda: trials if "shadow_trades" in sql else cycles
             )
 
     @contextmanager
@@ -103,9 +103,9 @@ def test_activation_uses_only_independent_episode_v2_evidence(monkeypatch):
 
     report = activation._build_report()
 
-    trial_sql = next(sql for sql in captured if "candidate_trials" in sql)
-    assert "episode_version>=2" in trial_sql
-    assert report["canonical_evidence_contract"] == "INDEPENDENT_EPISODE_V2"
+    trial_sql = next(sql for sql in captured if "shadow_trades" in sql)
+    assert "evidence_version>=3" in trial_sql
+    assert report["canonical_evidence_contract"] == "POLICY_APPROVED_SHADOW_EPISODE_V3"
 
 
 def test_five_day_activation_gate_excludes_sparse_extended_hours(monkeypatch):
@@ -128,7 +128,7 @@ def test_five_day_activation_gate_excludes_sparse_extended_hours(monkeypatch):
     class Conn:
         def execute(self, sql, _params=()):
             return SimpleNamespace(
-                fetchall=lambda: trials if "candidate_trials" in sql else cycles
+                fetchall=lambda: trials if "shadow_trades" in sql else cycles
             )
 
     @contextmanager

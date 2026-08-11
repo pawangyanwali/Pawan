@@ -168,6 +168,34 @@ def open_shadow_trade(
                     detail={"policy": policy.to_dict()},
                 )
                 return False
+            episode_cooldown = max(
+                1,
+                int(config.get("scalp.shadow_ticker_episode_cooldown_min", 15)),
+            )
+            recent_cutoff = (
+                _now() - timedelta(minutes=episode_cooldown)
+            ).isoformat()
+            recent = conn.execute(
+                """
+                SELECT id FROM scalp_shadow_trades
+                WHERE ticker=? AND status='CLOSED' AND evidence_version>=3
+                  AND closed_at>=?
+                ORDER BY closed_at DESC LIMIT 1
+                """,
+                (plan.ticker, recent_cutoff),
+            ).fetchone()
+            if recent:
+                _record_shadow_decision(
+                    plan,
+                    "SHADOW_REJECTED",
+                    "TICKER_EPISODE_COOLDOWN",
+                    entry_bar_id=entry_bar_id,
+                    detail={
+                        "policy": policy.to_dict(),
+                        "cooldown_min": episode_cooldown,
+                    },
+                )
+                return False
             allocation = conn.execute(
                 """
                 SELECT COALESCE(SUM(entry_fill * shares_remaining), 0) AS allocated
@@ -197,15 +225,15 @@ def open_shadow_trade(
             conn.execute(
                 """
                 INSERT INTO scalp_shadow_trades
-                  (plan_id, entry_bar_id, opened_at, ticker, side, setup_type,
+                  (plan_id, entry_bar_id, evidence_version, opened_at, ticker, side, setup_type,
                    session, entry_fill, current_price, stop_loss, original_stop,
                    tp1, tp2, risk_per_share, shares, shares_remaining,
                    high_watermark, low_watermark, policy_size_mult, policy_json,
                    plan_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    plan.plan_id, int(entry_bar_id), _iso(), plan.ticker,
+                    plan.plan_id, int(entry_bar_id), 3, _iso(), plan.ticker,
                     plan.side.value, plan.setup_type, plan.session, plan.entry,
                     plan.entry, plan.stop_loss, plan.stop_loss, plan.tp1, plan.tp2,
                     plan.risk_per_share, shares, shares, plan.entry, plan.entry,
@@ -336,21 +364,35 @@ def mark_shadow_trades(quotes: dict[str, dict], *, session: str) -> int:
         timed_out = _now() - _opened_at(row.get("opened_at")) >= timedelta(minutes=max_minutes)
         exit_reason = ""
         exit_fill = executable
+        planned_exit_price = executable
         if reached_t2:
             t2_hit = True
             exit_reason = "TP2"
             exit_fill = tp2
+            planned_exit_price = tp2
         elif hit_stop:
             exit_reason = "TRAIL_STOP" if t1_hit else "STOP"
             exit_fill = executable
+            planned_exit_price = stop
         elif close_session:
             exit_reason = "SESSION_CLOSE"
+            planned_exit_price = trigger
         elif timed_out:
             exit_reason = "TIME_STOP"
+            planned_exit_price = trigger
 
         pnl_dollar = partial + direction * (exit_fill - entry) * remaining
         pnl_r = pnl_dollar / (risk * shares)
         closed = bool(exit_reason)
+        fill_slippage_r = (
+            direction * (exit_fill - planned_exit_price) * remaining
+            / (risk * shares)
+            if closed else 0.0
+        )
+        stop_overshoot_r = (
+            max(0.0, -direction * (exit_fill - stop) / risk)
+            if exit_reason in {"STOP", "TRAIL_STOP"} else 0.0
+        )
         spread_bps = _spread_bps(quote, trigger)
         slippage_bps = (
             abs(exit_fill - trigger) / trigger * 10_000.0
@@ -364,7 +406,8 @@ def mark_shadow_trades(quotes: dict[str, dict], *, session: str) -> int:
                   t2_hit=?, realized_partial=?, pnl_r=?, pnl_dollar=?, mfe_r=?,
                   mae_r=?, high_watermark=?, low_watermark=?, trigger_price=?,
                   trigger_source=?, trigger_quote_age_ms=?, exit_bid=?, exit_ask=?,
-                  exit_spread_bps=?, exit_slippage_bps=?, status=?, closed_at=?,
+                  exit_spread_bps=?, exit_slippage_bps=?, planned_exit_price=?,
+                  fill_slippage_r=?, stop_overshoot_r=?, status=?, closed_at=?,
                   exit_fill=?, exit_reason=?
                 WHERE id=? AND status='OPEN'
                 """,
@@ -373,6 +416,8 @@ def mark_shadow_trades(quotes: dict[str, dict], *, session: str) -> int:
                     partial, pnl_r, pnl_dollar, mfe_r, mae_r, high, low,
                     trigger, source, age_ms, _float(quote.get("bid")),
                     _float(quote.get("ask")), spread_bps, slippage_bps,
+                    planned_exit_price if closed else None,
+                    fill_slippage_r, stop_overshoot_r,
                     "CLOSED" if closed else "OPEN", _iso() if closed else None,
                     exit_fill if closed else None, exit_reason, row["id"],
                 ),
@@ -428,6 +473,13 @@ def shadow_dashboard_data(*, recent_limit: int = 30) -> dict[str, Any]:
     losses = sum(_float(row.get("pnl_r")) <= 0 for row in all_closed)
     total_r = sum(_float(row.get("pnl_r")) for row in all_closed)
     total_dollar = sum(_float(row.get("pnl_dollar")) for row in all_closed)
+    total_fill_slippage_r = sum(
+        _float(row.get("fill_slippage_r")) for row in all_closed
+    )
+    stop_rows = [
+        row for row in all_closed
+        if str(row.get("exit_reason") or "") in {"STOP", "TRAIL_STOP"}
+    ]
     gross_win = sum(max(0.0, _float(row.get("pnl_r"))) for row in all_closed)
     gross_loss = abs(sum(min(0.0, _float(row.get("pnl_r"))) for row in all_closed))
     total = len(all_closed)
@@ -456,6 +508,12 @@ def shadow_dashboard_data(*, recent_limit: int = 30) -> dict[str, Any]:
             "expectancy_r": round(total_r / total, 4) if total else 0.0,
             "pnl_r": round(total_r, 4),
             "pnl_dollar": round(total_dollar, 2),
+            "fill_slippage_r": round(total_fill_slippage_r, 4),
+            "avg_stop_overshoot_r": round(
+                sum(_float(row.get("stop_overshoot_r")) for row in stop_rows)
+                / len(stop_rows),
+                4,
+            ) if stop_rows else 0.0,
             "profit_factor": round(gross_win / gross_loss, 3) if gross_loss else (999.0 if gross_win else 0.0),
             "candidate_count": opened_candidates + rejected_candidates,
             "approved_count": opened_candidates,

@@ -87,6 +87,22 @@ def assess_entry_quality(plan: ScalpSignalPlan, config: Any) -> ScalpSignalPlan:
             score += 2.0
             evidence.append("RSI_OB")
 
+    mtf_alignment = str(plan.mtf_alignment or "NO_DATA").upper()
+    if mtf_alignment == "ALIGNED":
+        bonus = max(0.0, _number(config.get(
+            "scalp.entry_quality_mtf_aligned_bonus", 8.0
+        ), 8.0))
+        score += bonus
+        evidence.append("MTF_ALIGNED")
+    elif mtf_alignment == "MIXED":
+        penalty = max(0.0, _number(config.get(
+            "scalp.entry_quality_mtf_mixed_penalty", 8.0
+        ), 8.0))
+        score -= penalty
+        evidence.append("MTF_MIXED_PENALTY")
+    else:
+        evidence.append(f"MTF_{mtf_alignment}")
+
     score = round(max(0.0, min(100.0, score)), 1)
     session = str(plan.session or "").upper()
     threshold_key = (

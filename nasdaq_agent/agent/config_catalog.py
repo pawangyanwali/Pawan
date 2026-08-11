@@ -231,6 +231,11 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Hard cap on share count after fixed-risk sizing so very tight stops cannot create unrealistic share counts.",
         "500 prevents penny-wide stops from opening thousands of simulated shares.",
     ),
+    "scalp.shadow_ticker_episode_cooldown_min": (
+        "Same-ticker shadow cooldown",
+        "Minutes after a policy-approved shadow trade closes before the same ticker may open another evidence episode. Other tickers remain eligible.",
+        "15 prevents one persistent setup from dominating activation evidence through rapid re-entry.",
+    ),
     "scalp.entry_quality_gate_enabled": (
         "TP1 reachability gate",
         "Requires a valid directional setup to pass a separate execution-quality assessment using spread-to-risk, RVOL, ATR regime, RSI extremity, and an actual VWAP reclaim or rejection. It never changes side, stop, TP1, or TP2.",
@@ -245,6 +250,21 @@ _SCALP_DETAILS: dict[str, tuple[str, str, str]] = {
         "Extended-session reachability score",
         "Minimum reachability score for PRE_MARKET and AFTER_HOURS entries, where spreads and quote depth are less reliable.",
         "70 is deliberately stricter than regular hours because extended-session execution has greater liquidity risk.",
+    ),
+    "scalp.entry_quality_mtf_aligned_bonus": (
+        "Aligned five-minute bonus",
+        "Adds transparent TP1-reachability points when the plan direction agrees with the fully closed five-minute trend. It does not create a signal or change bracket geometry.",
+        "8 helps a confirmed pullback in the prevailing five-minute direction clear the execution-quality floor.",
+    ),
+    "scalp.entry_quality_mtf_mixed_penalty": (
+        "Mixed five-minute penalty",
+        "Subtracts TP1-reachability points when fully closed five-minute evidence is mixed, because follow-through to TP1 is less reliable in directionless tape.",
+        "8 requires stronger spread, RVOL, RSI, and VWAP evidence before a mixed-context plan may execute.",
+    ),
+    "scalp.entry_quality_require_mtf_context": (
+        "Require tradable five-minute context",
+        "Fail-closes shadow and canonical execution when fully closed five-minute context is missing, stale, or directionally conflicting. Plans remain visible for diagnosis.",
+        "Enabled prevents a fresh one-minute reversal from trading without an independently closed five-minute context.",
     ),
     "scalp.entry_quality_require_positive_ml_ev": (
         "Require positive champion EV",
@@ -395,6 +415,16 @@ _SCALP_RUNTIME_DETAILS: dict[str, tuple[str, str, str]] = {
         "Independent candidate cooldown",
         "Minutes after a candidate episode resolves before the same ticker, side, candidate type, and strategy family can start another statistical trial.",
         "15 prevents consecutive one-minute observations of one setup from being counted as independent evidence.",
+    ),
+    "scalp.mtf_candidate_episode_cooldown_min": (
+        "MTF observation cooldown",
+        "Minutes after a resolved multi-timeframe observation before the same ticker, side, and strategy family may start another independent research episode.",
+        "30 reduces correlated momentum-pullback samples while retaining intraday regime changes.",
+    ),
+    "scalp.mtf_observation_blocked_sessions": (
+        "MTF observation blocked sessions",
+        "Sessions excluded from the counterfactual MTF research ledger. This affects research episode creation only and never relaxes canonical entry controls.",
+        "[\"LUNCH_BLOCK\"] removes the repeatedly negative low-volume lunch regime from candidate evidence.",
     ),
     "scalp_activation.min_cycles_per_day": (
         "Minimum measured cycles per day",

@@ -309,6 +309,46 @@ def test_shadow_trade_uses_executable_ask_for_short_stop():
     assert closed["recent_closed"][0]["pnl_r"] == pytest.approx(-1.0)
 
 
+def test_shadow_stop_reports_planned_level_and_adverse_fill_overshoot():
+    from agent.scalp.shadow import (
+        mark_shadow_trades,
+        open_shadow_trade,
+        shadow_dashboard_data,
+    )
+
+    assert open_shadow_trade(
+        _plan(SignalSide.SHORT),
+        entry_bar_id=4322,
+        market_health=_LIVE_HEALTH,
+    ) is True
+    mark_shadow_trades(
+        {"AAPL": _quote(last=101.05, bid=100.95, ask=101.20)},
+        session="REGULAR",
+    )
+    row = shadow_dashboard_data()["recent_closed"][0]
+    assert row["pnl_r"] == pytest.approx(-1.20)
+    assert row["planned_exit_price"] == pytest.approx(101.0)
+    assert row["fill_slippage_r"] == pytest.approx(-0.20)
+    assert row["stop_overshoot_r"] == pytest.approx(0.20)
+
+
+def test_shadow_same_ticker_requires_independent_episode_cooldown(monkeypatch):
+    from agent.config_manager import config
+    from agent.scalp.shadow import mark_shadow_trades, open_shadow_trade
+
+    monkeypatch.setitem(config._cache, "scalp.shadow_ticker_episode_cooldown_min", 15)
+    assert open_shadow_trade(
+        _plan(), entry_bar_id=4323, market_health=_LIVE_HEALTH
+    ) is True
+    mark_shadow_trades(
+        {"AAPL": _quote(last=98.9, bid=98.8, ask=99.0)},
+        session="REGULAR",
+    )
+    assert open_shadow_trade(
+        _plan(), entry_bar_id=4324, market_health=_LIVE_HEALTH
+    ) is False
+
+
 def test_short_stop_is_not_triggered_by_ask_spike_alone():
     from agent.scalp.shadow import (
         mark_shadow_trades,

@@ -79,7 +79,7 @@ def candidate_key(
             str(plan.ticker or "").upper(),
             plan.side.value,
             family,
-            f"EP2-{int(entry_bar_id)}",
+            f"EP3-{int(entry_bar_id)}",
         )
     )
 
@@ -196,7 +196,7 @@ def _candidate_values(
         family,
         plan.session,
         int(entry_bar_id),
-        2,
+        3,
         str(admission_state or "OBSERVED").upper(),
         str(admission_reason or ""),
         plan.entry,
@@ -220,32 +220,48 @@ def _episode_identity(values: tuple[Any, ...]) -> tuple[str, str, str, str]:
     return tuple(str(values[index] or "").upper() for index in (3, 4, 5, 6))  # type: ignore[return-value]
 
 
-def _episode_cutoff() -> str:
+def _episode_cooldown_minutes(candidate_type: str) -> int:
     from agent.config_manager import config
 
-    cooldown = max(
-        1, int(config.get("scalp.candidate_episode_cooldown_min", 15))
+    kind = str(candidate_type or "").upper()
+    key = (
+        "scalp.mtf_candidate_episode_cooldown_min"
+        if kind == MTF_CANDIDATE
+        else "scalp.candidate_episode_cooldown_min"
     )
-    return (_now() - timedelta(minutes=cooldown)).isoformat()
+    return max(1, int(config.get(key, 30 if kind == MTF_CANDIDATE else 15)))
 
 
 def _blocked_episode_identities(conn: Any) -> set[tuple[str, str, str, str]]:
+    longest_cooldown = max(
+        _episode_cooldown_minutes(CANONICAL_CANDIDATE),
+        _episode_cooldown_minutes(MTF_CANDIDATE),
+    )
+    earliest = (_now() - timedelta(minutes=longest_cooldown)).isoformat()
     rows = conn.execute(
         """
-        SELECT ticker, side, candidate_type, strategy_family
+        SELECT ticker, side, candidate_type, strategy_family, status, resolved_at
         FROM scalp_candidate_trials
         WHERE status='OPEN'
-           OR (episode_version>=2 AND resolved_at>=?)
+           OR (episode_version>=3 AND resolved_at>=?)
         """,
-        (_episode_cutoff(),),
+        (earliest,),
     ).fetchall()
-    return {
-        tuple(
+    blocked: set[tuple[str, str, str, str]] = set()
+    now = _now()
+    for row in rows:
+        identity = tuple(
             str(row[column] or "").upper()
             for column in ("ticker", "side", "candidate_type", "strategy_family")
         )
-        for row in rows
-    }
+        if str(row.get("status") or "").upper() == "OPEN":
+            blocked.add(identity)  # type: ignore[arg-type]
+            continue
+        resolved_at = _opened_at(row.get("resolved_at"))
+        cooldown = _episode_cooldown_minutes(str(row.get("candidate_type") or ""))
+        if resolved_at >= now - timedelta(minutes=cooldown):
+            blocked.add(identity)  # type: ignore[arg-type]
+    return blocked
 
 
 def _episode_exists(conn: Any, values: tuple[Any, ...]) -> bool:
@@ -399,18 +415,31 @@ def mark_candidate_trials(quotes: dict[str, dict], *, session: str) -> int:
         )
         exit_reason = ""
         exit_price = executable
+        planned_exit_price = executable
         if reached_t2:
             t2_hit = True
             exit_reason = "TP2"
             exit_price = tp2
+            planned_exit_price = tp2
         elif hit_stop:
             exit_reason = "TRAIL_STOP" if t1_hit else "STOP"
+            planned_exit_price = stop
         elif close_session:
             exit_reason = "SESSION_CLOSE"
+            planned_exit_price = trigger
         elif timed_out:
             exit_reason = "TIME_STOP"
+            planned_exit_price = trigger
 
         pnl_r = partial_r + direction * (exit_price - entry) / risk * remaining
+        fill_slippage_r = (
+            direction * (exit_price - planned_exit_price) / risk * remaining
+            if exit_reason else 0.0
+        )
+        stop_overshoot_r = (
+            max(0.0, -direction * (exit_price - stop) / risk)
+            if exit_reason in {"STOP", "TRAIL_STOP"} else 0.0
+        )
         closed = bool(exit_reason)
         updates.append((
             trigger,
@@ -429,6 +458,9 @@ def mark_candidate_trials(quotes: dict[str, dict], *, session: str) -> int:
             "CLOSED" if closed else "OPEN",
             _iso() if closed else None,
             exit_price if closed else None,
+            planned_exit_price if closed else None,
+            fill_slippage_r,
+            stop_overshoot_r,
             exit_reason,
             row["id"],
         ))
@@ -441,7 +473,8 @@ def mark_candidate_trials(quotes: dict[str, dict], *, session: str) -> int:
                   realized_partial_r=?, remaining_fraction=?, pnl_r=?,
                   mfe_r=?, mae_r=?, high_watermark=?, low_watermark=?,
                   trigger_source=?, trigger_quote_age_ms=?, status=?,
-                  resolved_at=?, exit_price=?, exit_reason=?
+                  resolved_at=?, exit_price=?, planned_exit_price=?,
+                  fill_slippage_r=?, stop_overshoot_r=?, exit_reason=?
                 WHERE id=? AND status='OPEN'
                 """,
                 updates,

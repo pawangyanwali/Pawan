@@ -193,7 +193,51 @@ def test_resolved_candidate_requires_independent_episode_cooldown():
         versions = conn.execute(
             "SELECT episode_version FROM scalp_candidate_trials ORDER BY id"
         ).fetchall()
-    assert [row["episode_version"] for row in versions] == [2, 2]
+    assert [row["episode_version"] for row in versions] == [3, 3]
+
+
+def test_mtf_candidate_uses_longer_independent_episode_cooldown(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from agent.config_manager import config
+    from agent.db import get_conn
+    from agent.scalp.candidate_tracker import (
+        MTF_CANDIDATE,
+        mark_candidate_trials,
+        register_candidate,
+    )
+
+    monkeypatch.setitem(config._cache, "scalp.candidate_episode_cooldown_min", 15)
+    monkeypatch.setitem(config._cache, "scalp.mtf_candidate_episode_cooldown_min", 30)
+    assert register_candidate(
+        _plan(), candidate_type=MTF_CANDIDATE, entry_bar_id=2251
+    )
+    assert mark_candidate_trials(
+        {"AAPL": _quote(last=98.9, bid=98.8, ask=99.0)},
+        session="REGULAR",
+    ) == 1
+    twenty_minutes_ago = (
+        datetime.now(timezone.utc) - timedelta(minutes=20)
+    ).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scalp_candidate_trials SET resolved_at=? WHERE ticker='AAPL'",
+            (twenty_minutes_ago,),
+        )
+    assert not register_candidate(
+        _plan(), candidate_type=MTF_CANDIDATE, entry_bar_id=2252
+    )
+    thirty_one_minutes_ago = (
+        datetime.now(timezone.utc) - timedelta(minutes=31)
+    ).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scalp_candidate_trials SET resolved_at=? WHERE ticker='AAPL'",
+            (thirty_one_minutes_ago,),
+        )
+    assert register_candidate(
+        _plan(), candidate_type=MTF_CANDIDATE, entry_bar_id=2253
+    )
 
 
 def test_short_candidate_uses_ask_for_stop_resolution():
@@ -219,6 +263,9 @@ def test_short_candidate_uses_ask_for_stop_resolution():
     assert row["exit_reason"] == "STOP"
     assert row["exit_price"] == pytest.approx(101.1)
     assert row["pnl_r"] == pytest.approx(-1.1)
+    assert row["planned_exit_price"] == pytest.approx(101.0)
+    assert row["fill_slippage_r"] == pytest.approx(-0.1)
+    assert row["stop_overshoot_r"] == pytest.approx(0.1)
 
 
 def test_candidate_admission_records_confirmation_and_policy_disposition():

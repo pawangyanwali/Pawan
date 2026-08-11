@@ -74,6 +74,23 @@ def test_entry_quality_score_separates_strong_and_weak_tp1_evidence():
     assert weak.confidence == 63.0
 
 
+def test_entry_quality_rewards_aligned_mtf_and_penalizes_mixed_context():
+    from agent.scalp.entry_quality import assess_entry_quality
+
+    aligned_plan = _plan()
+    aligned_plan.mtf_alignment = "ALIGNED"
+    mixed_plan = _plan()
+    mixed_plan.mtf_alignment = "MIXED"
+
+    aligned = assess_entry_quality(aligned_plan, _config())
+    mixed = assess_entry_quality(mixed_plan, _config())
+
+    assert aligned.entry_quality_score == 100.0
+    assert mixed.entry_quality_score == 86.0
+    assert "MTF_ALIGNED" in aligned.entry_quality_reasons
+    assert "MTF_MIXED_PENALTY" in mixed.entry_quality_reasons
+
+
 def test_extended_session_uses_stricter_quality_floor():
     from agent.scalp.entry_quality import assess_entry_quality
 

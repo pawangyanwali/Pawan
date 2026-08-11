@@ -164,3 +164,24 @@ def test_same_context_cluster_throttle_blocks_stampede(monkeypatch):
     assert decision.allowed is False
     assert decision.reason == "CONTEXT_CLUSTER_THROTTLE"
     assert decision.checks["context_cluster"]["entry_count"] == 3
+
+
+def test_shadow_execution_requires_closed_five_minute_context(monkeypatch):
+    from agent.config_manager import config
+    from agent.scalp.execution_policy import evaluate_execution_policy
+
+    monkeypatch.setitem(config._cache, "paper.enforce_risk_controls", False)
+    monkeypatch.setitem(config._cache, "scalp.entry_quality_require_mtf_context", True)
+    plan = _plan()
+    plan.mtf_mode = "SHADOW"
+    plan.mtf_state = "NO_DATA"
+    plan.mtf_alignment = "NO_DATA"
+
+    decision = evaluate_execution_policy(
+        plan,
+        mode="SHADOW",
+        market_health=_health(),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "MTF_CONTEXT_NOT_TRADABLE"

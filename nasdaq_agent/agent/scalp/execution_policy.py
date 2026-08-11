@@ -330,6 +330,21 @@ def evaluate_execution_policy(
             return ExecutionPolicyDecision(False, "QUOTE_TOO_OLD", 0.0, checks)
 
     if (
+        bool(config.get("scalp.entry_quality_require_mtf_context", True))
+        and str(plan.mtf_mode or "OFF").upper() != "OFF"
+    ):
+        mtf_alignment = str(plan.mtf_alignment or "NO_DATA").upper()
+        checks["mtf_alignment"] = mtf_alignment
+        checks["mtf_state"] = str(plan.mtf_state or "NO_DATA").upper()
+        if mtf_alignment not in {"ALIGNED", "MIXED"}:
+            return ExecutionPolicyDecision(
+                False,
+                "MTF_CONTEXT_NOT_TRADABLE",
+                0.0,
+                checks,
+            )
+
+    if (
         bool(config.get("scalp.entry_quality_gate_enabled", True))
         and bool(plan.entry_quality_assessed)
     ):
