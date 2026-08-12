@@ -7,6 +7,60 @@ import sys
 import time
 
 
+_CLOSED_SESSIONS = {"CLOSED", "WEEKEND", "HOLIDAY", "UNKNOWN"}
+
+
+def _validate_schwab_health(
+    *,
+    active_session: bool,
+    market_data: dict,
+    token_statuses: dict[str, dict],
+) -> tuple[dict[str, object], list[str]]:
+    """Validate durable auth always and live streaming only when it is expected."""
+    failures: list[str] = []
+    ws = market_data.get("ws_streamer") or {}
+    details: dict[str, object] = {
+        "ws": {
+            key: ws.get(key)
+            for key in (
+                "connected", "desired_subscriptions", "acknowledged_subscriptions",
+                "subscription_coverage_pct", "pending_subscription_requests",
+            )
+        },
+        "schwab_tokens": {},
+    }
+
+    if not market_data:
+        failures.append("market-data status unavailable")
+
+    desired = int(ws.get("desired_subscriptions") or 0)
+    if desired < 400:
+        failures.append("Schwab desired subscription universe is below 400")
+
+    for app in ("trader", "marketdata"):
+        status = token_statuses.get(app) or {}
+        connected = bool(status.get("connected"))
+        details["schwab_tokens"][app] = {
+            "connected": connected,
+            "access_token_ttl_s": int(status.get("access_token_ttl_s") or 0),
+            "refresh_token_ttl_s": int(status.get("refresh_token_ttl_s") or 0),
+            "source": status.get("_source"),
+        }
+        if not connected:
+            failures.append(f"Schwab {app} token is not connected")
+
+    # Schwab streaming may be intentionally offline overnight. During every
+    # tradable session, however, the release remains fail-closed on both the
+    # transport and the acknowledged subscription universe.
+    if active_session:
+        if not bool(ws.get("connected")):
+            failures.append("Schwab WebSocket is not connected")
+        if float(ws.get("subscription_coverage_pct") or 0.0) < 95.0:
+            failures.append("Schwab subscription ACK coverage is below 95%")
+
+    return details, failures
+
+
 def main() -> int:
     from agent.config_manager import config
     from agent.scalp.store import init_scalp_tables
@@ -54,9 +108,7 @@ def main() -> int:
     if isinstance(session_value, dict):
         session_value = session_value.get("session") or session_value.get("name")
     session_name = str(session_value or "UNKNOWN").upper()
-    active_session = session_name not in {
-        "CLOSED", "WEEKEND", "HOLIDAY", "UNKNOWN",
-    }
+    active_session = session_name not in _CLOSED_SESSIONS
     from agent.scalp.quality import continuous_bar_session
     data_gap_sla_session = continuous_bar_session(session_name)
     details["session"] = session_name
@@ -91,20 +143,16 @@ def main() -> int:
         failures.append("trusted five-second quote coverage is below 95%")
 
     market_data = get_state("market-data:status") or {}
-    ws = market_data.get("ws_streamer") or {}
-    details["ws"] = {
-        key: ws.get(key)
-        for key in (
-            "connected", "desired_subscriptions", "acknowledged_subscriptions",
-            "subscription_coverage_pct", "pending_subscription_requests",
-        )
-    }
-    if not bool(ws.get("connected")):
-        failures.append("Schwab WebSocket is not connected")
-    if int(ws.get("desired_subscriptions") or 0) < 400:
-        failures.append("Schwab desired subscription universe is below 400")
-    if float(ws.get("subscription_coverage_pct") or 0.0) < 95.0:
-        failures.append("Schwab subscription ACK coverage is below 95%")
+    schwab_details, schwab_failures = _validate_schwab_health(
+        active_session=active_session,
+        market_data=market_data,
+        token_statuses={
+            "trader": get_state("schwab:token_status:trader") or {},
+            "marketdata": get_state("schwab:token_status:marketdata") or {},
+        },
+    )
+    details.update(schwab_details)
+    failures.extend(schwab_failures)
 
     client = _get_client()
     if client is None:
