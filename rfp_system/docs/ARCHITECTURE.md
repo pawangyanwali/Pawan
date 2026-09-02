@@ -1,300 +1,189 @@
 # RFI/RFP Response System: Architecture
 
 Status: design, pre-build
-Last updated: 2026-09-01
+Last updated: 2026-09-02
 
-## Decisions already made
+## Decisions
 
-| Question | Answer | What it forces |
+| Question | Answer | Consequence |
 |---|---|---|
-| Data classification | Commercial, no CUI | AWS commercial regions. No FedRAMP boundary, no GovCloud procurement wait. |
-| Model hosting | Self-hosted vLLM on EKS | You own GPU capacity, node lifecycle, and on-call. Flat cost at volume. |
-| Document store | SharePoint Online (M365) | Microsoft Graph, Entra ID, on-behalf-of token flow for per-user permission trimming. |
-| Corpus size | 500 to 2,000 bid packages | Enough for a LoRA adapter and a real held-out evaluation set. |
-| Pricing data | Labor rate cards in Excel | Deterministic cost calculator. Price-to-win is out of scope until competitor award data exists. |
-| Phase 1 | First-draft generation | Retrieval and RFP shred have to ship underneath it. See "Phasing." |
-| Ops model | Build now, hand off later | Every design choice favors fewer moving parts over peak performance. |
-| Writer surface | Word, round-trip required | Office.js add-in plus a template-driven docx renderer. The hardest piece in the build. |
+| Data classification | Commercial, no CUI | AWS commercial regions. No FedRAMP boundary. |
+| Platform | Serverless-native. No Kubernetes. | Lambda container images, Step Functions, SageMaker Async. Nothing to patch, no cluster to hand off. |
+| Bulk inference | Amazon Bedrock, Qwen3-32B | ~$5/month. Zero ops, zero cold start, multi-AZ. |
+| Long-context and vision inference | Self-hosted Qwen3.8-27B on SageMaker Async, scale to zero | 262K context for RFP shred, vision encoder for scanned pages. ~$25/month. |
+| Vector store | Amazon S3 Vectors | GA December 2025. 500K chunks is a rounding error on a 2B-per-index limit. Removes Aurora. |
+| State store | DynamoDB, on-demand | Multi-AZ by default. Nothing to fail over. |
+| Document store | SharePoint Online (M365) | Microsoft Graph, Entra ID, on-behalf-of flow for per-user permission trimming. |
+| Corpus | 500 to 2,000 bid packages | Enough for a LoRA adapter and a real held-out evaluation set. |
+| Pricing data | Labor rate cards in Excel | Deterministic calculator. Price-to-win waits for competitor award data. |
+| Writers | 2 to 3, ~10 pursuits/month | Peak concurrency of 3. Sizes everything. |
+| Latency budget for a drafted section | 2 to 5 minutes | Queue-and-return. Nothing here is a chat. |
+| Writer surface | Word, round-trip required | Office.js add-in plus a template-driven docx renderer. |
+| Environments | Production only | Canary deploys with automatic rollback. See RELIABILITY.md. |
+| Ops model | Build now, hand off later | Every choice favors fewer moving parts over peak performance. |
 
-## Model stack
+Cost: roughly **$90/month** at this volume. See [SCALING.md](SCALING.md).
+Failure modes and recovery: see [RELIABILITY.md](RELIABILITY.md).
 
-| Role | Model | License | Notes |
+## Inference routing
+
+One gateway, two backends, routed by what the call actually needs.
+
+| Workload | Backend | Why |
+|---|---|---|
+| Section drafting | Bedrock, Qwen3-32B | 95% of calls. No cold start, no capacity risk during crunch week. |
+| Q&A over past bids | Bedrock, Qwen3-32B | Facts come from retrieval. The model composes and cites. |
+| Query rewriting, classification, metadata extraction | Bedrock, Qwen3-32B | Small, frequent, latency-sensitive. |
+| RFP shred | SageMaker Async, Qwen3.8-27B | Needs the 262K window. A 500-page solicitation reads in one pass. |
+| Vision parsing of scanned pages | SageMaker Async, Qwen3.8-27B | Built-in vision encoder. Replaces an OCR pipeline. |
+| Embeddings | Lambda, Qwen3-Embedding-0.6B (ONNX) | Runs on CPU. Never touches a GPU. |
+| Reranking | Lambda, Qwen3-Reranker-0.6B (ONNX) | 2 to 4 seconds for 50 chunks on CPU. Fine at this volume. |
+
+Every caller talks to `rfp_common.llm.InferenceGateway` and names a **capability**, not a model. The gateway maps capability to backend, handles retries, and fails over to the other backend when one is unavailable. Switching a workload from Bedrock to self-hosted is a table entry, not a code change.
+
+### Why Qwen3.8-27B is not on Bedrock
+
+Bedrock Custom Model Import supports Qwen2, Qwen2_VL, and Qwen2_5_VL architectures. Qwen3.8 is not importable. Bedrock's managed Qwen lineup covers Qwen3-32B, Qwen3-235B-A22B, Qwen3 Next 80B A3B, and the Coder variants, none of which is Qwen3.8.
+
+So the two properties that made Qwen3.8-27B the right pick, 262K context and a native vision encoder, are only available if you host it. Hosting it for every call costs $150 to $250/month. Hosting it for the two jobs that need it costs $25. That's the split.
+
+Re-check this at each Bedrock release. If Qwen3.8-27B lands as a managed model, the self-hosted endpoint deletes itself and the gateway table changes by one line.
+
+## Service decomposition
+
+Nine units. Each is a container image, each has one job, each talks to the others through a versioned contract in `rfp_common.contracts`. That package is the modularity. Not the count of services.
+
+| Unit | Runtime | Trigger | Responsibility |
 |---|---|---|---|
-| Generation, shred, extraction | Qwen3.8-27B | Apache 2.0 | 28B dense, hybrid attention (3 gated DeltaNet linear blocks per 1 full-attention block, 64 layers), 262,144 native context, built-in vision encoder |
-| Embeddings | Qwen3-Embedding-8B | Apache 2.0 | 32K input length. Drop to the 4B if GPU memory gets tight. |
-| Reranking | Qwen3-Reranker-4B | Apache 2.0 | Reranks top 50 retrieved chunks down to top 8 |
-| Page-image retrieval (Phase 2) | Qwen3-VL-Embedding | Apache 2.0 | For retrieving graphics, org charts, and scanned tables by visual content |
+| `api` | Lambda (container) | API Gateway HTTP API | BFF for the web app and Word add-in. Entra token validation, on-behalf-of exchange. |
+| `worker-ingest` | Lambda (container) | SQS `ingest-jobs` | Pull a file from Graph, write to S3 raw, emit a parse job. |
+| `worker-parse` | Lambda (container) | SQS `parse-jobs` | PyMuPDF for text-layer PDFs, python-docx for Word, hand scanned pages to the vision endpoint. |
+| `worker-index` | Lambda (container) | SQS `index-jobs` | Structure-aware chunking, embed, write to S3 Vectors and DynamoDB. |
+| `retrieval` | Lambda (container) | Invoked by `api` and `worker-draft` | Vector query, metadata filter, rerank, ACL check. |
+| `worker-draft` | Lambda (container) | SQS `draft-jobs` | One section per message. Retrieve, generate, verify citations, persist. |
+| `shred` | Step Functions + SageMaker Async | API or SQS | Full-RFP read, requirements matrix, checkpointed per section. |
+| `render` | Lambda (container) | Invoked by `api` | Section JSON to .docx against the template. Also reads .docx back in. |
+| `compute` | Lambda (container) | Invoked by `api` | Deterministic engines: page counts, format checks, cost calculator. No model involved. |
 
-One text model, not two. Qwen3.8-27B handles generation, requirement extraction, and classification. A separate small extraction model would save a little GPU time and cost the handoff team another component to understand. Not worth the trade.
+`shred` is Step Functions rather than Lambda because a 262K-token read plus a per-section matrix build runs past Lambda's 15-minute ceiling. Step Functions submits to the async endpoint, waits on the SNS callback, and checkpoints each completed section to DynamoDB, so a failure resumes rather than restarting the solicitation.
 
-Verify every license with counsel before the first training run. Model licenses change between releases.
+Nothing runs continuously. Idle cost across all nine is zero.
 
-### Why not the 2.4T flagship
+## Data layer
 
-Qwen3.8-2.4T-A95B ships a 2.4TB FP8 checkpoint, requires all experts resident in HBM, and needs two B300-class nodes for inference. It also carries a custom Qwen3.8-Max license rather than Apache 2.0, with display requirements and a separate-agreement clause for model-as-a-service businesses above roughly $50M revenue. Neither the cost nor the license review is justified for an internal proposal tool.
+**S3 Vectors** holds the vector index. One index, 500K to 1M chunks, filterable metadata: agency, NAICS, contract vehicle, submit date, outcome, document type. Queries return chunk IDs and metadata.
 
-### What the 262K context changes
+**DynamoDB**, on-demand billing, single table with a composite key. Holds chunk text keyed by chunk ID, document metadata, the ACL index, requirements matrices, rate card versions, generated section versions, and job state. Point-in-time recovery on. On-demand means idle cost is storage only.
 
-A large DoD solicitation with amendments and attachments runs 500 to 1,500 pages, roughly 150K to 400K tokens. Most of them fit in one window.
+**S3** holds three buckets: `raw` (SharePoint mirror, versioned), `parsed` (extracted text and page images), `output` (generated .docx). All SSE-KMS, all versioned.
 
-This removes an entire class of bug. Chunked RFP processing loses the cross-reference between an L.3.2 submission instruction and the M.2.1 evaluation factor it maps to, because the two live in different chunks and neither chunk knows about the other. Reading the whole document in one pass keeps those links intact.
+**Athena** over scheduled DynamoDB exports to S3 for the analytics you'll want later: win rate by agency, which past-performance write-ups get reused most, cost per drafted section. Serverless, pennies, and it keeps analytical queries off the operational store.
 
-Retrieval is still required. The 500 to 2,000 past bid packages run into hundreds of millions of tokens and will never fit in any context window.
+No relational database. The three things that wanted SQL, requirements matrices, rate cards, and section versions, are all accessed by a single partition key (RFP ID, card version, section ID) and computed in Python. DynamoDB is the better fit and it removes an instance that can fail.
 
-## System layout
+### Losing BM25
 
-```
-SharePoint Online ──Graph delta──> Ingestion (EKS) ──> S3 raw (versioned, SSE-KMS)
-                                          │
-                                          ├──> Parse: PyMuPDF for text-layer PDFs,
-                                          │           Qwen3.8-27B VL for scanned pages
-                                          │           and graphics, python-docx for Word
-                                          │
-                                          ├──> Metadata + outcome extraction
-                                          │           (agency, solicitation no., NAICS,
-                                          │            vehicle, win/loss/no-bid, value)
-                                          │
-                                          └──> Structure-aware chunking
-                                                      │
-                                                      v
-                                      Aurora PostgreSQL Serverless v2
-                                      (pgvector HNSW + tsvector full-text
-                                       + relational: rate cards, requirements
-                                       matrices, ACL index, job state)
-                                                      │
-        Word add-in (Office.js) ──Entra SSO──> FastAPI on EKS ──> vLLM (Qwen3.8-27B)
-        Web app                                     │              on g6e.12xlarge
-                                                    └──> Deterministic engines:
-                                                         page-count checker,
-                                                         cost calculator,
-                                                         format validator
-```
+S3 Vectors is vector-only. Hybrid search with a BM25 leg is not available, and that costs exact-phrase recall.
 
-## Ingestion and SharePoint integration
+The mitigation is that almost everything you want exact matching on is ID-shaped: solicitation numbers, CLINs, contract numbers, NAICS codes, agency names. Those become indexed metadata fields and exact-match lookups in DynamoDB, not full-text queries. Free-text phrase search over prose is the remaining gap. At 300 queries a month it has not been worth a $350/month OpenSearch Serverless collection. Revisit if writers start complaining they can't find a phrase they remember.
 
-### Two identities, not one
+## SharePoint integration
 
-**App-only identity** for the background crawler. Entra app registration with `Sites.Selected` granted per-site, not tenant-wide `Sites.Read.All`. Ask your M365 admin to grant only the bid libraries. A crawler with tenant-wide read is a finding waiting to happen in your next security review.
+**Two identities.**
 
-**Delegated identity** for user queries. The Word add-in calls `Office.auth.getAccessToken()`, sends that token to your API, and your API runs an on-behalf-of exchange to get a Graph token as that user. Every retrieval result gets checked against what that specific person can open.
+App-only for the crawler. Entra app registration with `Sites.Selected` granted per bid library, not tenant-wide read. Certificate auth, not a client secret.
 
-### Incremental sync
+Delegated for user queries. The Word add-in calls `Office.auth.getAccessToken()`, the `api` Lambda validates that token and runs an on-behalf-of exchange for a Graph token as that user.
 
-Graph delta queries against each document library (`/drives/{driveId}/root/delta`). Persist the deltaLink per drive in Aurora. A full recrawl of 2,000 bid packages is an hour of work you only want to do once.
+**Incremental sync.** Graph delta queries per document library, deltaLink persisted in DynamoDB. A nightly EventBridge rule sweeps for anything a webhook missed. Graph change notifications drive near-real-time updates on active pursuit folders, renewed on the expiry Graph reports.
 
-Add Graph change notifications (webhooks) for near-real-time updates on active bid folders. Subscriptions expire, so renew on the expiry Graph reports rather than a hardcoded interval. Fall back to a nightly delta sweep so a missed webhook never means a missed document.
-
-### Permission trimming
-
-Index the ACL alongside every chunk: the set of Entra group and user object IDs that can read the source file. Filter on that at query time. Then re-verify only the final top-k documents against Graph as the calling user before anything renders.
-
-The index filter keeps queries fast. The top-k re-check catches ACL drift between crawls. You pay 8 Graph calls per query instead of thousands, and a permission revoked an hour ago still takes effect.
-
-### The task nobody budgets for
-
-Your 500 to 2,000 bid packages need outcome labels: win, loss, or no-bid. Without them the corpus is a pile of text and retrieval will happily surface a losing proposal's technical approach as your best example.
-
-With them, retrieval can weight wins, the evaluation set is real, and a win/loss signal becomes trainable later.
-
-Where SharePoint columns already carry the outcome, take them. Where they don't, run Qwen3.8-27B over the debrief letters and award notices and route anything under a confidence threshold to a human queue. Budget one person for two to three weeks on this. It is the highest-value data work in the project and it will not do itself.
+**Permission trimming, two layers.** Index the readable Entra object IDs alongside every chunk and filter on that in the S3 Vectors query. Then re-verify only the final top-k documents against Graph as the calling user before anything renders. The filter keeps the query fast; the top-k check catches ACL drift between crawls. Eight Graph calls per query instead of thousands.
 
 ## Retrieval
 
-Aurora PostgreSQL Serverless v2 with pgvector, not OpenSearch. At 200K to 500K chunks, HNSW in pgvector is fast enough, and it puts your vectors, your bid metadata, your rate cards, your requirements matrices, and your job state in one database. The team taking this over learns one system instead of three.
+Query rewrite through Bedrock, embed on the retrieval Lambda, S3 Vectors query with metadata filters for top 50, rerank to top 8 on CPU, ACL re-verify, return with source anchors.
 
-**Hybrid search.** Dense vector similarity (pgvector HNSW) and PostgreSQL full-text (tsvector, GIN index) run in parallel, fused with reciprocal rank fusion. Vector search alone misses exact matches on solicitation numbers, CLINs, and contract numbers. Keyword search alone misses paraphrase. Proposal work needs both.
+**Chunking is structure-aware.** Split on the heading hierarchy python-docx reads out of the style names. A subsection stays whole up to a token limit. Every chunk carries its full heading path prepended to the embedded text, plus document ID, page anchor, and bid metadata. Fixed 512-token windows cut a past-performance write-up in half and hand you two chunks that each look complete and are both wrong.
 
-**Chunking is structure-aware, not fixed-size.** Split on the heading hierarchy that python-docx reads out of the style names. A subsection stays whole up to a token limit. Every chunk carries its full heading path ("Volume II > 3.2 Technical Approach > 3.2.4 Transition Plan") prepended to the embedded text, plus source document ID, page anchor, and bid metadata.
-
-Fixed 512-token windows cut a past-performance write-up in half and hand you two chunks that each look complete and are both wrong.
-
-**Filters and boosts.** Agency, NAICS, contract vehicle, date range, and outcome are all queryable. Default retrieval boosts wins and recency. A 2019 loss is still worth retrieving when a writer explicitly asks what didn't work.
-
-**Rerank.** Top 50 from hybrid search, reranked by Qwen3-Reranker-4B, top 8 into the generation context.
+**Wins get boosted, losses stay reachable.** Default ranking favors wins and recency. A writer who explicitly asks what didn't work on a past pursuit gets the losses.
 
 ## Generation
 
 Section at a time. Never a whole volume in one call.
 
-Every generation call gets:
-- the specific requirement text from the shred, verbatim
-- the Section M evaluation criteria that map to it
-- the top 8 reranked past-content chunks with source IDs
-- the outline slot and its page limit
-- the style adapter (once Phase 4 ships)
+Each `worker-draft` message carries one requirement. The call gets the verbatim requirement text, the Section M criteria it maps to, the top 8 reranked chunks with source IDs, the outline slot, and the page limit.
 
-**Citations are mandatory.** Every factual claim renders with a source ID pointing at a real chunk. The UI marks uncited sentences in yellow. A writer can accept an uncited sentence, and they have to look at it first.
+**Citations are mandatory.** Every factual claim renders with a source ID pointing at a real chunk. The UI marks uncited sentences. A writer can accept one, and they have to look at it first.
 
-This is the guardrail that makes the system usable in a real bid. A model that produces fluent past-performance narrative with an invented contract number will pass casual review and fail at the customer.
-
-**Facts come from retrieval. Always.** Contract numbers, period of performance, CPARS ratings, staff names, dollar values, and place of performance get retrieved and cited, never generated. The fine-tuned adapter learns your voice and structure. It does not learn your contract history.
+**Facts come from retrieval. Always.** Contract numbers, period of performance, CPARS ratings, staff names, dollar values, and place of performance are retrieved and cited, never generated. A fine-tuned adapter would learn your voice, not your contract history.
 
 ## Compliance
 
-**Shred.** The full RFP goes into one 262K context call. Output is structured JSON written to Aurora:
+**Shred** reads the full RFP in one 262K-token pass on the self-hosted endpoint and writes a structured matrix to DynamoDB: requirement ID, source reference, verbatim text, type, volume, page limit, owner, response location, status.
 
-```
-requirement_id, source_ref (L.3.2.1), verbatim_text, requirement_type
-(format | content | submission | evaluation), volume, page_limit,
-owner, response_location, status
-```
+**Cross-check** verifies after drafting that every requirement has a response location and that the response addresses it. Gaps go on a report the capture manager reads before pink team.
 
-**Cross-check.** After drafting, a second pass verifies that every requirement has a response location and that the response text actually addresses it. Gaps go on a report the capture manager reads before pink team.
-
-**Format checks are Python, not the model.** Page counts, font size, margins, line spacing, file naming, and file size limits are arithmetic and string matching. Do not ask an LLM to count pages. It will be confidently wrong and you will submit a 31-page volume against a 30-page limit.
-
-**Pink team scoring (Phase 2).** A separate call scores each drafted section against its Section M criteria and lists what's missing. Cheap to run, and it catches the gap between "we answered the question" and "we answered it the way the evaluator scores it."
+**Format checks are Python.** Page counts, font size, margins, line spacing, file naming, and size limits are arithmetic and string matching. Do not ask a model to count pages. It will be confidently wrong and you will submit a 31-page volume against a 30-page limit.
 
 ## Pricing
 
-You have labor rate cards in Excel and nothing else structured. That sets the scope precisely.
+Rate cards load into DynamoDB, versioned. A proposal priced in March references the card that was live in March.
 
-**Ingest the rate cards into Aurora tables:** labor category, direct rate, escalation by option year, wrap rate, fringe, overhead, G&A, fee. Version them. When a rate card changes, old proposals keep referencing the card that was live when they were priced.
+**The model proposes, Python computes.** Qwen3-32B reads the SOW and proposes labor categories and hours by period. The `compute` Lambda does every multiplication, escalation, and rollup. The model writes the BOE narrative explaining the hours.
 
-**The model proposes, Python computes.** Qwen3.8-27B reads the SOW and proposes a staffing plan: labor categories, hours by category by period. Python does every multiplication, escalation, and rollup. The model writes the BOE narrative explaining why those hours.
+No arithmetic that lands in a Volume III comes out of a language model. A transposed digit in a cost volume is not a quality problem, it's a protest.
 
-No arithmetic that lands in a Volume III comes out of a language model. Ever. A transposed digit in a cost volume is not a quality problem, it's a protest.
-
-**Cross-check against the card.** Every rate the narrative cites gets validated against the current card version. Mismatches block export.
-
-**Price-to-win is Phase 3+ and needs data you don't have.** It requires FPDS or USAspending award history for your competitors. Cheap to add later, impossible to fake now.
+Every rate the narrative cites gets validated against the card version. Mismatches block export.
 
 ## Word round-trip
 
-You picked the hardest option and the right one. Writers who have to leave Word stop using the tool by week three.
+**Generation emits structure, not markdown.** The model returns JSON: heading level, paragraph runs, tables, lists, citation anchors. The `render` Lambda maps that to python-docx calls against your `.dotx`, so headings, numbering, headers, footers, and section breaks come from the template you already use. Markdown-to-Word loses your numbering scheme on the first heading.
 
-**Generation emits structure, not markdown.** The model returns JSON: heading level, paragraph runs, tables, lists, citation anchors. A renderer maps that to python-docx calls against your `.dotx` template, so headings, numbering, headers, footers, and section breaks all come from the template you already use. Markdown-to-Word conversion loses your numbering scheme and your compliance-mandated formatting on the first heading.
+**Inbound, styles survive.** An edited section comes back, python-docx reads the style names and heading hierarchy out, and it re-indexes and diffs against what the machine wrote.
 
-**Inbound, styles survive.** When a writer edits a section in Word and it comes back, python-docx reads the style names and heading hierarchy back out. The section re-indexes and diffs against what the machine wrote.
+**Insert as tracked changes.** Generated content lands as tracked insertions. The writer sees exactly what came from the machine. This one feature does more for adoption than any accuracy improvement.
 
-**Insert as tracked changes.** Generated content lands in the document as tracked insertions. The writer sees exactly what came from the machine and what they wrote themselves. This single feature does more for adoption than any accuracy improvement.
+**The add-in** is an Office.js task pane running in Word desktop and Word on the web, authenticating through Entra SSO into the `api` on-behalf-of flow.
 
-**The add-in.** Office.js task pane, runs in Word desktop and Word on the web. Entra SSO through `getAccessToken()` into your API's on-behalf-of flow. Task pane surfaces: search past bids, view the compliance matrix, generate a section, check citations.
-
-**Admin consent is a gate.** Deploying an Office add-in to your tenant needs an M365 admin to approve it in Integrated Apps. Start that conversation in week one. It is a two-day task that becomes a three-week task if you raise it in month four.
-
-## AWS infrastructure
-
-Everything in Terraform. The handoff team gets state files, not a screenshot of a console.
-
-**Network.** One VPC, private subnets for compute and data. No public ingress to the model. ALB in public subnets terminating TLS for the app tier only. VPC endpoints for S3, ECR, Secrets Manager, and CloudWatch so GPU nodes never route through a NAT gateway. NAT egress at GPU-node volume is a line item you will notice.
-
-**EKS.** Karpenter for GPU node provisioning. Two node pools:
-
-- `gpu-inference`: g6e.12xlarge (4x L40S, 48GB each, 192GB total). Minimum 2 nodes so a rolling update doesn't take the service down. FP8 quantized weights at roughly 30GB per replica, tensor parallel 1, four replicas per node, one per GPU. Higher throughput than TP=4 on a single replica and simpler to reason about.
-- `app`: managed node group or Fargate for FastAPI, the ingestion workers, and the renderer.
-
-Dev cluster scales GPU nodes to zero outside working hours. That is roughly 60% of the dev GPU bill.
-
-**bf16 option.** If evaluation shows FP8 quantization costs measurable output quality, bf16 needs about 74GB with KV cache, so tensor parallel 2 across two L40S, two replicas per node instead of four. Measure before you decide. Run the same 50 held-out RFP sections through both and have a capture manager read them blind.
-
-**Serving.** vLLM as a plain Kubernetes Deployment behind a Service, with a Gateway API route. Not KServe. KServe buys autoscaling sophistication the handoff team has to learn, and you have a fixed two-node floor anyway.
-
-Weights pull from S3 via an init container onto a node-local volume, cached across pod restarts. Baking 30GB of weights into a container image makes every deploy a 30GB pull.
-
-**Data.**
-- Aurora PostgreSQL Serverless v2, pgvector extension, private subnets, encrypted with a customer-managed KMS key
-- S3 buckets: `raw` (SharePoint mirror, versioned), `parsed` (extracted text and page images), `output` (generated docx). All SSE-KMS, all versioned, lifecycle to Infrequent Access at 90 days.
-- Secrets Manager for the Entra client certificate and database credentials. Certificate auth to Entra, not a client secret. Secrets expire and rotate badly.
-
-**Observability.** DCGM exporter for GPU utilization, memory, and temperature into Prometheus. Grafana dashboards for tokens per second, queue depth, time to first token, and cache hit rate. CloudWatch for application logs. Alert on GPU memory above 90%, queue depth sustained above 10, and any pod restart.
-
-**GPU quota. Start this week.** g6e capacity in your target region needs a service quota increase and AWS has been slow to approve them. This request blocks the entire build and it costs nothing to file now.
-
-## Fine-tuning and evaluation
-
-Phase 4, not phase 1. Ship retrieval-based generation first and measure it. Then find out whether the adapter beats it.
-
-**Training data.** Pairs of (RFP requirement, winning response section), extracted by running the shred pipeline over your old solicitations and mapping the requirements to the sections that answered them. This is a byproduct of the ingestion work, which is why fine-tuning comes late rather than early.
-
-**Configuration.** LoRA rank 32, alpha 64, targeting attention and MLP projections on Qwen3.8-27B. On a 28B dense model this fits on two H100s, or one 80GB card with QLoRA. Hours, not days. Considerably cheaper than the 70B path.
-
-**Held out: 50 bid packages the adapter never sees, including losses.** Losses in the evaluation set matter. A model trained only on wins learns your house style. A model evaluated against losses tells you whether the style is doing any work.
-
-**The evaluation harness, all four measures:**
-
-1. *Compliance recall.* Percentage of Section L requirements the shred catches, measured against a human-built matrix for the same solicitation. Target above 98%. A missed submission requirement is a non-responsive bid.
-2. *Citation accuracy.* Percentage of generated factual claims that trace to a real source chunk containing that fact. Sampled and human-checked. Anything under 95% is not shippable.
-3. *Blind preference.* A capture manager reads base output and adapter output on held-out RFPs without knowing which is which, and picks.
-4. *Numeric accuracy.* Every figure in a generated cost narrative matched exactly against the deterministic calculator. Tolerance is zero.
-
-**Ship the adapter only if it wins the blind test.** If plain retrieval beats it, that is a real result and it saves you the training pipeline, the adapter versioning, and the retraining cadence. Take the win.
+**Admin consent is a gate.** Deploying an Office add-in to your tenant needs an M365 admin to approve it in Integrated Apps. Start that conversation in week one. It's a two-day task that becomes a three-week task if you raise it in month four.
 
 ## Phasing
 
-Phase 1 is first-draft generation, and drafting cannot ship without retrieval and shred underneath it. There's no version of this where drafting comes first. What follows puts drafting in Phase 1 by building the substrate it stands on.
+Drafting is Phase 1, and drafting cannot ship without retrieval and shred underneath it. What follows puts drafting in Phase 1 by building what it stands on.
 
-**Phase 1, weeks 1 to 14. Draft generation with citations.**
-- Entra app registration, Graph connector, delta sync
-- Document parsing including vision pass on scanned pages
-- Metadata and outcome labeling (parallel human track, starts week 1)
-- Structure-aware chunking, hybrid retrieval, reranking
-- RFP shred producing the requirements matrix
-- Section drafting with mandatory citations
-- docx renderer against your template
-- Word add-in v1: search, generate, cite
-- EKS, vLLM, Aurora, Terraform, all of it
+**Phase 1, weeks 1 to 12. Draft generation with citations.**
+Entra app registration and Graph connector. Parsing including the vision pass. Metadata and outcome labeling as a parallel human track starting week 1. Chunking, S3 Vectors index, retrieval, reranking. RFP shred producing the matrix. Section drafting with mandatory citations. The docx renderer against your template. Word add-in v1. All Terraform.
 
-**Phase 2, weeks 15 to 22. Compliance and round-trip.**
-- Requirements-to-response cross-check with a gap report
-- Deterministic format and page-limit validation
-- Tracked-changes insertion
-- Inbound docx re-ingestion and diffing
-- Pink team scoring against Section M
-- Page-image retrieval for graphics and tables
+**Phase 2, weeks 13 to 19. Compliance and round-trip.**
+Requirements-to-response cross-check with a gap report. Deterministic format and page-limit validation. Tracked-changes insertion. Inbound docx re-ingestion and diffing. Pink team scoring against Section M.
 
-**Phase 3, weeks 23 to 30. Pricing.**
-- Rate card ingestion and versioning
-- Staffing plan proposal from the SOW
-- Deterministic cost calculator with escalation and wrap
-- BOE narrative generation
-- Rate validation blocking export on mismatch
+**Phase 3, weeks 20 to 26. Pricing.**
+Rate card ingestion and versioning. Staffing plan proposal from the SOW. Deterministic cost calculator with escalation and wrap. BOE narrative generation. Rate validation blocking export on mismatch.
 
-**Phase 4, weeks 31 to 38. Training and handoff.**
-- Training pair extraction from the labeled corpus
-- LoRA training run and evaluation harness
-- Blind preference test, ship-or-drop decision
-- Operations runbook, on-call playbook, handoff sessions
+**Phase 4, weeks 27 to 33. Training and handoff.**
+Training pair extraction from the labeled corpus. LoRA run against Qwen3.8-27B and the evaluation harness. Blind preference test, ship-or-drop decision. Operations runbook and handoff.
 
-## Cost
+Three weeks shorter than the EKS plan, entirely because there is no cluster to build.
 
-Monthly, steady state, us-east-1. Verify current rates before you build a budget on these.
+## Evaluation
 
-| Item | Estimate |
-|---|---|
-| 2x g6e.12xlarge, on-demand, 24/7 | $15,000 to $15,500 |
-| Same, 1-year Compute Savings Plan | $9,000 to $9,500 |
-| Dev GPU (scaled to zero off-hours) | $1,200 to $1,800 |
-| Aurora Serverless v2 | $300 to $800 |
-| S3, KMS, data transfer | $150 to $400 |
-| App tier, ALB, observability | $300 to $600 |
-| **Total with Savings Plan** | **$11,000 to $13,000** |
+Four measures, all of them running before the fine-tuning question comes up.
 
-Training runs add a few hundred dollars each, occasional rather than recurring.
+1. **Compliance recall.** Percentage of Section L requirements the shred catches, against a human-built matrix for the same solicitation. Target above 98%. A missed submission requirement is a non-responsive bid.
+2. **Citation accuracy.** Percentage of generated factual claims that trace to a chunk containing that fact. Sampled and human-checked. Under 95% is not shippable.
+3. **Blind preference.** A capture manager reads two drafts of the same section without knowing which came from where, and picks.
+4. **Numeric accuracy.** Every figure in a generated cost narrative matched against the deterministic calculator. Tolerance is zero.
 
-Buy the Savings Plan after Phase 1, once real utilization is known. Committing before you have a load profile locks in the wrong instance family.
+Hold out 50 bid packages the system never indexes, losses included. A system evaluated only against wins tells you nothing about whether it's learning anything.
 
 ## Open items
 
-These need answers or owners before the phase they gate.
-
 | Item | Gates | Owner |
 |---|---|---|
-| g6e service quota increase | All of Phase 1 | File this week |
-| Outcome labeling: who, and starting when | Retrieval quality, everything downstream | Needs a named person |
-| M365 admin consent for the Office add-in | Phase 1 add-in delivery | Start week 1 |
-| SharePoint site inventory and which libraries the crawler gets | Ingestion | M365 admin |
-| Rate card owner and update cadence | Phase 3 | Contracts or finance |
+| Outcome labeling: who, starting when | Retrieval quality, everything downstream | Needs a named person |
+| M365 admin consent for the Office add-in | Phase 1 delivery | Start week 1 |
+| SharePoint site inventory, which libraries the crawler gets | Ingestion | M365 admin |
 | Your `.dotx` proposal templates | Phase 1 renderer | Proposal ops |
-| Model provenance policy (deferred) | Nothing yet. Revisit if a customer questionnaire asks. | Contracts |
+| Rate card owner and update cadence | Phase 3 | Contracts or finance |
+| Bedrock enablement for Qwen3-32B in your account and region | Phase 1 | AWS account admin |
 | Who receives the handoff | Phase 4 runbook scope | Leadership |
-
-## Risks worth naming now
-
-**Outcome labeling slips and retrieval quality never recovers.** This is the most likely failure and the least visible. Unlabeled corpus means the system cheerfully retrieves losing content. Assign a person, not a team.
-
-**Word round-trip eats more schedule than planned.** Office.js has real constraints, tracked-changes manipulation through OOXML is finicky, and your templates almost certainly have quirks nobody has documented. Build the renderer against your actual `.dotx` in week 2, not week 10.
-
-**Citation discipline erodes under deadline.** The first time a proposal manager is 12 hours from submission, somebody will want to turn off the uncited-sentence warning. Make it visible in the export rather than optional in the editor.
-
-**Handoff to a team that wasn't in the room.** Every architecture decision here has a reason, and the reasons are what the operators need. The runbook is a Phase 4 deliverable, and the decision log starts now.

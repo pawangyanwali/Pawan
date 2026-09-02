@@ -1,0 +1,28 @@
+# Local stack for logic changes.
+#
+# With no staging environment, this is where a contract mismatch between two
+# services gets caught. It does not run a real model: the inference mock returns
+# fixtures, because the bug this catches is a shape mismatch, not a bad
+# completion. Quality regressions are the nightly eval's job.
+
+services:
+  localstack:
+    image: localstack/localstack:3.8
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: dynamodb,sqs,s3,secretsmanager
+      DEBUG: 0
+    volumes:
+      - ./init-localstack.sh:/etc/localstack/init/ready.d/init.sh
+
+  inference-mock:
+    image: python:3.12-slim
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./fixtures:/fixtures:ro
+      - ./inference_mock.py:/app/mock.py:ro
+    command: >
+      sh -c "pip install --no-cache-dir fastapi uvicorn &&
+             python /app/mock.py"

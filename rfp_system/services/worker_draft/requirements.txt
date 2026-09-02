@@ -1,0 +1,1 @@
+# worker_draft calls retrieval and the inference gateway. Nothing else.

@@ -1,0 +1,16 @@
+[project]
+name = "rfp-common"
+version = "0.1.0"
+description = "Shared contracts and clients for the RFI/RFP response system"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "boto3>=1.35",
+]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["rfp_common*"]
